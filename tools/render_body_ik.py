@@ -629,8 +629,27 @@ def crop_part(part, center, radius):
     return dict(part, index=np.concatenate(kept) if kept else part['index'][:0], surfaces=surfaces)
 
 
+def flat_mesh(pts, tris):
+    """Flat-shaded triangles: every triangle its own three vertices and its face normal."""
+    pts = np.asarray(pts, np.float64)
+    tris = np.asarray(tris, np.intp).reshape(-1, 3)
+    face = np.cross(pts[tris[:, 1]] - pts[tris[:, 0]], pts[tris[:, 2]] - pts[tris[:, 0]])
+    face /= np.maximum(np.linalg.norm(face, axis=1, keepdims=True), 1e-12)
+    verts = pts[tris].reshape(-1, 3).astype(np.float32)
+    return verts, np.repeat(face, 3, axis=0).astype(np.float32), np.arange(len(verts), dtype=np.intp).reshape(-1, 3)
+
+
 def shape_mesh(shape):
-    """Capsule or box from the lab JSON -> (verts, normals, triangles)."""
+    """Capsule, box or hull from the lab JSON -> (verts, normals, triangles)."""
+    if shape['kind'] in ('hull', 'mesh'):
+        if shape['kind'] == 'mesh':
+            return flat_mesh(shape['points'], shape['triangles'])
+        from scipy.spatial import ConvexHull  # the real shape's hull (prop_hull.hpp): its corners pushed out by the convex radius
+        pts = np.asarray(shape['points'], np.float64)
+        hull = ConvexHull(pts)
+        tris = [s if np.dot(np.cross(pts[s[1]] - pts[s[0]], pts[s[2]] - pts[s[0]]), e[:3]) > 0 else s[[0, 2, 1]]
+                for s, e in zip(hull.simplices, hull.equations)]
+        return flat_mesh(pts, tris)
     c = np.asarray(shape['center'], np.float32)
     if shape['kind'] == 'box':
         axes = [_unit(a) for a in shape['axes']]
@@ -696,7 +715,9 @@ def shape_mesh(shape):
 
 def draw_shapes(color, depth, view, shapes):
     """Translucent shapes over the opaque depth buffer; convex, so back faces then front faces blend correctly."""
-    for shape in shapes or []:
+    meshes = [dict(kind='mesh', points=s['mesh']['points'], triangles=s['mesh']['triangles'], color=[0.80, 0.62, 0.38], alpha=0.85)
+              for s in shapes or [] if 'mesh' in s]  # the prop's render mesh (the thing the player sees), under its hull
+    for shape in meshes + list(shapes or []):
         verts, norms, tris = shape_mesh(shape)
         x, y, z = view.project(verts)
         pt = np.stack((x, y, z), axis=1).astype(np.float32)
@@ -784,6 +805,11 @@ def profile_image(frame, posed, chains, size=560):
                     d.ellipse((e[0] - r, e[1] - r, e[0] + r, e[1] + r), outline=colour, width=2)
                 for s in (-1, 1):
                     d.line([tuple(ends[0] + s * side * radii[0]), tuple(ends[1] + s * side * radii[1])], fill=colour, width=2)
+            elif shape['kind'] == 'hull':  # a real-shape piece: its outline in this view
+                from scipy.spatial import ConvexHull
+                q = px(np.asarray(shape['points'], np.float32))
+                ring = [tuple(q[i]) for i in ConvexHull(q).vertices]
+                d.line(ring + ring[:1], fill=colour, width=2)
             else:
                 ax, hf = [_unit(v) for v in shape['axes']], np.asarray(shape['half'], np.float32)
                 cs = np.array([np.asarray(shape['center']) + ax[0] * i * hf[0] + ax[1] * j * hf[1] + ax[2] * k * hf[2]

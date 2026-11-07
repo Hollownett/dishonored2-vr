@@ -3,6 +3,7 @@
 #include "game_rig.hpp"
 #include "physical_grab.hpp"
 #include "living_npc_hold.hpp"
+#include "prop_hull.hpp"
 #include <cstring>
 #include <limits>
 namespace d2vr {
@@ -19,6 +20,7 @@ struct NativeRigidBody {
     WorldTrackedPose pose{};
     std::optional<NativeGrabBounds> bounds{};
     int bone=-1; // ragdoll bone of a guard's body (native_ragdoll_body), -1 for a standalone prop
+    const PropShape* hull{}; // its real shape (prop_hull.hpp: its render mesh found by its Havok hull, or the hull alone); nullptr: composite, unreadable or a hull short of the render box (the bounds stand)
     Vec3 contact(Vec3 hand) const {return bounds?bounds->closest(hand):pose.position;}
     double contact_distance(Vec3 hand) const {return length(contact(hand)-hand);}
 };
@@ -137,6 +139,17 @@ template<class Read> std::optional<NativeRigidBody> native_rigid_body(Read& read
     if(value<Identity>(read,component+0x18)!=identity || value<std::uint32_t>(read,component+0xf8)!=handle ||
        value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0)!=model || value<std::uint32_t>(read,record+0x70)!=handle ||
        value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) {reason=BodyReject::not_prop;return {};}
+    result.hull=prop_hull(read,base,record);
+    // v1080: a Havok hull alone (no render-mesh entry) is the grip only when it covers the render box (within 2.5 cm a side): a spoon's hull is its bowl
+    // alone, and a grip on it would leave the handle in the air.
+    if(result.hull && !result.hull->mesh && result.bounds) {
+        const auto& w=result.hull->whole;Vec3 lo{1e300,1e300,1e300},hi{-1e300,-1e300,-1e300};
+        for(const auto& v:w.vertices) {const Vec3 b=w.centre+w.axes[0]*v.x+w.axes[1]*v.y+w.axes[2]*v.z;
+            const Vec3 p=result.pose.position+result.pose.basis[0]*b.x+result.pose.basis[1]*b.y+result.pose.basis[2]*b.z;
+            lo={std::min(lo.x,p.x),std::min(lo.y,p.y),std::min(lo.z,p.z)};hi={std::max(hi.x,p.x),std::max(hi.y,p.y),std::max(hi.z,p.z)};}
+        const auto& B=*result.bounds;const double r=w.radius;
+        if(std::max({lo.x-r-B.minimum.x,lo.y-r-B.minimum.y,lo.z-r-B.minimum.z,B.maximum.x-hi.x-r,B.maximum.y-hi.y-r,B.maximum.z-hi.z-r})>.025) result.hull=nullptr;
+    }
     reason=bounds_result;
     return result;
 }
@@ -200,6 +213,7 @@ template<class Read> std::optional<NativeRigidBody> native_ragdoll_body(Read& re
     const auto again=started(read,component);
     if(!again || again->generation!=identity->generation || value<std::uintptr_t>(read,*handles+0x28)!=data || value<std::uint32_t>(read,*data+bone*4)!=handle ||
        value<std::uint32_t>(read,record+0x70)!=handle || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return {};
+    result.hull=prop_hull(read,base,record);
     return result;
 }
 // G6 (plan Task 14): a LIVING NPC's bone, for the hand to hold him by the collar or an arm. His bodies are keyframed to the animation ((flags&7)==6):
