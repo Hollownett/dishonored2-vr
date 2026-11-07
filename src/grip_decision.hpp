@@ -74,7 +74,7 @@ inline constexpr std::uint64_t corpse_dock_hold_ms=250;
 inline constexpr double corpse_dock_lag_m=.6;
 // v1067 (user: "make it easy to put a corpse on a shoulder"): a body held in a shoulder zone for corpse_dock_dwell_ms docks too, the grip still
 // held (no let-go needed), and a body lifted with both hands docks (the other hand's hold at the dock does not end it; a NEW one does).
-inline constexpr std::uint64_t corpse_dock_dwell_ms=200;
+inline constexpr std::uint64_t corpse_dock_dwell_ms=120;   // v1069 (user: "even easier"): 200 -> 120
 // native_carry (v1019, user 2026-11-05): the game now carries a body (arkPlayerStateCarryCorpse). The placement handed it to the
 // game through shoulder_carry.hpp, so the dock's own hold ends at once (take): the game binds the body to the player's spine and
 // any physical motor write from here would fight it.
@@ -110,13 +110,15 @@ private:
 // The shoulder zones, in tracking space: a sphere of `radius` at head + side*left + up*up + forward*forward on either side (the eye centre and
 // the head's axes; -Z forward, +Y up). Clear of the face (a hand holding something up in front of the eyes is not at a shoulder) and inside the
 // sword holster over the right shoulder (TempleReach scabbard: left -.17, up -.10, forward -.10, r .16), which takes only a squeeze that STARTS there.
-struct ShoulderZone {double left=.18,up=-.18,forward=-.03,radius=.24;};   // v1067 .22 -> .24 (still clear of the eyes, .256 away)
+// v1069 (user: "even easier to put a corpse on the shoulder"): radius .24 -> .30, and the face is kept out by its own sphere (face) round the eyes.
+struct ShoulderZone {double left=.18,up=-.18,forward=-.03,radius=.30,face=.16;};
 inline bool at_shoulder(const std::array<double,3>& head,const std::array<double,3>& forward,const std::array<double,3>& up,const std::array<double,3>& hand,
                         const ShoulderZone& z={}) noexcept {
     using V=std::array<double,3>;
     const auto unit=[](V v) {const double l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);return l>1e-6?V{v[0]/l,v[1]/l,v[2]/l}:V{};};
     const V f=unit(forward),u=unit(up);
     const V left=unit({u[1]*f[2]-u[2]*f[1],u[2]*f[0]-u[0]*f[2],u[0]*f[1]-u[1]*f[0]});   // up x forward = left (right-handed, -Z forward)
+    {double e2=0;for(unsigned i=0;i<3;++i) e2+=(hand[i]-head[i])*(hand[i]-head[i]);if(!(e2>=z.face*z.face)) return false;}   // at the face (or NaN): never
     for(const double side:{1.,-1.}) {
         double d2=0;
         for(unsigned i=0;i<3;++i) {const double c=head[i]+left[i]*side*z.left+u[i]*z.up+f[i]*z.forward;d2+=(hand[i]-c)*(hand[i]-c);}

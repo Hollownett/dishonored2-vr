@@ -218,7 +218,9 @@ public:
         const bool accepted=sample(hand,grip,usable,epoch,tick);
         return release(throw_velocity && accepted,reason);
     }
-    std::optional<GrabMotor> motor(const WorldTrackedPose& object,bool usable,std::uint64_t now=0,std::uint64_t source_tick=0) {
+    // carrier (v1069, user: "walking with a prop, the hand and the part lag behind and sync again"): the player's own velocity. The target rides on
+    // the player, so that part of the feed never fades with the sample's age (the hand servo's Fix B); only the hand's motion relative to the player does.
+    std::optional<GrabMotor> motor(const WorldTrackedPose& object,bool usable,std::uint64_t now=0,std::uint64_t source_tick=0,Vec3 carrier={}) {
         if(!held_) return {};
         if(usable && valid_sample_ && grab_pose_valid(object)) last_anchor_=anchor(object);
         if(!usable || !valid_sample_ || !pressed_ || !grab_pose_valid(object)) {const bool open=usable && valid_sample_ && !pressed_;return release(open,open?ReleaseReason::open_fist:ReleaseReason::lifecycle);}
@@ -227,7 +229,8 @@ public:
         const auto spin=grab_rotation_error(object,goal);
         const auto source=source_tick?std::min(source_tick,tick_):tick_;
         const auto age=now>=source?now-source:0;
-        const auto feed=now?(now>=source?velocity_*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
+        if(!finite(carrier) || !(length(carrier)<=10)) carrier={};
+        const auto feed=now?carrier+(now>=source?(velocity_-carrier)*std::exp(-double(age>32?age-32:0)*.001/.035):Vec3{}):velocity_;
         return GrabMotor{grab_limit(error*18+feed,10),grab_limit(spin*12,5),false};
     }
     std::optional<CorpseMotor> corpse_motor(const WorldTrackedPose& object,bool usable,std::uint64_t now,std::uint64_t source_tick,const CorpseMotorInput& in) {

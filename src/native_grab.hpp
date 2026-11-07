@@ -929,7 +929,7 @@ private:
                 corpse_diag_.set_fault_latch(true);lane.grab.release(false,ReleaseReason::fault);lane.end_hold();lane.pending_release=false;return;
             }
             const auto motor=lane.pending_release?std::optional<GrabMotor>{lane.grab.release_sample(p.hand,p.grip,usable && same_owner,p.epoch,p.tick,lane.release_throw)}:
-                lane.grab.motor(body->pose,physical_usable && sample && same_owner,now,p.source_tick);
+                lane.grab.motor(body->pose,physical_usable && sample && same_owner,now,p.source_tick,carrier());
             if(motor && (motor->release || now-lane.last_motor>=10)) {
                 if(!write(lane,side,*body,*motor)) return;
                 lane.last_motor=now;
@@ -1191,6 +1191,12 @@ public:
         lane.grab.nudge(world);return true;
     }
     std::uint64_t natural_seats() {std::lock_guard<std::mutex> lock(mutex_);return natural_seats_;}
+    // v1069: the player's world velocity (render thread, the hand servo's Fix B estimate), fed to held props' motors.
+    void set_player_velocity(Vec3 v) noexcept {carrier_[0]=v.x;carrier_[1]=v.y;carrier_[2]=v.z;}
+    Vec3 carrier() const noexcept {return {carrier_[0].load(),carrier_[1].load(),carrier_[2].load()};}
+private:
+    std::array<std::atomic<double>,3> carrier_{};
+public:
     bool hold_flat(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held && lanes_[side].flat;}
     std::optional<double> held_size(unsigned side) {
         std::lock_guard<std::mutex> lock(mutex_);const auto& h=lanes_.at(side).held;if(!h) return {};

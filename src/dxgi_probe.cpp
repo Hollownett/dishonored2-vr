@@ -3506,7 +3506,8 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 std::uintptr_t model{};
                 if(!read_self(thing[hand]+0xf0,&model,sizeof model) || !model || !read_self(model+0x1860,raw[hand].data(),sizeof raw[hand])) continue;
                 const auto image=full_body.image_world(hand,59,now);if(!image) continue;
-                if(!held_bind.frame(hand,thing[hand],weapon_mat(*image),d2vr::weapon_draw::model_of(raw[hand].data()),t,bound[hand])) continue;
+                const double track_mps=game_xr?static_cast<double>(game_xr->grip_speeds[hand]):-1.;   // the hand's own motion: walking is not a moving hand
+                if(!held_bind.frame(hand,thing[hand],weapon_mat(*image),d2vr::weapon_draw::model_of(raw[hand].data()),t,bound[hand],track_mps,player_speed)) continue;
                 raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.02;++held_draw_placed[hand];
             }
         }
@@ -9032,7 +9033,7 @@ void prepare_head_view(void* view) noexcept {
                         if(dt>.05) {velocity={(p.x-a[1])/dt,(p.y-a[2])/dt,0};speed=std::hypot(velocity.x,velocity.y);}
                         if(!(speed<=10.)) {speed=0;velocity={};locomotion_roots.clear();}   // a blink or a respawn is not a run: the feedforward never carries one
                     } catch(...) {speed=0;velocity={};} else locomotion_roots.clear();
-                    player_speed=speed;player_velocity=velocity;
+                    player_speed=speed;player_velocity=velocity;native_grab.set_player_velocity(no_hand_body_feedforward?d2vr::Vec3{}:velocity);
                     if(locomotion_csv.is_open()) {
                         const auto diag=full_body.diagnostic();
                         locomotion_csv << static_cast<long long>(std::chrono::duration<double,std::milli>(trace_now-locomotion_start).count()) << ',' << speed << ',' << diag.root_gap_m << ',' << (diag.root_gap_valid?1:0);

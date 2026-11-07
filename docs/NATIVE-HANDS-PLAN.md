@@ -192,3 +192,10 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   frame; knob build/no-held-draw-place; status held_draw_placed). natural_seat refuses a face it cannot turn to the palm.
   ShoulderDock: holding a body in a shoulder zone 0.2 s docks it (no let-go needed) and hands it to the game's carry as
   before; a body lifted with both hands docks too; zone radius .22 -> .24.
+- v1069 (user's v1067 headset test: "kind of better"; corpse to the shoulder even easier, a screwdriver inside the hand not
+  touched by it, a held prop/head/leg and the hand lag behind while walking then resync): held-prop motors get the player's
+  velocity as feed-forward (PhysicalGrab::motor carrier, the hand servo's Fix B; only the hand's own motion fades with the
+  sample's age); HeldBind learns the hold only while the hand is still in tracking space AND the player stands (v1067 learned
+  the first 0.7 s from any motion and walking frames taught the walking lag), places only after 0.15 s of still frames past
+  the 0.25 s seat nudge, and widens its off tolerance by 0.15 s of walking speed. Shoulder zone radius .30 with a .16 face
+  sphere, dwell 0.12 s.

@@ -20,5 +20,15 @@ int main(){
     assert(off>=40 && back);
     // a new entity starts over (not placed while it settles)
     assert(!b.frame(0,8,H,mul(H,G),7,out));
+    // v1069 walking: the hand still in tracking space, the player at 3 m/s, the physics frame 20 cm behind: still placed, at the hand
+    {HeldBind w;const Mat G0=pose(.02,.09,-.03,.4);unsigned n=0;double far=0;
+     for(int i=0;i<300;++i){const double t=i*.011,x=t<1?0:(t-1)*3;const Mat Hw=pose(x,0,1.2,0),F=mul(pose(t<1?0:x-.2,0,1.2,0),G0);
+        if(w.frame(0,9,Hw,F,t,out,0.,t<1?0.:3.)){++n;far=std::max(far,distance(out,mul(Hw,G0)));}}
+     std::printf("walking: placed %u, worst %.3f mm\n",n,far*1000);std::fflush(stdout);assert(n>=230 && far<.001);}
+    // v1069 pickup on the move: 0.8 s of a moving hand with the frame 3 cm behind teaches nothing; the still hand after it gives the true hold
+    {HeldBind m;const Mat G0=pose(.02,.09,-.03,.4);unsigned n=0;double far=0;
+     for(int i=0;i<200;++i){const double t=i*.011;const bool moving=t<.8;const Mat Hw=pose(moving?t:.8,0,1.2,0),F=mul(pose(moving?t-.03:.8,0,1.2,0),G0);
+        const bool p=m.frame(0,10,Hw,F,t,out,moving?1.:0.,0.);if(moving) assert(!p);else if(p){++n;far=std::max(far,distance(out,mul(Hw,G0)));}}
+     std::printf("pickup on the move: placed %u, worst %.3f mm\n",n,far*1000);std::fflush(stdout);assert(n>100 && far<.001);}
     std::puts("PASS");
 }

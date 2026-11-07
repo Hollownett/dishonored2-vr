@@ -112,9 +112,11 @@ inline bool valid_grip(const Mat& g) noexcept {
 // drawn where the game has it until it agrees again, and a new spot that persists (a regrip, a game seat change) is learned afresh.
 class HeldBind {
 public:
-    static constexpr double settle_s=.7,still_mps=.25,still_rps=1.5,still_tau=.12,off_m=.15,off_rad=.6,relearn_s=.5;
+    static constexpr double settle_s=.7,still_mps=.25,still_rps=1.5,still_tau=.12,learn_s=.15,off_m=.15,off_rad=.6,relearn_s=.5;
     // One render: H = the drawn hand (joint 59), F = the thing's engine frame (scaled), t = seconds. Returns true with B when it is placed.
-    bool frame(unsigned hand,std::uintptr_t id,const Mat& H,const Mat& F,double t,Mat& out) {
+    // track_mps: the hand's tracking-space speed (walking excluded; <0 = judge from H); walk_mps: the player's speed (a moving player's
+    // physics lag is no blocked thing: the off tolerance grows by 0.15 s of it).
+    bool frame(unsigned hand,std::uintptr_t id,const Mat& H,const Mat& F,double t,Mat& out,double track_mps=-1,double walk_mps=0) {
         if(hand>1 || !id) return false;
         S& s=s_[hand];Mat hi{};
         if(!finite(H) || !finite(F) || !inverse(H,hi)) return false;
@@ -123,22 +125,29 @@ public:
         const double dt=std::clamp(t-s.last_t,0.,.1);
         const double speed=dt>0?distance(H,s.last_h)/dt:0,turn=dt>0?angle(H,s.last_h)/dt:0;
         s.last_t=t;s.last_h=H;
-        const bool still=speed<still_mps && turn<still_rps;
-        if(distance(meas,s.g)>off_m || angle(meas,s.g)>off_rad) {   // the thing is not where the hold says (a wall stops it, or it was moved)
+        const double walk=std::isfinite(walk_mps)?std::clamp(walk_mps,0.,10.):0.;
+        const bool still=(track_mps>=0?track_mps:speed)<still_mps && turn<still_rps && walk<still_mps;   // the player walking is no still hand either: the physics trails
+        // v1069 (user, v1067: "a screwdriver still appears inside my hand, the hand does not touch it"): the hold is learned ONLY from a still hand,
+        // the settle included (v1067 learned the first 0.7 s from any motion, so a pickup on the move baked its lag into the hold for good), and it
+        // is placed only once learn_s of still frames went into it. Until then the thing is drawn where the game has it, and G keeps up with it.
+        if(t-s.start<settle_s || s.learned<learn_s) {
+            if(still) {blend(s.g,meas,std::min(1.,dt/.05));if(t-s.start>=.25) s.learned+=dt;} else if(s.learned<=0) s.g=meas;   // counted after the 0.2 s seat nudge
+            return false;
+        }
+        const double off=off_m+.15*walk;
+        if(distance(meas,s.g)>off || angle(meas,s.g)>off_rad) {   // the thing is not where the hold says (a wall stops it, or it was moved)
             if(!still) {s.off_since=0;return false;}                  // a moving hand's physics lag is no new spot
             if(!s.off_since) s.off_since=t;
             if(t-s.off_since<relearn_s) return false;
-            s.g=meas;s.start=t;s.off_since=0;return false;            // off while still for 0.5 s: a new hold spot, learned again
+            s.g=meas;s.start=t;s.learned=0;s.off_since=0;return false; // off while still for 0.5 s: a new hold spot, learned again
         }
         s.off_since=0;
-        if(t-s.start<settle_s) blend(s.g,meas,std::min(1.,dt/.05));
-        else if(still) blend(s.g,meas,std::min(1.,dt/still_tau));   // a moving hand teaches nothing (its lag is not the hold)
-        if(t-s.start<settle_s) return false;                          // the seat is still settling (nudge at 0.2 s, ease, fit)
+        if(still) blend(s.g,meas,std::min(1.,dt/still_tau));         // a moving hand teaches nothing (its lag is not the hold)
         out=mul(H,s.g);return finite(out);
     }
     void clear(unsigned hand) {if(hand<2) s_[hand]=S{};}
 private:
-    struct S {std::uintptr_t id{};Mat g{};double start{},last_t{},off_since{};Mat last_h{};};
+    struct S {std::uintptr_t id{};Mat g{};double start{},last_t{},off_since{},learned{};Mat last_h{};};
     std::array<S,2> s_{};
     // Linear blend, then the 3x3 made orthogonal again with each column keeping its length (the model's scales).
     static void blend(Mat& g,const Mat& m,double a) {

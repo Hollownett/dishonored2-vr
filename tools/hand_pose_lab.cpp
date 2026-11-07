@@ -473,7 +473,8 @@ int run(int argc,char** argv) {
         {"taken_plank","Plank taken 35 deg off across the palm, near its end",{.5,.05,.015},{0,.61,0},{.3,0,0}},
         {"taken_crate","Crate side taken tilted 30 deg",{.2,.2,.2},{.52,.2,0},{.05,.05,0}},
         {"taken_bottlebox","Bottle box taken 40 deg off across",{.125,.035,.035},{0,.7,.2},{.04,0,0}},
-        {"taken_spoon","Spoon taken along the fingers (not swung)",{.09,.015,.004},{0,1.4,0},{0,0,0}}}) {
+        {"taken_spoon","Spoon taken along the fingers (not swung)",{.09,.015,.004},{0,1.4,0},{0,0,0}},
+        {"taken_screwdriver","Screwdriver (20 x 2.4 cm) taken by its handle, 20 deg off across",{.1,.012,.012},{0,.35,0},{.05,0,0}}}) {
         Scene c{};c.name=_strdup(t.name);c.held=true;c.where=hold_at;c.fingers=hold_fingers;c.normal=hold_in;c.squeeze=1.f;c.index=0.f;
         c.title=_strdup((std::string(t.title)+": natural seat + seat-out").c_str());c.shape_name="object surface (natural seat)";
         c.moving=[t,box_of,seat_out](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {

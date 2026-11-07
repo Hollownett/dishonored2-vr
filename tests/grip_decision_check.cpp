@@ -143,9 +143,9 @@ int main() {
         d.update(1,held(1,true));d.update(1,held(0,true));assert(d.anchored(1));
         {auto in=held(0,true);in.native_carry=true;const auto o=d.update(1,in);assert(o.take && !o.anchored && !d.anchored(1) && !d.consumes(1));}   // v1019: the game's own carry took the body; the dock's hand lets go and the squeeze stays the hand's
         assert(d.update(1,held(0,false)).anchored==false);
-        // v1067: held at the shoulder 0.2 s docks without letting go; lifted with both hands docks and stays; a hold the other hand starts later ends it
-        {ShoulderDock e;auto in=held(1,true);in.now=5000;assert(!e.update(0,in).anchored);in.now=5150;assert(!e.update(0,in).anchored);
-         in.now=5210;{const auto o=e.update(0,in);assert(o.docked && o.anchored);}
+        // v1067: held at the shoulder 0.12 s docks without letting go; lifted with both hands docks and stays; a hold the other hand starts later ends it
+        {ShoulderDock e;auto in=held(1,true);in.now=5000;assert(!e.update(0,in).anchored);in.now=5080;assert(!e.update(0,in).anchored);
+         in.now=5130;{const auto o=e.update(0,in);assert(o.docked && o.anchored);}
          in.now=5300;assert(e.update(0,in).anchored && !e.update(0,in).resumed);                 // the squeeze that lifted it does not take it back
          auto out=held(1,false);out.now=6000;e.reset(0);e.update(0,out);out.now=6300;assert(!e.update(0,out).anchored);   // away from the shoulder: never
          auto two=held(1,true);two.other_holds=true;two.now=7000;e.update(0,two);two.now=7250;assert(e.update(0,two).docked);
