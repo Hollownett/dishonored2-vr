@@ -508,7 +508,7 @@ static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouc
 // G4 grip ease (plan Task 9): the 0.25 s grip pose blend per hand (render thread, finger block), the drawn angles it starts from, and the
 // knob build/legacy-finger-ease (no blend, no hover shape, no eased opening, the reach flips, the touch floor clamped after its filter).
 static std::array<d2vr::rig::GripPoseBlend,2> grip_pose_blend;static std::array<d2vr::rig::FingerAngles,2> finger_drawn_angles{};static std::array<bool,2> finger_drawn_valid{};
-static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static unsigned held_entity_side{}; // v1067: held things placed at their draws (build/no-held-draw-place = off)
+static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static std::array<std::atomic<std::uintptr_t>,2> held_bound_entity{};static unsigned held_entity_side{}; // v1067: held things placed at their draws (build/no-held-draw-place = off); v1071 held_bound_entity: the thing each hand's draws are placed on
 static bool legacy_finger_ease=false,legacy_finger_grab=false,legacy_held_collision=false,surface_grip_enabled=true;static std::array<std::atomic<bool>,2> finger_ease_active{}; // legacy_finger_grab: build/legacy-finger-grab (v638 contact on the held thing's own shapes, no sphere grip)
 static std::array<std::atomic<bool>,2> grip_pose_blend_request{};
 // Seam (Track G Task 14, a living hold): start this hand's 0.25 s grip pose blend (GripPoseBlend::start from the pose its fingers have now) on
@@ -3500,7 +3500,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             if(thing[0] && thing[0]==thing[1]) thing={};   // ponytail: a two-handed hold stays at the game's frame; bind to one hand if it jitters
             const double t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
             for(unsigned hand=0;hand<2;++hand) {
-                if(raw_ptr[hand] || !thing[hand]) {held_bind.clear(hand);continue;}
+                if(raw_ptr[hand] || !thing[hand]) {held_bind.clear(hand);held_bound_entity[hand].store(0);continue;}
                 const unsigned arm_side=(attachment_pose.cross_mask()&3u)==3u?hand^1u:hand;
                 if(image_skin_slots[arm_side].kind.load()!=1) continue;
                 std::uintptr_t model{};
@@ -3508,7 +3508,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 const auto image=full_body.image_world(hand,59,now);if(!image) continue;
                 const double track_mps=game_xr?static_cast<double>(game_xr->grip_speeds[hand]):-1.;   // the hand's own motion: walking is not a moving hand
                 if(!held_bind.frame(hand,thing[hand],weapon_mat(*image),d2vr::weapon_draw::model_of(raw[hand].data()),t,bound[hand],track_mps,player_speed)) continue;
-                raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.02;++held_draw_placed[hand];
+                raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.02;++held_draw_placed[hand];held_bound_entity[hand].store(thing[hand]);
             }
         }
         d2vr::weapon_draw::Place::publish_bound(engine_frame,raw_ptr,bound_ptr,reach);
@@ -8265,7 +8265,12 @@ void prepare_head_view(void* view) noexcept {
                      const auto held_view=native_grab.hold_anchor(side);
                      // A corpse limb never seats (user, headset v627): the drawn hand stays at the controller and the limb follows it. The seat let the
                      // lagging bone pull the hand up to 0.35 m off, straightening the arm until the elbow hinge flipped and the wrist twisted thin.
-                     const bool seat=held_view.active && ((held_view.capped && !held_view.corpse && native_grab.prop_grasp_point()) || held_view.living);   // G6: a living hold seats too
+                     // v1071 (user, v1070: "hands when I carry an object are still out of sync"): the seat put the drawn hand on the prop's PHYSICS grasp point,
+                     // which trails the controller while walking or swinging, so the hand was dragged back and the v1067 placement drew the prop on that lagging
+                     // hand: both lagged, then caught up. Once the prop's draws are placed in the hand (HeldBind learned the hold), the hand stays at the controller.
+                     const auto seat_body=native_grab.held(side);
+                     const bool drawn_in_hand=!no_held_draw_place && seat_body && seat_body->bone<0 && seat_body->entity && held_bound_entity[side].load()==seat_body->entity;
+                     const bool seat=held_view.active && ((held_view.capped && !held_view.corpse && native_grab.prop_grasp_point() && !drawn_in_hand) || held_view.living);   // G6: a living hold seats too
                      const auto drawn=drawn_anchor.update(side,seat,hands.grips[side].position,held_view.anchor,drawn_now);
                      anchors[side]=drawn;
                      if(drawn.weight>0) {

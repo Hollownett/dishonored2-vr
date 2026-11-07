@@ -134,7 +134,8 @@ public:
             if(still) {blend(s.g,meas,std::min(1.,dt/.05));if(t-s.start>=.25) s.learned+=dt;} else if(s.learned<=0) s.g=meas;   // counted after the 0.2 s seat nudge
             return false;
         }
-        const double off=off_m+.15*walk;
+        const double hand_mps=std::clamp(track_mps>=0?track_mps:speed,0.,10.);
+        const double off=off_m+.15*(walk+hand_mps);   // v1071: a swinging hand's physics lag is no blocked thing either (the hand is no longer dragged onto the prop)
         if(distance(meas,s.g)>off || angle(meas,s.g)>off_rad) {   // the thing is not where the hold says (a wall stops it, or it was moved)
             if(!still) {s.off_since=0;return false;}                  // a moving hand's physics lag is no new spot
             if(!s.off_since) s.off_since=t;

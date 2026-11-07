@@ -15,7 +15,7 @@ int main(){
     std::printf("placed %u, worst %.3f mm\n",placed,worst*1000);
     assert(placed>300 && worst<.002);
     // a wall: the game's frame stays 30 cm off while the hand is still -> not placed, then relearned after 0.5 s
-    const Mat H=hand(0),Fw=mul(H,pose(.32,.09,-.03,.4));unsigned off=0;bool back=false;
+    const Mat H=hand(0),Fw=mul(H,pose(.32,.09,-.03,.4));unsigned off=0;bool back=false;b.frame(0,7,H,mul(H,G),4.99,out);   // the hand arrives there first (no teleport into the wall)
     for(int i=0;i<150;++i){const double t=5+i*.011;if(b.frame(0,7,H,Fw,t,out)) {back=true;assert(distance(out,Fw)<.001);} else ++off;}
     assert(off>=40 && back);
     // a new entity starts over (not placed while it settles)
@@ -30,5 +30,10 @@ int main(){
      for(int i=0;i<200;++i){const double t=i*.011;const bool moving=t<.8;const Mat Hw=pose(moving?t:.8,0,1.2,0),F=mul(pose(moving?t-.03:.8,0,1.2,0),G0);
         const bool p=m.frame(0,10,Hw,F,t,out,moving?1.:0.,0.);if(moving) assert(!p);else if(p){++n;far=std::max(far,distance(out,mul(Hw,G0)));}}
      std::printf("pickup on the move: placed %u, worst %.3f mm\n",n,far*1000);std::fflush(stdout);assert(n>100 && far<.001);}
+    // v1071 a fast swing: the hand at 2 m/s, the physics frame 25 cm behind (more than off_m): still placed, at the hand
+    {HeldBind f;const Mat G0=pose(.02,.09,-.03,.4);unsigned n=0;double far=0;
+     for(int i=0;i<200;++i){const double t=i*.011,x=t<1?0:(t-1)*2;const Mat Hs=pose(x,0,1.2,0),F=mul(pose(t<1?0:x-.25,0,1.2,0),G0);
+        if(f.frame(0,11,Hs,F,t,out,t<1?0.:2.,0.) && t>=1){++n;far=std::max(far,distance(out,mul(Hs,G0)));}}
+     std::printf("fast swing: placed %u, worst %.3f mm\n",n,far*1000);std::fflush(stdout);assert(n>=85 && far<.001);}
     std::puts("PASS");
 }
