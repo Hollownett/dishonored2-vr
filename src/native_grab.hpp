@@ -243,10 +243,13 @@ private:
         WorldTrackedPose sample_hand{};   // the hand the grab sampled this pass (the controller, or the coupled body pose)
         std::uint64_t hold_serial{};bool was_coupled{};Vec3 last_offset{};   // B16: this hold's serial; the coupling edge rebases the grab
         double sphere{};   // the sphere grip ball (finger_sphere.hpp) of this hold, decided at the bind; 0: none
+        // v1074 (user: "you carry a thing and it is simply in your hand, nothing twitches"): what the draw needs to put a held prop in the drawn hand
+        // exactly, from its first frame: the body and its render model frame (entity+0xf0 -> +0x1860) read together at the bind, at rest.
+        struct DrawBind {bool valid{};std::uintptr_t entity{};WorldTrackedPose body{};std::array<float,15> frame{};std::uint64_t serial{};} draw_bind{};
         bool flat{};       // the thing is wide and thin (a book, a folder): the fingers lie on its face (grip_flat_shape), not closed on the ball
         void end_hold() {
             held.reset();sphere=0;flat=false;corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
-            bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();
+            bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();draw_bind={};
         }
         Gate gate=Gate::none;float raw_grip{};UINT64 decision_tick{};bool decision_usable{};
         UINT64 consumed{},last_motor{},last_tow{},last_acquisition{},owner_epoch{},grip_epoch{};
@@ -271,7 +274,7 @@ private:
     // Corpse hold (Task 10). All of this is touched under mutex_ (the dispatcher callback, the render-thread accessors) except the atomics.
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
-    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{},pinch_seats_{};
+    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{},pinch_seats_{},draw_binds_{};
     bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
     bool sphere_whole_object_{};
@@ -730,6 +733,9 @@ private:
         {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
         if(lane.corpse && body.bone>0) if(const auto pelvis=native_ragdoll_body(read_,base_,body.entity,0)) lane.bind_pelvis_z=pelvis->pose.position.z;
         lane.anchor_view=anchor_view_of(lane,body,now);
+        lane.draw_bind={};
+        if(body.bone<0) {std::uintptr_t model{};Lane::DrawBind d{};   // v1074: a prop's model frame and body, read in this same pass
+            if(read_(body.entity+0xf0,&model,sizeof model) && model && read_(model+0x1860,d.frame.data(),sizeof d.frame)) {d.valid=true;d.entity=body.entity;d.body=body.pose;d.serial=++draw_binds_;lane.draw_bind=d;}}
         if(lane.corpse) corpse_diag_.note_bind(side,body.bone,ragdoll_body_mass(body.bone,std::nullopt,tuning_.use_measured_mass).source);
     }
     // A capped hold ends without a velocity write (a corpse never gets one; a prop only its release). The grab keeps the release reason, the
@@ -1183,6 +1189,15 @@ public:
     }
     // Size of what this hand holds (the diagonal of its drawn bounds; a limb's sphere box), for fingers that close around it.
     std::optional<NativeRigidBody> held(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2?lanes_[side].held:std::nullopt;}
+    // v1074: a held prop's exact draw binding: its hold (the body in the sampled grip's frame, PhysicalGrab::relative) and the body + model frame of
+    // its bind. Not for corpses, a second hand on a prop, or a two-handed hold (the goal turns toward the other hand: no fixed hold).
+    struct HeldDraw {bool valid{};std::uintptr_t entity{};WorldTrackedPose relative{},body{};std::array<float,15> frame{};std::uint64_t serial{};};
+    HeldDraw held_draw(unsigned side) {
+        std::lock_guard<std::mutex> lock(mutex_);if(side>1) return {};
+        const auto& l=lanes_[side];
+        if(!l.held || l.held->bone>=0 || !l.draw_bind.valid || l.draw_bind.entity!=l.held->entity || l.secondary || l.grab.two_handed() || !l.grab.held()) return {};
+        return {true,l.held->entity,l.grab.relative(),l.draw_bind.body,l.draw_bind.frame,l.draw_bind.serial};
+    }
     // The radius of the ball this hand's fingers wrap while it holds a prop or a body part (0: none, or build/legacy-finger-grab).
     double hold_sphere(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held?lanes_[side].sphere:0.;}
     // This hand's hold is a wide, thin thing (finger_sphere.hpp grip_flat_shape): the fingers lie on its face instead of closing on the ball.

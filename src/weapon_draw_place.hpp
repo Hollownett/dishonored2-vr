@@ -87,6 +87,13 @@ inline Mat model_of(const float* raw) noexcept {
     for(int r=0;r<3;++r) m[static_cast<std::size_t>(r*4+3)]=raw[r];
     return m;
 }
+// A pose {position, basis[3]} (WorldTrackedPose, held_copy::Pose: world axes as columns) as a column-vector matrix.
+template<class Pose> inline Mat pose_mat(const Pose& p) noexcept {
+    Mat m=identity();
+    for(int c=0;c<3;++c) {m[static_cast<std::size_t>(c)]=p.basis[c].x;m[static_cast<std::size_t>(4+c)]=p.basis[c].y;m[static_cast<std::size_t>(8+c)]=p.basis[c].z;}
+    m[3]=p.position.x;m[7]=p.position.y;m[11]=p.position.z;
+    return m;
+}
 // G is a rigid offset in the hand frame: a small translation and an orthonormal rotation (no scale, no shear). A bad candidate is
 // rejected and never becomes a binding; while there is no valid G the engine's rows stay (counted as fallback by the publisher).
 inline bool valid_grip(const Mat& g) noexcept {
@@ -147,6 +154,8 @@ public:
         out=mul(H,s.g);note(hand,o_placed);return finite(out);
     }
     void clear(unsigned hand) {if(hand<2) s_[hand]=S{};}
+    // from eased toward to (s 0..1): the matrix blend with the axes made orthogonal again, keeping each axis's length (the model's scales).
+    static Mat eased(const Mat& from,const Mat& to,double s) noexcept {Mat g=from;blend(g,to,std::clamp(s,0.,1.));return g;}
     // Diagnostics (status held_bind): per hand, how many renders ended in each outcome.
     enum Outcome : unsigned {o_new,o_learning,o_off_moving,o_off_still,o_relearn,o_placed,outcomes};
     std::uint64_t count(unsigned hand,unsigned o) const noexcept {return hand<2 && o<outcomes?counts_[hand][o].load(std::memory_order_relaxed):0;}

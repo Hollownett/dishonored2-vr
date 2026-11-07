@@ -215,6 +215,16 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
     the same drain (status native_options_page[11] = open failures).
   - Sim: `holdrun --near bottle` (take a bottle, hold it still 2 s, run 5 s, stop); `--lead-ms` now also works with
     `--launch`; sims need `build/diagnostics` in the worktree for the full status.
+- v1073: the old drawn VR settings panel never opens (no button, hold, or first-menu recalibration prompt; Pause > VR Settings only).
+- v1074 (user, v1073: "the hand still twitches, and the thing I carry in it twitches when I run ... it should simply be in your hand"):
+  held things are drawn EXACTLY in the drawn hand from their first frame, like the dual-wield copies, with no learning:
+  - physical props: drawn grip (joint 59 * inverse(attachment_target)) * PhysicalGrab::relative() (the grab's own hold) * K, where
+    K = inverse(body) * model frame, read together at the bind in the dispatcher (NativeGrab::held_draw); a 0.12 s ease from the
+    game's frame; the hand is never seated on such a prop. Lab: tests/held_exact_check.cpp (exact to 1e-15 while running/swinging).
+  - Use holds (heads, legs): this frame's published target (from this frame's drawn grip) * K, K learned when the game's frame sits
+    exactly on one of the last 8 targets (twice in agreement); HeldBind is the fallback until then.
+  - a hand that holds something is drawn at the clamp output (the held weight's drive shortfall no longer elects the lagging body).
+  - status: held_exact_placed, held_use_exact.
 - v1080 (branch feat/prop-grips; user's v1066-v1071 headset tests: "a screwdriver inside the hand, fingers not touching it",
   "a book on an open palm rests on a flat hand", "a thin spoon held in a full fist"): grips from the props' REAL shapes.
   The grip used the render model's world AABB, solved back into the body's axes (lossy, ambiguous at 45 degrees).

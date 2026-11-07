@@ -102,6 +102,8 @@ public:
     // grip already held latches on the next valid sample, as if pressed fresh.
     void arm() noexcept {armed_=true;}
     bool held() const {return held_;}
+    // v1074: the hold itself - the held body's pose in the sampled hand's frame (target() = hand * relative). The draw places the thing with it.
+    const WorldTrackedPose& relative() const noexcept {return relative_;}
     const Vec3& velocity() const {return velocity_;}
     double recovery_s() const {return recovery_s_;}
 #ifdef D2VR_TESTING
