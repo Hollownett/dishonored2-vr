@@ -508,7 +508,10 @@ static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouc
 // G4 grip ease (plan Task 9): the 0.25 s grip pose blend per hand (render thread, finger block), the drawn angles it starts from, and the
 // knob build/legacy-finger-ease (no blend, no hover shape, no eased opening, the reach flips, the touch floor clamped after its filter).
 static std::array<d2vr::rig::GripPoseBlend,2> grip_pose_blend;static std::array<d2vr::rig::FingerAngles,2> finger_drawn_angles{};static std::array<bool,2> finger_drawn_valid{};
-static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static std::array<std::atomic<std::uintptr_t>,2> held_bound_entity{};static std::array<std::atomic<unsigned long long>,4> prop_seat_frames{};static std::array<std::array<std::atomic<unsigned long long>,3>,2> held_skip{};static unsigned held_entity_side{}; // v1067: held things placed at their draws (build/no-held-draw-place = off); v1071 held_bound_entity: the thing each hand's draws are placed on
+static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static std::array<std::atomic<std::uintptr_t>,2> held_bound_entity{};static std::array<std::atomic<unsigned long long>,4> prop_seat_frames{};struct HeldExact {std::uint64_t serial{};bool valid{};double since{};d2vr::weapon_draw::Mat k{};};static std::array<HeldExact,2> held_exact{};struct UseTargets {std::uintptr_t entity{};unsigned side{};std::array<d2vr::WorldTrackedPose,8> ring{};unsigned count{},next{};double at{};std::optional<d2vr::weapon_draw::Mat> k,k_try;unsigned agree{};double since{};};static UseTargets use_targets{};static std::mutex use_targets_mutex;   // v1074: a Use hold's own targets
+static std::array<std::atomic<unsigned long long>,2> held_use_exact{};
+static std::array<std::atomic<unsigned long long>,2> held_exact_placed{};   // v1074: props drawn at grip * hold * (body -> model frame)
+static std::array<std::array<std::atomic<unsigned long long>,3>,2> held_skip{};static unsigned held_entity_side{}; // v1067: held things placed at their draws (build/no-held-draw-place = off); v1071 held_bound_entity: the thing each hand's draws are placed on
 static bool legacy_finger_ease=false,legacy_finger_grab=false,legacy_held_collision=false,surface_grip_enabled=true;static std::array<std::atomic<bool>,2> finger_ease_active{}; // legacy_finger_grab: build/legacy-finger-grab (v638 contact on the held thing's own shapes, no sphere grip)
 static std::array<std::atomic<bool>,2> grip_pose_blend_request{};
 // Seam (Track G Task 14, a living hold): start this hand's 0.25 s grip pose blend (GripPoseBlend::start from the pose its fingers have now) on
@@ -1587,7 +1590,7 @@ static std::string binding_json() {
 }
 static std::string weapon_draw_json() {
     const auto types=weapon_live_types();
-    std::string text=",\"held_draw_placed\":["+std::to_string(held_draw_placed[0].load())+","+std::to_string(held_draw_placed[1].load())+"]"+",\"held_bind\":"+[]{std::string o="[";for(unsigned h=0;h<2;++h){o+=h?",[":"[";for(unsigned k=0;k<d2vr::weapon_draw::HeldBind::outcomes;++k) o+=(k?",":"")+std::to_string(held_bind.count(h,k));o+="]";}return o+"]";}()+",\"held_skip\":[["+std::to_string(held_skip[0][0].load())+","+std::to_string(held_skip[0][1].load())+","+std::to_string(held_skip[0][2].load())+"],["+std::to_string(held_skip[1][0].load())+","+std::to_string(held_skip[1][1].load())+","+std::to_string(held_skip[1][2].load())+"]]"+",\"prop_seat_frames\":["+std::to_string(prop_seat_frames[0].load())+","+std::to_string(prop_seat_frames[1].load())+","+std::to_string(prop_seat_frames[2].load())+","+std::to_string(prop_seat_frames[3].load())+"]"+",\"weapon_draw\":{\"published\":["+std::to_string(weapon_draw_published[0].load())+","+std::to_string(weapon_draw_published[1].load())+"],\"skipped\":["+
+    std::string text=",\"held_draw_placed\":["+std::to_string(held_draw_placed[0].load())+","+std::to_string(held_draw_placed[1].load())+"]"+",\"held_bind\":"+[]{std::string o="[";for(unsigned h=0;h<2;++h){o+=h?",[":"[";for(unsigned k=0;k<d2vr::weapon_draw::HeldBind::outcomes;++k) o+=(k?",":"")+std::to_string(held_bind.count(h,k));o+="]";}return o+"]";}()+",\"held_exact_placed\":["+std::to_string(held_exact_placed[0].load())+","+std::to_string(held_exact_placed[1].load())+"]"+",\"held_use_exact\":["+std::to_string(held_use_exact[0].load())+","+std::to_string(held_use_exact[1].load())+"]"+",\"held_skip\":[["+std::to_string(held_skip[0][0].load())+","+std::to_string(held_skip[0][1].load())+","+std::to_string(held_skip[0][2].load())+"],["+std::to_string(held_skip[1][0].load())+","+std::to_string(held_skip[1][1].load())+","+std::to_string(held_skip[1][2].load())+"]]"+",\"prop_seat_frames\":["+std::to_string(prop_seat_frames[0].load())+","+std::to_string(prop_seat_frames[1].load())+","+std::to_string(prop_seat_frames[2].load())+","+std::to_string(prop_seat_frames[3].load())+"]"+",\"weapon_draw\":{\"published\":["+std::to_string(weapon_draw_published[0].load())+","+std::to_string(weapon_draw_published[1].load())+"],\"skipped\":["+
         std::to_string(weapon_draw_skipped[0].load())+","+std::to_string(weapon_draw_skipped[1].load())+"],\"frames\":["+std::to_string(weapon_wobble[0][0].n)+","+std::to_string(weapon_wobble[1][0].n)+"]"+",\"skip_reasons\":["+skip_reasons();
     text+=",\"source\":["+source_counts();
     text+=",\"no_writer\":["+std::to_string(weapon_draw_no_writer[0].load())+","+std::to_string(weapon_draw_no_writer[1].load())+"]";
@@ -3509,6 +3512,54 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 std::uintptr_t model{};
                 if(!read_self(thing[hand]+0xf0,&model,sizeof model) || !model || !read_self(model+0x1860,raw[hand].data(),sizeof raw[hand])) {++held_skip[hand][1];continue;}
                 const auto image=full_body.image_world(hand,59,now);if(!image) {++held_skip[hand][2];continue;}
+                // v1074 (user: "the hand and the thing I carry still twitch when I run ... you carry a thing and it is simply in your hand"): a physical
+                // prop is drawn at the drawn grip * the grab's own hold * (its body -> model frame, measured at the bind at rest), exact from its first
+                // frame - the dual-wield copies' rigid binding (grip = joint 59 * inverse(attachment_target)). No learning from a lagging physics frame, no
+                // stillness needed, no fallback while running; a 0.12 s ease from where the game had it.
+                if(const auto hd=native_grab.held_draw(hand); hd.valid && hd.entity==thing[hand]) {
+                    auto& ex=held_exact[hand];
+                    if(ex.serial!=hd.serial) {
+                        ex={};ex.serial=hd.serial;ex.since=t;
+                        d2vr::weapon_draw::Mat inv_body{};
+                        if(d2vr::weapon_draw::inverse(d2vr::weapon_draw::pose_mat(hd.body),inv_body)) {
+                            ex.k=d2vr::weapon_draw::mul(inv_body,d2vr::weapon_draw::model_of(hd.frame.data()));
+                            ex.valid=d2vr::weapon_draw::finite(ex.k) && std::hypot(ex.k[3],ex.k[7],ex.k[11])<1.;
+                        }
+                    }
+                    if(ex.valid) {
+                        const auto grip=d2vr::body::mul(*image,d2vr::body::inverse(full_body.attachment_target(hand,d2vr::fullbody::Xf{})));
+                        auto b=d2vr::weapon_draw::mul(d2vr::weapon_draw::mul(weapon_mat(grip),d2vr::weapon_draw::pose_mat(hd.relative)),ex.k);
+                        if(t-ex.since<.12) b=d2vr::weapon_draw::HeldBind::eased(d2vr::weapon_draw::model_of(raw[hand].data()),b,(t-ex.since)/.12);
+                        if(d2vr::weapon_draw::finite(b)) {
+                            bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
+                            ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);
+                            continue;
+                        }
+                    }
+                }
+                // v1074: a thing held with the game's Use is drawn at THIS frame's target (computed from this frame's drawn grip) times its model offset K.
+                // K = inverse(target) * F, learned the first time the game's frame sits exactly on one of the last 8 targets (twice in agreement).
+                if(std::unique_lock<std::mutex> ul(use_targets_mutex);use_targets.entity==thing[hand] && use_targets.side==hand && use_targets.count && t-use_targets.at<.1) {
+                    auto& u=use_targets;const auto f=d2vr::weapon_draw::model_of(raw[hand].data());
+                    if(!u.k) for(unsigned i=0;i<u.count;++i) {
+                        const auto& p=u.ring[i];
+                        if(d2vr::length(p.position-d2vr::Vec3{f[3],f[7],f[11]})>.004) continue;
+                        d2vr::weapon_draw::Mat inv_t{};if(!d2vr::weapon_draw::inverse(d2vr::weapon_draw::pose_mat(p),inv_t)) continue;
+                        const auto k=d2vr::weapon_draw::mul(inv_t,f);
+                        if(u.k_try && d2vr::weapon_draw::distance(*u.k_try,k)<.002 && d2vr::weapon_draw::angle(*u.k_try,k)<.02) {if(++u.agree>=2) u.k=k;}
+                        else {u.k_try=k;u.agree=0;}
+                        break;
+                    }
+                    if(u.k) {
+                        const auto& now_target=u.ring[(u.next+u.ring.size()-1)%u.ring.size()];
+                        const auto b=d2vr::weapon_draw::mul(d2vr::weapon_draw::pose_mat(now_target),*u.k);
+                        if(d2vr::weapon_draw::finite(b) && d2vr::weapon_draw::distance(b,f)<1.) {
+                            bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
+                            ++held_draw_placed[hand];++held_use_exact[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);
+                            continue;
+                        }
+                    }
+                }
                 const double track_mps=game_xr?static_cast<double>(game_xr->grip_speeds[hand]):-1.;   // the hand's own motion: walking is not a moving hand
                 if(!held_bind.frame(hand,thing[hand],weapon_mat(*image),d2vr::weapon_draw::model_of(raw[hand].data()),t,bound[hand],track_mps,player_speed)) continue;
                 raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];++held_draw_placed[hand];held_bound_entity[hand].store(thing[hand]);
@@ -5256,6 +5307,10 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
         }
     }
     published=origin;published_pose={origin,{X,Y,Z}};held_snap.published=origin;held_snap.centre=centre;
+    {std::lock_guard<std::mutex> ul(use_targets_mutex);auto& u=use_targets;   // v1074: this frame's target of the thing (from this frame's drawn grip): the draw puts the thing there exactly
+     if(u.entity!=*e) {u=UseTargets{};u.entity=*e;u.since=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+     u.side=side&1u;u.ring[u.next]=published_pose;u.next=(u.next+1)%u.ring.size();u.count=std::min<unsigned>(u.count+1,static_cast<unsigned>(u.ring.size()));
+     u.at=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
     d2vr::NativeHeldObject::Target t{*rf,*e,{float(origin.x),float(origin.y),float(origin.z)},
         {float(X.x),float(X.y),float(X.z),float(Y.x),float(Y.y),float(Y.z),float(Z.x),float(Z.y),float(Z.z)},GetTickCount64()};
     if(const auto m=value<std::uintptr_t>(read,*rf+0x3c8);m && pointer(*m) && read_self(*m+0x300,t.master_pos,12) && read_self(*m+0x30c,t.master_axis,36)) {
@@ -8272,7 +8327,9 @@ void prepare_head_view(void* view) noexcept {
                      // which trails the controller while walking or swinging, so the hand was dragged back and the v1067 placement drew the prop on that lagging
                      // hand: both lagged, then caught up. Once the prop's draws are placed in the hand (HeldBind learned the hold), the hand stays at the controller.
                      const auto seat_body=native_grab.held(side);
-                     const bool drawn_in_hand=!no_held_draw_place && seat_body && seat_body->bone<0 && seat_body->entity && held_bound_entity[side].load()==seat_body->entity;
+                     // v1074: a prop with an exact draw binding is in the drawn hand from its first frame: the hand is never pulled onto its physics.
+                     const bool drawn_in_hand=!no_held_draw_place && seat_body && seat_body->bone<0 && seat_body->entity &&
+                         (held_bound_entity[side].load()==seat_body->entity || native_grab.held_draw(side).valid);
                      const bool seat=held_view.active && ((held_view.capped && !held_view.corpse && native_grab.prop_grasp_point() && !drawn_in_hand) || held_view.living);   // G6: a living hold seats too
                      if(held_view.active && held_view.capped && !held_view.corpse) ++prop_seat_frames[side+(seat?0u:2u)];   // diagnostics: prop holds seated [0,1] / in the hand [2,3]
                      const auto drawn=drawn_anchor.update(side,seat,hands.grips[side].position,held_view.anchor,drawn_now);
@@ -8341,6 +8398,9 @@ void prepare_head_view(void* view) noexcept {
                         in.clamp=hands.grips[side];in.controller=palm_grips[side];
                         in.clamp_contact=(hand_visual_contact_bits>>side)&1u;
                         in.body_contact=d2vr::HandBodyRuntime::contact_now(side);   // the drive's shortfall on an uncapped command
+                        // v1074 (user: "the hand that carries a thing still twitches when I run"): a hand that holds something is drawn where an empty hand
+                        // is (the clamp output): the held thing's weight makes the body fall short (a 'contact') and elected the lagging physics hand.
+                        if((hold_holding_bits>>side)&1u) {in.body_contact=false;in.clamp_contact=false;}
                         in.player_speed=no_moving_controller_visual?0.:player_speed;   // Fix C
                         if(anchors[side].weight>0) in.anchor=anchors[side].position;
                         in.yield=(((hand_body_yield_bits&~hold_coupled_bits)|authored_hands)>>side)&1u;   // B16: a coupled hold is not a yield (X-4 holds while holding)
