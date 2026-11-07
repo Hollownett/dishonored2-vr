@@ -177,3 +177,10 @@ User: "book render is bad, fingers should not get through objects ... touch, gra
   <= 28 deg; wrap gap bottle box 124 -> 24 mm, corpse limbs 123 -> 23.
 - Sim v1062/v1063 corpse drag: 1.90/1.91 m, no crash; seat move 71 mm (old limb shape) -> 30 mm pull-in.
 Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; thin spoons are a fist; nothing headset-tested.
+- v1064: power grip - the thumb root is left out of the seat for things narrow along the fingers (bars, bottles, limbs).
+- v1065: a held gun's barrel capsule (authored gun frame, gun shape) joins hand_weapon_contact; never a clash.
+- v1066 (user: "objects picked up with game Use, like limbs, also using native VR grips, only visual like bottles"): severed
+  limbs/heads held by HoldObject are seated like bottles (seat_held), the ball placement only without the surface grip;
+  severed parts and big native holds (> 5 cm radius) are pushed out of the hand visually (native_seat_push); thumb guard
+  judges world shapes only, prefers out-of-the-thing over the spread cap, keeps a holding thumb clear of the hand and draws it
+  as placed. Lab: severed forearm pen 2.4 mm, head 16 -> 2.9 mm.
