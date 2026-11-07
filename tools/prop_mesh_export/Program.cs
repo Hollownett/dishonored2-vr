@@ -22,8 +22,36 @@ if (Environment.GetEnvironmentVariable("DB") != null)
             var line = $"{k}: key=0x{e.Key:x16} hull_verts={e.HullCount} decimated_verts={e.Verts.Length} hull_centre_minus_mesh_centre_mm=({dc.X:F1},{dc.Y:F1},{dc.Z:F1}) mesh_size_cm=({e.MeshSize.X * 100:F1},{e.MeshSize.Y * 100:F1},{e.MeshSize.Z * 100:F1})";
             Console.WriteLine(line); kt.AppendLine(line);
         }
-    kt.AppendLine("bottle: skipped (compound, 2 hulls: neck + body) -> generated/models/environment/props/generic/bottle_set_01/bottle_01.lwo.hkt._100_100_100.10.hkx");
+    foreach (var e in entries.Where(e => e.Hkx.Contains("bottle_set_01/bottle_01.lwo") && e.Hkx.Contains("._100_100_100.")))
+        kt.AppendLine($"bottle (compound): key=0x{e.Key:x16} hull_verts={e.HullCount} decimated_verts={e.Verts.Length} {e.Hkx}");
     File.WriteAllText(Path.Combine(outDir, "keys.txt"), kt.ToString());
+    Console.WriteLine($"by kind: " + string.Join(", ", entries.GroupBy(e => System.Text.RegularExpressions.Regex.Match(e.Hkx, @"\.lwo\.([a-z]+)\.").Groups[1].Value).Select(g => $"{g.Key} {g.Count()}")) +
+        $"; compounds {entries.Count(e => e.Children > 1)}; mirrored {entries.Count(e => e.Hkx.Contains("_-"))}");
+    {   // frame check: every hull vertex inside the render mesh box + 2 cm (the convex radius and the mesh's margin): the hull's frame is the mesh's
+        (int bad, int n) Check(IEnumerable<PropShapes.Entry> es) { int b = 0, k = 0; foreach (var e in es) { k++; var lo = e.MeshCentre - e.MeshSize / 2 - new Vector3(.02f); var hi = e.MeshCentre + e.MeshSize / 2 + new Vector3(.02f);
+            if (e.Hull.Any(v => v.X < lo.X || v.Y < lo.Y || v.Z < lo.Z || v.X > hi.X || v.Y > hi.Y || v.Z > hi.Z)) b++; } return (b, k); }
+        var all = Check(entries); var comp = Check(entries.Where(e => e.Children > 1));
+        Console.WriteLine($"frame check: {all.bad} of {all.n} entries have hull vertices outside their mesh box + 2 cm; compounds {comp.bad} of {comp.n}");
+    }
+    // MATCH=<prop-hulls.jsonl>: every hull the DLL dumped (its vertices as read, padding included), keyed as the DLL keys it
+    if (Environment.GetEnvironmentVariable("MATCH") is string dump)
+    {
+        var byKey = entries.GroupBy(e => e.Key).ToDictionary(g => g.Key, g => g.First());
+        int hit = 0, all = 0; var seen = new HashSet<ulong>();
+        foreach (var line in File.ReadLines(dump))
+        {
+            using var doc = JsonDocument.Parse(line); var r = doc.RootElement;
+            var v = r.GetProperty("vertices").EnumerateArray().Select(a => new Vector3(a[0].GetSingle(), a[1].GetSingle(), a[2].GetSingle())).ToList();
+            var k = PropShapes.Key(v); if (!seen.Add(k)) continue; all++;
+            var mn = v.Aggregate(Vector3.Min); var mx = v.Aggregate(Vector3.Max); var z = (mx - mn) * 100;
+            // the dump prints 5 decimals, so its 0.1 mm key can differ from the live one: match the vertices within 0.02 mm instead
+            var found = byKey.TryGetValue(k, out var e);
+            if (!found) { e = entries.FirstOrDefault(x => x.Hull.Length == v.Count && x.Hull.Zip(v).All(p => Vector3.Distance(p.First, p.Second) < 2e-5f)); found = e != null; }
+            if (found) hit++;
+            Console.WriteLine($"{(found ? "HIT " : "miss")} type={r.GetProperty("type")} n={v.Count} size_cm=({z.X:F1},{z.Y:F1},{z.Z:F1}) {(found ? e!.Hkx : "")}");
+        }
+        Console.WriteLine($"MATCH: {hit} of {all} distinct dumped hulls have an entry");
+    }
     return;
 }
 var c = new ArtImport.Containers(game, n => true);

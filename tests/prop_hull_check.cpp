@@ -40,11 +40,32 @@ int main() {
     bool pinch=false;const auto seat=r::natural_seat(body,b,skin,fw,n,&*ps,&pinch);assert(seat && pinch);
     const Vec3 grip=skin+fw*r::seat_pinch_reach+n*r::seat_pinch_lift,on=seat->position+seat->basis[0]*-.06; // the handle point that was taken
     assert(d2vr::length(on-grip)<.01);
-    pinch=true;const auto bowl=r::natural_seat(body,b,{.04,0,-.0075},fw,n,&*ps,&pinch);assert(bowl && !pinch);
+    // v1082 grip map: taken by its bowl, it slides to its handle span and is pinched there too (v1080 laid it in the palm by the bowl)
+    pinch=false;const auto bowl=r::natural_seat(body,b,{.04,0,-.0075},fw,n,&*ps,&pinch);assert(bowl && pinch);
+    {const Vec3 taken=Vec3{.04,0,-.0075}+fw*r::seat_pinch_reach+n*r::seat_pinch_lift;const double along=ps->whole.to_own(d2vr::grab_local(*bowl,taken-bowl->position)).x;assert(along>=ps->grip.x0-1e-6 && along<=ps->grip.x1+1e-6);}
     // the pieces as contact shapes: valid, and the fingers meet the handle's surface (2 mm thick half) above its centre line
     std::array<r::HeldShape,d2vr::prop_max_pieces> got{};const unsigned count=r::prop_grip_shapes(body,*ps,got.data(),static_cast<unsigned>(got.size()));
     assert(count==ps->pieces.size());double d=1e9;for(unsigned i=0;i<count;++i) {r::require_shape(got[i]);d=std::min(d,r::shape_distance(got[i],{-.06,0,.012}));}
     assert(near(d,.01,1e-3));
+    // v1082 compounds: the bottle's two hulls (its neck and body, bottle_01.lwo.hkt._100_100_100.10.hkx) give the key the launcher wrote
+    // (artifacts/prop-meshes/keys.txt, PropShapes.CompoundKey), in either order and with Havok's padding on a child
+    std::vector<Vec3> neck{{0.014096318,0.011822495,0.31633687},{0.014096318,-0.0118221855,0.31633687},{0.014096318,0.011822495,0.2153992},{-0.014096318,0.011822495,0.31633687},
+        {0.014096318,-0.0118221855,0.2153992},{-0.014096318,0.011822495,0.2153992},{-0.014096318,-0.0118221855,0.31633687},{-0.014096318,-0.0118221855,0.2153992}};
+    const std::vector<Vec3> body_hull{{0.031198787,0.040871885,0.20197116},{0.031198787,-0.04087158,0.20197116},{0.031198787,0.040871885,0.00999999},{-0.031198787,0.040871885,0.20197116},
+        {0.031198787,-0.04087158,0.00999999},{-0.031198787,0.040871885,0.00999999},{-0.031198787,-0.04087158,0.20197116},{-0.031198787,-0.04087158,0.00999999}};
+    const auto k1=d2vr::hull_key(d2vr::hull_unpadded(neck)),k2=d2vr::hull_key(d2vr::hull_unpadded(body_hull));
+    assert(d2vr::compound_key({k1,k2})==0xd62581342ac8b80cull && d2vr::compound_key({k2,k1})==0xd62581342ac8b80cull);
+    {auto padded=body_hull;padded.push_back(padded.back());padded.push_back(padded.back());assert(d2vr::hull_key(d2vr::hull_unpadded(padded))==k2);}
+    // v1082 grip map (prop_grip): the spoon is pinched by its handle, a bottle-like bar is held anywhere along it, a book lies flat, a skull is a ball
+    {const double hx=ps->whole.to_own({-.06,0,0}).x,bx=ps->whole.to_own({.04,0,0}).x;assert(ps->grip.kind==d2vr::GripKind::pinch && ps->grip.span && hx>=ps->grip.x0 && hx<=ps->grip.x1 && (bx<ps->grip.x0 || bx>ps->grip.x1));}
+    {std::vector<Vec3> stick;for(double z=0;z<=.3;z+=.01) for(double a=0;a<6.283;a+=.4) stick.push_back({.015*std::cos(a),.015*std::sin(a),z});   // a candlestick: anywhere along it
+     const auto st=d2vr::build_prop_shape(stick,0,true);assert(st && st->grip.kind==d2vr::GripKind::power && st->grip.span && st->grip.x1-st->grip.x0>.25);
+     std::vector<Vec3> bottle;for(double z=0;z<=.3;z+=.01) for(double a=0;a<6.283;a+=.4) {const double rr=z<.2?.035:.012;bottle.push_back({rr*std::cos(a),rr*std::sin(a),z});}
+     const auto bt=d2vr::build_prop_shape(bottle,0,true);assert(bt && bt->grip.kind==d2vr::GripKind::power && bt->grip.span && bt->grip.x1-bt->grip.x0<.11);   // a bottle: by its neck
+     const double nx=bt->whole.to_own({0,0,.25}).x;assert(nx>=bt->grip.x0 && nx<=bt->grip.x1);}
+    {const auto bk=d2vr::build_prop_shape(box,0,true);assert(bk && bk->grip.kind==d2vr::GripKind::flat);}   // the 20 x 10 x 4 cm box above
+    {std::vector<Vec3> skull;for(double a=0;a<6.283;a+=.3) for(double e=-1.4;e<=1.4;e+=.3) skull.push_back({.09*std::cos(a)*std::cos(e),.075*std::sin(a)*std::cos(e),.1*std::sin(e)});
+     const auto sk=d2vr::build_prop_shape(skull,0,true);assert(sk && sk->grip.kind==d2vr::GripKind::ball);}
     std::puts("prop_hull_check: ok");
     return 0;
 }

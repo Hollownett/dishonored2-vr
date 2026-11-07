@@ -6,18 +6,24 @@ namespace DishonoredVR;
 
 /// <summary>prop-shapes.bin: runtime Havok convex hull (key) -> decimated real render-mesh vertices, built from the user's own install.
 /// Key = FNV-1a 64 over uint32 vertex count then x,y,z of each hull vertex as int32 round(coord*10000) (0.1 mm), all little endian.
-/// File: "D2PS", u32 version 1, u32 entries, per entry u64 key, u32 n, n x float3. Single-hull .lwo.hkt._SX_SY_SZ.10.hkx files only.</summary>
+/// A compound (several hulls in one file: a bottle's neck and body) is keyed by CompoundKey: its children's keys, each over the hull without
+/// Havok's padding, sorted (the runtime reads them from hknpCompoundShape's instance array, prop_hull.hpp).
+/// File: "D2PS", u32 version 2, u32 entries, per entry u64 key, u32 n, n x float3. Every .lwo.{hkt,cvx,box}._SX_SY_SZ.10.hkx (mirrored scales too;
+/// v1 read .hkt and positive scales only, which left the game's box and convex files and every mirrored placement without a shape).</summary>
 public static class PropShapes
 {
-    public sealed record Entry(string Hkx, string Mesh, ulong Key, int HullCount, Vector3[] Hull, Vector3[] Verts, Vector3 HullCentre, Vector3 MeshCentre, Vector3 MeshSize);
+    public sealed record Entry(string Hkx, string Mesh, ulong Key, int HullCount, Vector3[] Hull, Vector3[] Verts, Vector3 HullCentre, Vector3 MeshCentre, Vector3 MeshSize, int Children = 1);
 
-    static readonly Regex HkxName = new(@"^generated/models/(.+)\.lwo\.hkt\._(\d+)_(\d+)_(\d+)\.10\.hkx$", RegexOptions.Compiled);
+    static readonly Regex HkxName = new(@"^generated/models/(.+)\.lwo\.(?:hkt|cvx|box)\._(-?\d+)_(-?\d+)_(-?\d+)\.10\.hkx$", RegexOptions.Compiled);
+    public const uint Version = 2;
 
     public static string DefaultPath => Path.Combine(ModHome.Dir, "prop-shapes.bin");
 
     public static bool Stale(string game, string path)
     {
         if (!File.Exists(path)) return true;
+        try { using var f = File.OpenRead(path); var h = new byte[8]; if (f.Read(h, 0, 8) != 8 || BitConverter.ToUInt32(h, 4) != Version) return true; }
+        catch (IOException) { return true; }
         var t = File.GetLastWriteTimeUtc(path);
         foreach (var c in new[] { "game1", "game2", "game3", "game4" })
             if (File.GetLastWriteTimeUtc(Path.Combine(game, "base", c + "_patch.index")) > t) return true;
@@ -46,8 +52,8 @@ public static class PropShapes
             hkxCount++;
             try
             {
-                var runs = HullRuns(c.Read(name)); if (runs.Count != 1) continue;  // compounds skipped
-                var hull = runs[0];
+                var runs = HullRuns(c.Read(name)); if (runs.Count == 0 || runs.Count > 16) continue;
+                var hull = runs.Count == 1 ? runs[0] : runs.SelectMany(r => r).ToList();
                 var scale = new Vector3(int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value), int.Parse(m.Groups[4].Value)) / 100f;
                 var (pts, tris) = MeshTriangles(c.Read(mesh)); if (pts.Count == 0) continue;
                 for (int i = 0; i < pts.Count; i++) pts[i] *= scale;
@@ -55,11 +61,12 @@ public static class PropShapes
                 var (hmn, hmx) = Bounds(hull); var (mmn, mmx) = Bounds(pts);
                 var verts = Decimate(pts, 512, area);
                 // Havok pads the vertex array to a multiple of 4 by repeating the last vertex; the runtime count may be either, so key both.
-                foreach (var h in PaddedVariants(hull))
+                // A compound has one key (its children's, unpadded and sorted).
+                foreach (var h in runs.Count == 1 ? PaddedVariants(hull) : new[] { hull })
                 {
-                    ulong key = Key(h);
+                    ulong key = runs.Count == 1 ? Key(h) : CompoundKey(runs);
                     if (byKey.ContainsKey(key)) continue;
-                    var e = new Entry(name, mesh, key, h.Count, h.ToArray(), verts, (hmn + hmx) / 2, (mmn + mmx) / 2, mmx - mmn);
+                    var e = new Entry(name, mesh, key, h.Count, h.ToArray(), verts, (hmn + hmx) / 2, (mmn + mmx) / 2, mmx - mmn, runs.Count);
                     byKey[key] = e; list.Add(e);
                 }
             }
@@ -72,6 +79,24 @@ public static class PropShapes
     {
         yield return h;
         if (h.Count % 4 != 0) { var p = new List<Vector3>(h); while (p.Count % 4 != 0) p.Add(h[^1]); yield return p; }
+    }
+
+    /// <summary>A hull without Havok's padding (trailing repeats of the last vertex).</summary>
+    public static List<Vector3> Unpadded(IReadOnlyList<Vector3> h)
+    {
+        int n = h.Count; while (n > 1 && h[n - 1] == h[n - 2]) n--;
+        return h.Take(n).ToList();
+    }
+
+    /// <summary>A compound's key: FNV-1a 64 over u32 child count, then the children's keys (each over its unpadded hull) sorted, as u64.</summary>
+    public static ulong CompoundKey(IReadOnlyList<List<Vector3>> children)
+    {
+        var keys = children.Select(c => Key(Unpadded(c))).OrderBy(k => k).ToList();
+        ulong h = 1469598103934665603UL;
+        void Byte(byte b) { h ^= b; h *= 1099511628211UL; }
+        for (int i = 0; i < 4; i++) Byte((byte)((uint)keys.Count >> (8 * i)));
+        foreach (var k in keys) for (int i = 0; i < 8; i++) Byte((byte)(k >> (8 * i)));
+        return h;
     }
 
     public static ulong Key(IReadOnlyList<Vector3> hull)
@@ -90,7 +115,7 @@ public static class PropShapes
         var tmp = path + ".tmp";  // written aside and renamed: a game starting meanwhile never reads half a file
         using (var w = new BinaryWriter(File.Create(tmp)))
         {
-            w.Write("D2PS"u8); w.Write(1u); w.Write((uint)entries.Count);
+            w.Write("D2PS"u8); w.Write(Version); w.Write((uint)entries.Count);
             foreach (var e in entries) { w.Write(e.Key); w.Write((uint)e.Verts.Length); foreach (var v in e.Verts) { w.Write(v.X); w.Write(v.Y); w.Write(v.Z); } }
         }
         File.Move(tmp, path, true);

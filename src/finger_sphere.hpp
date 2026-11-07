@@ -61,11 +61,8 @@ inline double sphere_grip_ball_radius(const WorldTrackedPose& pose,const NativeG
 // instead of closing through its cover. Same cost as the ball: one shape, fixed in the palm frame, never re-read.
 // "Wide and thin": at most 3 cm on its thinnest side, at least 4 cm on its middle side, and the thin side at most half the middle one (a spoon's 1.5 cm middle
 // is a handle to close on, not a face to lie on; a bottle's 3.5 x 3.5 cross-section is a shaft).
-inline constexpr double grip_slab_thin_max=.03,grip_slab_wide_min=.04,grip_slab_ratio=.5;
-inline bool grip_is_flat(Vec3 half) noexcept {
-    const double lo=std::min({half.x,half.y,half.z}),hi=std::max({half.x,half.y,half.z}),mid=half.x+half.y+half.z-lo-hi;
-    return std::isfinite(lo+hi+mid) && lo<=grip_slab_thin_max && mid>=grip_slab_wide_min && lo<=grip_slab_ratio*mid;
-}
+// (v1082: the rule lives in prop_hull.hpp, prop_is_flat, so the grip map and this agree.)
+inline bool grip_is_flat(Vec3 half) noexcept {return prop_is_flat(half);}
 // A prop's flatness from its own local box (the world box as it is when the axes cannot be solved).
 inline bool grip_is_flat(const WorldTrackedPose& pose,const NativeGrabBounds& bounds,const PropShape* shape=nullptr) noexcept {
     try {
@@ -170,7 +167,7 @@ inline constexpr double seat_bar_snap=.873,seat_face_snap=.611,seat_edge_margin=
 // bottle's neck) is not laid in the palm to be wrapped; it is pinched at the fingertips: its centre line where the index and middle pads meet the
 // opposed thumb, seat_pinch_reach along the fingers from the palm skin and seat_pinch_lift off it. The section is the real one at the grasped spot
 // when the thing has a real shape (prop_hull.hpp: the slab there), else the box's.
-inline constexpr double seat_pinch_thin=.006,seat_pinch_wide=.016,seat_pinch_reach=.085,seat_pinch_lift=.035;
+inline constexpr double seat_pinch_thin=prop_pinch_thin,seat_pinch_wide=prop_pinch_wide,seat_pinch_reach=.085,seat_pinch_lift=.035;
 inline std::optional<WorldTrackedPose> natural_seat(const WorldTrackedPose& pose,const NativeGrabBounds& bounds,Vec3 skin,Vec3 forward,Vec3 normal,const PropShape* hull=nullptr,bool* pinched=nullptr) {
     if(pinched) *pinched=false;
     const auto box=grip_box(pose,bounds,hull);
@@ -201,6 +198,9 @@ inline std::optional<WorldTrackedPose> natural_seat(const WorldTrackedPose& pose
     const Vec3 centre=box->centre;
     double q[3];for(unsigned j=0;j<3;++j) q[j]=dot(skin-centre,old[j]);   // the grasped spot in the thing's own frame, placed at the grip point
     for(unsigned j=0;j<3;++j) {const double room=std::max(0.,h[j]-std::min(seat_edge_margin,.5*h[j]));q[j]=std::clamp(q[j],-room,room);}
+    // v1082 grip map: a bar is taken where a hand closes round it (prop_hull.hpp prop_grip: a spoon by its handle, a leg by its shin), the
+    // grasped spot slid into that span, seat_edge_margin inside its ends
+    if(bar && hull && L==0 && hull->grip.span) {const double m=std::min(seat_edge_margin,.5*(hull->grip.x1-hull->grip.x0));q[0]=std::clamp(q[0],hull->grip.x0+m,hull->grip.x1-m);}
     q[face]=sign*h[face];   // on the face toward the palm
     if(bar) {
         const unsigned u=(L+1)%3,v=(L+2)%3;double hu=h[u],hv=h[v],cu=0,cv=0;
