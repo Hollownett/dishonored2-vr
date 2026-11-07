@@ -271,7 +271,7 @@ private:
     // Corpse hold (Task 10). All of this is touched under mutex_ (the dispatcher callback, the render-thread accessors) except the atomics.
     // corpse_enabled_: build/no-corpse-grab clears it; lockout_ is internally locked (any thread); the dispatcher cost counters are dispatcher-thread only; no_posts_ is
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
-    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true;
+    bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{};
     bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
     bool sphere_whole_object_{};
@@ -991,6 +991,9 @@ private:
                 // v1062: the box's own depth along the palm direction (its support), not the ball round it - a book 14 cm off the palm on its face, or inside it on edge
                 const Vec3 centre=(body->bounds->minimum+body->bounds->maximum)*.5,goal=p.palm.palm+p.palm.direction*(rig::surface_seat_depth(body->pose,*body->bounds,p.palm.direction)+rig::held_palm_depth);
                 if(finite(goal) && length(goal-centre)<=.5) seated.position=seated.position+(goal-centre);
+                // v1063 natural seat: the thing turns into the hand (a long side across the palm, the nearest face flat on it) where it was taken
+                if(natural_seat_) if(const auto n=rig::natural_seat(body->pose,*body->bounds,p.palm.palm+p.palm.direction*rig::held_palm_depth,p.palm.forward,p.palm.direction);
+                    n && length(n->position-body->pose.position)<=.5) {seated=*n;++natural_seats_;}
             }
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,grab_acquire_distance)) {
                 lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
@@ -1187,6 +1190,7 @@ public:
         if(!lane.held || lane.held->entity!=entity || lane.held->handle!=handle) return false;
         lane.grab.nudge(world);return true;
     }
+    std::uint64_t natural_seats() {std::lock_guard<std::mutex> lock(mutex_);return natural_seats_;}
     bool hold_flat(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2 && lanes_[side].held && lanes_[side].flat;}
     std::optional<double> held_size(unsigned side) {
         std::lock_guard<std::mutex> lock(mutex_);const auto& h=lanes_.at(side).held;if(!h) return {};
@@ -1550,7 +1554,7 @@ public:
          if(collar_grab_) {std::ofstream note(loss_file_,std::ios::app);note<<"knob build/collar-grab present: chest/neck hold targets enabled (full fist only)\n";}
          // Corpse hold knobs and the tuning file, read once here so the shipped configuration is the one that was tested (valid file or the defaults).
          const auto knobs=corpse_knobs_from(root);const auto& kill=knobs.kill;const auto& loaded=knobs.loaded;
-         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;sphere_grip_=!std::filesystem::exists(root/L"build"/L"legacy-finger-grab",ec);
+         no_posts_=kill.no_posts;prop_grasp_point_=!kill.no_prop_grasp_point;sphere_grip_=!std::filesystem::exists(root/L"build"/L"legacy-finger-grab",ec);natural_seat_=!std::filesystem::exists(root/L"build"/L"no-natural-seat",ec);
          sphere_whole_object_=std::filesystem::exists(root/L"build"/L"legacy-sphere-grip-whole-object",ec);
          grip_slab_=!std::filesystem::exists(root/L"build"/L"no-grip-slab",ec);
          for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);

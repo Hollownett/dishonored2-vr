@@ -364,7 +364,7 @@ int run(int argc,char** argv) {
     const auto seat_out=[](std::vector<r::HeldShape> v,const WorldTrackedPose& palm,const r::HandGeometry& g) {
         if(no_seat) return v;const auto into=[&](Vec3 x) {return Vec3{dot(x,palm.basis[0]),dot(x,palm.basis[1]),dot(x,palm.basis[2])};};
         for(auto& s:v) {const r::PalmShape l{into(s.frame.position-palm.position),{into(s.frame.basis[0]),into(s.frame.basis[1]),into(s.frame.basis[2])},s.half,s.radius,s.radius_end,s.rim,s.fingers_only};
-            s.frame.position=s.frame.position+r::palm_normal(palm,g)*r::held_standoff(g,l);}
+            const double d=r::held_standoff(g,l);if(std::getenv("LAB_SEAT_DEBUG")) std::fprintf(stderr,"standoff %.1f mm local %.3f %.3f %.3f half %.3f %.3f %.3f\n",d*1000,l.position.x,l.position.y,l.position.z,l.half.x,l.half.y,l.half.z);s.frame.position=s.frame.position+r::palm_normal(palm,g)*d;}
         return v;};
     const auto old_pose=[](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3 half,Vec3 dp,Vec3 turn) {
         const Vec3 n=r::palm_normal(palm,g);const double lo=std::min({half.x,half.y,half.z});
@@ -452,9 +452,32 @@ int run(int argc,char** argv) {
         Scene c{};c.name=_strdup(("corpse_bone"+std::to_string(limb.first)).c_str());c.held=true;c.where=hold_at;c.fingers=hold_fingers;c.normal=hold_in;c.squeeze=1.f;c.index=0.f;
         c.title=_strdup((std::string(limb.second)+": classify_held bone path, laid across the palm").c_str());c.shape_name="ragdoll bone capsule";
         const int bone=limb.first;
-        c.moving=[bone,round_centre,seat_out](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
-            const double rad=d2vr::ragdoll_bone_radius[static_cast<std::size_t>(bone)];const Vec3 at=round_centre(palm,g,rad);
-            return seat_out({r::surface_grip_shape({at,palm.basis},NativeGrabBounds{at-Vec3{rad,rad,rad},at+Vec3{rad,rad,rad}},bone,palm)},palm,g);};
+        // v1063: the bone's padded body box (limb: 13 cm half long across the palm, the table radius round it; head: a cube), its visible limb in the palm
+        c.moving=[bone,round_centre,seat_out,box_of](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+            const double rad=d2vr::ragdoll_bone_radius[static_cast<std::size_t>(bone)];const Vec3 at=round_centre(palm,g,rad*r::surface_bone_share);
+            const Vec3 half=bone==4?Vec3{rad,rad,rad}:Vec3{.13,rad,rad};const WorldTrackedPose pose{at,palm.basis};
+            return seat_out({r::surface_grip_shape(pose,box_of(pose,half),bone,palm)},palm,g);};
+        c.shapes=[m=c.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};c.ghost=c.shapes;
+        scenes.push_back(c);
+    }
+    // v1063: things TAKEN at an awkward angle (tilted, turned off square, held off centre): the grab's natural seat turns them into the hand, then the seat-out.
+    struct Taken {const char* name;const char* title;Vec3 half;Vec3 tilt;Vec3 offset;};
+    for(const auto& t:std::vector<Taken>{{"taken_book","Book taken tilted 25 deg, 20 deg off square",{.11,.08,.02},{.44,0,.35},{.02,0,.03}},
+        {"taken_plank","Plank taken 35 deg off across the palm, near its end",{.5,.05,.015},{0,.61,0},{.3,0,0}},
+        {"taken_crate","Crate side taken tilted 30 deg",{.2,.2,.2},{.52,.2,0},{.05,.05,0}},
+        {"taken_bottlebox","Bottle box taken 40 deg off across",{.125,.035,.035},{0,.7,.2},{.04,0,0}},
+        {"taken_spoon","Spoon taken along the fingers (not swung)",{.09,.015,.004},{0,1.4,0},{0,0,0}}}) {
+        Scene c{};c.name=_strdup(t.name);c.held=true;c.where=hold_at;c.fingers=hold_fingers;c.normal=hold_in;c.squeeze=1.f;c.index=0.f;
+        c.title=_strdup((std::string(t.title)+": natural seat + seat-out").c_str());c.shape_name="object surface (natural seat)";
+        c.moving=[t,box_of,seat_out](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+            const Vec3 n=r::palm_normal(palm,g),fp=g.finger[2].pivot,f0=palm.basis[0]*fp.x+palm.basis[1]*fp.y+palm.basis[2]*fp.z;Vec3 fw=unit(cross(n,palm.basis[0]));if(dot(fw,f0)<0) fw=fw*-1.; // the hand's forward (the game's grip axis), not the knuckle direction
+            WorldTrackedPose pose{palm.position+n*(r::held_palm_depth+std::min({t.half.x,t.half.y,t.half.z}))+palm.basis[0]*t.offset.x+palm.basis[2]*t.offset.z,palm.basis};
+            const auto spin=[](Vec3 v,Vec3 k,double a) {return v*std::cos(a)+cross(k,v)*std::sin(a)+k*(dot(k,v)*(1-std::cos(a)));};
+            for(unsigned k=0;k<3;++k) {const double a=k==0?t.tilt.x:k==1?t.tilt.y:t.tilt.z;const Vec3 ax=unit(palm.basis[k]);if(a!=0) for(auto& row:pose.basis) row=spin(row,ax,a);}
+            const auto seat=r::natural_seat(pose,box_of(pose,t.half),palm.position+n*r::held_palm_depth,fw,n);
+            if(seat && std::getenv("LAB_SEAT_DEBUG")) std::fprintf(stderr,"%s fw %.3f %.3f %.3f n %.3f %.3f %.3f in0 %.3f %.3f %.3f out0 %.3f %.3f %.3f\n",t.name,fw.x,fw.y,fw.z,n.x,n.y,n.z,pose.basis[0].x,pose.basis[0].y,pose.basis[0].z,seat->basis[0].x,seat->basis[0].y,seat->basis[0].z);
+            auto use=seat?*seat:pose;if(!seat) {std::fprintf(stderr,"%s: natural seat unsolvable, support seat\n",t.name);const auto b=box_of(pose,t.half);use.position=use.position+(palm.position+n*(r::held_palm_depth+r::surface_seat_depth(pose,b,n))-(b.minimum+b.maximum)*.5);}
+            return seat_out({r::surface_grip_shape(use,box_of(use,t.half),-1,palm)},palm,g);};
         c.shapes=[m=c.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};c.ghost=c.shapes;
         scenes.push_back(c);
     }

@@ -12,6 +12,7 @@
 #include "finger_ik.hpp"
 #include <algorithm>
 #include <cmath>
+#include <optional>
 namespace d2vr::rig {
 // A thing's ball: 1.5 cm at least (a fist still closes on it), 0.5 m at most (what a hand can still hold out in front of it).
 inline constexpr double sphere_grip_min=.015,sphere_grip_max=.5,sphere_grip_unknown=.06;
@@ -69,9 +70,43 @@ inline constexpr float grip_flat_reach=.35f;
 // fitting it as a fat capsule (classify_held's fit_cylinder takes a 22x16x4 cm book within 10%) made the fingers fan round a ball with the thumb far off -
 // unless its cross-section is genuinely round (two smaller half extents within 25%, the long one at least 1.5x longer): then the capsule along the long
 // axis. A corpse bone is classify_held's limb capsule. Local extents unsolvable (axes 45 degrees to the box): classify_held.
+// v1063: held_local_extents, or where it has no answer (two axes at about 45 degrees to the world box: only their sum is known) the least-squares box
+// with a small ridge (the ambiguous sides split evenly - a crate stays a cube, not a slab), accepted when it reproduces the world box to 3 mm.
+inline std::optional<Vec3> held_local_extents_any(const std::array<Vec3,3>& axes,Vec3 e) {
+    if(const auto exact=held_local_extents(axes,e)) return exact;
+    double A[3][3];
+    for(unsigned c=0;c<3;++c) {const Vec3 a=unit(axes[c]);A[0][c]=std::abs(a.x);A[1][c]=std::abs(a.y);A[2][c]=std::abs(a.z);}
+    const double ev[3]{e.x,e.y,e.z},lambda=1e-3;double M[3][3]{},b[3]{};
+    for(unsigned i=0;i<3;++i) {for(unsigned j=0;j<3;++j) {for(unsigned k=0;k<3;++k) M[i][j]+=A[k][i]*A[k][j];}M[i][i]+=lambda;for(unsigned k=0;k<3;++k) b[i]+=A[k][i]*ev[k];}
+    const double det=M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])-M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])+M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+    if(!(std::abs(det)>1e-12)) return {};
+    double h[3];
+    for(unsigned c=0;c<3;++c) {double m[3][3];for(unsigned i=0;i<3;++i) for(unsigned j=0;j<3;++j) m[i][j]=j==c?b[i]:M[i][j];
+        h[c]=(m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1])-m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0])+m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]))/det;}
+    if(!(h[0]>1e-3 && h[1]>1e-3 && h[2]>1e-3) || !std::isfinite(h[0]+h[1]+h[2])) return {};
+    for(unsigned k=0;k<3;++k) if(std::abs(A[k][0]*h[0]+A[k][1]*h[1]+A[k][2]*h[2]-ev[k])>.003) return {};
+    return Vec3{h[0],h[1],h[2]};
+}
+// v1063: a corpse bone is a capsule along its OWN long axis (the longest side of its body's local box: forearm, calf, thigh), centred on that box, its
+// radius the visible limb (surface_bone_share of the padded box's cross-section, at most the bone table's radius); a squat box (a head, a hand) is a ball.
+// The v641 limb capsule (centred on the joint, laid across the palm, the padded radius) made the v1062 seat push a dragged limb 71 mm off the palm (sim).
+inline constexpr double surface_bone_share=.6;
+inline std::optional<HeldShape> surface_bone_shape(const WorldTrackedPose& body,const NativeGrabBounds& bounds,int bone) {
+    if(bone<0 || bone>=17) return {};
+    const auto local=held_local_extents_any(body.basis,(bounds.maximum-bounds.minimum)*.5);if(!local) return {};
+    const double v[3]{local->x,local->y,local->z};unsigned a=0;for(unsigned i=1;i<3;++i) if(v[i]>v[a]) a=i;
+    const double cross_half=.5*(v[(a+1)%3]+v[(a+2)%3]);
+    const double r=std::clamp(cross_half*surface_bone_share,.02,ragdoll_bone_radius[static_cast<std::size_t>(bone)]);
+    HeldShape shape{};shape.frame.position=(bounds.maximum+bounds.minimum)*.5;
+    shape.frame.basis={unit(body.basis[a]),unit(body.basis[(a+1)%3]),unit(body.basis[(a+2)%3])};
+    shape.half={v[a]>=1.3*cross_half?std::max(0.,v[a]-r):0.,0,0};shape.radius=r;
+    return shape;
+}
 inline HeldShape surface_grip_shape(const WorldTrackedPose& body,const std::optional<NativeGrabBounds>& bounds,int bone,const WorldTrackedPose& palm) {
+    if(bone>=0 && bounds && finite(bounds->minimum) && finite(bounds->maximum))
+        if(const auto limb=surface_bone_shape(body,*bounds,bone)) return *limb;
     if(bone<0 && bounds && finite(bounds->minimum) && finite(bounds->maximum)) {
-        const auto local=held_local_extents(body.basis,(bounds->maximum-bounds->minimum)*.5);
+        const auto local=held_local_extents_any(body.basis,(bounds->maximum-bounds->minimum)*.5);
         if(local) {
             const auto h=held_clamped_extents(*local);const double v[3]{h.x,h.y,h.z};
             unsigned a=0;for(unsigned i=1;i<3;++i) if(v[i]>v[a]) a=i;
@@ -90,9 +125,49 @@ inline HeldShape surface_grip_shape(const WorldTrackedPose& body,const std::opti
 // extents projected on it; the world box's own when the axes cannot be solved). The drawn hand then moves it the last millimetres (held_standoff).
 inline double surface_seat_depth(const WorldTrackedPose& pose,const NativeGrabBounds& bounds,Vec3 direction) {
     const auto e=(bounds.maximum-bounds.minimum)*.5;const Vec3 n=unit(direction);
-    if(const auto h=held_local_extents(pose.basis,e))
+    if(const auto h=held_local_extents_any(pose.basis,e))
         return std::abs(h->x*dot(unit(pose.basis[0]),n))+std::abs(h->y*dot(unit(pose.basis[1]),n))+std::abs(h->z*dot(unit(pose.basis[2]),n));
     return std::abs(e.x*n.x)+std::abs(e.y*n.y)+std::abs(e.z*n.z);
+}
+// v1063 natural seat (user 2026-11-07: "native like VR hands grabbing"): a grab turns the thing a little and lays it in the hand the way a hand takes it, as the
+// reference games' hand poses do. A long thing (its longest side at least 1.5x the others: a plank, a candlestick, a bottle, a spoon) turns its long axis
+// across the palm (a bar grip) when it lies within 50 degrees of that; then the face most turned toward the palm turns flat onto it when within 35 degrees
+// (a palm flat on a book, a crate side). The grasped spot is kept: the palm skin point stays where it was on the thing (its offsets along the face, kept
+// seat_edge_margin inside the edges so the fingers have something to close over), and the face lies on the skin. Turns are about the skin point.
+// Unsolvable local box (axes at 45 degrees to it): no answer (the caller keeps surface_seat_depth).
+inline constexpr double seat_bar_snap=.873,seat_face_snap=.611,seat_edge_margin=.02,seat_bar_ratio=1.5,seat_crease_depth=.045;
+inline std::optional<WorldTrackedPose> natural_seat(const WorldTrackedPose& pose,const NativeGrabBounds& bounds,Vec3 skin,Vec3 forward,Vec3 normal) {
+    const auto local=held_local_extents_any(pose.basis,(bounds.maximum-bounds.minimum)*.5);
+    if(!local || !finite(skin) || !finite(forward) || !finite(normal) || length(normal)<1e-9) return {};
+    const Vec3 n=unit(normal),fw0=forward-n*dot(forward,n);if(length(fw0)<1e-9) return {};
+    const Vec3 fw=unit(fw0),across=cross(n,fw);
+    const std::array<Vec3,3> old{unit(pose.basis[0]),unit(pose.basis[1]),unit(pose.basis[2])};
+    auto ax=old;const double h[3]{local->x,local->y,local->z};
+    const auto spin=[](Vec3 v,Vec3 k,double a) {return v*std::cos(a)+cross(k,v)*std::sin(a)+k*(dot(k,v)*(1-std::cos(a)));};
+    const auto turn=[&](Vec3 from,Vec3 to,double limit) {
+        const double a=std::acos(std::clamp(dot(from,to),-1.,1.));const Vec3 k=cross(from,to);
+        if(a<1e-6 || a>limit || length(k)<1e-9) return;
+        const Vec3 u=unit(k);for(auto& v:ax) v=spin(v,u,a);
+    };
+    unsigned L=0;for(unsigned i=1;i<3;++i) if(h[i]>h[L]) L=i;
+    const bool bar=h[L]>=seat_bar_ratio*std::max(h[(L+1)%3],h[(L+2)%3]);
+    if(bar) turn(ax[L],dot(ax[L],across)>=0?across:across*-1.,seat_bar_snap);
+    unsigned face=bar?(L+1)%3:0;double sign=1,best=-2;
+    for(unsigned i=0;i<3;++i) for(const double sg:{1.,-1.}) {if(bar && i==L) continue;const double v=-dot(ax[i]*sg,n);if(v>best) {best=v;face=i;sign=sg;}}
+    turn(ax[face]*sign,n*-1.,seat_face_snap);
+    // Narrow along the fingers (at most seat_crease_depth either side: a bar, a book's spine, a bottle): the fingers can close round it, so it lies in the palm
+    // crease a knuckle shift toward the finger roots (seat_held's), not at the palm's centre behind them (they curled in front of it and never touched it).
+    const double along_fingers=h[0]*std::abs(dot(ax[0],fw))+h[1]*std::abs(dot(ax[1],fw))+h[2]*std::abs(dot(ax[2],fw));
+    const Vec3 grip=along_fingers<=seat_crease_depth?skin+fw*held_knuckle_shift:skin; // (a shift that keeps its front behind the knuckles wrapped worse in the lab: v1063)
+    const Vec3 centre=(bounds.maximum+bounds.minimum)*.5;
+    double q[3];for(unsigned j=0;j<3;++j) q[j]=dot(skin-centre,old[j]);   // the grasped spot in the thing's own frame, placed at the grip point
+    for(unsigned j=0;j<3;++j) {const double room=std::max(0.,h[j]-std::min(seat_edge_margin,.5*h[j]));q[j]=std::clamp(q[j],-room,room);}
+    q[face]=sign*h[face];   // on the face toward the palm
+    const Vec3 c=grip-(ax[0]*q[0]+ax[1]*q[1]+ax[2]*q[2]);
+    const auto R=[&](Vec3 v) {return ax[0]*dot(v,old[0])+ax[1]*dot(v,old[1])+ax[2]*dot(v,old[2]);};
+    WorldTrackedPose out{};out.position=c+R(pose.position-centre);
+    for(unsigned k=0;k<3;++k) out.basis[k]=R(pose.basis[k]);
+    return out;
 }
 // A ragdoll bone (a corpse's limb, held for a drag): the visible limb, about 0.6 of its padded collision capsule (sim v640: a dragged wrist's 5-6 cm
 // capsule, or its box's x half that can be the forearm's half LENGTH, gave the 6 cm cap: a fist round a ball, not a wrist); never above the bone box's thinnest half side.

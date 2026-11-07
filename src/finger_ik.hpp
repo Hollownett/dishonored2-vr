@@ -280,7 +280,7 @@ inline std::array<std::array<Vec3,3>,5> hinge_axes(const HandGeometry& hand,cons
 // arcs == 0: no arcs, the capsule itself (every sample's thickness sphere): the thumb, which closes across the palm out of its hinge plane.
 // Negative = inside; `stop` returns at the first value below it (the solver only needs the sign); only bones from..to are tested (all
 // bones move), from sample `first` on (the thumb's middle stage skips the part of a bone near its own joint, which a seat may bury).
-inline constexpr unsigned arc_tip=1,arc_outer=2,arc_inner=4,arc_all=7;
+inline constexpr unsigned arc_tip=1,arc_outer=2,arc_inner=4,arc_all=7,arc_side=8; // arc_side (v1063): the pad at 45 degrees to each side, for boxes
 template<class World,class Distance>
 double finger_clearance(const FingerSegments& g,double thickness,const std::array<double,3>& turns,World&& world,Distance&& distance,
     unsigned arcs=arc_all,unsigned samples=3,double stop=-1e300,unsigned from=0,unsigned to=2,unsigned first=1) {
@@ -301,6 +301,9 @@ double finger_clearance(const FingerSegments& g,double thickness,const std::arra
             if(arcs&arc_inner) { // the pad, and the skin a bone's tilt turns toward its tip or its knuckle (a tilted pad meets a plane there first)
                 static constexpr double lean[5][2]{{1,0},{.8660254,.5},{.8660254,-.5},{.5,.8660254},{.5,-.8660254}}; // cos, sin of 0, +-30, +-60 degrees
                 for(const auto& l:lean) worst=std::min(worst,distance(world(p+side*l[0]+along*(thickness*l[1]))));
+                // v1063: and the pad turned 45 degrees toward each side (a box edge crossing the finger at a slant slipped between the in-plane samples, 7 mm in);
+                // only against a held-size shape (a pin right beside the finger, out of its closing path, still does not stop it).
+                if(arcs&arc_side) {const double hl=length(axis[s]);if(hl>1e-9) {const Vec3 w=axis[s]*(thickness*.70710678/hl);for(const Vec3 o:{side*.70710678+w,side*.70710678-w}) worst=std::min(worst,distance(world(p+o)));}}
                 if(worst<stop) return worst;
             }
             if(arcs&arc_outer) {worst=std::min(worst,distance(world(p-side)));if(worst<stop) return worst;}
@@ -555,7 +558,7 @@ inline double held_standoff(const HandGeometry& hand,const PalmShape& shape,doub
         const auto p=finger_points(hand.finger[f],finger_turns_of(hand.finger[f],angles));
         for(unsigned b=0;b<bones;++b) for(unsigned k=(b?1:0);k<=last;++k) if(count<pts.size()) pts[count++]={p[b]+(p[b+1]-p[b])*(k/4.),hand.thickness[f]};
     };
-    chain(0,finger_open_angles(0),1,4);
+    chain(0,{0,0,0},1,4); // the thumb root at rest (v1063: swung open it stood 3-4 cm off the palm and pushed a book out of the fingers' reach)
     for(unsigned f=1;f<5;++f) chain(f,{0,0,0},1,1); // the knuckle pad only: the rest of a finger curls round an edge (an edge across the fingers is wrapped, not pushed off)
     double d=0;
     for(unsigned it=0;it<12;++it) {
@@ -568,6 +571,11 @@ inline double held_standoff(const HandGeometry& hand,const PalmShape& shape,doub
     }
     return d;
 }
+// v1063 (user 2026-11-07: "palm near thumb zone stretched too much, it feels unnatural"): a thumb that found nothing swung its base out to the open
+// limit (45 degrees past the bind pose, a thumbs-up), and its placement searches never paid for the spread. They search from 30 degrees out at most and
+// pay thumb_spread_cost per radian of it (0.26 at the 30 degree limit: a 2.6 cm pinch miss), so a thumb with nothing better rests by the index.
+inline constexpr double thumb_search_spread_degrees=30,thumb_spread_cost=.5;
+inline std::array<double,3> thumb_search_open() {auto o=finger_open_angles(0);o[0]=std::max(o[0],-thumb_search_spread_degrees*3.14159265358979323846/180);return o;}
 inline constexpr float memo_reach_step=.05f;
 inline float memo_reach_key(float reach) noexcept {return std::round(reach/memo_reach_step)*memo_reach_step;}
 // ease_opening (G4 the fitter's shape replacing the hover shape; G5 a free hand on a surface): a contact pose that falls (the finger must open)
@@ -635,12 +643,13 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
         const auto solve=[&](const FingerSegments& g,unsigned f,std::array<float,3>& pose,float& mins,bool& hyperextended,bool& stuck) {
             mins=0;hyperextended=false;stuck=false;
             const double thickness=hand.thickness[f];
+            bool box_reach=false;for(unsigned k=0;k<reachable;++k) {const auto& b=*within_reach[k];if(b.half.x>0 || b.half.y>0 || b.half.z>0 || b.radius>=.02) box_reach=true;} // a box, a shaft, a ball a hand holds; not a pin
             const auto top=finger_reach_angles(f,reach);
             const double follow_ratio=finger_limit_degrees[f][2]/finger_limit_degrees[f][1]; // the distal joint's share of the middle one's angle
             std::array<double,3> lever{};
             for(unsigned s=0;s<3;++s) {lever[s]=thickness;for(unsigned k=s;k<3;++k) lever[s]+=length(g.bone[k]);}
             const auto skin=[&](const std::array<double,3>& angles,double stop,unsigned from,unsigned to,unsigned first=1) {
-                return finger_clearance(g,thickness,finger_turns_of(g,angles),world,distance,f?arc_all:0u,4,stop,from,to,first);};
+                return finger_clearance(g,thickness,finger_turns_of(g,angles),world,distance,f?arc_all|(box_reach?arc_side:0u):0u,4,stop,from,to,first);};
             std::array<double,3> a{};bool stopped=false;
             // A stage whose phalanges lie buried in a shape for the whole of it (a seat around the palm buries the thumb) is run again on
             // the far end of the phalanx alone: the tip may still meet the shape from outside.
@@ -771,7 +780,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                 const auto& b=*within_reach[k];
                 if(b.fingers_only || b.half.x!=0 || b.half.y!=0 || b.half.z!=0 || !(b.radius>0) || b.radius_end>=0) continue;
                 if(b.radius<thumb_ball_min_radius) continue;   // v1035: a small grip ball is not wrapped by the thumb
-                const auto lim=finger_angles(0,1.),open=finger_open_angles(0);const auto& g0=hand.finger[0];const double t0=hand.thickness[0],reach_r=b.radius+t0;
+                const auto lim=finger_angles(0,1.),open=thumb_search_open();const auto& g0=hand.finger[0];const double t0=hand.thickness[0],reach_r=b.radius+t0;
                 const auto idx=finger_points(hand.finger[1],finger_turns_of(hand.finger[1],finger_pose_angles(1,std::max(wants[1],relaxed_share),pose_target.pose[1])))[3];
                 FingerAngles drawn_fingers{};for(unsigned fk=1;fk<5;++fk) {const auto x=finger_pose_angles(fk,std::max(wants[fk],relaxed_share),pose_target.pose[fk]);for(unsigned q=0;q<3;++q) drawn_fingers[fk][q]=static_cast<float>(x[q]);}
                 const ThumbBody hand_body(hand,drawn_fingers); // v1062: clear of the hand too, so finger_drawn_pose's thumb_clear_of_hand leaves it where it is (it moved it back into the thing)
@@ -780,6 +789,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                     for(unsigned j=1;j<4;++j) c+=20*std::max(0.,reach_r-length(p[j]-b.position))+(j>1?20*std::max(0.,held_palm_depth+t0-dot(p[j],hand.palm_in)):0.); // none inside the ball; IP and tip clear of the palm
                     c+=thumb_buried_cost(g0,t0,a,[&](Vec3 q) {return palm_shape_distance(b,q);}); // v1062: no part of the thumb in the ball (hard)
                     c+=1000*std::max(0.,-hand_body.clearance(a)); // and out of the hand
+                    c+=thumb_spread_cost*std::max(0.,-a[0]); // v1063: the thumb's base swung out stretches the web (user: "palm near thumb zone stretched too much")
                     return c+10*std::abs(length(p[3]-b.position)-reach_r)+std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]); // tip on the surface, pad to the fingertip
                 };
                 std::array<double,3> best{},step{(lim[0]-open[0])/6,(lim[1]-open[1])/6,(lim[2]-open[2])/6};double bc=1e9;
@@ -800,7 +810,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
             if(f==0 && fold) for(unsigned k=0;k<reachable;++k) {
                 const auto& b=*within_reach[k];
                 if(b.fingers_only || b.radius!=0 || b.radius_end>=0 || (b.half.x==0 && b.half.y==0 && b.half.z==0)) continue;
-                const auto lim=finger_angles(0,1.),open=finger_open_angles(0);const auto& g0=hand.finger[0];const double t0=hand.thickness[0];
+                const auto lim=finger_angles(0,1.),open=thumb_search_open();const auto& g0=hand.finger[0];const double t0=hand.thickness[0];
                 const auto idx=finger_points(hand.finger[1],finger_turns_of(hand.finger[1],finger_pose_angles(1,std::max(wants[1],relaxed_share),pose_target.pose[1])))[3];
                 unsigned thin_axis=0;{const double hh[3]{b.half.x,b.half.y,b.half.z};for(unsigned i=1;i<3;++i) if(hh[i]<hh[thin_axis]) thin_axis=i;}
                 const double face_half=thin_axis==0?b.half.x:thin_axis==1?b.half.y:b.half.z,face_mid=b.half.x+b.half.y+b.half.z-face_half-std::max({b.half.x,b.half.y,b.half.z});
@@ -815,6 +825,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
                     for(unsigned j=1;j<4;++j) c+=20*std::max(0.,t0-palm_shape_distance(b,p[j]))+(j>1?20*std::max(0.,held_palm_depth+t0-dot(p[j],hand.palm_in)):0.);
                     c+=thumb_buried_cost(g0,t0,a,[&](Vec3 q) {return palm_shape_distance(b,q);}); // v1062: no part of the thumb in the box (hard: the lab had it 30 mm inside a book)
                     c+=1000*std::max(0.,-hand_body.clearance(a)); // and out of the hand
+                    c+=thumb_spread_cost*std::max(0.,-a[0]); // v1063: the thumb's base swung out stretches the web (user: "palm near thumb zone stretched too much")
                     c+=(thin?6.:1.)*std::max(0.,length(p[3]-idx)-t0-hand.thickness[1]); // a pinch: the pad comes to the fingertip across the thin side
                     // A thin thing (<= 6 cm): the thumb opposes across it, its tip on the face the fingers are not on (the palm's side, the plank between them; with the palm on the edge, the side the fingers do not lie on)
                     if(thin) return c+10*std::abs(dot(p[3]-b.position,face_axis)*face_sign-(face_half+t0))+10*std::max(0.,-palm_shape_distance(b,p[3]));
@@ -836,7 +847,10 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
             // has no search of its own and the march leaves a buried thumb where it is least buried): the nearest pose clear of the shapes and of the hand.
             if(f==0 && reachable) {
                 const std::array<double,3> now{pose_target.pose[0][0],pose_target.pose[0][1],pose_target.pose[0][2]};
-                const auto clear=[&](const std::array<double,3>& a) {return finger_clearance(hand.finger[0],hand.thickness[0],finger_turns_of(hand.finger[0],a),world,distance,0u,4,-contact_tolerance,0,2,1)>=-contact_tolerance;};
+                // v1063: a holding thumb (fold) is also kept within thumb_search_spread_degrees of its rest (the web stretch), when such a pose is clear
+                const double spread_floor=fold && !stop_extended?thumb_search_open()[0]:-1e9;
+                const auto clear_of_shapes=[&](const std::array<double,3>& a) {return finger_clearance(hand.finger[0],hand.thickness[0],finger_turns_of(hand.finger[0],a),world,distance,0u,4,-contact_tolerance,0,2,1)>=-contact_tolerance;};
+                const auto clear=[&](const std::array<double,3>& a) {return a[0]>=spread_floor-1e-9 && clear_of_shapes(a);};
                 if(!clear(now)) {
                     FingerAngles drawn_fingers{};for(unsigned fk=1;fk<5;++fk) {const auto x=finger_pose_angles(fk,std::max(wants[fk],relaxed_share),pose_target.pose[fk]);for(unsigned q=0;q<3;++q) drawn_fingers[fk][q]=static_cast<float>(x[q]);}
                     if(const auto out=thumb_nearest_clear(ThumbBody(hand,drawn_fingers),now,clear)) {for(unsigned q=0;q<3;++q) pose_target.pose[0][q]=static_cast<float>((*out)[q]);min_target[0]=1.f;touching[0]=true;}

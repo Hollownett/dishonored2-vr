@@ -160,5 +160,29 @@ int main() {
         assert(bottle.radius>.034 && bottle.radius<.036 && bottle.half.x>.08);
         assert(crate.radius==0 && crate.half.x==.2);
     }
+    {   // v1063 natural seat: palm normal -z (the thing below the palm), fingers +x
+        using d2vr::WorldTrackedPose;using d2vr::NativeGrabBounds;namespace rr=d2vr::rig;
+        const Vec3 skin{0,0,0},fw{1,0,0},n{0,0,-1};
+        const auto box_of=[](const WorldTrackedPose& p,Vec3 half) {Vec3 e{};const double hh[3]{half.x,half.y,half.z};
+            for(unsigned i=0;i<3;++i) {e.x+=hh[i]*std::abs(p.basis[i].x);e.y+=hh[i]*std::abs(p.basis[i].y);e.z+=hh[i]*std::abs(p.basis[i].z);}
+            return NativeGrabBounds{p.position-e,p.position+e};};
+        const auto turned=[](double a,Vec3 k,Vec3 v) {return v*std::cos(a)+d2vr::cross(k,v)*std::sin(a)+k*(d2vr::dot(k,v)*(1-std::cos(a)));};
+        // a book (22 x 16 x 4) under the palm, tilted 20 deg about the fingers and 15 deg off square: its cover comes flat on the palm, the skin on it
+        const Vec3 half{.11,.08,.02};WorldTrackedPose book{{.01,.02,-.05},{{{1,0,0},{0,1,0},{0,0,1}}}};
+        for(auto& r:book.basis) r=turned(.35,{1,0,0},turned(.26,{0,0,1},r));
+        const auto seat=rr::natural_seat(book,box_of(book,half),skin,fw,n);assert(seat);
+        assert(std::abs(std::abs(seat->basis[2].z)-1)<1e-6);   // cover flat on the palm (thin axis along the normal)
+        assert(std::abs(seat->position.z-(-.02))<1e-6);         // the face on the skin
+        // a plank 100 x 10 x 3 lying 35 deg off across the palm: turned across, then its wide face flat on the palm
+        const Vec3 ph{.5,.05,.015};WorldTrackedPose plank{{0,.1,-.03},{{{0,1,0},{-1,0,0},{0,0,1}}}};
+        for(auto& r:plank.basis) r=turned(.61,{0,0,1},r);
+        const auto ps=rr::natural_seat(plank,box_of(plank,ph),skin,fw,n);assert(ps);
+        const Vec3 across=d2vr::cross(n,fw);
+        assert(std::abs(std::abs(d2vr::dot(ps->basis[0],across))-1)<1e-6 && std::abs(std::abs(ps->basis[2].z)-1)<1e-6);
+        assert(std::abs(d2vr::dot(ps->position-skin,ps->basis[0]))>.05);   // held near its end: it does not slide to its middle
+        // a plank along the fingers (80 deg off across) is not swung round
+        WorldTrackedPose along{{.2,0,-.03},{{{1,0,0},{0,1,0},{0,0,1}}}};for(auto& r:along.basis) r=turned(.17,{0,0,1},r);
+        const auto as=rr::natural_seat(along,box_of(along,ph),skin,fw,n);assert(as && std::abs(d2vr::dot(as->basis[0],fw))>.98);
+    }
     std::cout<<"finger_sphere_check passed\n";
 }
