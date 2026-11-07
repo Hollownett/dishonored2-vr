@@ -34,5 +34,27 @@ int main() {
         fresh*1000,aged*1000,heavy*1000,corpse*1000);std::fflush(stdout);
     assert(fresh<.01 && aged<.01 && heavy<.01);   // a held prop stays in the hand while running, whatever the sample's age or its weight
     assert(corpse>aged);                          // a corpse limb keeps the heavier Bonelab law
+    // v1086: a 45 deg snap turn with the arm out carries the hand 0.7 m in one step (past the 0.5 m jump rule): a squeezed hold stays and the
+    // prop is back on its target within a few steps; a released grip that jumps still throws nothing.
+    {PhysicalGrab g;GrabTuning tuning;const auto hand0=at(0,0,1.2);
+     g.sample(hand0,0.f,true,1,1000);g.sample(hand0,0.f,true,1,1010);g.sample(hand0,1.f,true,1,1020);
+     auto body=at(.05,0,1.15);assert(g.bind(body,body.position));
+     const double c=std::cos(.785398),s=std::sin(.785398);const double r=.92;   // the hand 0.92 m from the turn pivot
+     WorldTrackedPose jumped=at(r*c-r,r*s,1.2);
+     const bool kept=g.sample(jumped,1.f,true,1,1030);
+     assert(kept && g.held() && g.pressed());
+     Vec3 v{};unsigned steps=0;
+     for(int i=0;i<30;++i) {
+        CorpseMotorInput in;in.body_velocity=v;in.velocity_known=true;in.corpse=false;in.object_kg=1;in.inertia_kgm2=.05;in.dt=1./60;in.tuning=&tuning;
+        const std::uint64_t tick=1030+static_cast<std::uint64_t>((i+1)*1000/60);g.sample(jumped,1.f,true,1,tick);
+        const auto m=g.corpse_motor(body,true,tick+10,tick,in);assert(m && !m->motor.release);
+        if(length(g.target().position-body.position)<.01 && !steps) steps=static_cast<unsigned>(i);
+        v=m->motor.linear;body.position=body.position+v*(1./60);
+     }
+     std::printf("snap turn: hold kept, back in the hand after %u steps\n",steps);std::fflush(stdout);
+     assert(steps>0 && steps<=6);
+     PhysicalGrab q;q.sample(hand0,0.f,true,2,2000);q.sample(hand0,0.f,true,2,2010);q.sample(hand0,1.f,true,2,2020);auto b2=at(.05,0,1.15);assert(q.bind(b2,b2.position));
+     assert(!q.sample(jumped,0.f,true,2,2030));   // an open hand that jumps: the old rule, no throw from the jump
+    }
     std::puts("PASS");
 }
