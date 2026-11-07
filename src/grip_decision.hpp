@@ -72,10 +72,13 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
 // Replaces v613's torso held 0.5 s, which turned a walking torso drag into the game's carry.
 inline constexpr std::uint64_t corpse_dock_hold_ms=250;
 inline constexpr double corpse_dock_lag_m=.6;
+// v1067 (user: "make it easy to put a corpse on a shoulder"): a body held in a shoulder zone for corpse_dock_dwell_ms docks too, the grip still
+// held (no let-go needed), and a body lifted with both hands docks (the other hand's hold at the dock does not end it; a NEW one does).
+inline constexpr std::uint64_t corpse_dock_dwell_ms=200;
 // native_carry (v1019, user 2026-11-05): the game now carries a body (arkPlayerStateCarryCorpse). The placement handed it to the
 // game through shoulder_carry.hpp, so the dock's own hold ends at once (take): the game binds the body to the player's spine and
 // any physical motor write from here would fight it.
-struct ShoulderDockIn {bool corpse_hold{};std::uintptr_t entity{};std::uint64_t held_ms{};double lag_m{1e9};bool in_zone{};float grip{};bool other_holds{};bool native_carry{};};
+struct ShoulderDockIn {bool corpse_hold{};std::uintptr_t entity{};std::uint64_t held_ms{};double lag_m{1e9};bool in_zone{};float grip{};bool other_holds{};bool native_carry{};std::uint64_t now{};};
 class ShoulderDock {
 public:
     struct Out {bool anchored{},docked{},resumed{},take{};};
@@ -85,10 +88,15 @@ public:
         const bool down=in.grip>=(s.down?.35f:.55f);
         if(s.anchored) {
             if(in.native_carry) {s.anchored=false;s.entity=0;o.take=true;}   // the game took the body (the native shoulder now)
-            else if(!in.corpse_hold || in.entity!=s.entity || in.other_holds) s.anchored=false;
+            else if(!in.corpse_hold || in.entity!=s.entity || (in.other_holds && !s.other_at_dock)) s.anchored=false;
             else if(down && !s.down && in.in_zone) {s.anchored=false;s.consumed=true;o.resumed=true;}
-        } else if(s.down && !down && in.corpse_hold && in.entity && in.in_zone && in.held_ms>=corpse_dock_hold_ms &&
-                  std::isfinite(in.lag_m) && in.lag_m<=corpse_dock_lag_m && !in.other_holds) {s.anchored=true;s.entity=in.entity;o.docked=true;}
+        } else {
+            const bool ready=in.corpse_hold && in.entity && in.in_zone && in.held_ms>=corpse_dock_hold_ms && std::isfinite(in.lag_m) && in.lag_m<=corpse_dock_lag_m;
+            if(!(ready && down && in.now)) s.zone_since=0;else if(!s.zone_since) s.zone_since=in.now;
+            const bool dwelt=s.zone_since && in.now-s.zone_since>=corpse_dock_dwell_ms;
+            if(ready && ((s.down && !down) || dwelt)) {s.anchored=true;s.entity=in.entity;s.other_at_dock=in.other_holds;s.zone_since=0;o.docked=true;}
+        }
+        if(!in.other_holds) s.other_at_dock=false;
         if(!down) s.consumed=false;
         s.down=down;o.anchored=s.anchored;return o;
     }
@@ -96,13 +104,13 @@ public:
     bool consumes(unsigned side) const noexcept {return side<2 && side_[side].consumed;}
     void reset(unsigned side) noexcept {if(side<2) side_[side]=Side{};}
 private:
-    struct Side {bool down{},anchored{},consumed{};std::uintptr_t entity{};};
+    struct Side {bool down{},anchored{},consumed{},other_at_dock{};std::uintptr_t entity{};std::uint64_t zone_since{};};
     std::array<Side,2> side_{};
 };
 // The shoulder zones, in tracking space: a sphere of `radius` at head + side*left + up*up + forward*forward on either side (the eye centre and
 // the head's axes; -Z forward, +Y up). Clear of the face (a hand holding something up in front of the eyes is not at a shoulder) and inside the
 // sword holster over the right shoulder (TempleReach scabbard: left -.17, up -.10, forward -.10, r .16), which takes only a squeeze that STARTS there.
-struct ShoulderZone {double left=.18,up=-.18,forward=-.03,radius=.22;};
+struct ShoulderZone {double left=.18,up=-.18,forward=-.03,radius=.24;};   // v1067 .22 -> .24 (still clear of the eyes, .256 away)
 inline bool at_shoulder(const std::array<double,3>& head,const std::array<double,3>& forward,const std::array<double,3>& up,const std::array<double,3>& hand,
                         const ShoulderZone& z={}) noexcept {
     using V=std::array<double,3>;

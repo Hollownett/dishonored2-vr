@@ -184,3 +184,11 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   severed parts and big native holds (> 5 cm radius) are pushed out of the hand visually (native_seat_push); thumb guard
   judges world shapes only, prefers out-of-the-thing over the spread cap, keeps a holding thumb clear of the hand and draws it
   as placed. Lab: severed forearm pen 2.4 mm, head 16 -> 2.9 mm.
+- v1067 (user's v1066 headset test: "so far so good"; held heads/legs/props jitter "calculated out of frame", plates/boxes
+  sometimes behind the hand, corpse to the shoulder must be easy): held things (grab props, Use holds) are placed at their
+  draws like weapons (weapon_draw_place.hpp HeldBind: G = inverse(drawn joint 59) * engine frame, averaged only while the
+  hand is still, placed after 0.7 s settle, falls back to the engine frame while off > 15 cm / 34 deg, relearned when off
+  while still for 0.5 s; match radius 2 cm so a twin prop is never moved; two-handed holds and corpses stay at the game's
+  frame; knob build/no-held-draw-place; status held_draw_placed). natural_seat refuses a face it cannot turn to the palm.
+  ShoulderDock: holding a body in a shoulder zone 0.2 s docks it (no let-go needed) and hands it to the game's carry as
+  before; a body lifted with both hands docks too; zone radius .22 -> .24.

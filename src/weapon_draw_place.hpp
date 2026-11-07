@@ -105,6 +105,56 @@ inline bool valid_grip(const Mat& g) noexcept {
     return det>.98;
 }
 
+// v1067 (user: "a head, a leg or any object in my hand jitters ... use the same synchronization as the weapons"): a held thing (a grabbed
+// prop, a part held with the game's Use) is placed at its draws like a weapon, B = H * G. Its game pose comes from a tick (one interval old
+// against the drawn hand), and no writer note pairs it, so G = inverse(H) * F is AVERAGED, and only while the hand is still (the lag is then ~0).
+// A hold is rigid in the hand, so the average is the hold. A thing the world stops (a wall) leaves the average: it is
+// drawn where the game has it until it agrees again, and a new spot that persists (a regrip, a game seat change) is learned afresh.
+class HeldBind {
+public:
+    static constexpr double settle_s=.7,still_mps=.25,still_rps=1.5,still_tau=.12,off_m=.15,off_rad=.6,relearn_s=.5;
+    // One render: H = the drawn hand (joint 59), F = the thing's engine frame (scaled), t = seconds. Returns true with B when it is placed.
+    bool frame(unsigned hand,std::uintptr_t id,const Mat& H,const Mat& F,double t,Mat& out) {
+        if(hand>1 || !id) return false;
+        S& s=s_[hand];Mat hi{};
+        if(!finite(H) || !finite(F) || !inverse(H,hi)) return false;
+        const Mat meas=mul(hi,F);
+        if(s.id!=id) {s=S{};s.id=id;s.g=meas;s.start=s.last_t=t;s.last_h=H;return false;}
+        const double dt=std::clamp(t-s.last_t,0.,.1);
+        const double speed=dt>0?distance(H,s.last_h)/dt:0,turn=dt>0?angle(H,s.last_h)/dt:0;
+        s.last_t=t;s.last_h=H;
+        const bool still=speed<still_mps && turn<still_rps;
+        if(distance(meas,s.g)>off_m || angle(meas,s.g)>off_rad) {   // the thing is not where the hold says (a wall stops it, or it was moved)
+            if(!still) {s.off_since=0;return false;}                  // a moving hand's physics lag is no new spot
+            if(!s.off_since) s.off_since=t;
+            if(t-s.off_since<relearn_s) return false;
+            s.g=meas;s.start=t;s.off_since=0;return false;            // off while still for 0.5 s: a new hold spot, learned again
+        }
+        s.off_since=0;
+        if(t-s.start<settle_s) blend(s.g,meas,std::min(1.,dt/.05));
+        else if(still) blend(s.g,meas,std::min(1.,dt/still_tau));   // a moving hand teaches nothing (its lag is not the hold)
+        if(t-s.start<settle_s) return false;                          // the seat is still settling (nudge at 0.2 s, ease, fit)
+        out=mul(H,s.g);return finite(out);
+    }
+    void clear(unsigned hand) {if(hand<2) s_[hand]=S{};}
+private:
+    struct S {std::uintptr_t id{};Mat g{};double start{},last_t{},off_since{};Mat last_h{};};
+    std::array<S,2> s_{};
+    // Linear blend, then the 3x3 made orthogonal again with each column keeping its length (the model's scales).
+    static void blend(Mat& g,const Mat& m,double a) {
+        for(std::size_t i=0;i<12;++i) g[i]+=(m[i]-g[i])*a;
+        double c[3][3],n[3];
+        for(int k=0;k<3;++k) {for(int r=0;r<3;++r) c[k][r]=g[static_cast<std::size_t>(r*4+k)];n[k]=std::sqrt(c[k][0]*c[k][0]+c[k][1]*c[k][1]+c[k][2]*c[k][2]);}
+        if(!(n[0]>1e-9 && n[1]>1e-9 && n[2]>1e-9)) return;
+        for(int k=0;k<3;++k) {
+            for(int j=0;j<k;++j) {double d=0;for(int r=0;r<3;++r) d+=c[k][r]*c[j][r];for(int r=0;r<3;++r) c[k][r]-=d*c[j][r];}
+            double l=std::sqrt(c[k][0]*c[k][0]+c[k][1]*c[k][1]+c[k][2]*c[k][2]);if(!(l>1e-9)) return;
+            for(int r=0;r<3;++r) c[k][r]/=l;
+        }
+        for(int k=0;k<3;++k) for(int r=0;r<3;++r) g[static_cast<std::size_t>(r*4+k)]=c[k][r]*n[k];
+    }
+};
+
 // The two frames a held weapon can be composed from. Native and crossed items are bound to the engine's hand ATTACHMENT joint 59;
 // a copy is teleported from the controller GRIP (the authored arm socket moves the attachment relative to the grip, and the copy's
 // offset was measured in the grip frame). G is always in world axes; only the hand frame it is relative to changes.
@@ -334,6 +384,7 @@ struct Result {int side{-1},eye{-1},hint{-1};Stage stage{rejected};};
 
 struct Side {
     bool valid{},have_prev{},bound{};
+    double reach{};   // v1067: >0 = this side's own match radius (a held thing: its draws share F, and a twin prop nearby must not match)
     std::uint32_t prev_frame{};
     Mat model{},delta{},prev{},relative{},bound_frame{},prev_bound{};
     // v1106: the previous DRAWN hand per eye (the same B in a paired render, kept per eye so a separately rendered eye can never take
@@ -352,7 +403,7 @@ public:
     // Render thread, at the eye-0 begin of the render that draws `frame`. raw[s] = the engine's F (15 floats); bound[s] = B = H_image*G
     // or null while no valid G exists (the engine's rows stay). The old publish(frame,raw,delta) form is kept for the labs and treats
     // delta*F as the bound frame.
-    static void publish_bound(std::uint32_t frame,const std::array<const float*,2>& raw,const std::array<const Mat*,2>& bound) noexcept {
+    static void publish_bound(std::uint32_t frame,const std::array<const float*,2>& raw,const std::array<const Mat*,2>& bound,const std::array<double,2>& side_reach={0.,0.}) noexcept {
         Slot& slot=ring_[frame%ring];
         slot.ready.store(0,std::memory_order_release);
         for(unsigned s=0;s<2;++s) {
@@ -361,7 +412,7 @@ public:
             if(!raw[s]) {last_[s]={};continue;}
             model=model_of(raw[s]);
             if(!finite(model) || !inverse(model,inverse_model)) {last_[s]={};continue;}
-            out.valid=true;out.model=model;
+            out.valid=true;out.model=model;out.reach=side_reach[s];
             if(!bound[s] || !finite(*bound[s])) {last_[s]={};continue;}   // no G yet: no placement, no previous chain
             out.bound=true;out.bound_frame=*bound[s];
             out.delta=mul(*bound[s],inverse_model);
@@ -415,6 +466,7 @@ public:
         for(int r=0;r<3;++r) for(int c=0;c<4;++c) {double t=a[static_cast<std::size_t>(r*4+3)]*(c==3?1.0:0.0);for(int k=0;k<3;++k) t+=a[static_cast<std::size_t>(r*4+k)]*m[static_cast<std::size_t>(k*4+c)];o[static_cast<std::size_t>(r*4+c)]=t;}
         return o;
     }
+    static double reach_of(const Side& w) noexcept {const double r=reach.load(std::memory_order_relaxed);return w.reach>0?std::min(w.reach,r):r;}
     static Mat full(const Rows& m) noexcept {Mat o=identity();for(std::size_t i=0;i<12;++i) o[i]=m[i];return o;}
 
     // One draw: cur/prev = its cb2 rows; pass_eye names the eye of the render pass (exact). A bound side is placed in every pass
@@ -442,7 +494,7 @@ public:
                 if(!same_orientation(cur_model[e],w.model,tol)) continue;
                 side_oriented=true;
                 const double d=origin_distance(cur_model[e],w.model);
-                if(d<=reach.load(std::memory_order_relaxed) && (side_distance[s]<0 || d<side_distance[s])) side_distance[s]=d;
+                if(d<=reach_of(w) && (side_distance[s]<0 || d<side_distance[s])) side_distance[s]=d;
             }
         }
         int candidate=-1;
@@ -485,7 +537,7 @@ public:
             }
         }
         const Rows& model=cur_model[eye];
-        if(!(origin_distance(model,w.model)<=reach.load(std::memory_order_relaxed))) {result.stage=far_away;return result;}
+        if(!(origin_distance(model,w.model)<=reach_of(w))) {result.stage=far_away;return result;}
         const Mat m=full(model);
         const Mat vp=views.vp[eye];
         const bool previous=w.have_prev && w.prev_eye_ok[eye] && views.prev_frame[candidate]==w.prev_frame && views.prev_ok[candidate][eye];

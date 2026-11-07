@@ -183,6 +183,13 @@ int main() {
         // a plank along the fingers (80 deg off across) is not swung round
         WorldTrackedPose along{{.2,0,-.03},{{{1,0,0},{0,1,0},{0,0,1}}}};for(auto& r:along.basis) r=turned(.17,{0,0,1},r);
         const auto as=rr::natural_seat(along,box_of(along,ph),skin,fw,n);assert(as && std::abs(d2vr::dot(as->basis[0],fw))>.98);
+        // v1067: a plate or a box at any tilt, touched at its nearest corner region: a seat never leaves the thing's centre behind the palm
+        for(const Vec3 h:{Vec3{.12,.12,.01},Vec3{.15,.1,.08}}) for(int ax=0;ax<2;++ax) for(int deg=0;deg<=90;deg+=5) {
+            WorldTrackedPose p{{0,0,0},{{{1,0,0},{0,1,0},{0,0,1}}}};for(auto& r:p.basis) r=turned(deg*3.14159265358979/180,ax?fw:across,r);
+            const auto b=box_of(p,h);p.position.z=-(b.maximum.z-b.minimum.z)*.5+.002;   // its top just under the skin
+            const auto s=rr::natural_seat(p,box_of(p,h),skin+Vec3{.03,.04,0},fw,n);
+            if(s) assert(d2vr::dot(s->position-skin,n)>.005);
+        }
     }
     std::cout<<"finger_sphere_check passed\n";
 }

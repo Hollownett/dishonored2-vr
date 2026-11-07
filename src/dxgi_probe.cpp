@@ -508,6 +508,7 @@ static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouc
 // G4 grip ease (plan Task 9): the 0.25 s grip pose blend per hand (render thread, finger block), the drawn angles it starts from, and the
 // knob build/legacy-finger-ease (no blend, no hover shape, no eased opening, the reach flips, the touch floor clamped after its filter).
 static std::array<d2vr::rig::GripPoseBlend,2> grip_pose_blend;static std::array<d2vr::rig::FingerAngles,2> finger_drawn_angles{};static std::array<bool,2> finger_drawn_valid{};
+static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static unsigned held_entity_side{}; // v1067: held things placed at their draws (build/no-held-draw-place = off)
 static bool legacy_finger_ease=false,legacy_finger_grab=false,legacy_held_collision=false,surface_grip_enabled=true;static std::array<std::atomic<bool>,2> finger_ease_active{}; // legacy_finger_grab: build/legacy-finger-grab (v638 contact on the held thing's own shapes, no sphere grip)
 static std::array<std::atomic<bool>,2> grip_pose_blend_request{};
 // Seam (Track G Task 14, a living hold): start this hand's 0.25 s grip pose blend (GripPoseBlend::start from the pose its fingers have now) on
@@ -538,6 +539,7 @@ static void start_finger_touch_knobs(const fs::path& root,const fs::path& output
     legacy_finger_curl=fs::exists(root/L"build"/L"legacy-finger-curl");finger_touch_curl=d2vr::rig::FingerTouchCurl{};finger_touch_params={};
     legacy_finger_ease=fs::exists(root/L"build"/L"legacy-finger-ease");finger_touch_params.floor_after_smoothing=legacy_finger_ease;
     legacy_finger_grab=fs::exists(root/L"build"/L"legacy-finger-grab");
+    no_held_draw_place=fs::exists(root/L"build"/L"no-held-draw-place");
     surface_grip_enabled=!fs::exists(root/L"build"/L"no-surface-grip"); // native hands 2b: fingers on the held thing's own surface (off: the v638 ball / v1028 flat grip)
     legacy_held_collision=fs::exists(root/L"build"/L"legacy-held-collision");
     power_native_fingers=fs::exists(root/L"build"/L"power-native-fingers");
@@ -1585,7 +1587,7 @@ static std::string binding_json() {
 }
 static std::string weapon_draw_json() {
     const auto types=weapon_live_types();
-    std::string text=",\"weapon_draw\":{\"published\":["+std::to_string(weapon_draw_published[0].load())+","+std::to_string(weapon_draw_published[1].load())+"],\"skipped\":["+
+    std::string text=",\"held_draw_placed\":["+std::to_string(held_draw_placed[0].load())+","+std::to_string(held_draw_placed[1].load())+"]"+",\"weapon_draw\":{\"published\":["+std::to_string(weapon_draw_published[0].load())+","+std::to_string(weapon_draw_published[1].load())+"],\"skipped\":["+
         std::to_string(weapon_draw_skipped[0].load())+","+std::to_string(weapon_draw_skipped[1].load())+"],\"frames\":["+std::to_string(weapon_wobble[0][0].n)+","+std::to_string(weapon_wobble[1][0].n)+"]"+",\"skip_reasons\":["+skip_reasons();
     text+=",\"source\":["+source_counts();
     text+=",\"no_writer\":["+std::to_string(weapon_draw_no_writer[0].load())+","+std::to_string(weapon_draw_no_writer[1].load())+"]";
@@ -3489,7 +3491,26 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 if(n>0 && n<620) d2vr::ObjectMotion::probe_line(line);
             }
         }
-        d2vr::weapon_draw::Place::publish_bound(engine_frame,raw_ptr,bound_ptr);
+        // v1067: a hand with no weapon placed and a thing in it (a grabbed prop, a part held with Use): the thing is placed at its draws too.
+        std::array<double,2> reach{};
+        if(!no_held_draw_place) {
+            std::array<std::uintptr_t,2> thing{};
+            if(physical_grab_requested) for(unsigned hand=0;hand<2;++hand) if(native_grab.holding(hand)) if(const auto h=native_grab.held(hand); h && h->bone<0) thing[hand]=h->entity;
+            {std::lock_guard<std::mutex> l(hand_state_mutex);const unsigned s=held_entity_side&1u;if(held_entity && !thing[s]) thing[s]=held_entity;}
+            if(thing[0] && thing[0]==thing[1]) thing={};   // ponytail: a two-handed hold stays at the game's frame; bind to one hand if it jitters
+            const double t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            for(unsigned hand=0;hand<2;++hand) {
+                if(raw_ptr[hand] || !thing[hand]) {held_bind.clear(hand);continue;}
+                const unsigned arm_side=(attachment_pose.cross_mask()&3u)==3u?hand^1u:hand;
+                if(image_skin_slots[arm_side].kind.load()!=1) continue;
+                std::uintptr_t model{};
+                if(!read_self(thing[hand]+0xf0,&model,sizeof model) || !model || !read_self(model+0x1860,raw[hand].data(),sizeof raw[hand])) continue;
+                const auto image=full_body.image_world(hand,59,now);if(!image) continue;
+                if(!held_bind.frame(hand,thing[hand],weapon_mat(*image),d2vr::weapon_draw::model_of(raw[hand].data()),t,bound[hand])) continue;
+                raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.02;++held_draw_placed[hand];
+            }
+        }
+        d2vr::weapon_draw::Place::publish_bound(engine_frame,raw_ptr,bound_ptr,reach);
     } catch(...) {}
 }
 static std::array<float,12> skin_row59(void* model) noexcept {   // frame-order trace: joint 59's skin row block as the copy will upload it
@@ -5287,7 +5308,7 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
          held_debug[10]=((*box)[0]+(*box)[4])*.5f;held_debug[11]=((*box)[1]+(*box)[5])*.5f;held_debug[12]=((*box)[2]+(*box)[6])*.5f;}}
     LARGE_INTEGER qpc{},freq{};QueryPerformanceCounter(&qpc);QueryPerformanceFrequency(&freq);
     const double dt=last_qpc.QuadPart?static_cast<double>(qpc.QuadPart-last_qpc.QuadPart)/static_cast<double>(freq.QuadPart):0;
-    std::lock_guard<std::mutex> l(hand_state_mutex);held_entity=*e;
+    std::lock_guard<std::mutex> l(hand_state_mutex);held_entity=*e;held_entity_side=side&1u;
     // The throw velocity is the controller's own motion (C9), not the palm-offset grip's: the offset's rotation lever added ~0.3-0.45 m/s to a wrist flick.
     if(dt>.002 && dt<.1) {const auto v=(raw.position-last)*(1/dt);for(unsigned i=0;i<3;++i) held_hand_velocity[i]=held_hand_velocity[i]*.5+(i==0?v.x:i==1?v.y:v.z)*.5;}
     last=raw.position;last_qpc=qpc;
@@ -7473,7 +7494,7 @@ void prepare_head_view(void* view) noexcept {
                     const double yaw_angle=std::atan2(-fwd.x,-fwd.z);
                     const d2vr::Quaternion yaw{0,std::sin(yaw_angle*.5),0,std::cos(yaw_angle*.5)},unyaw{0,-yaw.y,0,yaw.w};
                     const auto hold=native_grab.corpse_hold(side,grab_now),other=native_grab.corpse_hold(1-side,grab_now);
-                    d2vr::ShoulderDockIn in;in.corpse_hold=hold.has_value();in.grip=squeeze;
+                    d2vr::ShoulderDockIn in;in.corpse_hold=hold.has_value();in.grip=squeeze;in.now=grab_now;
                     if(hold) {in.entity=hold->entity;in.held_ms=hold->held_ms;in.lag_m=d2vr::length(hold->anchor-hand.position);in.other_holds=other && other->entity==hold->entity;}
                     const auto up=d2vr::rotated(d2vr::normalized(centre_pose.orientation),{0,1,0});
                     in.in_zone=shoulder_dock_enabled && d2vr::at_shoulder({head_t.x,head_t.y,head_t.z},{fwd.x,fwd.y,fwd.z},{up.x,up.y,up.z},{hand_t.x,hand_t.y,hand_t.z});

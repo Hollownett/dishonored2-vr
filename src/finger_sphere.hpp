@@ -146,15 +146,18 @@ inline std::optional<WorldTrackedPose> natural_seat(const WorldTrackedPose& pose
     const auto spin=[](Vec3 v,Vec3 k,double a) {return v*std::cos(a)+cross(k,v)*std::sin(a)+k*(dot(k,v)*(1-std::cos(a)));};
     const auto turn=[&](Vec3 from,Vec3 to,double limit) {
         const double a=std::acos(std::clamp(dot(from,to),-1.,1.));const Vec3 k=cross(from,to);
-        if(a<1e-6 || a>limit || length(k)<1e-9) return;
-        const Vec3 u=unit(k);for(auto& v:ax) v=spin(v,u,a);
+        if(a<1e-6) return true;
+        if(a>limit || length(k)<1e-9) return false;
+        const Vec3 u=unit(k);for(auto& v:ax) v=spin(v,u,a);return true;
     };
     unsigned L=0;for(unsigned i=1;i<3;++i) if(h[i]>h[L]) L=i;
     const bool bar=h[L]>=seat_bar_ratio*std::max(h[(L+1)%3],h[(L+2)%3]);
     if(bar) turn(ax[L],dot(ax[L],across)>=0?across:across*-1.,seat_bar_snap);
     unsigned face=bar?(L+1)%3:0;double sign=1,best=-2;
     for(unsigned i=0;i<3;++i) for(const double sg:{1.,-1.}) {if(bar && i==L) continue;const double v=-dot(ax[i]*sg,n);if(v>best) {best=v;face=i;sign=sg;}}
-    turn(ax[face]*sign,n*-1.,seat_face_snap);
+    // v1067 (user: "plates or boxes sometimes right behind my hand"): a face too far from the palm to turn to it is no seat. Putting the grip on
+    // it anyway slid the grasped spot onto that face unturned: a plate taken by its rim then stood half behind the hand. The support seat stays.
+    if(!turn(ax[face]*sign,n*-1.,seat_face_snap)) return {};
     // Narrow along the fingers (at most seat_crease_depth either side: a bar, a book's spine, a bottle): the fingers can close round it, so it lies in the palm
     // crease a knuckle shift toward the finger roots (seat_held's), not at the palm's centre behind them (they curled in front of it and never touched it).
     const double along_fingers=h[0]*std::abs(dot(ax[0],fw))+h[1]*std::abs(dot(ax[1],fw))+h[2]*std::abs(dot(ax[2],fw));
