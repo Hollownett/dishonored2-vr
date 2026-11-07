@@ -1695,7 +1695,7 @@ public:
     // Asked on the fire frame of a gameplay hold: does a Talk offer or the wheel own Y right now (this frame, not the last controls pass)?
     std::atomic<bool (*)()> y_hold_owned_now{nullptr};
     bool y_hold_enabled=true,legacy_hold_y_settings=false;
-    std::atomic<UINT64> y_hold_fires{0},y_hold_blocked_presses{0},y_hold_last_ms{0};
+    std::atomic<UINT64> y_hold_fires{0},y_hold_blocked_presses{0},y_hold_last_ms{0},old_panel_blocked{0};   // old_panel_blocked (v1073): drawn-panel opens closed before drawing
     void avatar_measurements(NativeAvatarMeasurements value) {
         avatar_measurements_=value;
         // Keep the player's body across reloads/avatar/reference changes: refit without a new pose.
@@ -2412,12 +2412,9 @@ public:
             // While the page is open it also gets the rule for what its rows become after a change (a copy of the settings, read by the drain thread).
             NativeOptionsPage::publish(native_settings::rows(settings_),NativeOptionsPage::showing.load()?native_settings::resolver(settings_):NativeOptionsPage::Resolver{});}}
         if(settings_enabled_) {
-            if(settings_requested.exchange(false) && !gameplay) {settings_.open_from_menu();}
-            if(hold.settings && !settings_.open()) {
-                menu_panel_.reset(); // place a legacy gameplay panel afresh; paused settings stay in the native menu
-                if(gameplay) settings_.open_from_gameplay();else settings_.open_from_menu();
-                pulse(0,.4f,.08f);
-            }
+            // v1073 (user: "delete the old VR menu; the user must not see it when holding any buttons; the only way to VR settings is Pause >
+            // VR Settings"): nothing opens the drawn panel any more - not the menu item's fallback request, not a Y hold, not a Y press.
+            settings_requested.store(false);
             if(settings_.gameplay_panel_open() && !panel_drawable) settings_.suspend(); // never consume input while the panel is not drawn
             settings_in_world_=gameplay && settings_.open();
             if(settings_.open()) {
@@ -2443,8 +2440,11 @@ public:
             }
             auto settings_input=controller_input;
             // A paused tap of Y must not bypass the new hold, but Y still closes an open panel and serves calibration pages.
-            if(!legacy_hold_y_settings && !settings_.open()) settings_input.y=false;
+            if(!settings_.open()) settings_input.y=false;   // v1073: Y never opens the drawn panel
             auto changes=settings_.update(settings_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
+            // v1073: the drawn panel may show only the avatar calibration page started from the game's own VR Settings page (its Calibrate row).
+            // Anything else - the old settings page, the automatic recalibration prompt in a menu - is closed before it is ever drawn.
+            if(settings_.open() && !(settings_.calibration_page() && settings_.native_calibration())) {settings_.suspend();changes.opened=false;++old_panel_blocked;}
             if(changes.palm_offset) confirm_palm_offset(changes.palm_offset->side,changes.palm_offset->value);
             // The game's own options page ("VR Settings"): its values and actions take the panel's path (apply, save, calibrate).
             {std::vector<NativeOptionsPage::Kind> page_kinds;

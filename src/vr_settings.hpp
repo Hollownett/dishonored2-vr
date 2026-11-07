@@ -288,7 +288,7 @@ public:
             default:return L"Sharpening: Medium";
         }
     }
-    void suspend() noexcept {open_=false;gameplay_open_=false;close_latch_=latch_started_=false;calibration_page_=measurements_page_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
+    void suspend() noexcept {open_=false;gameplay_open_=false;close_latch_=latch_started_=false;calibration_page_=measurements_page_=false;native_calibration_=false;leave_hand_fit();controls_valid_=false;stick_held_=false;}
     // Opened from the native menu's "VR Settings" item: held buttons from that click are not replayed.
     void open_from_menu() noexcept {open_=true;calibration_page_=measurements_page_=false;leave_hand_fit();selected_=0;controls_valid_=false;stick_held_=false;native_calibration_=false;}
     // Opened in gameplay by holding Y (y_hold.hpp): the same panel on page 0. Y (a new press) or B closes it.
@@ -296,6 +296,7 @@ public:
     bool gameplay_panel_open() const noexcept {return gameplay_open_ && open_;}
     static constexpr double latch_timeout_s=1.5;
     // The game's own options page (vr_settings_native.hpp) sets values directly; the panel shows only calibration then.
+    bool native_calibration() const noexcept {return native_calibration_;}   // v1073: the only page the game may show
     void open_calibration_from_native() noexcept {open_=calibration_page_=true;measurements_page_=false;leave_hand_fit();selected_=11;controls_valid_=false;stick_held_=false;native_calibration_=true;}
     void set_requested(double v) noexcept {requested_=std::clamp(v,.5,2.);}
     void set_antialiasing(bool v) noexcept {aa_=v;}
@@ -397,7 +398,7 @@ public:
                 if(a || (click && pointer && pointer->v*560>=438 && pointer->v*560<=480)) {measurements_page_=false;out.calibrate=true;}
                 return out;
             }
-            if(b) {calibration_page_=false;if(native_calibration_) {open_=native_calibration_=false;}}
+            if(b) {calibration_page_=false;if(native_calibration_) {open_=native_calibration_=false;}}   // (v1073: the game closes any other page itself)
             else if(a && calibration_state_!=AvatarCalibrationState::hold_pose) out.calibrate=true;
             return out;
         }

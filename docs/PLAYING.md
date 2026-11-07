@@ -55,7 +55,7 @@ headset listening validation is still required. See [audio evidence and checks](
 | Right grip over your right shoulder | Draw the sword. Reach over the right shoulder and squeeze: a fist at your side does not draw it. It stays in your hand only while you keep squeezing (see *Weapons in your hands*) |
 | Left grip at your left hip | Draw the pistol or crossbow. It stays in your hand only while you keep squeezing |
 | Y on an offered Talk prompt | Talk to that exact NPC or open the shop; the prompt shows Y. The hand's trigger also talks; the grip no longer commits that Talk offer |
-| Y held for 0.6 s (no Talk offer or wheel) | Open the game pause menu. Release, then hold Y again while paused for VR settings |
+| Y held for 0.6 s (no Talk offer or wheel) | Open the game pause menu. VR settings are its **VR Settings** item |
 | Move your head sideways | Lean physically. The v553 test candidate removes button-driven lean; Y does not modify stick movement or turning |
 | A fast right-hand swing with the sword drawn (3 m/s or more, your own walking and head motion not counted) | Presses the game's own attack. The game decides what it is: on a guard who has not noticed you, seen from behind, it is the silent assassination; on one who has noticed you, an ordinary attack |
 | A straight stab while crouched (starts at 1.5 m/s, at least 20 cm of travel, a straight line along the hand's pointing direction) | The same game attack, so a crouched stab from behind on an unaware guard is the assassination. Standing, only a real swing attacks |
@@ -74,14 +74,12 @@ Every control and gesture is on one page: squeeze the right grip at your right t
 Open the game's pause menu and choose **VR Settings**. Its controls appear in
 the native menu image, beside the game's navigation. Point with the right
 controller and use its trigger to select.
-During play, hold left Y for 0.6 seconds to open the game's pause menu. Release Y,
-then hold it again while paused to open VR settings. A short Y during play still
+During play, hold left Y for 0.6 seconds to open the game's pause menu. A short Y during play still
 talks to an NPC; a Talk offer or the weapon wheel keeps ownership of that press.
-Press Y again or B to close VR settings.
+The pause menu's **VR Settings** item is the only way to the VR settings (v1073: the old drawn
+settings panel is gone; no button or hold opens it, and `legacy-hold-y-settings` is retired).
 The `no-hold-y-menu` knob (the launcher's "Hold Y menu shortcut" switch) turns the
-hold shortcut off. `legacy-hold-y-settings` restores the previous behavior: hold Y
-during play opens a settings panel while the game keeps running, and a short Y
-while paused opens settings. These routing changes still need headset verification.
+hold shortcut off.
 From there you can set:
 - resolution scale
 - anti-aliasing: FSR Native, FSR Quality (renders at 77% and upscales), FSR Balanced (67% and upscales), Game TAA or Off. The displayed generation reflects the active backend. Your saved selection is preserved. Reduced input resolution is verified; headset FPS gains remain unmeasured.
@@ -107,7 +105,7 @@ Anti-aliasing default: FSR 3 Native stays the default. On the sim rig no mode
 (Off, Game TAA, FSR Quality, FSR Balanced) was measurably cheaper than it, and
 Quality and Balanced looked visibly grainier; see "Anti-aliasing modes compared"
 in docs/VR-PERF-LAPTOP.md. A saved `vr-settings.cfg` keeps your own choice. To
-change it, open the VR settings panel in the headset and cycle the anti-aliasing
+change it, open Pause > VR Settings in the headset and change the anti-aliasing
 row (Game TAA, FSR Native, Quality, Balanced, Off); the choice is saved for the
 next session. Game TAA is the one worth trying if FSR Native costs too much in your headset.
 

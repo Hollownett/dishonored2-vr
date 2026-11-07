@@ -152,6 +152,17 @@ int main() {
     expect(guide.controls_guide && !guide.controls_hint && !s.controls_hint(),"opening the guide preserves a disabled saved hint preference");
     VrSettings::Changes into{};ns::merge(into,c);expect(into.resolution && into.turning,"merge keeps reported changes");
     ns::merge(into,guide);expect(into.controls_guide,"merge carries the guide action to the runtime");
+    // v1073: the game shows the drawn panel only for a calibration started from the game's own page (GameXr closes anything else).
+    {
+        VrSettings p;ControllerInput c2{};c2.active=true;
+        p.calibration_runtime(AvatarFitRuntimeStatus::recalibration_required);
+        p.update(c2,false,true);p.update(c2,false,true);   // a menu frame: the panel's own recalibration prompt
+        expect(!p.open() || !p.native_calibration(),"the automatic recalibration prompt is never the game's Calibrate page (GameXr closes it)");
+        p.suspend();ns::action(p,ns::calibrate);
+        expect(p.open() && p.calibration_page() && p.native_calibration(),"the Calibrate row opens the one page the game may show");
+        p.suspend();
+        expect(!p.native_calibration(),"a suspended calibration forgets it was native (a later prompt cannot pass as one)");
+    }
     if(!failures) std::printf("PASS: native VR options rows mirror the settings, apply only valid changes, actions and calibration return\n");
     return failures?1:0;
 }
