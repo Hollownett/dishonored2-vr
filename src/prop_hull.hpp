@@ -140,6 +140,7 @@ inline std::optional<ConvexHull> build_hull(std::vector<Vec3> v,double radius) {
 // across the whole's long axis at own x (the slab there, in the whole's frame). `mesh`: from the render mesh (else the Havok hull alone).
 struct PropShape {
     ConvexHull whole;std::vector<ConvexHull> pieces;std::vector<std::array<double,6>> slabs;bool mesh{}; // slabs: x0,x1,y0,y1,z0,z1 in the whole's frame
+    Vec3 box_centre{}; // the centre of its box in the BODY's axes (the model's: a Use hold's seat places that box, dxgi_probe.cpp)
     // At own x of the whole: the slab there - its centre line (whole frame) and its piece's own half width and half thickness (a curved spoon
     // handle's slab spans 2 cm in the whole frame, but the handle is 3 mm thick).
     std::optional<HullSection> section(double x) const {
@@ -154,6 +155,8 @@ inline constexpr unsigned prop_max_pieces=6;inline constexpr double prop_slab_le
 inline std::optional<PropShape> build_prop_shape(const std::vector<Vec3>& v,double radius,bool mesh) {
     auto whole=build_hull(v,radius);if(!whole) return {};
     PropShape s{};s.whole=*whole;s.mesh=mesh;
+    {Vec3 lo=v.front(),hi=v.front();for(const auto& p:v) {lo={std::min(lo.x,p.x),std::min(lo.y,p.y),std::min(lo.z,p.z)};hi={std::max(hi.x,p.x),std::max(hi.y,p.y),std::max(hi.z,p.z)};}
+     s.box_centre=(lo+hi)*.5;}
     const double L=whole->half.x-radius;
     const unsigned k=whole->solid && whole->half.x>=1.5*whole->half.y?std::clamp(static_cast<unsigned>(std::ceil(2*L/prop_slab_length)),2u,prop_max_pieces):1u;
     if(k>1) for(unsigned i=0;i<k;++i) {

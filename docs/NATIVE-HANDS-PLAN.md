@@ -220,3 +220,9 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   Not covered: things held with the game's Use (bottles, glasses, severed limbs) keep the cylinder/profile path; compound
   bodies (the bottle) keep the box. Status: prop_hulls, prop_hull_meshes, pinch_seats; new hulls are appended to
   artifacts/prop-hulls.jsonl for lab replay.
+- v1081 (user's v1080 headset run: "props still use the old grip"; the live dump showed 35 of 52 nearby props found their
+  mesh, but the things the user picks up are held with the game's Use, which v1080 did not touch): a Use-held thing's own
+  body (NativeHeldObject::exclusion_body record) finds its render mesh by its hull; the mesh pieces lie where the fitted
+  cylinder is seated (seat_held's axes, the model box centre at its middle: where the placement draws it) and the fingers
+  meet them; the seat-out pushes a real shape out of the hand (the drawn thing moves the same). Two-hull bottles and severed
+  limbs keep the fitted cylinder. Status: finger_real_holds.
