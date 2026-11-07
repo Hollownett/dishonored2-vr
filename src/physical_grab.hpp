@@ -123,6 +123,11 @@ public:
         const auto displacement=hand.position-previous_.position;
         // Check discontinuities even at duplicate or slow accepted timestamps,
         // before a released grip can convert old movement into a throw.
+        // v1086 (user: "a held screwdriver or tray falls out of my hand on a snap turn although I hold the grip"): a snap turn carries the hand
+        // round the player's pivot in one step (45 deg: 0.77 x its distance from the pivot), past this jump rule when the arm is out or the player
+        // stands off his play-space centre. A HELD grip still squeezed continues from the new hand: the press and the hold stay, the jump is not
+        // hand motion (no throw velocity from it). A real teleport (a blink) still ends the hold through the motor's 1.5 m lag rule.
+        if(!(length(displacement)<=.5) && held_ && pressed_ && grip>=.35f) {velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;valid_sample_=true;return true;}
         if(!(length(displacement)<=.5)) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;return false;}
         // Samples inside one clock quantum leave velocity (and its baseline) alone; their motion enters the next spaced sample.
         if(tick-velocity_tick_>=grab_velocity_min_ms) {
