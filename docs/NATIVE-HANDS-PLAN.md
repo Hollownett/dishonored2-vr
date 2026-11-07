@@ -298,3 +298,14 @@ Open: a book face-on on the palm is a resting hand (fingers flat), not a pinch; 
   close on the real pieces there (dxgi_probe.cpp UseSeat; status use_real_seats). Grip map power span up to 9 cm thick (a bottle taken by
   its body stays held there; a 14 cm jug by its neck). Lab 210/265 fingers on the render mesh (bottles 5/5). Severed limbs (skinned, no
   render-mesh entry) still use the fitted cylinder.
+- v1084 (user after v1083: "use the same path for all physical props and corpses as was used for bottles and glasses ... I grab it, it
+  sticks to my hand ... the procedural animations are fine, but this floating object mechanic is not the VR holding style"): bottles and
+  glasses are put on their target every step by the game's HoldObject; physical props and corpse limbs went through the weighted hold
+  (PhysicalGrab::corpse_motor: gain 18/s and 12/s through a 90-300 N / 30 Nm force cap, at most 5 rad/s), so they trailed and swung.
+  Now they stick: closure gain 40/s (2/3 of the gap a 60 Hz step, stable to 50 ms steps), 20 m/s / 30 rad/s, no force cap; the grasp slide,
+  slip, lag release, stale-frame recovery and the runaway rule stay; the walk slowdown keeps the weight. Knob build/legacy-weighted-hold.
+  Lab (real PhysicalGrab::corpse_motor, prop tuning): a quick wrist turn (12 rad/s for 0.4 s) leaves the held body 155 deg behind the hand
+  weighted, 17 deg stick (one step); running at 5 m/s with a swinging hand 36 -> 14 mm max. tests/corpse_hold_check.cpp: the weighted
+  suite runs with the knob, new stick_hold_follows_the_hand. Its tow-saturation case (line 497) fails on v1083 too (not this change).
+  Severed limbs already use the bottles' path (the game's Use); their floating is the placement (coordinator's side). Crash note: the
+  user's v1083 run ended with an access violation in vrclient_x64.dll on quit (mod static destructor -> OpenXR/OpenVR teardown).

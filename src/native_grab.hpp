@@ -276,6 +276,7 @@ private:
     // build/no-ragdoll-posts, read at install for the wake path (Task 11).
     bool corpse_enabled_=true,no_posts_{},prop_grasp_point_=true,sphere_grip_=true,natural_seat_=true;std::uint64_t natural_seats_{},pinch_seats_{},draw_binds_{};
     bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
+    bool stick_hold_=true; // v1084: a held prop or corpse limb sticks to the hand like a bottle (build/legacy-weighted-hold: the force-capped hold)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
     bool sphere_whole_object_{};
     bool grip_slab_{true};   // !build/no-grip-slab (read at install): a wide thin prop's grip is its face under the fingers, not a ball
@@ -813,7 +814,7 @@ private:
         }
         const double kg=mass.kg+hanging;lane.mass=kg;
         CorpseMotorInput in;in.body_velocity=motion.velocity;in.body_spin=motion.spin;in.velocity_known=motion.status==MotionStatus::ok;in.corpse=corpse;
-        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;
+        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;in.stick=stick_hold_;   // v1084: props and corpse limbs stick (PhysicalGrab::corpse_motor)
         const auto& other=lanes_[1-side].held;in.share=other && other->entity==body.entity?.5:1.; // two hands on one body: each takes half the mass
         if(!in.velocity_known) ++velocity_unknown_;
         {   // Two-handed prop (phase 2): the earlier hand drives; the later one writes nothing and turns the main hand's goal toward itself.
@@ -1585,6 +1586,7 @@ public:
          sphere_whole_object_=std::filesystem::exists(root/L"build"/L"legacy-sphere-grip-whole-object",ec);
          grip_slab_=!std::filesystem::exists(root/L"build"/L"no-grip-slab",ec);
          for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
+         stick_hold_=!std::filesystem::exists(root/L"build"/L"legacy-weighted-hold",ec);
          configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";

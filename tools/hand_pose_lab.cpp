@@ -166,6 +166,47 @@ std::string running_report(const WorldTrackedPose& hold) {
         char b[420];std::snprintf(b,sizeof b,"RUNNING (%s, held still 1 s, then 5 m/s with a swinging hand for 3 s): drawn thing off hand * hold: v1073 (HeldBind on the physics body) max %.0f mm, mean %.0f mm, max while running %.0f mm, %u%% of frames at the lagging body; v1074 exact + v1082: 0 mm (drawn at hand * hold). Finger shapes off the drawn thing: v1073 %.0f mm (read from the body 0.6 s in), v1082 0 mm (read at the hold).",
             walk_grab>0?"taken while walking at 2 m/s":"taken standing",old_max*1000,old_sum/std::max(1u,frames)*1000,run_max*1000,frames?engine*100/frames:0,finger_old*1000);
         out+=(out.empty()?"":"\n")+std::string(b);
+        // v1084 (user: "the same path as bottles and glasses: I grab it, it sticks to my hand"): the held BODY itself, under the motor the game
+        // runs for a prop (PhysicalGrab::corpse_motor through NativeGrab::capped_tick, the shipped prop tuning), weighted (v1083: force-capped)
+        // against stick (v1084): its distance from hand * hold while running (from 1.5 s), for a 2 kg and an 8 kg prop.
+        const auto physics=[&](bool stick,double kg,double& mx,double& mean) {
+            PhysicalGrab g2;g2.sample(h0,0.f,true,1,1);g2.sample(h0,1.f,true,1,12);WorldTrackedPose bd=compose(h0,hold);Vec3 lv{},av{};
+            mx=mean=0;unsigned n=0;if(!g2.bind(bd,h0.position,.3)) return;
+            const GrabTuning tuning=GrabTuning{}.prop_view();
+            for(double tp=0;tp<4;tp+=1./60) {
+                const auto ms=static_cast<std::uint64_t>(tp*1000)+20;g2.sample(hand_at(tp),1.f,true,1,ms);
+                CorpseMotorInput in;in.body_velocity=lv;in.body_spin=av;in.velocity_known=true;in.corpse=false;in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,.1);
+                in.dt=1./60;in.tuning=&tuning;in.stick=stick;
+                if(const auto m=g2.corpse_motor(bd,true,ms,ms,in); m && m->write && !m->motor.release) {lv=m->motor.linear;av=m->motor.angular;}
+                bd.position=bd.position+lv*(1./60);const double a=length(av)/60;
+                if(a>1e-12) {const Vec3 k=av*(1/length(av));for(auto& e:bd.basis) e=e*std::cos(a)+cross(k,e)*std::sin(a)+k*(dot(k,e)*(1-std::cos(a)));}
+                if(tp>=1.5) {const double off=length(bd.position-compose(hand_at(tp+1./60),hold).position);mx=std::max(mx,off);mean+=off;++n;}
+            }
+            mean/=std::max(1u,n);
+        };
+        // a quick wrist turn (12 rad/s about the forearm for 0.4 s, then back), standing: the largest turn of the held body away from hand * hold
+        const auto flick=[&](bool stick,double kg) {
+            const auto wrist=[&](double t) {WorldTrackedPose h=h0;const double a=t<1?0.:t<1.4?12*(t-1):t<1.8?4.8-12*(t-1.4):0.;
+                h.basis={h0.basis[0],h0.basis[1]*std::cos(a)+h0.basis[2]*std::sin(a),h0.basis[2]*std::cos(a)-h0.basis[1]*std::sin(a)};return h;};
+            PhysicalGrab g2;g2.sample(h0,0.f,true,1,1);g2.sample(h0,1.f,true,1,12);WorldTrackedPose bd=compose(h0,hold);Vec3 lv{},av{};double worst=0;
+            if(!g2.bind(bd,h0.position,.3)) return 0.;const GrabTuning tuning=GrabTuning{}.prop_view();
+            for(double tp=0;tp<2.2;tp+=1./60) {
+                const auto ms=static_cast<std::uint64_t>(tp*1000)+20;g2.sample(wrist(tp),1.f,true,1,ms);
+                CorpseMotorInput in;in.body_velocity=lv;in.body_spin=av;in.velocity_known=true;in.corpse=false;in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,.1);in.dt=1./60;in.tuning=&tuning;in.stick=stick;
+                if(const auto m=g2.corpse_motor(bd,true,ms,ms,in); m && m->write && !m->motor.release) {lv=m->motor.linear;av=m->motor.angular;}
+                bd.position=bd.position+lv*(1./60);const double a=length(av)/60;
+                if(a>1e-12) {const Vec3 k=av*(1/length(av));for(auto& e:bd.basis) e=e*std::cos(a)+cross(k,e)*std::sin(a)+k*(dot(k,e)*(1-std::cos(a)));}
+                const auto want=compose(wrist(tp+1./60),hold);worst=std::max(worst,std::acos(std::clamp(dot(unit(bd.basis[1]),unit(want.basis[1])),-1.,1.)));
+            }
+            return worst*kDeg;};
+        if(walk_grab==0) {
+            char f[200];std::snprintf(f,sizeof f,"WRIST TURN (12 rad/s for 0.4 s): the held body's largest turn away from hand * hold: weighted (v1083) %.0f deg, stick (v1084) %.0f deg (2 kg).",flick(false,2),flick(true,2));
+            out+="\n"+std::string(f);
+            double w2x,w2m,w8x,w8m,s2x,s2m,s8x,s8m;physics(false,2,w2x,w2m);physics(false,8,w8x,w8m);physics(true,2,s2x,s2m);physics(true,8,s8x,s8m);
+            char p[360];std::snprintf(p,sizeof p,"PHYSICS while running (the held body off hand * hold, 5 m/s, swinging hand): weighted hold (v1083, force cap) 2 kg max %.0f mean %.0f mm, 8 kg max %.0f mean %.0f mm; stick (v1084, as the game holds a bottle) 2 kg max %.0f mean %.0f mm, 8 kg max %.0f mean %.0f mm.",
+                w2x*1000,w2m*1000,w8x*1000,w8m*1000,s2x*1000,s2m*1000,s8x*1000,s8m*1000);
+            out+="\n"+std::string(p);
+        }
     }
     return out;
 }

@@ -111,7 +111,9 @@ void fixture(unsigned char state_a=0x08,unsigned char state_b=0x08,bool with_pro
 }
 namespace d2vr {
 struct NativeGrabCheck {
-    static void setup(NativeGrab& grab) {grab.active_=true;grab.base_=base;grab.read_=read;grab.logic_=logic;grab.original_=original;grab.velocity_=velocity;}
+    // the suite below was written for the weighted (force-capped) hold: build/legacy-weighted-hold; v1084's sticking hold has its own case
+    static void setup(NativeGrab& grab) {grab.active_=true;grab.base_=base;grab.read_=read;grab.logic_=logic;grab.original_=original;grab.velocity_=velocity;grab.stick_hold_=false;}
+    static void stick(NativeGrab& grab,bool on) {grab.stick_hold_=on;}
     static void consume(NativeGrab& grab,unsigned side,UINT64 now,std::uintptr_t w=world) {std::lock_guard<std::mutex> lock(grab.mutex_);grab.update_lane(side,w,now);grab.publish_snapshot_locked();}
     static void collar(NativeGrab& grab,bool on) {grab.collar_grab_=on;}
     static bool corpse(NativeGrab& grab,unsigned side) {std::lock_guard<std::mutex> lock(grab.mutex_);return grab.lanes_[side].corpse;}
@@ -421,6 +423,26 @@ void two_hands_two_limbs_independent() {
         combined+=dv;sum+=cap;++limb_writes;
     }
     CHECK(limb_writes==2 && combined<=sum*1.01);
+}
+// v1084 (user: "I grab it, it sticks to my hand", the way the game holds a bottle): with the sticking hold the force cap never binds - a 12 kg prop
+// and a weak hand's limb get the full closure toward the hand (gain 40/s plus the hand's own motion), so they are back on the hand within a step.
+void stick_hold_follows_the_hand() {
+    fixture(0x08,0x08,true,.325f);Rig heavy;GrabTuning feeble;feeble.prop_strength_scale=.1;NativeGrabCheck::tune(heavy.grab,feeble);NativeGrabCheck::stick(heavy.grab,true);
+    REQUIRE(heavy.grasp(0,{prop_x,0,0}));
+    const auto before=writes.size();
+    heavy.step(0,{prop_x+.4,0,0},.9f,100);
+    REQUIRE(writes.size()==before+1);
+    const double cap=expected_cap(12.,.1,feeble.prop_view());   // a feeble hand: the weighted hold would allow about 1 m/s here
+    std::printf("stick prop write %.3f m/s, weighted cap %.3f\n",std::fabs(writes.back().linear[0]),cap);
+    CHECK(std::fabs(writes.back().linear[0])>cap*3);   // the stick hold is not capped
+    fixture();Rig r;GrabTuning weak;weak.strength_scale=.5;NativeGrabCheck::tune(r.grab,weak);NativeGrabCheck::stick(r.grab,true);
+    const Vec3 left{2,0,0};
+    for(int i=0;i<18;++i) {r.step(0,left,0,20);r.grab.focus_point(0,r.t);}
+    r.step(0,left,.9f);REQUIRE(r.grab.holding(0) && NativeGrabCheck::corpse(r.grab,0));
+    const auto limb_before=writes.size();
+    r.step(0,left+Vec3{.3,0,0},.9f);
+    double dv=0;for(std::size_t i=limb_before;i<writes.size();++i) if(writes[i].handle==handle_of(a_first,10)) dv=std::max(dv,static_cast<double>(std::hypot(writes[i].linear[0],std::hypot(writes[i].linear[1],writes[i].linear[2]))));
+    CHECK(dv>expected_cap(ragdoll_class_kg[10],.1,weak,1.)*1.5);   // well past what the weak hand's cap allowed
 }
 void prop_hold_capped_old_release() {
     // A 2 kg prop and a slow hand: the cap does not bind, so the write is the old uncapped motor's, bit for bit.
@@ -798,6 +820,7 @@ int main() {
     two_hands_two_limbs_independent();
     torso_reach_catches();forearm_preferred_over_torso_at_equal_distance();head_is_candidate_with_known_radius();collar_needs_squeeze_rule();
     prop_hold_capped_old_release();
+    stick_hold_follows_the_hand();
     tow_follows_and_limb_saturation_gates_it();
     mass_hangs_on_a_lifted_limb();
     contact_push_blocked_during_lockout_and_latch();

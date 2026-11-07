@@ -58,6 +58,7 @@ struct GrabMotor {Vec3 linear{},angular{};bool release{};};
 // Input for PhysicalGrab::corpse_motor. corpse=false is a prop: the force cap only, with motor()'s 1.5 m release and throw.
 struct CorpseMotorInput {Vec3 body_velocity{},body_spin{};bool velocity_known{},corpse{true};
     bool state_changed{};   // caller saw the entity change state this tick; wins over an open fist (the release reason is state_changed)
+    bool stick{};           // v1084: the held thing is put on the hold every step (no force cap; corpse_motor below)
     double object_kg{},inertia_kgm2{},share{1.},dt{};const GrabTuning* tuning{};};
 // What Task 10 needs per write: the command, the cap fraction (share of the commanded velocity change removed), the capped flag,
 // the implied force, and the release reason (none while held).
@@ -96,6 +97,8 @@ public:
     // Corpse slide and slip (fix round 1): anchor_slide_s to bring the grasp point to the palm; a lag over lag_release_m for lag_release_s re-seats the goal toward
     // the body at slip_mps while the hand is within slip_hand_m of the grasped bone (plus the hold's offset on it, H21); only a lag over lag_hard_release_m (or a hand beyond slip_hand_m) lets go.
     static constexpr double anchor_slide_s=.25,slip_mps=.15,slip_hand_m=.45,lag_hard_release_m=.9;
+    // v1084 stick (corpse_motor): the closure gain (1/s) and the velocity limits of a hold that puts the thing on the hand every step
+    static constexpr double stick_gain=40,stick_mps=20,stick_rps=30;
     void set_legacy_lag_release(bool on) noexcept {legacy_lag_=on;}   // build/legacy-corpse-lag-release: no slide, the hard 0.5 m / 0.25 s drop
     bool pressed() const {return pressed_;}
     // A squeeze the game owned at its press, handed to the physics hand mid-press (a yanked or woken body under it): the
@@ -292,7 +295,13 @@ public:
         // An active ramp is never re-armed by a further stale frame (it keeps ramping, so a run of slow frames still ends it); only an idle one arms.
         if(recovery_s_>0) recovery_s_+=in.dt;
         else if(in.dt>tuning.stale_dt_s) recovery_s_=1e-9;
-        auto closure=error*(18*catch_up);auto spin_closure=spin*12;
+        // v1084 stick (user, v1083 headset: "use the same path for all physical props and corpses as for bottles and glasses ... I grab it, it
+        // sticks to my hand"): the game's HoldObject puts a bottle on its target every step; the weighted hold (18/s through a 90-300 N force cap)
+        // made a prop or a corpse's limb trail and float behind the hand. A sticking hold closes the gap in about one physics step (stick_gain:
+        // 2/3 of it a 60 Hz step, stable up to 50 ms steps) with no force cap; the grasp slide, the slip, the lag release, the stale-frame recovery
+        // and the runaway rule stay. build/legacy-weighted-hold restores the weighted hold.
+        const double k_lin=in.stick?stick_gain:18,k_ang=in.stick?stick_gain:12;
+        auto closure=error*(k_lin*catch_up);auto spin_closure=spin*k_ang;
         if(recovery_s_>0) {
             const double cap=tuning.catch_up_mps+tuning.catch_up_ramp_mps2*recovery_s_,wcap=cap*.5;   // angular: half the linear cap (5 rad/s vs 10 m/s)
             const double c=length(closure),w=length(spin_closure);
@@ -301,10 +310,11 @@ public:
             if(cap>=10 || (c<=cap && w<=wcap && lag<.05 && length(spin)<.1)) recovery_s_=0;
             else {if(c>cap) closure=closure*(cap/c);if(w>wcap) spin_closure=spin_closure*(wcap/w);}
         }
-        const auto want_v=grab_limit(closure+feed,10),want_w=grab_limit(spin_closure,5);
+        const auto want_v=grab_limit(closure+feed,in.stick?stick_mps:10),want_w=grab_limit(spin_closure,in.stick?stick_rps:5);
         // Unknown body velocity: step from rest (the caller counts the fallback).
         const Vec3 v0=in.velocity_known?in.body_velocity:Vec3{},w0=in.velocity_known?in.body_spin:Vec3{};
-        const auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);
+        auto step=cap_velocity_step(v0,w0,want_v,want_w,previous_.basis[0],in.object_kg,in.inertia_kgm2,dt,tuning,in.share);
+        if(in.stick) {step.linear=want_v;step.angular=want_w;step.linear_capped=step.angular_capped=false;}   // no force cap: it is in the hand
         if(!finite(step.linear) || !finite(step.angular)) return finish(ReleaseReason::fault,false,false,lag);
         const auto asked=length(want_v-v0)>1e-12?length(want_v-v0):length(want_w-w0),
             given=length(want_v-v0)>1e-12?length(step.linear-v0):length(step.angular-w0);
