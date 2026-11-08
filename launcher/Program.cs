@@ -116,6 +116,7 @@ sealed class MainForm : Form
         Text = "Dishonored 2 VR Launcher"; BackColor = Ui.Ink; ForeColor = Ui.Text;
         AutoScaleMode = AutoScaleMode.None;  // layout and fonts scale by DeviceDpi in DoLayout / Ui.Font
         DoubleBuffered = true; StartPosition = FormStartPosition.Manual;
+        try { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch (Exception) { }  // the exe icon (launcher.ico) in the title bar and taskbar
         LoadArt();
 
         for (int i = 0; i < 4; i++) { int idx = i; nav[i].Click += (_, _) => ShowPage(idx); Controls.Add(nav[i]); }
@@ -216,6 +217,7 @@ sealed class MainForm : Form
                 _ = Task.Run(() => { try { if (PropShapes.EnsureCurrent(propGame, PropShapes.DefaultPath) is string line) BeginInvoke(() => Append(log, line, Ui.Text)); } catch (Exception ex) { BeginInvoke(() => Append(log, "Prop shapes not built: " + ex.Message, Ui.Gold)); } });
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
+            featList.Prewarm();
             if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();  // review runs must not write a knob into a real mod home
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are
             // rendered alone when only they are missing. Review screenshots wait for it.
@@ -271,6 +273,8 @@ sealed class MainForm : Form
     {
         var old = Ui.Art;
         Ui.Art = noArt ? new GameArt() : new GameArt(env.P("artifacts", "game-art"));
+        DropBackdrops();  // they were drawn from the old art
+        ApplyArtIcon();
         old.Dispose();
         importArt.Visible = true;
         importArt.Text = Ui.Art.Present ? "Re-import game art" : "Import game art";
@@ -479,7 +483,71 @@ sealed class MainForm : Form
     }
 
     /// <summary>Renders the static window background for the current page: hero art, ink veil, paper grain, vignette, logo.</summary>
+    // The backdrop depends only on the page's hero art, the window size, DPI and the content edge; rendering it costs
+    // 110-140 ms (high-quality scaling + full-window texture), so page switches reuse a cached copy.
+    readonly Dictionary<(int hero, int w, int h, int dpi, int cr), Bitmap> backdrops = new();
+
+    /// <summary>Drops the cached backdrops (new art, or too many sizes); the one on screen stays alive until replaced.</summary>
+    void DropBackdrops()
+    {
+        foreach (var b in backdrops.Values) if (b != Ui.Backdrop) b.Dispose();
+        backdrops.Clear();
+    }
+
+    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
+    IntPtr artIcon;
+
+    /// <summary>Window and taskbar icon: a round badge cut from the split mask/face key art imported from the player's own install
+    /// (the exe carries only an original fallback icon, it never ships game art). No key art = the exe icon stays.</summary>
+    void ApplyArtIcon()
+    {
+        if (Ui.Art["key_art"] is not Bitmap art) return;
+        try
+        {
+            const int N = 256, rim = 13, face = 17;
+            using var bmp = new Bitmap(N, N, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                Ui.Quality(g);
+                using (var ring = new LinearGradientBrush(new Rectangle(0, 0, N, N), Color.FromArgb(200, 204, 208), Color.FromArgb(46, 50, 54), 90f))
+                    g.FillEllipse(ring, 2, 2, N - 4, N - 4);
+                using (var inner = new SolidBrush(Color.FromArgb(20, 22, 24))) g.FillEllipse(inner, rim, rim, N - 2 * rim, N - 2 * rim);
+                using (var clip = new GraphicsPath())
+                {
+                    clip.AddEllipse(face, face, N - 2 * face, N - 2 * face); g.SetClip(clip);
+                    float k = art.Width / 1920f;  // the split sits at x 960; mask and face span y ~210-690 of the 1920x1080 loading screen
+                    var src = new RectangleF(720 * k, 210 * k, 480 * k, 480 * k);
+                    const float b = 1.35f;  // the art is very dark at icon size
+                    using var ia = new ImageAttributes();
+                    ia.SetColorMatrix(new ColorMatrix(new[] { new[] { b, 0f, 0, 0, 0 }, new[] { 0f, b, 0, 0, 0 }, new[] { 0f, 0, b, 0, 0 }, new[] { 0f, 0, 0, 1, 0 }, new[] { 0f, 0, 0, 0, 1 } }));
+                    g.DrawImage(art, new Rectangle(face, face, N - 2 * face, N - 2 * face), src.X, src.Y, src.Width, src.Height, GraphicsUnit.Pixel, ia);
+                    g.ResetClip();
+                }
+                using var teal = new Pen(Color.FromArgb(110, 200, 210), 2f);
+                g.DrawEllipse(teal, face - 2, face - 2, N - 2 * face + 4, N - 2 * face + 4);
+            }
+            var h = bmp.GetHicon();
+            Icon = Icon.FromHandle(h);
+            if (artIcon != IntPtr.Zero) DestroyIcon(artIcon);
+            artIcon = h;
+        }
+        catch (Exception) { }  // a bad art file leaves the exe icon
+    }
+
     void RebuildBackdrop()
+    {
+        var key = (Math.Min(page, 2), ClientSize.Width, ClientSize.Height, DeviceDpi, pages[page].Right);
+        if (!backdrops.TryGetValue(key, out var bmp))
+        {
+            if (backdrops.Count >= 6) DropBackdrops();  // a resize drag makes a new size per step
+            bmp = RenderBackdrop();
+            backdrops[key] = bmp;
+        }
+        var old = Ui.Backdrop; Ui.Backdrop = bmp; Ui.BackdropOwner = this;
+        if (old != null && old != bmp && !backdrops.ContainsValue(old)) old.Dispose();
+    }
+
+    Bitmap RenderBackdrop()
     {
         int W = ClientSize.Width, H = ClientSize.Height;
         var bmp = new Bitmap(W, H, PixelFormat.Format32bppPArgb);
@@ -527,7 +595,7 @@ sealed class MainForm : Form
             Ui.Image(g, art["menu_vignette"], new RectangleF(0, 0, W, H));
             Ui.Image(g, art["logo"], LogoRect());
         }
-        var old = Ui.Backdrop; Ui.Backdrop = bmp; Ui.BackdropOwner = this; old?.Dispose();
+        return bmp;
     }
 
     protected override void OnPaintBackground(PaintEventArgs e) => Ui.PaintBackdrop(this, e.Graphics);

@@ -411,29 +411,38 @@ sealed class CheckList : ArtControl
     readonly List<ArtCheck> rows = new();
     int scroll;
     public CheckList() { SetStyle(ControlStyles.Selectable, false); TabStop = false; AccessibleRole = AccessibleRole.Grouping; AccessibleName = "Features"; }
+    // WS_EX_COMPOSITED: the rows (one child window each) are painted together off screen, not one after another while scrolling.
+    protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x02000000; return cp; } }
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
     public IReadOnlyList<ArtCheck> Rows => rows;
     public void Add(ArtCheck c)
     {
         rows.Add(c); Controls.Add(c);
         c.GotFocus += (_, _) => EnsureVisible(c);
-        c.MouseWheel += (_, e) => Scroll(-e.Delta);
+        c.MouseWheel += (_, e) => Wheel(e.Delta);
     }
     int Total => rows.Count == 0 ? 0 : rows.Sum(r => r.RowHeight);
     public void Relayout()
     {
         scroll = Math.Clamp(scroll, 0, Math.Max(0, Total - Height));
         int y = -scroll;
+        // one repaint for the whole move (WM_SETREDRAW), not one per row
+        if (IsHandleCreated) SendMessage(Handle, 0x000B, IntPtr.Zero, IntPtr.Zero);
         foreach (var r in rows) { r.Bounds = new Rectangle(0, y, Math.Max(10, Width - S(10)), r.RowHeight); y += r.RowHeight; }
+        if (IsHandleCreated) SendMessage(Handle, 0x000B, (IntPtr)1, IntPtr.Zero);
         Invalidate(true);
     }
-    void Scroll(int delta) { scroll = Math.Clamp(scroll + delta / 2, 0, Math.Max(0, Total - Height)); Relayout(); }
+    /// <summary>One wheel notch scrolls three rows (the Windows default of three lines).</summary>
+    void Wheel(int delta) { int row = rows.Count > 0 ? rows[0].RowHeight : S(54); scroll = Math.Clamp(scroll - delta * 3 * row / 120, 0, Math.Max(0, Total - Height)); Relayout(); }
     void EnsureVisible(ArtCheck c)
     {
         int top = c.Top + scroll;  // top in content coordinates
         if (top < scroll) scroll = top; else if (top + c.RowHeight > scroll + Height) scroll = top + c.RowHeight - Height;
         Relayout();
     }
-    protected override void OnMouseWheel(MouseEventArgs e) { Scroll(-e.Delta); base.OnMouseWheel(e); }
+    protected override void OnMouseWheel(MouseEventArgs e) { Wheel(e.Delta); base.OnMouseWheel(e); }
+    /// <summary>Creates the row windows ahead of time, so the first opening of the list does not build them.</summary>
+    public void Prewarm() { _ = Handle; foreach (var r in rows) _ = r.Handle; }
     protected override void OnResize(EventArgs e) { base.OnResize(e); Relayout(); }
     protected override void OnPaint(PaintEventArgs e)
     {

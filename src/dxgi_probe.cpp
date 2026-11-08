@@ -5446,9 +5446,13 @@ static std::uintptr_t find_cvar(const std::string& name) noexcept; // defined be
 static std::string engine_cvars_applied;
 static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
     try {
-        std::ifstream file{root/L"build"/L"engine-cvars"};if(!file) {engine_cvars_applied="none";return;}
+        // v1109: with no file, the engine's own sun-cascade time slicing (slice 0 every frame, far slices in turn, no dynamic
+        // casters on far slices) is the default; headset-accepted 2026-11-08. A file (even comments only) replaces the defaults.
+        std::ifstream file{root/L"build"/L"engine-cvars"};
+        std::istringstream defaults{"r_shadowParallelPartialSliceUpdate 1\nr_shadowParallelPartialDynaUpdate 1\n"};
+        std::istream& in=file ? static_cast<std::istream&>(file) : defaults;
         std::string line;
-        while(std::getline(file,line)) {
+        while(std::getline(in,line)) {
             const auto start=line.find_first_not_of(" \t");if(start==std::string::npos) continue;
             if(line[start]=='#') continue; // a comment is not a cvar name
             std::istringstream row{line.substr(start)};std::string name;int value{};

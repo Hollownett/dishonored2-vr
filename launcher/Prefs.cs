@@ -3,7 +3,7 @@ using System.Text;
 
 namespace DishonoredVR;
 
-/// <summary>Saved settings, byte-compatible with src/vr_preferences.hpp (version 10). Measurement tokens are preserved.</summary>
+/// <summary>Saved settings, byte-compatible with src/vr_preferences.hpp (version 11). Measurement tokens are preserved.</summary>
 public sealed class Prefs
 {
     public double Resolution = 1, Sharpness = .5, SnapDeg = 45, SmoothDps = 90;
@@ -13,6 +13,8 @@ public sealed class Prefs
     /// <summary>Version 10: ScriptedRecenter 0 stops re-aiming the view on scripted moments; CutsceneMode is vr_comfort, vr_full or theater (unknown reads as vr_comfort).</summary>
     public int ScriptedRecenter = 1;
     public string CutsceneMode = "vr_comfort";
+    /// <summary>Version 11: the game's per-mode upscaler render scale, 50..100 (0 = the mode's preset). Set in game; the launcher keeps it.</summary>
+    public int UpscalePercent = 0;
     public static readonly string[] CutsceneModes = { "vr_comfort", "vr_full", "theater" };
     public string[] Measurements = { "0", "0", "0", "0", "0" };
 
@@ -22,8 +24,8 @@ public sealed class Prefs
         if (!File.Exists(file)) return p;
         var t = File.ReadAllText(file).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         var inv = CultureInfo.InvariantCulture;
-        if (t.Length < 6 || !int.TryParse(t[0], out var v) || v < 1 || v > 10)
-            throw new InvalidDataException("Saved settings file is not a recognised version (1-10). It was left untouched.");
+        if (t.Length < 6 || !int.TryParse(t[0], out var v) || v < 1 || v > 11)
+            throw new InvalidDataException("Saved settings file is not a recognised version (1-11). It was left untouched.");
         double D(int i) => double.Parse(t[i], inv);
         int I(int i) => int.Parse(t[i], inv);
         p.Resolution = D(1); p.Aa = I(2); p.Mode = I(3); p.SnapDeg = D(4); p.SmoothDps = D(5);
@@ -43,6 +45,7 @@ public sealed class Prefs
             p.ScriptedRecenter = t[18] == "0" ? 0 : 1;
             p.CutsceneMode = Array.IndexOf(CutsceneModes, t[19]) >= 0 ? t[19] : "vr_comfort";
         }
+        if (v >= 11) p.UpscalePercent = t.Length > 20 && int.TryParse(t[20], NumberStyles.Integer, inv, out var up) && up is >= 50 and <= 100 ? up : 0;
         return p;
     }
 
@@ -53,7 +56,7 @@ public sealed class Prefs
         {
             Resolution = disk.Resolution, Sharpness = disk.Sharpness, SnapDeg = disk.SnapDeg, SmoothDps = disk.SmoothDps,
             Aa = disk.Aa, Mode = disk.Mode, Mirror = disk.Mirror, TemporalAa = disk.TemporalAa, Hud = disk.Hud, Hint = disk.Hint,
-            AaChosen = disk.AaChosen, Crosshair = disk.Crosshair, ScriptedRecenter = disk.ScriptedRecenter, CutsceneMode = disk.CutsceneMode, Measurements = (string[])disk.Measurements.Clone(),
+            AaChosen = disk.AaChosen, Crosshair = disk.Crosshair, ScriptedRecenter = disk.ScriptedRecenter, CutsceneMode = disk.CutsceneMode, UpscalePercent = disk.UpscalePercent, Measurements = (string[])disk.Measurements.Clone(),
         };
         if (edited.Resolution != baseline.Resolution) m.Resolution = edited.Resolution;
         if (edited.Sharpness != baseline.Sharpness) m.Sharpness = edited.Sharpness;
@@ -138,9 +141,9 @@ public sealed class Prefs
         var temporal = TemporalAa is SmaaMode or SmaaSsaaMode or SmaaSsaa150Mode ? 0 : TemporalAa;
         var aa = TemporalAa is SmaaMode or SmaaSsaa150Mode ? 1 : TemporalAa == SmaaSsaaMode ? 0 : Aa;
         var resolution = TemporalAa == SmaaSsaaMode ? 1.25 : TemporalAa == SmaaSsaa150Mode ? 2.0 : (TemporalAa == 0 && (Math.Abs(Resolution - 1.25) < .001 || Math.Abs(Resolution - 2.0) < .001) ? 1.0 : Resolution);
-        var head = new[] { "10", F(resolution), aa.ToString(), Mode.ToString(), F(SnapDeg), F(SmoothDps), Mirror.ToString(), F(Sharpness),
+        var head = new[] { "11", F(resolution), aa.ToString(), Mode.ToString(), F(SnapDeg), F(SmoothDps), Mirror.ToString(), F(Sharpness),
             temporal.ToString(), Hud.ToString(), Hint.ToString() };
-        var line = string.Join(' ', head.Concat(Measurements).Concat(new[] { AaChosen.ToString(), Crosshair.ToString(), ScriptedRecenter.ToString(), CutsceneMode })) + "\n";
+        var line = string.Join(' ', head.Concat(Measurements).Concat(new[] { AaChosen.ToString(), Crosshair.ToString(), ScriptedRecenter.ToString(), CutsceneMode, (temporal >= 2 ? UpscalePercent : 0).ToString() })) + "\n";
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         var tmp = file + ".tmp";
         File.WriteAllText(tmp, line, new UTF8Encoding(false));
