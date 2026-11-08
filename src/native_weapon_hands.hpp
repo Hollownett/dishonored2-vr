@@ -1250,7 +1250,7 @@ public:
         std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
-            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu]}",dual_wield()?1:0,
+            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu]}",dual_wield()?1:0,
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1260,7 +1260,7 @@ public:
             held_want_[0].load()?1:0,held_want_[1].load()?1:0,failed.c_str(),kinds.c_str(),static_cast<unsigned long long>(slot1_restores.load()),ride_other_.load()?1:0,
             static_cast<double>(last_return_dz.load()),static_cast<double>(last_return_age_s.load()),
             static_cast<unsigned long long>(gun_hits.load()),static_cast<unsigned long long>(bash_hits.load()),static_cast<unsigned long long>(gadget_hits.load()),
-            static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()));
+            static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()),static_cast<unsigned long long>(upgrade_skips.load()));
         return b;
     }
 private:
@@ -1610,7 +1610,7 @@ private:
     struct CopyUpgrades {std::uintptr_t ent{};std::uint32_t id{};unsigned n{};std::array<std::uintptr_t,8> item{};
         std::array<std::array<std::uintptr_t,2>,8> att{};std::array<std::array<std::uint32_t,2>,8> att_id{};};
     inline static std::array<CopyUpgrades,10> ups_{};inline static std::uint64_t ups_looked_{};
-    inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{};
+    inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{},upgrade_skips{};
     template<class Read> static void upgrades_drop(std::uintptr_t base,Read& read,CopyUpgrades& u) {
         for(unsigned i=0;i<u.n;++i) for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u.att[i][k],u.att_id[i][k])) remove_entity(base,u.att[i][k]);
         u={};
@@ -1640,17 +1640,29 @@ private:
             for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u->att[i][k],u->att_id[i][k])) remove_entity(base,u->att[i][k]);
             --u->n;u->item[i]=u->item[u->n];u->att[i]=u->att[u->n];u->att_id[i]=u->att_id[u->n];
         }
+        // v1092 (headset v1091 crash, the crossbow put in the other hand): a part bound to a joint tag needs the owner's animation component.
+        // The bind (0x752900) stores GetComponent(owner, 0x39dc9d0) at bind+0x400 even when it is null, and the bind update (0x7506d0 ->
+        // 0x53d3f0) reads [+0x400]+0x38 on worker threads whenever the joint index is set. The crossbow copies (crossbow_*_midnight.def)
+        // have no animation component and every crossbow part is tagged (cross_rot_jnt): such a part is skipped (recorded, not retried). An
+        // untagged part keeps joint index -1, which 0x53d3f0 answers without that read.
+        const bool animated=reinterpret_cast<std::uintptr_t (__fastcall*)(std::uintptr_t,std::uintptr_t,int)>(base+0x877720)(ent,base+0x39dc9d0,0)!=0;
         for(unsigned w=0;w<wn && u->n<u->item.size();++w) {
             if(std::find(u->item.begin(),u->item.begin()+u->n,want[w])!=u->item.begin()+u->n) continue;
             alignas(16) std::array<std::uintptr_t,4> self{0,0,ent,0};alignas(16) std::array<std::uintptr_t,5> out{};
-            reinterpret_cast<void (__fastcall*)(void*,void*,std::uintptr_t)>(base+0x61a2b0)(self.data(),out.data(),want[w]);
+            const auto decl=rig::value<std::uintptr_t>(read,want[w]);const auto tag=decl && *decl?rig::value<std::uintptr_t>(read,*decl+0x240):std::nullopt;
+            const auto first=tag && *tag?rig::value<char>(read,*tag):std::optional<char>{};
+            if(!decl || !*decl || !tag || (*tag && !first)) continue;   // unreadable: try again later
+            if(first && *first && !animated) ++upgrade_skips;
+            else reinterpret_cast<void (__fastcall*)(void*,void*,std::uintptr_t)>(base+0x61a2b0)(self.data(),out.data(),want[w]);
             const unsigned i=u->n++;u->item[i]=want[w];
             for(unsigned k=0;k<2;++k) {u->att[i][k]=out[2+k];u->att_id[i][k]=out[2+k]?rig::value<std::uint32_t>(read,out[2+k]+0xa8).value_or(0):0u;if(out[2+k]) ++upgrade_parts;}
         }
     }
     template<class Read> static void service_upgrades(std::uintptr_t base,Read& read) {
         static const bool pinned=[&]{static constexpr std::array<unsigned char,16> code{0x48,0x8b,0xc4,0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x60,0x48,0xc7,0x40,0xd8};
-            std::array<unsigned char,16> got{};return read(base+0x61a2b0,got.data(),got.size()) && got==code;}();
+            static constexpr std::array<unsigned char,12> get_component{0x48,0x89,0x5c,0x24,0x10,0x44,0x89,0x44,0x24,0x18,0x55,0x56};
+            std::array<unsigned char,16> got{};std::array<unsigned char,12> gc{};
+            return read(base+0x61a2b0,got.data(),got.size()) && got==code && read(base+0x877720,gc.data(),gc.size()) && gc==get_component;}();
         if(!pinned) return;
         struct Shown {std::uintptr_t ent;std::uint32_t id;held_copy::Kind kind;};std::array<Shown,16> shown{};unsigned ns=0;
         const auto player_kind=[](const char* def) {
