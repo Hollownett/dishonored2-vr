@@ -237,6 +237,7 @@ public:
         {CrashOperation operation("native hip holster");try {service_hip(base,read);} catch(...) {}}
         {CrashOperation operation("native mirrored hands");try {service_mirror(base,read);} catch(...) {}}
         {CrashOperation operation("native gun copies");try {service_guns(base,read);} catch(...) {}}
+        {CrashOperation operation("native copy upgrades");try {service_upgrades(base,read);} catch(...) {}}
         hold_down(base,read);
         service_wake_retries(base,read,clock_ms());
         service_guard_probe(base,read);
@@ -1245,11 +1246,11 @@ public:
         for(unsigned i=1;i<4;++i) {const auto& o=kind_offset_[i];const auto& q=o.offset;char kb[300];
             std::snprintf(kb,sizeof(kb),"%s[%d,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",i>1?",":"",o.have?1:0,o.side,q.position.x,q.position.y,q.position.z,
                 q.basis[0].x,q.basis[0].y,q.basis[0].z,q.basis[1].x,q.basis[1].y,q.basis[1].z,q.basis[2].x,q.basis[2].y,q.basis[2].z);kinds+=kb;}
-        char b[1600];
+        char b[2048];
         std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
-            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu]}",dual_wield()?1:0,
+            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu]}",dual_wield()?1:0,
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1258,7 +1259,8 @@ public:
             static_cast<unsigned long long>(held_hides.load()),static_cast<unsigned long long>(held_measured.load()),static_cast<unsigned long long>(held_rejected.load()),static_cast<unsigned long long>(held_carried.load()),static_cast<double>(held_step_mm.load()),static_cast<double>(held_turn_mdeg.load()),held_bits.load(),
             held_want_[0].load()?1:0,held_want_[1].load()?1:0,failed.c_str(),kinds.c_str(),static_cast<unsigned long long>(slot1_restores.load()),ride_other_.load()?1:0,
             static_cast<double>(last_return_dz.load()),static_cast<double>(last_return_age_s.load()),
-            static_cast<unsigned long long>(gun_hits.load()),static_cast<unsigned long long>(bash_hits.load()),static_cast<unsigned long long>(gadget_hits.load()));
+            static_cast<unsigned long long>(gun_hits.load()),static_cast<unsigned long long>(bash_hits.load()),static_cast<unsigned long long>(gadget_hits.load()),
+            static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()));
         return b;
     }
 private:
@@ -1593,11 +1595,82 @@ private:
         }
     }
     template<class Read> static void guns_teardown(std::uintptr_t base,Read& read) {
+        for(auto& u:ups_) upgrades_drop(base,read,u);
         for(auto& e:pool_) {if(e.ent && alive_entity(base,read,e.ent,e.id)) remove_entity(base,e.ent);e={};}
         guns_forget();
     }
+    // v1091 (user, headset v1090: "if the player has upgrades, the copied weapon should also have them"). The copies are the *_midnight.def
+    // models, which carry no upgrades. The player's weapon keeps them in arkCpntEquipment::m_upgrades (+0x50, idList<upgrade_t>, 0x28 each:
+    // m_item, m_originalModel, m_staticAttachment, m_animatedAttachment, m_anim; the exe's generated type records). The game builds an
+    // upgrade_t with the equipment vtable's slot 0xf0 (0x61a2b0, shared by the gun, crossbow and every other equipment class), which reads
+    // only this+0x10 (the owner entity): it spawns the upgrade decl's static model / attachment def at the owner and binds it to the decl's
+    // joint tag (0x875e80), and applies the decl's model and material overrides. The same call with the copy as owner gives the copy the same
+    // parts. A hidden or removed copy loses its parts (removed); a shown one gets them again. ponytail: a model override is not undone when an
+    // upgrade leaves the list (the game only adds upgrades); the copy entity would need a respawn.
+    struct CopyUpgrades {std::uintptr_t ent{};std::uint32_t id{};unsigned n{};std::array<std::uintptr_t,8> item{};
+        std::array<std::array<std::uintptr_t,2>,8> att{};std::array<std::array<std::uint32_t,2>,8> att_id{};};
+    inline static std::array<CopyUpgrades,10> ups_{};inline static std::uint64_t ups_looked_{};
+    inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{};
+    template<class Read> static void upgrades_drop(std::uintptr_t base,Read& read,CopyUpgrades& u) {
+        for(unsigned i=0;i<u.n;++i) for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u.att[i][k],u.att_id[i][k])) remove_entity(base,u.att[i][k]);
+        u={};
+    }
+    // The player's own weapon component of a kind (the inventory record's component, as test_equip finds it): 0 none.
+    template<class Read> static std::uintptr_t native_equipment(std::uintptr_t base,Read& read,held_copy::Kind kind) {
+        const auto fsm=player_fsm(base,read);const auto inventory=fsm?rig::value<std::uintptr_t>(read,fsm+0x328):std::nullopt;
+        const auto entries=inventory && *inventory?rig::list(read,*inventory+0x38,4096):std::nullopt;if(!entries) return 0;
+        for(unsigned i=0;i<entries->packed_count;++i) {
+            const auto comp=rig::value<std::uintptr_t>(read,entries->data+i*0x38ull+0x10);
+            if(comp && *comp && rig::typed(read,base,*comp,kind==held_copy::Kind::crossbow?0x1b9cbf8:0x1b53f58)) return *comp;
+        }
+        return 0;
+    }
+    template<class Read> static void upgrades_sync(std::uintptr_t base,Read& read,std::uintptr_t ent,std::uint32_t id,std::uintptr_t comp) {
+        CopyUpgrades* u=nullptr;
+        for(auto& c:ups_) if(c.ent==ent && c.id==id) u=&c;
+        if(!u) for(auto& c:ups_) if(!c.ent) {u=&c;break;}
+        if(!u) return;
+        u->ent=ent;u->id=id;
+        const auto list=rig::list(read,comp+0x50,64);if(!list) return;
+        std::array<std::uintptr_t,8> want{};unsigned wn=0;
+        for(unsigned i=0;i<list->packed_count && wn<want.size();++i)
+            if(const auto item=rig::value<std::uintptr_t>(read,list->data+i*0x28ull);item && rig::pointer(*item)) want[wn++]=*item;
+        for(unsigned i=0;i<u->n;) { // an upgrade that left the list: its parts go
+            if(std::find(want.begin(),want.begin()+wn,u->item[i])!=want.begin()+wn) {++i;continue;}
+            for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u->att[i][k],u->att_id[i][k])) remove_entity(base,u->att[i][k]);
+            --u->n;u->item[i]=u->item[u->n];u->att[i]=u->att[u->n];u->att_id[i]=u->att_id[u->n];
+        }
+        for(unsigned w=0;w<wn && u->n<u->item.size();++w) {
+            if(std::find(u->item.begin(),u->item.begin()+u->n,want[w])!=u->item.begin()+u->n) continue;
+            alignas(16) std::array<std::uintptr_t,4> self{0,0,ent,0};alignas(16) std::array<std::uintptr_t,5> out{};
+            reinterpret_cast<void (__fastcall*)(void*,void*,std::uintptr_t)>(base+0x61a2b0)(self.data(),out.data(),want[w]);
+            const unsigned i=u->n++;u->item[i]=want[w];
+            for(unsigned k=0;k<2;++k) {u->att[i][k]=out[2+k];u->att_id[i][k]=out[2+k]?rig::value<std::uint32_t>(read,out[2+k]+0xa8).value_or(0):0u;if(out[2+k]) ++upgrade_parts;}
+        }
+    }
+    template<class Read> static void service_upgrades(std::uintptr_t base,Read& read) {
+        static const bool pinned=[&]{static constexpr std::array<unsigned char,16> code{0x48,0x8b,0xc4,0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x60,0x48,0xc7,0x40,0xd8};
+            std::array<unsigned char,16> got{};return read(base+0x61a2b0,got.data(),got.size()) && got==code;}();
+        if(!pinned) return;
+        struct Shown {std::uintptr_t ent;std::uint32_t id;held_copy::Kind kind;};std::array<Shown,16> shown{};unsigned ns=0;
+        const auto player_kind=[](const char* def) {
+            for(unsigned d=1;d<mirror_def_names.size();++d) if(def && !std::strcmp(def,mirror_def_names[d])) return held_copy::kind_of(def);
+            return held_copy::Kind::other;}; // guard weapons and the sword copy carry no player upgrades
+        for(const auto& e:pool_) if(e.ent && e.in_use && e.shown) if(const auto k=player_kind(e.def);k!=held_copy::Kind::other) shown[ns++]={e.ent,e.id,k};
+        for(unsigned d=1;d<copies_.size();++d) if(const auto& c=copies_[d];c.ent && c.shown) shown[ns++]={c.ent,c.id,player_kind(mirror_def_names[d])};
+        for(auto& u:ups_) if(u.ent && std::none_of(shown.begin(),shown.begin()+ns,[&](const Shown& s){return s.ent==u.ent && s.id==u.id;})) upgrades_drop(base,read,u);
+        const auto now=GetTickCount64();
+        bool fresh=std::any_of(shown.begin(),shown.begin()+ns,[&](const Shown& s){
+            return std::none_of(ups_.begin(),ups_.end(),[&](const CopyUpgrades& u){return u.ent==s.ent && u.id==s.id;});});
+        if(!fresh && now-ups_looked_<250) return;   // a newly shown copy at once, the rest (a bought upgrade) four times a second
+        ups_looked_=now;
+        for(unsigned i=0;i<ns;++i) {
+            if(!alive_entity(base,read,shown[i].ent,shown[i].id)) continue;
+            if(const auto comp=native_equipment(base,read,shown[i].kind)) {try {upgrades_sync(base,read,shown[i].ent,shown[i].id,comp);} catch(...) {++upgrade_faults;}}
+        }
+    }
     static void guns_forget() { // every pointer is dead or already removed: call nothing
-        lying_={};held_={};meas_={};pool_={};bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
+        lying_={};held_={};meas_={};pool_={};ups_={};bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
         std::lock_guard<std::mutex> l(feed_m_);held_pub_={};copy_draw_={};
     }
     template<class Read> static void service_guns(std::uintptr_t base,Read& read) {
