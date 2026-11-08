@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include "tracked_pose.hpp"
 #include "tracked_pose_lifetime.hpp"
 #include "dwell_timer.hpp"
@@ -13,6 +14,8 @@ namespace d2vr {
 inline constexpr std::uint64_t grab_pose_freshness_ms=tracked_pose_freshness_ms;
 // Samples closer than this share a clock quantum; their motion waits for the next spaced sample instead of being dropped.
 inline constexpr std::uint64_t grab_velocity_min_ms=8;
+// v1090: the precise clock of a grab's samples and writes (steady clock, s); the ms ticks stay for freshness and lifecycle.
+inline double precise_s() noexcept {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 inline bool grab_pose_valid(const WorldTrackedPose& pose) {
     if(!finite(pose.position)) return false;
     for(unsigned i=0;i<3;++i) {
@@ -61,6 +64,7 @@ struct CorpseMotorInput {Vec3 body_velocity{},body_spin{};bool velocity_known{},
     bool stick{};           // v1084: a corpse limb sticks like a prop (corpse_motor below); a prop always does (v1075)
     double object_kg{},inertia_kgm2{},share{1.},dt{};const GrabTuning* tuning{};
     Vec3 carrier{};   // v1075: the player's own velocity (the held thing's feed-forward rides on it, as motor()'s v1069 carrier)
+    double now_s{};   // v1090: the motor's precise time (steady clock, s; 0 = off): the goal is led from the hand sample's time to now
     bool chain{};     // v1087: the held body carries others on its joints (a part of a severed limb): the sticking hold integrates its error (corpse_motor)
 };
 // What Task 10 needs per write: the command, the cap fraction (share of the commanded velocity change removed), the capped flag,
@@ -76,6 +80,7 @@ struct ReleasedAnchor {Vec3 position{};double weight{};std::uint64_t released_at
 class PhysicalGrab {
     bool armed_=false,pressed_=false,held_=false,valid_sample_=false;
     std::uint64_t epoch_{},tick_{},velocity_tick_{};
+    double velocity_at_s_{},sample_at_s_{};   // sample_at_s_: the newest sample's precise time (0 = unknown)   // v1090: the velocity baseline's precise time (s, steady clock; 0 = none: the tick clock)
     WorldTrackedPose previous_{},relative_{};
     // Velocity has its own baseline so same-quantum samples keep their motion while previous_/tick_ track the newest pose.
     Vec3 velocity_{},velocity_origin_{};
@@ -104,6 +109,7 @@ public:
     // v1075/v1084 the sticking hold (corpse_motor): the closure gains (1/s) and the velocity limits of a hold that puts the thing on the hand every step
     static constexpr double stick_gain=40,stick_spin_gain=40,stick_mps=20,stick_rps=30;
     // v1087 a chained hold's integral: critical damping with stick_gain (1/s^2), integrated only within chain_window_m of the goal, its correction capped
+    static constexpr double lead_max_s=.05;   // v1090: the most a goal is led (a stalled publication is not extrapolated further)
     static constexpr double chain_gain=stick_gain*stick_gain/4,chain_window_m=.05,chain_mps=3;
     void set_legacy_lag_release(bool on) noexcept {legacy_lag_=on;}   // build/legacy-corpse-lag-release: no slide, the hard 0.5 m / 0.25 s drop
     bool pressed() const {return pressed_;}
@@ -118,13 +124,15 @@ public:
 #ifdef D2VR_TESTING
     void set_recovery_for_tests(double seconds) {recovery_s_=seconds;}
 #endif
-    bool sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick) {
+    // at_s (v1090, user v1089: carried severed parts unstable on the run): the sample's precise time (steady clock, s). The ms ticks are
+    // GetTickCount's 15.6 ms quantum while hands arrive every ~11 ms, so a running hand's velocity (the motor's feed) swung +-40%; 0 keeps the tick clock.
+    bool sample(const WorldTrackedPose& hand,float grip,bool usable,std::uint64_t epoch,std::uint64_t tick,double at_s=0) {
         const bool valid_input=usable && epoch && tick && grab_pose_valid(hand) && std::isfinite(grip) && grip>=0 && grip<=1;
         if(!valid_input || epoch!=epoch_ || tick<tick_ || (tick_ && tick-tick_>grab_pose_freshness_ms)) {
             // A fresh released sample is sufficient to rearm at a new epoch;
             // held grips and unusable/reset samples never acquire on return.
             armed_=valid_input && epoch!=epoch_ && grip<.35f && (!tick_ || tick>=tick_);
-            valid_sample_=false;pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;return false;
+            valid_sample_=false;pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=at_s;return false;
         }
         const auto displacement=hand.position-previous_.position;
         // Check discontinuities even at duplicate or slow accepted timestamps,
@@ -133,18 +141,19 @@ public:
         // round the player's pivot in one step (45 deg: 0.77 x its distance from the pivot), past this jump rule when the arm is out or the player
         // stands off his play-space centre. A HELD grip still squeezed continues from the new hand: the press and the hold stay, the jump is not
         // hand motion (no throw velocity from it). A real teleport (a blink) still ends the hold through the motor's 1.5 m lag rule.
-        if(!(length(displacement)<=.5) && held_ && pressed_ && grip>=.35f) {velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;valid_sample_=true;return true;}
-        if(!(length(displacement)<=.5)) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;return false;}
+        if(!(length(displacement)<=.5) && held_ && pressed_ && grip>=.35f) {velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=at_s;sample_at_s_=at_s;valid_sample_=true;return true;}
+        if(!(length(displacement)<=.5)) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=at_s;return false;}
         // Samples inside one clock quantum leave velocity (and its baseline) alone; their motion enters the next spaced sample.
-        if(tick-velocity_tick_>=grab_velocity_min_ms) {
-            const auto dt=double(tick-velocity_tick_)*.001;
+        const bool precise=at_s>0 && velocity_at_s_>0 && at_s>=velocity_at_s_;
+        if(precise?at_s-velocity_at_s_>=.004:tick-velocity_tick_>=grab_velocity_min_ms) {
+            const auto dt=precise?at_s-velocity_at_s_:double(tick-velocity_tick_)*.001;velocity_at_s_=at_s;
             const double weight=1-std::exp(-dt/.035);
             velocity_=velocity_*(1-weight)+grab_limit((hand.position-velocity_origin_)*(1/dt),12)*weight;
             velocity_origin_=hand.position;velocity_tick_=tick;
         }
         if(grip<.35f) {armed_=true;pressed_=false;}
         else if(armed_ && grip>=.45f) pressed_=true;
-        valid_sample_=true;tick_=tick;previous_=hand;return true;
+        valid_sample_=true;tick_=tick;previous_=hand;sample_at_s_=at_s;return true;
     }
     // While the press waits for its owner (a native interactable's query, e.g. a corpse's carry, plus the obstruction check:
     // ~250 ms in sim v400), keep the sample fresh without touching the press latch. Otherwise the wait outlasts the freshness
@@ -152,13 +161,13 @@ public:
     void keep_fresh(const WorldTrackedPose& hand,std::uint64_t epoch,std::uint64_t tick) {
         if(!valid_sample_ || epoch!=epoch_ || tick<tick_ || tick-tick_>grab_pose_freshness_ms || !grab_pose_valid(hand) ||
            length(hand.position-previous_.position)>.5) return;
-        tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;
+        tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=0;
     }
     // B16: the hand this grab samples moved by a known step (a coupling to the hand body began or ended, the body snapped): continue from it
     // without reading the step as hand motion (no 0.5 m discontinuity release, no throw velocity from it); the press, the hold and the clock stay.
     void rebase(const WorldTrackedPose& hand) {
         if(!valid_sample_ || !grab_pose_valid(hand)) return;
-        previous_=hand;velocity_origin_=hand.position;
+        previous_=hand;velocity_origin_=hand.position;velocity_at_s_=0;
     }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
     bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
@@ -277,7 +286,12 @@ public:
             relative_.position=slide_r0_-slide_o0_*(slide_s_/anchor_slide_s);   // the first frame after the bind stays at the stored offset (a zero command)
             if(slide_s_>=anchor_slide_s) slide_done_=true;else slide_s_=std::min(anchor_slide_s,slide_s_+dt);
         }
-        auto goal=target();auto error=goal.position-object.position;
+        // v1090 (user, headset v1089: carried parts unstable on the run): the goal is where the hand is NOW, not at its sample: the newest hand is 0-25 ms
+        // old at a game frame (90 Hz publications, ~81 fps frames), so at 6 m/s the goal trailed 0-15 cm by a different amount every frame (the lab
+        // tests/held_run_jitter_check.cpp). Led by the hand's own velocity over that age (at most lead_max_s); off without precise times.
+        const double lead=in.now_s>0 && sample_at_s_>0 && in.now_s>=sample_at_s_?std::min(in.now_s-sample_at_s_,lead_max_s):0.;
+        const auto led=[&]{auto g=target();g.position=g.position+velocity_*lead;return g;};
+        auto goal=led();auto error=goal.position-object.position;
         auto lag=length(anchor(goal)-anchor(object));
         if(in.corpse) {
             if(lag_timer_.update(lag>lag_release_m,dt)) {
@@ -286,7 +300,7 @@ public:
                 if(!slip) return finish(ReleaseReason::lag,true,false,lag);
                 const auto toward=anchor(object)-anchor(goal);const auto n=length(toward);
                 if(n>1e-9) relative_.position=relative_.position+grab_local(previous_,toward*(std::min(slip_mps*dt,n)/n));
-                goal=target();error=goal.position-object.position;lag=length(anchor(goal)-anchor(object));
+                goal=led();error=goal.position-object.position;lag=length(anchor(goal)-anchor(object));
             }
         }
         else if(length(error)>1.5) return finish(ReleaseReason::lag,false,pressed_,lag);

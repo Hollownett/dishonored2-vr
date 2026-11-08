@@ -208,7 +208,7 @@ private:
     using Dispatch=void (__fastcall*)(void*,void*);
     using Velocity=void (__fastcall*)(void*,UINT,const float*,const float*,int);
     // palm: the G2 palm probe (raw controller grip + palm fit, C9/C10), the same one that orders the hand's native Use hits (Task 3).
-    struct Publication {NativePlayerCamera owner{};WorldTrackedPose hand{};float grip{};UINT64 epoch{},tick{},serial{};bool usable{};bool occupied{};UINT64 source_tick{};PalmProbe palm{};};
+    struct Publication {NativePlayerCamera owner{};WorldTrackedPose hand{};float grip{};UINT64 epoch{},tick{},serial{};bool usable{};bool occupied{};UINT64 source_tick{};PalmProbe palm{};double at_s{};};   // at_s v1090: precise publish time (precise_s)
     // One independent lane per hand. Either hand may hold one dynamic body.
     // The caller marks native carrying/action occupancy. Equipped weapons do
     // not prevent either tracked hand from acquiring a loose physics object.
@@ -252,6 +252,7 @@ private:
             bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();draw_bind={};
         }
         Gate gate=Gate::none;float raw_grip{};UINT64 decision_tick{};bool decision_usable{};
+        double last_motor_s{},bound_at_s{};   // v1090: the capped write's gate and dt on the precise clock (precise_s), not the 15.6 ms tick
         UINT64 consumed{},last_motor{},last_tow{},last_acquisition{},owner_epoch{},grip_epoch{};
         UINT64 focus_calls{},focus_us{},focus_max_us{};
         std::optional<HandProxies> contact_proxies;
@@ -792,7 +793,7 @@ private:
         lane.flat=sphere_grip_ && grip_slab_ && !sphere_whole_object_ && body.bone<0 && body.bounds && rig::grip_is_flat(body.pose,*body.bounds,body.hull);
         lane.sphere=!sphere_grip_?0.:body.bone>=0?rig::sphere_grip_radius_of_bone(body.bone,body.bounds):
             body.bounds?(sphere_whole_object_?rig::sphere_grip_radius(body.pose,*body.bounds):rig::sphere_grip_ball_radius(body.pose,*body.bounds,body.hull)):0.;
-        lane.bound_at=now;if(lane.capped) lane.last_motor=0; // no write yet this hold: the first one measures its dt from the bind
+        lane.bound_at=now;lane.bound_at_s=precise_s();if(lane.capped) {lane.last_motor=0;lane.last_motor_s=0;} // no write yet this hold: the first one measures its dt from the bind
         if(coupling_on_) {lane.hold_serial=++hold_serials_;lane.was_coupled=false;lane.last_offset={};}   // B16: the render thread couples the new hold afresh
         {const auto motion=read_motion_state(body);lane.bind_motion=motion.index;lane.bind_owner=motion.owner;}
         if(lane.corpse && body.bone>0) if(const auto pelvis=native_ragdoll_body(read_,base_,body.entity,0)) lane.bind_pelvis_z=pelvis->pose.position.z;
@@ -842,10 +843,13 @@ private:
             if(length(motor.linear)>3) {std::lock_guard<std::mutex> g(thrown_mutex_);thrown_=Thrown{body.entity,body.component,body.entity_id,motor.linear,now};}
             lane.end_hold();lane.pending_release=false;return true;
         }
-        if(lane.last_motor && now-lane.last_motor<10) return true;
-        const UINT64 since=lane.last_motor?lane.last_motor:lane.bound_at; // elapsed since the last write, or since the bind
-        const double elapsed=now>since?static_cast<double>(now-since)/1000.:0.;
-        const double dt=elapsed>0?elapsed:1./60; // two ticks inside one clock quantum: assume one nominal tick
+        // v1090 (user, headset v1089: severed parts unstable on the run): one write per game frame on the precise clock. The 10 ms gate on the
+        // 15.6 ms tick skipped about every fifth ~81 fps frame and gave the motor dt 0 / 15.6 / 31 ms (tests/held_run_jitter_check.cpp).
+        const double motor_s=precise_s();
+        if(lane.last_motor_s>0 && motor_s-lane.last_motor_s<.004) return true;
+        const double since_s=lane.last_motor_s>0?lane.last_motor_s:lane.bound_at_s; // elapsed since the last write, or since the bind
+        const double elapsed=since_s>0 && motor_s>since_s?motor_s-since_s:0.;
+        const double dt=elapsed>0?elapsed:1./60;
         const auto motion=read_motion_state(body);
         if(motion.status==MotionStatus::garbage && !corpse) {end_capped_hold(lane,side,ReleaseReason::fault);return true;}
         // The body's slot in the motion array and the body that entry belongs to are fixed for its life; a different slot or owner is a recycled body.
@@ -877,7 +881,7 @@ private:
         }
         const double kg=mass.kg+hanging;lane.mass=kg;
         CorpseMotorInput in;in.body_velocity=motion.velocity;in.body_spin=motion.spin;in.velocity_known=motion.status==MotionStatus::ok;in.corpse=corpse;
-        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;in.carrier=carrier();in.stick=stick_hold_;in.chain=body.limb>=0;   // v1075: rides on the player; v1084: corpse limbs stick too; v1087: a severed limb's part carries the rest
+        in.object_kg=kg;in.inertia_kgm2=bone_inertia(kg,radius);in.dt=dt;in.tuning=corpse?&tuning_:&prop_tuning_;in.carrier=carrier();in.stick=stick_hold_;in.chain=body.limb>=0;in.now_s=motor_s;   // v1075: rides on the player; v1084: corpse limbs stick too; v1087: a severed limb's part carries the rest
         const auto& other=lanes_[1-side].held;in.share=other && other->entity==body.entity?.5:1.; // two hands on one body: each takes half the mass
         if(!in.velocity_known) ++velocity_unknown_;
         {   // Two-handed prop (phase 2): the earlier hand drives; the later one writes nothing and turns the main hand's goal toward itself.
@@ -897,13 +901,13 @@ private:
                 corpse_diag_.note_release(side,result->reason);lane.end_hold();lane.pending_release=false;return true;
             }
             if(!write(lane,side,body,result->motor)) return false;
-            lane.last_motor=now;
+            lane.last_motor=now;lane.last_motor_s=motor_s;
             if(length(result->motor.linear)>3) {std::lock_guard<std::mutex> g(thrown_mutex_);thrown_=Thrown{body.entity,body.component,body.entity_id,result->motor.linear,now};}
             lane.end_hold();lane.pending_release=false;return true;
         }
         if(!result->write) return true; // no usable dt this tick: the hold continues
         if(!write(lane,side,body,result->motor)) return false;
-        lane.last_motor=now;lane.last_capped=result->capped;
+        lane.last_motor=now;lane.last_motor_s=motor_s;lane.last_capped=result->capped;
         if(body.limb>=0) {   // v1088: severed-limb-hold.csv "hold" - the held part against the hand, every write; the worst error once it has come in (0.3 s)
             const auto goal=lane.grab.target();const double err=length(goal.position-body.pose.position)*1000,rot=length(grab_rotation_error(body.pose,goal))*57.29578;
             const double gap=p.palm.valid && body.hull?hull_surface_distance(body.pose,*body.hull,p.palm.palm+p.palm.direction*rig::held_palm_depth)*1000:-1;
@@ -927,7 +931,7 @@ private:
     }
     void update_lane(unsigned side,std::uintptr_t world,UINT64 now) {
         auto& lane=lanes_[side];last_pass_ms_=now;
-        if(lane.consumed==lane.published.serial && (!lane.held || now-lane.last_motor<10)) return;
+        if(lane.consumed==lane.published.serial && (!lane.held || (lane.capped?precise_s()-lane.last_motor_s<.004:now-lane.last_motor<10))) return;   // v1090: a capped hold writes every game frame
         const auto& p=lane.published;lane.consumed=p.serial;
         // A pending native query must not disarm the observed-release physics
         // latch before the final per-press owner can be chosen.
@@ -969,7 +973,7 @@ private:
             lane.was_coupled=coupled;lane.last_offset=coupled?lane.coupling.offset:Vec3{};
         }
         const bool sample=lane.held && lane.pending_release?false:lane.grab.sample(coupling_on_?lane.sample_hand:p.hand,p.grip,
-            usable && (physical_usable || (!lane.held && p.grip<.35f)) && (!lane.held || same_owner),p.epoch,p.tick);
+            usable && (physical_usable || (!lane.held && p.grip<.35f)) && (!lane.held || same_owner),p.epoch,p.tick,p.at_s);
         if(!lane.grab.pressed()) {lane.attempted=lane.acquired=false;if(!lane.owner.physical() && !lane.held) lane.candidates.clear();}
         if(lane.held) {
             const auto body=native_grab_body(read_,base_,*lane.held);
@@ -1230,7 +1234,7 @@ public:
         const bool keep_hover=lane.obstruction && lane.obstruction->request.hover && p.epoch==epoch && p.owner.camera_identity==owner.camera_identity && usable && !occupied;
         if((p.tick!=tick || p.source_tick!=source_tick || p.epoch!=epoch || p.owner.camera_identity!=owner.camera_identity || !usable || occupied) && !keep_hover) lane.obstruction.reset();
         if(p.epoch!=epoch || !usable || occupied) lane.selection.reset();   // a new pose epoch or a lost hand starts the palm's pick afresh
-        p={owner,hand,grip,epoch,tick,p.serial+1,usable,occupied,source_tick,palm};
+        p={owner,hand,grip,epoch,tick,p.serial+1,usable,occupied,source_tick,palm,precise_s()};
     }
     void clear() {{std::lock_guard<std::mutex> lock(mutex_);advance_lifecycle_locked();for(auto& lane:lanes_) {lane.published.usable=false;lane.contact_proxies.reset();lane.obstruction.reset();++lane.published.serial;lane.focus.reset();lane.focus_tick=0;}}contact_.clear();}
     // A lane docked at the shoulder (grip_decision.hpp ShoulderDock: the body stays held, pulled to a point at the shoulder) leaves its hand free:
@@ -1560,7 +1564,7 @@ public:
         if(!std::isfinite(raw) || raw<.35f) lane.buffer_used=false;
         // Arm only after a real observed release. This is controller math;
         // the renderer does not bind bodies or call the velocity ABI.
-        if(!lane.held && usable && raw<.35f) lane.grab.sample(p.hand,raw,true,p.epoch,p.tick);
+        if(!lane.held && usable && raw<.35f) lane.grab.sample(p.hand,raw,true,p.epoch,p.tick,p.at_s);
         if(usable) {
             if(lane.pending_release) lane.gate=Gate::pending_release;
             else if(lane.held) lane.gate=Gate::physical_held;
@@ -1628,7 +1632,7 @@ public:
             const auto& other=lanes_[1-side].held;
             const auto contact=acquisition_contact(lane,*after,GetTickCount64());
             if(*verdict && contact && lane.owner.physical() && hold_bone_allowed(after->bone,p.grip) && !(after->bone>=0 && lockout_.locked(after->entity_id,seconds_from_ms(GetTickCount64()))) && (!other || other->entity!=after->entity || other->handle!=after->handle || (two_hand_ && after->bone<0)) &&
-               lane.grab.sample(p.hand,p.grip,true,p.epoch,p.tick) &&
+               lane.grab.sample(p.hand,p.grip,true,p.epoch,p.tick,p.at_s) &&
                lane.grab.bind(after->pose,*contact,grab_acquire_distance)) {
                 lane.held=after;lane.acquired=true;lane.pending_release=false;lane.reset_tow();
                 lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;

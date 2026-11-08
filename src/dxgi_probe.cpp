@@ -4281,7 +4281,10 @@ static std::atomic<float> gadget_throw_hold{}; // dual wield (v771): 1 while an 
 static std::atomic<bool> left_power_item{}; // the left slot holds a power, whatever build/power-native-fingers says (dual wield's power-hand cross)
 // Dual wield decisions, one JSON line each (artifacts/dual-wield-events.jsonl): what the next headset test needs to explain a wrong hand.
 // v820: one stream kept open (an open+close per row was 3% of a core on the render thread in a paired sim).
-static std::array<bool,2> g_hip_near{};static std::array<int,2> g_hip_mm{-1,-1};static UINT64 g_heart_unequip_at{}; // v1046: the Heart block's pending unequip (60 ms after a drop, at once for a put-away); the catch's equip waits for it
+static std::array<bool,2> g_hip_near{};static std::array<int,2> g_hip_mm{-1,-1};static UINT64 g_heart_unequip_at{};
+// v1090 (user, headset v1089: the wheel gave a Heart picked up before): no gadget/Heart catch by a hand that just let one go (the grip's own flutter
+// re-caught a dropped Heart 156 ms later) or that just chose from the wheel (its squeeze holds the chosen item); a wheel choice also cancels a pending catch equip.
+static std::array<UINT64,2> g_no_catch_until{};static UINT64 g_wheel_commit_tick{}; // v1046: the Heart block's pending unequip (60 ms after a drop, at once for a put-away); the catch's equip waits for it
 static void dual_wield_event(const std::string& fields) {
     if(!d2vr::diag::on()) return; // v1046: off = no row, no lock
     static std::atomic<unsigned> rows{};if(rows.fetch_add(1)>=4000) return;
@@ -13090,7 +13093,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         const bool slot1_ex=slot1_shows_item(); // v773: a power does not keep the slot-1 hand from taking a gun
                                         // v780 (user, headset v779: "I toss the pistol to the hand with Blink and expect Blink to move to the other hand; any weapon, the sword too"): the
                                         // power swap is ArmSet::place's (a weapon placed in the arm that holds a power moves it to the other arm when empty, else puts it away).
-                                        static std::array<E,2> ex_prev{};static std::array<const char*,2> held_def{};static UINT64 gadget_restore_at{};static const char* gadget_restore_item{};
+                                        static std::array<E,2> ex_prev{};static std::array<const char*,2> held_def{};static UINT64 gadget_restore_at{},gadget_claim_tick{};static const char* gadget_restore_item{};
                                         struct GadgetTake {std::uint64_t id{};UINT64 until{};unsigned h{};bool heart{};};static GadgetTake gadget_take{}; // v1046: a catch's take, queued; equipped only once the game thread says it removed the pickup
                                         if(const auto t=test_extra_request.exchange(0);t&0x100u) { // the "extra" test command
                                             const unsigned th=t&1u,tk=(t>>1)&0x7fu;arms_apply(arm_set.set_copy(th,tk==1?E::pistol:tk==2?E::crossbow:E::none,GetTickCount64()),"test_extra");
@@ -13157,7 +13160,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 // flight or taken from the floor: back into the inventory, the grenades (slot 1) ride this hand, the last one is equipped again.
                                                 // v1046 (user, headset v1045: "heart ... just picking up randomly when I squeeze my hand", it reappeared in the other hand): the reach test uses the pickup's
                                                 // LIVE position, the take is a ticket, and nothing is equipped until the game thread removed the pickup (below); a refused catch queues nothing.
-                                                if(!taken && !gadget_take.id && arm_set.can_catch_gadget(h)) for(const auto& d:d2vr::NativeGadgetDrop::published())
+                                                if(!taken && !gadget_take.id && GetTickCount64()>=g_no_catch_until[h&1u] && arm_set.can_catch_gadget(h)) for(const auto& d:d2vr::NativeGadgetDrop::published())
                                                     if(d2vr::held_copy::in_reach(hr.position,{d.pos[0],d.pos[1],d.pos[2]})) {
                                                         if(const auto id=d2vr::NativeGadgetDrop::take_ticket({fl(hr.position.x),fl(hr.position.y),fl(hr.position.z)},.45f)) {gadget_take={id,GetTickCount64()+1000,h,d.kind==d2vr::gadget_drop::Kind::heart};game_xr->pulse(h,.4f,.05f);}
                                                         break;}
@@ -13177,13 +13180,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 if(answered && tr.result==1) {
                                                     const auto cfx=arm_set.catch_gadget(th,now_t,left_aim_equip_revision.load(std::memory_order_acquire));
                                                     if(cfx.refused) res=2;
-                                                    else {res=1;arms_apply(cfx,"gadget_catch");arms_publish();gadget_restore_item=d2vr::gadget_drop::equip_key(tr.kind);gadget_restore_at=now_t+(gadget_restore_item?0:250);}
+                                                    else {res=1;arms_apply(cfx,"gadget_catch");arms_publish();gadget_claim_tick=now_t;gadget_restore_item=d2vr::gadget_drop::equip_key(tr.kind);gadget_restore_at=now_t+(gadget_restore_item?0:250);}
                                                 }
                                                 dual_wield_event("\"ev\":\"gadget_catch\",\"hand\":"+std::to_string(th)+",\"claimed\":"+std::to_string(res==1?1:0));
                                                 if(was_heart_take)
                                                     dual_wield_event(std::string("\"ev\":\"heart_take\",\"hand\":")+std::to_string(th)+",\"result\":\""+(res==1?"ok":res==2?"refused":"none")+"\"");
                                             }
                                         }
+                                        if(gadget_restore_at && g_wheel_commit_tick>gadget_claim_tick) {gadget_restore_at=0;gadget_restore_item=nullptr;} // v1090: the wheel's newer choice wins
                                         if(gadget_restore_at && GetTickCount64()>=gadget_restore_at) { // a caught last grenade or the Heart: slot 1 emptied, equip it again
                                             bool slot1_empty{};{std::lock_guard<std::mutex> l(hand_state_mutex);slot1_empty=(hand_weapon_bits&1u)==0;}
                                             // v779: an item that never left the inventory (the Heart) is equipped by its inventory name. v1046: that happens once the take succeeded, whatever slot 1 holds (the
@@ -13317,7 +13321,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const auto wheel_to_hand=[&]{if(dual_wield_enabled && wheel_open_hand>=0) {wheel_committed_now=true;
                                     const unsigned h=static_cast<unsigned>(wheel_open_hand)&1u;const auto now_w=GetTickCount64();
                                     const auto plan=arm_set.derive();const int holder=arm_set.slot1_holder();const auto held=holder>=0?arm_set.a[static_cast<unsigned>(holder)].what:d2vr::arm::Held::none;
-                                    wheel_commit_hand=static_cast<int>(h);wheel_commit_seq=wheel_open_seq;wheel_commit_decl=slot1_decl_now.load(std::memory_order_relaxed);wheel_chosen=wheel_dial_sector>=0;
+                                    wheel_commit_hand=static_cast<int>(h);wheel_commit_seq=wheel_open_seq;g_wheel_commit_tick=now_w;g_no_catch_until[h]=now_w+1000;wheel_commit_decl=slot1_decl_now.load(std::memory_order_relaxed);wheel_chosen=wheel_dial_sector>=0;
                                     arms_apply(arm_set.wheel_commit(h,now_w,left_aim_equip_revision.load(std::memory_order_acquire)),"wheel");
                                     if(!wheel_chosen) arm_set.wheel_nothing(h);   // the dial pointed at no sector: nothing will arrive
                                     dual_wield_event("\"ev\":\"wheel_commit\",\"hand\":"+std::to_string(wheel_open_hand)+",\"sector\":"+std::to_string(wheel_dial_sector)+",\"dial\":"+std::to_string(wheel_open_dial)+",\"stick\":"+std::to_string(wheel_open_stick)+",\"equip\":\""+[]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& c:n) if(c=='"' || c==92 || static_cast<unsigned char>(c)<32) c='?';return n;}()+"\""+
@@ -14021,7 +14025,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 const auto fl=[](double v){return static_cast<float>(v);};
                                                 d2vr::NativeGadgetDrop::drop(d2vr::gadget_drop::Kind::any,{fl(hw.position.x),fl(hw.position.y),fl(hw.position.z)},{fl(hv.x),fl(hv.y),fl(hv.z)},
                                                     {fl(hw.basis[0].x),fl(hw.basis[0].y),fl(hw.basis[0].z),fl(hw.basis[1].x),fl(hw.basis[1].y),fl(hw.basis[1].z),fl(hw.basis[2].x),fl(hw.basis[2].y),fl(hw.basis[2].z)});
-                                                dual_wield_event("\"ev\":\"gadget_drop\",\"hand\":"+std::to_string(rh)+",\"grenade\":"+std::to_string(grenade?1:0));
+                                                g_no_catch_until[rh&1u]=GetTickCount64()+400;dual_wield_event("\"ev\":\"gadget_drop\",\"hand\":"+std::to_string(rh)+",\"grenade\":"+std::to_string(grenade?1:0));
                                             }
                                         } else {
                                             const float squeeze=gadget_fist(raw_grip(rh),raw_trigger(rh));
@@ -14048,7 +14052,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 queued=d2vr::NativeGadgetDrop::drop(d2vr::gadget_drop::Kind::heart,{fl(hw.position.x),fl(hw.position.y),fl(hw.position.z)},{fl(hv.x),fl(hv.y),fl(hv.z)},
                                                     {fl(hw.basis[0].x),fl(hw.basis[0].y),fl(hw.basis[0].z),fl(hw.basis[1].x),fl(hw.basis[1].y),fl(hw.basis[1].z),fl(hw.basis[2].x),fl(hw.basis[2].y),fl(hw.basis[2].z)});
                                             }
-                                            g_heart_unequip_at=GetTickCount64()+(dropping?60:1);game_xr->pulse(rh,.2f,.04f); // a drop spawns it first (game thread), then the hand lets go; a put-away only lets go
+                                            g_heart_unequip_at=GetTickCount64()+(dropping?60:1);g_no_catch_until[rh&1u]=GetTickCount64()+400;game_xr->pulse(rh,.2f,.04f); // a drop spawns it first (game thread), then the hand lets go; a put-away only lets go
                                             dual_wield_event("\"ev\":\"heart_release\",\"hand\":"+std::to_string(rh)+",\"hip\":"+std::to_string(hip?1:0)+",\"hip_mm\":"+std::to_string(g_hip_mm[rh&1u])+",\"dropped\":"+std::to_string(dropping?1:0)+",\"queued\":"+std::to_string(queued?1:0));
                                         }
                                         if(g_heart_unequip_at && GetTickCount64()>=g_heart_unequip_at) {g_heart_unequip_at=0;

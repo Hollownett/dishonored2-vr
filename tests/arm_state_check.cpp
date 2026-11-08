@@ -137,7 +137,14 @@ int main() {
         engine(s,c,Held::pistol,false,false);assert(s.copy_at(0)==Held::pistol);   // nothing to withdraw later (no guess)
         // the same item chosen from the holder's own wheel, a power or nothing: no copy
         ArmSet t;Clock d;t.hip_draw(1,d.t,d.rev);engine(t,d,Held::pistol,false);t.wheel_commit(1,d.t,d.rev);assert(!t.wheel_choice(1,true,d.t).same_copy && t.copy_at(1)==Held::none);
-        ArmSet u;Clock e;engine(u,e,Held::power,false);u.wheel_commit(1,e.t,e.rev);assert(!u.wheel_choice(1,true,e.t).same_copy && u.copy_at(1)==Held::none);
+        ArmSet u;Clock e;engine(u,e,Held::power,false);u.wheel_commit(1,e.t,e.rev);
+        {const Fx m=u.wheel_choice(1,true,e.t);assert(!m.same_copy && u.copy_at(1)==Held::none);
+         // v1090: the same power (Heart, gadget) chosen from the other arm's wheel MOVES there; the engine keeps it equipped
+         assert((m.power_moved&2u) && u.a[1].what==Held::power && u.a[1].home==Home::slot1 && u.a[0].what==Held::none && u.derive().slot1_arm==1 && u.valid());}
+        engine(u,e,Held::power,false,false);assert(u.a[1].what==Held::power && u.a[0].what==Held::none);
+        // the Heart held in the left, the right arm (holding a gun copy) chooses it: the copy falls, the Heart moves right
+        ArmSet v;Clock f;engine(v,f,Held::heart,false);v.set_copy(1,Held::pistol,f.t);v.wheel_commit(1,f.t,f.rev);
+        {const Fx m=v.wheel_choice(1,true,f.t);assert((m.copy_displaced&2u) && v.a[1].what==Held::heart && v.a[0].what==Held::none && v.valid());}
     }
     {   // a stale request for the other arm does not steal the arrival; a wheel closed on nothing lets the holder go at once
         ArmSet s;Clock c;s.hip_draw(0,c.t,c.rev);s.wheel_commit(1,c.t,c.rev);s.wheel_choice(1,false,c.t);
@@ -247,7 +254,9 @@ int main() {
                 if(local) {
                     const bool moved_in=(fx.power_moved>>o)&1u;
                     // wheel_choice(same) copies a gun into arm h only; nothing here may touch arm o's item except a power moving in
-                    assert(s.a[o].what==before.what || (moved_in && before.what==Held::none));
+                    // v1090: or a power the other arm held moving to arm h (the same power chosen from h's wheel)
+                    const bool moved_out=which==9 && ((fx.power_moved>>h)&1u) && slot1_only(before.what) && s.a[o].what==Held::none;
+                    assert(s.a[o].what==before.what || (moved_in && before.what==Held::none) || moved_out);
                     // the other arm's copy never changes through a local event
                     if(before.home==Home::copy) assert(s.a[o].home==Home::copy && s.a[o].what==before.what);
                 }

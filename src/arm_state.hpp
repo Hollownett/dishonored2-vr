@@ -199,6 +199,10 @@ struct ArmSet {
         const int s=slot1_holder();
         if(s>=0 && static_cast<unsigned>(s)!=h && copyable(a[s].what) && !(a[h].home==Home::copy && a[h].what==a[s].what)) {
             fx.merge(place(h,a[s].what,Home::copy,now));fx.same_copy=true;
+        } else if(s>=0 && static_cast<unsigned>(s)!=h && slot1_only(a[s].what)) {
+            // v1090 (user, headset v1089: "a power active in the other hand should be placed into the new hand"): a power, gadget or Heart cannot be
+            // copied, so it MOVES to the opening arm; the engine keeps it equipped, only the arm that draws slot 1 changes (as the power swap).
+            fx.merge(place(h,a[s].what,Home::slot1,now,false));fx.power_moved|=1u<<h;
         }
         if(!pend[0].wheel && !pend[1].wheel && !pend[0].on && !pend[1].on) wheel_ctx=false;
         return fx;
