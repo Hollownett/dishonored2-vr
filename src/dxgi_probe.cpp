@@ -5537,6 +5537,19 @@ static std::string run_test_command(const std::string& line) {
         d2vr::WorldTrackedPose hw{};{std::lock_guard<std::mutex> l(hand_state_mutex);hw=hand_world[1];}
         const std::array<float,3> pos{static_cast<float>(hw.position.x),static_cast<float>(hw.position.y),static_cast<float>(hw.position.z-.2)};
         return d2vr::NativeGadgetDrop::spawn_free(k,pos,{0,0,0},{1,0,0,0,1,0,0,0,1})?"gadget spawn requested":"gadget spawn refused";}
+    if(verb=="ammo") { // test (sim, v1097): ammo left|right <index>: the hand's real copy selects that ammo type (NativeRangedFire::test_ammo)
+        std::string hand;int index=-1;in>>hand>>index;const int h=hand=="left"?0:hand=="right"?1:-1;
+        if(h<0 || index<0 || index>8) return "usage: ammo left|right <index 0..8>";
+        d2vr::NativeRangedFire::test_ammo(static_cast<unsigned>(h),index);return "ammo requested";}
+    if(verb=="realcopy") { // EXPERIMENT v1095: realcopy pistol|crossbow|report|remove (NativeWeaponHands::real_copy; realcopy-report.txt)
+        std::string what;in>>what;static constexpr const char* known[]{"pistol","crossbow","report","remove"};
+        const char* w=nullptr;for(const char* k:known) if(what==k) w=k;
+        if(!w) return "usage: realcopy pistol|crossbow|report|remove";
+        d2vr::NativeWeaponHands::set_report_dir(output_directory.always());
+        d2vr::WorldTrackedPose hw{};{std::lock_guard<std::mutex> l(hand_state_mutex);hw=hand_world[1];}
+        d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::real_copy;r.decl=w;
+        r.pos={static_cast<float>(hw.position.x),static_cast<float>(hw.position.y),static_cast<float>(hw.position.z)};
+        return d2vr::NativeWeaponHands::request(r)?"realcopy requested":"realcopy queue full";}
     if(verb=="extra") { // test (sim, v765): give a hand a mod-owned copy, as the wheel's second-weapon route does: extra left|right pistol|crossbow|none
         std::string hand,what;in>>hand>>what;const int h=hand=="left"?0:hand=="right"?1:-1;
         const unsigned kind=what=="pistol"?1u:what=="crossbow"?2u:what=="none"?0u:9u;
@@ -13340,12 +13353,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 bool wheel_committed_now=false;
                                 if(dual_wield_enabled && x_wheel.wheel()) {
                                     if(!manual_wheel_was_open) wheel_open_seq=d2vr::NativeManualEquipRuntime::wheel_choice_seq.load(std::memory_order_acquire);
+                                    if(!manual_wheel_was_open && wheel_open_hand>=0) d2vr::NativeRangedFire::note_wheel_open(static_cast<unsigned>(wheel_open_hand)); // v1101: the copy hand's ammo choice
                                     arm_set.wheel_open(GetTickCount64());
                                 }
                                 const auto wheel_to_hand=[&]{if(dual_wield_enabled && wheel_open_hand>=0) {wheel_committed_now=true;
                                     const unsigned h=static_cast<unsigned>(wheel_open_hand)&1u;const auto now_w=GetTickCount64();
                                     const auto plan=arm_set.derive();const int holder=arm_set.slot1_holder();const auto held=holder>=0?arm_set.a[static_cast<unsigned>(holder)].what:d2vr::arm::Held::none;
-                                    wheel_commit_hand=static_cast<int>(h);wheel_commit_seq=wheel_open_seq;g_wheel_commit_tick=now_w;g_no_catch_until[h]=now_w+1000;wheel_commit_decl=slot1_decl_now.load(std::memory_order_relaxed);wheel_chosen=wheel_dial_sector>=0;
+                                    wheel_commit_hand=static_cast<int>(h);wheel_commit_seq=wheel_open_seq;g_wheel_commit_tick=now_w;g_no_catch_until[h]=now_w+1000;d2vr::NativeRangedFire::note_wheel(h);wheel_commit_decl=slot1_decl_now.load(std::memory_order_relaxed);wheel_chosen=wheel_dial_sector>=0;
                                     arms_apply(arm_set.wheel_commit(h,now_w,left_aim_equip_revision.load(std::memory_order_acquire)),"wheel");
                                     if(!wheel_chosen) arm_set.wheel_nothing(h);   // the dial pointed at no sector: nothing will arrive
                                     dual_wield_event("\"ev\":\"wheel_commit\",\"hand\":"+std::to_string(wheel_open_hand)+",\"sector\":"+std::to_string(wheel_dial_sector)+",\"dial\":"+std::to_string(wheel_open_dial)+",\"stick\":"+std::to_string(wheel_open_stick)+",\"equip\":\""+[]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& c:n) if(c=='"' || c==92 || static_cast<unsigned char>(c)<32) c='?';return n;}()+"\""+
@@ -13490,6 +13504,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 {static bool fire_live{};if(dual_wield_enabled && fire_live && logic!=2) d2vr::NativeRangedFire::reset();fire_live=logic==2;}
                                 if(dual_wield_enabled) { // two active hands: a hand's mod-owned gun fires a real shot from its barrel on its own trigger (NativeRangedFire)
                                     using E=d2vr::arm::Held;static std::array<bool,2> shot_down{};
+                                    {const auto kind=[&](unsigned h){const auto ex=arm_set.copy_at(h);return !d2vr::arm::is_gun(ex)?-1:ex==E::crossbow?1:0;}; // v1094: the copies' own ammo (NativeRangedFire::track_ammo)
+                                     d2vr::NativeRangedFire::note_copies(kind(0),kind(1));}
+                                    {static bool pick_installed=false;if(!pick_installed) {pick_installed=true; // v1101: a copy hand's wheel ammo choice stays on its copy (NativeRangedFire::wheel_pick)
+                                        d2vr::NativeManualEquipRuntime::wheel_pick.store(+[](std::uintptr_t item,std::uintptr_t ammo)->std::uintptr_t {auto rd=&read_self;return d2vr::NativeRangedFire::wheel_pick(image_base,rd,item,ammo);},std::memory_order_release);}}
                                     for(unsigned h=0;h<2;++h) {
                                         const auto ex=arm_set.copy_at(h);const bool pull=raw_trigger(h)>=(shot_down[h]?.35f:.55f),edge=pull && !shot_down[h];shot_down[h]=pull;
                                         if(!d2vr::arm::is_gun(ex) || !edge || logic!=2) continue;

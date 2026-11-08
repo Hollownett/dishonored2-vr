@@ -141,6 +141,7 @@ struct NativeRangedFireTest { // the friend: what NativeRangedFire::service does
         return w;
     }
     static bool latched() {return Fire::latched_.load();}
+    static void track_ammo() {Fire::track_ammo(BASE,M);}
     static void swapped(std::uintptr_t base,std::uintptr_t rva,std::uintptr_t comp,std::uintptr_t entity,const float* o,const float* a) {Fire::swapped(base,rva,comp,entity,o,a);}
 };
 }
@@ -157,6 +158,15 @@ static bool has(const std::string& s,const char* t) {return s.find(t)!=std::stri
 
 int main() {
     // ---- HandState: cooldown, reload, magazine
+    { // v1094: the upgrades' scene lengths
+        using ranged_fire::timing;using ranged_fire::condition_of;
+        assert(timing(Kind::pistol,0).cool==330 && timing(Kind::pistol,0).reload==1500);
+        assert(timing(Kind::pistol,condition_of("ReloadSpeed")).reload==1000 && timing(Kind::pistol,condition_of("ReloadSpeed")|condition_of("ReloadSpeed2")).reload==766);
+        assert(timing(Kind::crossbow,0).cool==666 && timing(Kind::crossbow,0).reload==900);
+        assert(timing(Kind::crossbow,condition_of("ReloadSpeed")).cool==100 && timing(Kind::crossbow,condition_of("ReloadSpeed")).reload==566);
+        assert(timing(Kind::crossbow,condition_of("NailGun")).reload==581 && condition_of("Other")==0 && condition_of(nullptr)==0);
+        HandState t;t.sync(0,Kind::pistol,1,5);t.fired(0,true,330,766);assert(t.ready_at==330 && t.reload_done==330+766);
+    }
     {
         HandState h;assert(!h.sync(1000,Kind::pistol,1,7) && h.loaded==1 && h.check(1000,7)==Why::ok);
         h.fired(1000,true);assert(h.loaded==0 && h.ready_at==1666 && h.reloading && h.reload_done==1666+1500);
@@ -226,13 +236,13 @@ int main() {
         assert(Fire::comps_total_==3 && Fire::comps_started0_==3);
         assert(M.get<std::int32_t>(PCOMP+0xa0)==1); // the component's own magazine is untouched in per-hand mode
         assert(!Fire::ready(0) && Fire::ready(1));
-        // cooldown: no second call before 666 ms; the other hand fires at once (two pistols)
-        g_now=1665;assert(!Fire::fire(shot(0,Fire::Shot::pistol)) && Fire::refused_count(Why::cooldown)==1);
+        // cooldown: no second call before 330 ms (v1094: the fire scene's BREAK_PLAYER_STATE); the other hand fires at once (two pistols)
+        g_now=1329;assert(!Fire::fire(shot(0,Fire::Shot::pistol)) && Fire::refused_count(Why::cooldown)==1);
         assert(Fire::fire(shot(1,Fire::Shot::pistol,-5.f)));run_queued();
         assert(Fire::fired_==2 && get_pool(PAMMO_DECL)==5 && g_origin[0]==-5.f);
-        // the pistol of hand 0 reloads by itself (666 + 1500)
-        g_now=1000+666+1499;assert(!Fire::fire(shot(0,Fire::Shot::pistol)));
-        g_now=1000+666+1500;assert(Fire::fire(shot(0,Fire::Shot::pistol)));run_queued();
+        // the pistol of hand 0 reloads by itself (330 + 1500)
+        g_now=1000+330+1499;assert(!Fire::fire(shot(0,Fire::Shot::pistol)));
+        g_now=1000+330+1500;assert(Fire::fire(shot(0,Fire::Shot::pistol)));run_queued();
         assert(Fire::fired_==3 && get_pool(PAMMO_DECL)==4);
     }
     // ---- a crossbow shot: the native bolt speed and flag, the selected bolt's reserve
@@ -348,6 +358,30 @@ int main() {
         assert(Fire::stationary_==1 && Fire::moved_==0 && Fire::comps_started0_==0 && Fire::comps_started100_==0 && Fire::proj_comp_started100_==0);
         g_now+=5000;service({});assert(Fire::alive_4s_==1);
         const auto k=Fire::status_json();int depth=0;for(char c:k) {if(c=='{'||c=='[') ++depth;if(c=='}'||c==']') --depth;assert(depth>=0);}assert(depth==0 && has(k,"\"alive_4s\":1"));
+    }
+    // ---- v1101: a wheel choice by the hand that holds a real copy stays on the copy; the native weapon keeps its ammo
+    {
+        fresh();
+        constexpr std::uintptr_t CCOMP=0x2e000000,CCOMP2=0x2e010000,SLEEP_DECL=0x2e100000,SLEEP_DEF=0x2e200000;
+        M.put<std::uint64_t>(XDECL+0x188,XAMMO);M.put<std::uint32_t>(XDECL+0x190,2);   // the crossbow's ammo table: entry 0 = the native's bolt, entry 1 = sleep darts
+        M.put<std::uint64_t>(XAMMO+0x70,SLEEP_DECL);M.put<std::uint64_t>(XAMMO+0x80,SLEEP_DEF);M.put<std::uint64_t>(SLEEP_DECL,0);M.put<std::uint64_t>(SLEEP_DEF,0);
+        M.put<std::uint64_t>(INV+0x70,RECS+2*0x38);   // the crossbow record is in slot 1
+        for(const auto c:{CCOMP,CCOMP2}) {M.zero(c,0x200);M.put<std::uint64_t>(c,BASE+0x1b9cbf8);M.put<std::uint64_t>(c+8,XDECL);M.put<std::uint64_t>(c+0x98,XAMMO);}
+        Fire::note_copies(-1,1);Fire::set_copy_comp(1,CCOMP);Fire::note_wheel_open(1);
+        assert(Fire::wheel_pick(BASE,M,0xa0000,SLEEP_DECL)==0 && Fire::copy_ammo(1,1)==0);                       // another item chosen: left alone
+        assert(Fire::wheel_pick(BASE,M,0xb0000,SLEEP_DECL)==XAMMO_DECL && Fire::copy_ammo(1,1)==XAMMO+0x70);    // sleep darts for the copy: the game keeps the native's bolt
+        assert(Fire::wheel_pick(BASE,M,0xb0000,0xdead0000)==0 && Fire::copy_ammo(1,1)==XAMMO+0x70);              // not an ammo of this weapon
+        Fire::note_wheel_open(0);assert(Fire::wheel_pick(BASE,M,0xb0000,SLEEP_DECL)==0);                           // the hand without a copy: the native's own choice
+        Fire::note_wheel_open(1);M.put<std::uint64_t>(INV+0x70,0);
+        assert(Fire::wheel_pick(BASE,M,0xb0000,XAMMO_DECL)==0 && Fire::copy_ammo(1,1)==XAMMO);                    // native not in slot 1: recorded, the equip runs as chosen
+        M.put<std::uint64_t>(INV+0x70,RECS+2*0x38);
+        Fire::set_copy_comp(1,CCOMP);assert(Fire::copy_ammo(1,1)==XAMMO);                                            // the same instance keeps its choice
+        Fire::set_copy_comp(1,0);Fire::set_copy_comp(1,CCOMP);assert(Fire::copy_ammo(1,1)==XAMMO);                  // hidden and shown again: kept
+        Fire::set_copy_comp(1,CCOMP2);assert(Fire::copy_ammo(1,1)==0);                                               // a new instance starts as the weapon it copies
+        Test::track_ammo();assert(Fire::copy_ammo(1,1)==XAMMO && Fire::native_ammo(1)==XAMMO);                       // adopted the native's bolt, and now its own
+        M.put<std::uint64_t>(XCOMP+0x98,XAMMO+0x70);g_now+=3000;Test::track_ammo();                                  // the native hand chose sleep darts, no wheel of a copy hand pending
+        assert(Fire::native_ammo(1)==XAMMO+0x70 && Fire::copy_ammo(1,1)==XAMMO);                                     // the copy keeps its own
+        const auto j=Fire::status_json();int depth=0;for(char c:j) {if(c=='{'||c=='[') ++depth;if(c=='}'||c==']') --depth;}assert(depth==0 && has(j,"\"v1094\":[0,0,0,0,0,0,2]"));
     }
     std::puts("native ranged fire checks ok");
 }
