@@ -164,6 +164,8 @@ public:
         return enqueue(r);
     }
     static bool ready(unsigned side) {return side<2 && clock()>=ready_at_[side].load() && clock()>=reload_until_[side].load();}
+    // v1113: a hand whose last shot was refused on the game thread (no ammo...) stays blocked 250 ms for the held trigger; an edge pull still asks.
+    static bool held_blocked(unsigned side) {const auto t=side<2?refused_at_[side].load():0;return t && clock()-t<250;}
     static bool queued(unsigned side) {return side<2 && pending_[side];} // v1112: a shot already queued for this hand (the held trigger waits for it)
     // v1094: what each hand holds as a copy (-1 none, 0 pistol, 1 crossbow; render/control thread, every frame) and which hand chose from
     // the wheel last (its choice of ammo for a copy is the copy's own, not the other hand's native weapon's).
@@ -211,6 +213,7 @@ public:
     // Serials NativeWeaponHands plays the copy's upgrade animations from (fire = ANIMATE_ON_FIRE, reload start = ANIMATE_ON_RELOAD).
     static std::uint64_t shot_serial(unsigned side) {return side<2?shot_serial_[side]:0;}
     static std::uint64_t reload_serial(unsigned side) {return side<2?reload_serial_[side]:0;}
+    static bool burst_follow_up(unsigned side) {return side<2 && burst_follow_[side];}   // v1114: the last shot was a burst's follow-up (the burst's fire scene keeps playing)
     static void reset_latch() {latched_=false;consecutive_faults_=0;}
     static void reset_counters() {
         for(auto* c:{&requests_,&serviced_,&services_,&failures_,&fired_,&created_,&launched_,&reloads_,&dry_plans_,&comps_total_,&comps_started0_,
@@ -222,7 +225,7 @@ public:
     static void reset() {
         {std::lock_guard<std::mutex> l(m_);queue_.clear();pending_[0]=pending_[1]=false;shots_.clear();plans_.clear();}
         tracks_.clear();hands_[0]=hands_[1]=ranged_fire::HandState{};
-        for(unsigned i=0;i<2;++i) {ready_at_[i]=0;reload_until_[i]=0;last_kind_[i]=-1;}
+        for(unsigned i=0;i<2;++i) {refused_at_[i]=0;ready_at_[i]=0;reload_until_[i]=0;last_kind_[i]=-1;}
         reset_latch();
     }
 
@@ -249,7 +252,7 @@ public:
         for(const auto& r:work) {
             ++serviced_;
             const Why why=latched_?Why::latched:handle(base,read,n,r,now);
-            if(why!=Why::ok) {refuse(why);if(r.burst) burst_left_[r.shot.side]=0;}
+            if(why!=Why::ok) {refuse(why);if(!r.reload && r.shot.side<2) refused_at_[r.shot.side]=now;if(r.burst) burst_left_[r.shot.side]=0;}
         }
         update_tracks(base,read,now);
     }
@@ -433,6 +436,7 @@ public:
 private:
     inline static std::mutex m_;inline static std::vector<Request> queue_;inline static bool pending_[2]{};
     inline static std::atomic<std::uint64_t> refused_[static_cast<unsigned>(Why::count_)]{};
+    inline static std::atomic<std::uint64_t> refused_at_[2]{};
     inline static std::atomic<std::uint64_t> ready_at_[2]{},reload_until_[2]{};inline static std::atomic<int> last_kind_[2]{{-1},{-1}};
     inline static std::atomic<bool> latched_{false};inline static std::atomic<unsigned> consecutive_faults_{0};
     inline static std::array<std::array<std::uintptr_t,2>,2> copy_ammo_{};inline static std::array<std::uintptr_t,2> seen_ammo_{},seen_comp_{};inline static std::array<unsigned,2> conditions_{};inline static std::atomic<bool> wheel_done_{true};
@@ -442,7 +446,7 @@ public:
     inline static std::atomic<std::uint64_t> own_shots_{},copy_ammo_sets_{},wheel_picks_{};
 private:
     inline static std::array<unsigned,2> burst_left_{};inline static std::array<std::uint64_t,2> burst_next_{},reload_len_{};inline static std::array<Shot,2> burst_shot_{};
-    inline static std::array<bool,2> reload_noted_{true,true};inline static std::array<std::uint64_t,2> shot_serial_{},reload_serial_{};
+    inline static std::array<bool,2> reload_noted_{true,true},burst_follow_{};inline static std::array<std::uint64_t,2> shot_serial_{},reload_serial_{};
 public:
     inline static std::atomic<std::uint64_t> ammo_swaps_{},ammo_splits_{},spreads_{},bursts_{};
 private:
@@ -492,6 +496,7 @@ private:
     static void finish_shot(const Shot& s,const Located& l,std::uint64_t now,ranged_fire::HandState& hand,std::uint8_t flags) {
         const bool burst=s.kind==Shot::pistol && (flags&1);
         auto& left=burst_left_[s.side];
+        burst_follow_[s.side]=left!=0;
         if(burst && !left && hand.loaded>1) {left=2;burst_shot_[s.side]=s;++bursts_;}   // first shot of a burst: two more follow
         else if(left) --left;
         const std::uint64_t cool=left?ranged_fire::burst_gap_ms:l.timing.cool;

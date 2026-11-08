@@ -110,6 +110,7 @@ struct LyingGun {
     std::uintptr_t item_decl{},ammo_decl{},entity{};std::uint32_t item_spawn{};
 };
 struct HeldSide {int pe{-1};bool shown{},have_cmd{};const char* failed{};unsigned tries{};std::uint64_t retry_at{};held_copy::Pose cmd{};}; // failed: the def that did not spawn; retried every 250 ms, 12 times
+struct Adopt {int pe{-1};const char* def{};std::uint64_t tick{};}; // v1113: a lying gun picked up as a copy, still shown, waiting for held_copy() to want it (no hide-and-reshow flicker)
 struct HeldPub {bool valid{};held_copy::Pose pose{};std::uint64_t tick{};std::uintptr_t ent{};std::uint32_t id{};};
 // v1101: the copy a hand draws (the mirror copy of a natively equipped weapon, or a mod-owned held copy), as the render thread's weapon
 // publisher needs it for draw-time placement (src/dxgi_probe.cpp publish_weapon_draw -> weapon_draw_place.hpp). `read` is the hand
@@ -1313,11 +1314,14 @@ public:
         for(unsigned i=1;i<4;++i) {const auto& o=kind_offset_[i];const auto& q=o.offset;char kb[300];
             std::snprintf(kb,sizeof(kb),"%s[%d,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",i>1?",":"",o.have?1:0,o.side,q.position.x,q.position.y,q.position.z,
                 q.basis[0].x,q.basis[0].y,q.basis[0].z,q.basis[1].x,q.basis[1].y,q.basis[1].z,q.basis[2].x,q.basis[2].y,q.basis[2].z);kinds+=kb;}
-        char b[2048];
+        std::string pin;   // v1114: the copy scenes' pinned prologues (scene_pin_rvas order), once read
+        if(scene_pin_.load()>=0) for(const auto& p:scene_pin_bytes_) {if(!pin.empty()) pin+=' ';for(const auto c:p) {char h[4];std::snprintf(h,sizeof(h),"%02x",static_cast<unsigned>(c));pin+=h;}}
+        char b[3072];
         std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
-            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu,%llu,%llu],\"real\":[%llu,%llu,%llu,%llu,%llu],\"parts\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}",dual_wield()?1:0,
+            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu,%llu,%llu],\"real\":[%llu,%llu,%llu,%llu,%llu],\"parts\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu],"
+            "\"scenes\":{\"knob_off\":%d,\"pin\":%d,\"faults\":%llu,\"conds\":%llu,\"late_conds\":%llu,\"stops\":%llu,\"bytes\":\"%s\"}}",dual_wield()?1:0,
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1333,14 +1337,17 @@ public:
             static_cast<unsigned long long>(real_anchors.load()),static_cast<unsigned long long>(real_rebinds.load()),
             static_cast<unsigned long long>(real_parts_near.load()),static_cast<unsigned long long>(real_parts_far.load()),static_cast<unsigned long long>(real_parts_unhid.load()),
             static_cast<unsigned long long>(real_parts_rebound.load()),static_cast<unsigned long long>(real_bolt_far.load()),static_cast<unsigned long long>(children_presented.load()),
-            static_cast<unsigned long long>(tree_presents.load()),static_cast<unsigned long long>(tree_present_blocked.load()));
+            static_cast<unsigned long long>(tree_presents.load()),static_cast<unsigned long long>(tree_present_blocked.load()),static_cast<unsigned long long>(handovers.load()),
+            static_cast<unsigned long long>(scene_fire.load()),static_cast<unsigned long long>(scene_reload.load()),static_cast<unsigned long long>(scene_fail.load()),static_cast<unsigned long long>(scene_running.load()),
+            scene_knob_.load(),scene_pin_.load(),static_cast<unsigned long long>(scene_faults.load()),static_cast<unsigned long long>(scene_conds.load()),
+            static_cast<unsigned long long>(scene_late.load()),static_cast<unsigned long long>(scene_stops.load()),pin.c_str());
         return b;
     }
 private:
     inline static std::atomic<bool> dual_wield_{},clear_guns_req_{};
     inline static std::atomic<bool> ride_other_{};inline static std::uintptr_t slot1_cur_{},slot1_prev_{};inline static std::uint64_t slot1_looked_{};
     inline static std::array<LyingGun,2> lying_{};inline static bool gun_native_lying_{},guns_live_{};inline static std::uintptr_t guns_game_{};
-    inline static std::array<PoolEnt,8> pool_{};inline static std::array<HeldSide,2> held_{};inline static std::array<HeldSlot,2> meas_{};
+    inline static std::array<PoolEnt,8> pool_{};inline static std::array<HeldSide,2> held_{};inline static std::array<Adopt,2> adopt_{};inline static std::atomic<std::uint64_t> handovers{};inline static std::array<HeldSlot,2> meas_{};
     inline static std::array<std::atomic<const char*>,2> held_want_{};inline static std::array<HeldPub,2> held_pub_{};inline static std::array<char,96> held_last_failed_{};
     inline static std::array<GunCopy,2> published_guns_{};inline static std::uint64_t guns_player_check_{};inline static float guns_player_[3]{};
     static std::uint64_t steady_ms() {return static_cast<std::uint64_t>(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count()*1000);}
@@ -1450,12 +1457,13 @@ private:
         for(unsigned i=0;i<3;++i) {axis[i*3]=float(at.basis[i].x);axis[i*3+1]=float(at.basis[i].y);axis[i*3+2]=float(at.basis[i].z);}
         int li=-1;for(int i=0;i<2;++i) if(!lying_[i].present) {li=i;break;}
         if(li<0) {li=lying_[0].since<=lying_[1].since?0:1;gun_release(base,read,lying_[li]);} // two lie already: the older goes back
-        const int pe=pool_acquire(base,read,def,pos,axis);if(pe<0) return false;
+        const bool reuse=!native && held_[side].pe>=0 && pool_alive(base,read,held_[side].pe) && !std::strcmp(pool_[held_[side].pe].def,def); // v1113: the held entity becomes the lying gun (already at the held pose)
+        const int pe=reuse?held_[side].pe:pool_acquire(base,read,def,pos,axis);if(pe<0) return false;
         if(native) {
             if(!equip(base,read,0x20,64)) {pool_release(base,read,pe);return false;}
             auto& c=copies_[s1.def]; // a mirrored copy of this gun in the other hand goes now, not at the mirror's next look
             if(mirror_slots_[1].native==s1.entity && c.ent && c.shown && alive_entity(base,read,c.ent,c.id) && visible(base,read,c.ent,false)) c.shown=false;
-        } else if(held_[side].pe>=0 && !std::strcmp(pool_[held_[side].pe].def,def)) {pool_release(base,read,held_[side].pe);held_[side]=HeldSide{};}
+        } else if(reuse) {held_[side]=HeldSide{};++handovers;}
         // v1041: held_want_ is the caller's alone. The drop used to null it, which erased the copy the caller had just asked for in the same hand
         // (a wheel choice or same-item copy that displaced this one: "selected, not shown until I release and squeeze again"); a drop of the
         // copy the hand released has its want cleared by the caller already.
@@ -1489,7 +1497,12 @@ private:
         const int i=held_copy::nearest(pos,present,2,Vec3{r.pos[0],r.pos[1],r.pos[2]},.6);if(i<0) return false;
         auto& g=lying_[i];
         if(g.native && !r.as_copy && !gun_take_native(base,read,g,r,manual)) return false;
-        gun_release(base,read,g);++gun_pickups;return true;
+        if((r.as_copy || r.decl) && pool_alive(base,read,g.pe)) { // v1113: the entity stays shown and in_use; service_held hands it to the hand's copy
+            auto& a=adopt_[r.side&1u];if(a.pe>=0) pool_release(base,read,a.pe);
+            a=Adopt{g.pe,pool_[g.pe].def,GetTickCount64()};g=LyingGun{};
+            gun_native_lying_=false;for(const auto& o:lying_) gun_native_lying_=gun_native_lying_ || (o.present && o.native);
+        } else gun_release(base,read,g);
+        ++gun_pickups;return true;
     }
     // One lying gun per game tick: flight, then the stow / redraw / return rules.
     template<class Read> static void gun_fly(std::uintptr_t base,Read& read,LyingGun& g) {
@@ -1610,6 +1623,7 @@ private:
         }
         for(unsigned side=0;side<2;++side) {
             auto& h=held_[side];const char* want=held_want_[side].load(std::memory_order_relaxed);
+            if(auto& a=adopt_[side];a.pe>=0 && (GetTickCount64()-a.tick>500 || !pool_alive(base,read,a.pe))) {pool_release(base,read,a.pe);a=Adopt{};} // nobody wanted it
             if(h.pe>=0 && !pool_alive(base,read,h.pe)) {if(h.pe<static_cast<int>(pool_.size())) pool_[h.pe]={};h=HeldSide{};held_bits&=~(5u<<side);}
             if(h.failed && h.failed!=want) {h.failed=nullptr;h.tries=0;} // another def: try again
             if(!want) {if(h.pe>=0) {held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};}continue;}
@@ -1627,6 +1641,7 @@ private:
             if(!held_copy::place(hand,offset,mirrored,out)) {held_hide(base,read,side);continue;}
             std::array<float,3> pos{float(out.position.x),float(out.position.y),float(out.position.z)};std::array<float,9> axis{};
             for(unsigned i=0;i<3;++i) {axis[i*3]=float(out.basis[i].x);axis[i*3+1]=float(out.basis[i].y);axis[i*3+2]=float(out.basis[i].z);}
+            if(h.pe<0 && want) if(auto& a=adopt_[side];a.pe>=0 && !std::strcmp(a.def,want)) {h.pe=a.pe;a=Adopt{};++handovers;} // v1113: take the picked-up gun's entity as is
             if(h.pe<0) {
                 if(h.failed==want && (h.tries>=12 || GetTickCount64()<h.retry_at)) continue; // v1041: a transient failure (def not loaded yet, a hidden-state call refused) is retried, not latched
                 h.pe=pool_acquire(base,read,want,pos,axis);
@@ -1849,6 +1864,163 @@ private:
         reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uintptr_t,const std::uintptr_t*,const float*,const float*,bool)>(base+0x875e80)(copy,bolt,&tag,o.data(),m.data(),true);
         b={copy,bolt,def,copy_id,rig::value<std::uint32_t>(read,bolt+0xa8).value_or(0)};++copy_bolts;
     }
+    // v1114 (user: the copy plays the original's weapon BODY animation on fire and reload, upgrades included). The weapon component has no body
+    // clips: the player's fire / reload states play the weapon's midnight scene through 0x854be0(state, &handle, scene, flags, 0) with the
+    // equipped weapon bound as actor PlayerLeftEquipment (0x8542b0 flag 8: entity id [[[state+0x10]+0x328]+0x70]+8, needs a model at +0xf0).
+    // The copy gets the same call: a fake state per side whose fake player's slot-1 record names the copy's entity. The driver calls the state's
+    // vslot 0x88 between create and play (the game's 0x845ad0): here scene_conditions, the copy component's 0x63a7c0 (its upgrades' conditions,
+    // Burst / BurstLoop); every other fake slot is the game's own 3-byte no-op 0x998b0. Scene and rate come from the copy's own getters
+    // (vslot 0x120 fire, 0x128 reload with dl=1), the rate is applied by 0x7d8fe0, a fire is followed by the copy's vslot 0x108 (bolt / bullets).
+    // build/no-copy-scenes turns it off (read once). Rows scene / scene_fail / scene_after / pin in artifacts/real-parts.csv:
+    // tick,what,side,kind,handle,rate (fail: why 1 getter 2 no scene 3 driver fault 4 no handle; after: 1 still running),rate_ok,scene,decl+0x11c,
+    // native mag,native bolt +0xd0,native hidden parts (hex, bit 2i+k),copy mag,copy bolt,copy hidden,cond source (1 state+0x24, 2 out, 3 after play,
+    // -1 no handle when asked),cond rdx (low 32 bits, decimal like the handle). Marks are read before the scene starts; scene_after 1 s later.
+    struct CopyScene {std::uintptr_t comp{},game{};std::uint32_t handle{};char kind{};bool cond{};std::uint64_t at{};};
+    struct SceneAfter {std::uint64_t due{};std::uint32_t handle{};char kind{};held_copy::Kind wk{};};
+    struct SceneFake {   // fake fire state, its player, the player's inventory and the slot-1 record (sizes generous, all zero but the links)
+        std::array<std::uintptr_t,0x80> state{},player{};std::array<std::uintptr_t,0x20> equip{};std::array<std::uintptr_t,4> rec{};};
+    struct Marks {int mag{-1},bolt{-1};unsigned hidden{};};
+    struct SceneMarks {Marks native,copy;int d11c{-1};};
+    inline static std::array<CopyScene,2> scenes_{};inline static std::array<SceneAfter,2> scene_after_{};
+    inline static std::array<SceneFake,2> scene_fakes_{};inline static std::array<std::uintptr_t,64> scene_vt_{};inline static std::uintptr_t scene_base_{};
+    inline static std::array<int,2> scene_cond_src_{};inline static std::array<std::uint32_t,2> scene_cond_arg_{};inline static unsigned scene_rows_{};
+    inline static std::atomic<int> scene_knob_{-1},scene_pin_{-1};   // -1 not read yet; knob 1 = build/no-copy-scenes; pin 1 = verified
+    static constexpr std::array<std::uintptr_t,8> scene_pin_rvas{0x854be0,0x7d6040,0x7d9270,0x7d8fe0,0x7d63f0,0x7d9590,0x63a7c0,0x998b0};
+    inline static std::array<std::array<unsigned char,16>,8> scene_pin_bytes_{};
+    inline static std::atomic<std::uint64_t> scene_fire{},scene_reload{},scene_fail{},scene_running{},scene_faults{},scene_conds{},scene_late{},scene_stops{};
+    static bool scenes_on() {   // build/no-copy-scenes, read once (the knob folder is the artifacts folder's sibling, as dxgi_probe's root/build)
+        if(scene_knob_.load()<0) {if(report_dir_.empty()) return false;std::error_code ec;scene_knob_=std::filesystem::exists(report_dir_.parent_path()/"build"/"no-copy-scenes",ec)?1:0;}
+        return scene_knob_.load()==0;
+    }
+    static bool scene_of(std::uintptr_t fn,std::uintptr_t comp,bool reload,float* rate,std::uintptr_t* scene) {
+        __try {*scene=reload?reinterpret_cast<std::uintptr_t (__fastcall*)(std::uintptr_t,bool,float*)>(fn)(comp,true,rate)
+                            :reinterpret_cast<std::uintptr_t (__fastcall*)(std::uintptr_t,float*)>(fn)(comp,rate);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    static bool scene_drive(std::uintptr_t base,std::uintptr_t state,std::uint32_t* out,std::uintptr_t scene) {
+        __try {reinterpret_cast<std::uint32_t* (__fastcall*)(std::uintptr_t,std::uint32_t*,std::uintptr_t,std::uint32_t,float)>(base+0x854be0)(state,out,scene,8u,0.f);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    static bool comp_call(std::uintptr_t fn,std::uintptr_t comp,std::uint32_t handle) {   // vslot 0x108 (handle unused) / 0x63a7c0 conditions
+        __try {reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uint32_t)>(fn)(comp,handle);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    static int scene_rate(std::uintptr_t base,std::uintptr_t mgr,std::uint32_t h,float rate) {   // 1 set, 0 refused (no such scene / ended), -1 fault
+        __try {return reinterpret_cast<bool (__fastcall*)(std::uintptr_t,std::uint32_t,float)>(base+0x7d8fe0)(mgr,h,rate)?1:0;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+    }
+    static int scene_finished(std::uintptr_t base,std::uintptr_t mgr,std::uint32_t h) {
+        __try {return reinterpret_cast<bool (__fastcall*)(std::uintptr_t,std::uint32_t)>(base+0x7d63f0)(mgr,h)?1:0;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+    }
+    static bool scene_halt(std::uintptr_t base,std::uintptr_t mgr,std::uint32_t h) {   // 0x7d9590 stop (inferred (mgr, handle); r8/r9 zero)
+        __try {reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uint32_t,std::uintptr_t,std::uintptr_t)>(base+0x7d9590)(mgr,h,0,0);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    // The fake state's vslot 0x88, called by the driver between create and play: the copy's own conditions on the new scene.
+    static void __fastcall scene_conditions(std::uintptr_t state,std::uintptr_t arg) {
+        for(unsigned side=0;side<2;++side) {
+            auto& f=scene_fakes_[side];if(state!=reinterpret_cast<std::uintptr_t>(f.state.data())) continue;
+            auto& s=scenes_[side];std::uint32_t h{};std::memcpy(&h,reinterpret_cast<const unsigned char*>(f.state.data())+0x24,4);
+            scene_cond_arg_[side]=static_cast<std::uint32_t>(arg);scene_cond_src_[side]=h?1:s.handle?2:-1;if(!h) h=s.handle;
+            if(!h || !s.comp) return;
+            if(comp_call(scene_base_+0x63a7c0,s.comp,h)) {s.cond=true;++scene_conds;} else ++scene_faults;
+            return;
+        }
+    }
+    // One-time pin: plausible prologues (REX / push) for the driver, the manager's create / play / finished / stop and the conditions, the rate
+    // setter's exact bytes (NativeSlashSceneRate::setter_code), the no-op's 3 bytes, and the getters / refresh / conditions in both weapon vtables.
+    template<class Read> static bool scene_pinned(std::uintptr_t base,Read& read) {
+        if(const int p=scene_pin_.load();p>=0) return p==1;
+        static constexpr std::array<unsigned char,16> rate_code{0x40,0x53,0x48,0x83,0xec,0x50,0x48,0xc7,0x44,0x24,0x20,0xfe,0xff,0xff,0xff,0x0f};
+        struct Slot {std::uintptr_t vt,slot,fn;};
+        static constexpr std::array<Slot,8> slots{{{0x1b53f58,0x120,0x44f1e0},{0x1b53f58,0x128,0x63bd90},{0x1b53f58,0x108,0x44e180},{0x1b53f58,0xe0,0x63a7c0},
+            {0x1b9cbf8,0x120,0x63bc00},{0x1b9cbf8,0x128,0x63bd90},{0x1b9cbf8,0x108,0x62b990},{0x1b9cbf8,0xe0,0x63a7c0}}};
+        bool good=true;
+        for(unsigned i=0;i<scene_pin_rvas.size();++i) {
+            auto& b=scene_pin_bytes_[i];if(!read(base+scene_pin_rvas[i],b.data(),b.size())) {good=false;continue;}
+            if(i+1==scene_pin_rvas.size()) good=good && ((b[0]==0xc2 && b[1]==0 && b[2]==0) || ((b[0]==0x32 || b[0]==0x33) && b[1]==0xc0 && b[2]==0xc3));   // ret 0 / xor; ret
+            else good=good && (b[0]==0x40 || b[0]==0x48 || b[0]==0x4c || b[0]==0x53 || b[0]==0x55 || b[0]==0x56 || b[0]==0x57);
+        }
+        good=good && scene_pin_bytes_[3]==rate_code;
+        for(const auto& s:slots) good=good && rig::value<std::uintptr_t>(read,base+s.vt+s.slot)==base+s.fn;
+        if(good) {
+            scene_base_=base;for(auto& v:scene_vt_) v=base+0x998b0;scene_vt_[0x88/8]=reinterpret_cast<std::uintptr_t>(&scene_conditions);
+            for(auto& f:scene_fakes_) {f.state[0]=reinterpret_cast<std::uintptr_t>(scene_vt_.data());f.state[0x10/8]=reinterpret_cast<std::uintptr_t>(f.player.data());
+                f.player[0x328/8]=reinterpret_cast<std::uintptr_t>(f.equip.data());f.equip[0x70/8]=reinterpret_cast<std::uintptr_t>(f.rec.data());}
+        }
+        scene_pin_=good?1:0;
+        if(!report_dir_.empty()) if(std::ofstream o(report_dir_/"real-parts.csv",std::ios::app);o) {
+            o<<GetTickCount64()<<",pin,"<<(good?1:0);
+            for(unsigned i=0;i<scene_pin_rvas.size();++i) {char h[40];o<<','<<std::hex<<scene_pin_rvas[i]<<std::dec<<':';for(const auto c:scene_pin_bytes_[i]) {std::snprintf(h,sizeof(h),"%02x",static_cast<unsigned>(c));o<<h;}}
+            for(const auto& s:slots) o<<','<<std::hex<<s.vt<<'+'<<s.slot<<'='<<(rig::value<std::uintptr_t>(read,base+s.vt+s.slot).value_or(0)-base)<<std::dec;
+            o<<'\n';
+        }
+        return good;
+    }
+    template<class Read> static Marks weapon_marks(std::uintptr_t base,Read& read,std::uintptr_t comp) {
+        Marks m{};if(!comp || !rig::pointer(comp)) return m;
+        m.mag=rig::value<std::int32_t>(read,comp+0xa0).value_or(-1);
+        if(rig::typed(read,base,comp,0x1b9cbf8)) if(const auto b=rig::value<std::uintptr_t>(read,comp+0x160);b && rig::pointer(*b)) m.bolt=rig::value<std::uint8_t>(read,*b+0xd0).value_or(0);
+        if(const auto list=rig::list(read,comp+0x50,64)) for(unsigned i=0;i<list->packed_count && i<16;++i) for(unsigned k=0;k<2;++k)
+            if(const auto p=rig::value<std::uintptr_t>(read,list->data+i*0x28ull+0x10+8ull*k);p && rig::pointer(*p) && (rig::value<std::uint8_t>(read,*p+0xd0).value_or(0)&1)) m.hidden|=1u<<(i*2+k);
+        return m;
+    }
+    template<class Read> static SceneMarks scene_marks(std::uintptr_t base,Read& read,std::uintptr_t own,held_copy::Kind kind) {
+        SceneMarks m{weapon_marks(base,read,native_equipment(base,read,kind)),weapon_marks(base,read,own)};
+        const auto decl=own?rig::value<std::uintptr_t>(read,own+8).value_or(0):0;
+        if(decl && rig::pointer(decl)) m.d11c=rig::value<std::int32_t>(read,decl+0x11c).value_or(-1);
+        return m;
+    }
+    static void scene_row(const char* what,unsigned side,char kind,std::uint32_t h,double x,int rate_ok,std::uintptr_t scene,const SceneMarks& m) {
+        if(report_dir_.empty() || scene_rows_>=400) return;   // diagnostics: the first 400 rows of a session
+        ++scene_rows_;std::ofstream o(report_dir_/"real-parts.csv",std::ios::app);if(!o) return;
+        o<<GetTickCount64()<<','<<what<<','<<side<<','<<(kind=='R'?"reload":"fire")<<','<<h<<','<<x<<','<<rate_ok<<','<<std::hex<<scene<<std::dec<<','<<m.d11c<<','
+         <<m.native.mag<<','<<m.native.bolt<<','<<std::hex<<m.native.hidden<<std::dec<<','<<m.copy.mag<<','<<m.copy.bolt<<','<<std::hex<<m.copy.hidden<<std::dec
+         <<','<<scene_cond_src_[side&1u]<<','<<scene_cond_arg_[side&1u]<<'\n';
+    }
+    static void scene_stop(std::uintptr_t base,unsigned side,std::uintptr_t game) {   // calls the manager only in the game that made the handle, and only if still running
+        auto& s=scenes_[side];
+        if(s.handle && game && s.game==game) {
+            const int done=scene_finished(base,game+0x1f5338,s.handle);
+            if(done<0) ++scene_faults;
+            else if(!done) {if(scene_halt(base,game+0x1f5338,s.handle)) ++scene_stops;else ++scene_faults;}
+        }
+        s={};
+    }
+    template<class Read> static void scene_play(std::uintptr_t base,Read& read,unsigned side,std::uintptr_t own,held_copy::Kind kind,bool reload,std::uintptr_t game) {
+        auto& s=scenes_[side];const char k=reload?'R':'F';const bool crossbow=kind==held_copy::Kind::crossbow;
+        const auto ent=rig::value<std::uintptr_t>(read,own+0x10).value_or(0);const auto id=ent && rig::pointer(ent)?rig::value<std::uint32_t>(read,ent+0xa8).value_or(0):0u;
+        const auto before=scene_marks(base,read,own,kind);
+        float rate=1.f;std::uintptr_t scene=0;
+        const bool got=id && scene_of(base+(reload?0x63bd90:crossbow?0x63bc00:0x44f1e0),own,reload,&rate,&scene);
+        if(!got || !scene) {++scene_fail;if(id && !got) ++scene_faults;scene_row("scene_fail",side,k,0,got?2:1,0,scene,before);return;}
+        if(s.handle) scene_stop(base,side,game);   // a new shot or the reload replaces the running scene (the game's state exit ends its own)
+        auto& f=scene_fakes_[side];f.rec[1]=id;std::memset(reinterpret_cast<unsigned char*>(f.state.data())+0x24,0,4);
+        scene_cond_src_[side]=0;scene_cond_arg_[side]=0;
+        s={own,game,0,k,false,GetTickCount64()};
+        const bool ran=scene_drive(base,reinterpret_cast<std::uintptr_t>(f.state.data()),&s.handle,scene);
+        if(!ran || !s.handle) {++scene_fail;if(!ran) ++scene_faults;const auto h=s.handle;if(!ran) scene_stop(base,side,game);s={};scene_row("scene_fail",side,k,h,ran?4:3,0,scene,before);return;}
+        if(!s.cond) {if(comp_call(base+0x63a7c0,own,s.handle)) {s.cond=true;++scene_late;scene_cond_src_[side]=3;} else ++scene_faults;}   // the driver never asked: set them after play
+        const int rated=std::isfinite(rate) && rate>0.f?scene_rate(base,game+0x1f5338,s.handle,rate):-2;if(rated<0 && rated!=-2) ++scene_faults;
+        if(!reload && !comp_call(base+(crossbow?0x62b990:0x44e180),own,0)) ++scene_faults;   // after a fire: the bolt / bullets as the weapon shows them
+        ++(reload?scene_reload:scene_fire);
+        scene_row("scene",side,k,s.handle,rate,rated,scene,before);
+        scene_after_[side]={GetTickCount64()+1000,s.handle,k,kind};
+    }
+    // Per side, per tick: ends a scene that finished, or whose copy is gone, hidden, dropped or replaced (or another game's); a new shot plays
+    // the fire scene (not on a burst's follow-up shots while the burst's scene runs), a new reload the reload scene.
+    template<class Read> static void service_copy_scene(std::uintptr_t base,Read& read,unsigned side,std::uintptr_t own,held_copy::Kind kind,bool fired,bool reloading) {
+        auto& s=scenes_[side];auto& a=scene_after_[side];
+        if(!s.handle && !a.due && !(own && (fired || reloading))) return;
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290).value_or(0);const auto now=GetTickCount64();
+        if(s.handle && (s.comp!=own || s.game!=game || now-s.at>10000)) scene_stop(base,side,game);
+        else if(s.handle) {const int done=scene_finished(base,game+0x1f5338,s.handle);if(done) {if(done<0) ++scene_faults;s={};}}
+        if(a.due && now>=a.due) {scene_row("scene_after",side,a.kind,a.handle,s.handle==a.handle?1:0,-9,0,scene_marks(base,read,own,a.wk));a={};}
+        if(fired && !reloading && s.handle && s.kind=='F' && NativeRangedFire::burst_follow_up(side)) fired=false;
+        if(own && game && (fired || reloading) && scenes_on() && scene_pinned(base,read)) scene_play(base,read,side,own,kind,reloading,game);
+        scene_running=(scenes_[0].handle?1u:0u)+(scenes_[1].handle?1u:0u);
+    }
     // Per game tick, before the 250 ms gate: each hand's held copy plays its parts on its shots and reloads (and the looping ones), and the
     // crossbow copy keeps its loaded bolt.
     template<class Read> static void service_copy_state(std::uintptr_t base,Read& read) {
@@ -1864,9 +2036,11 @@ private:
                 auto& seen=real_seen_[side];
                 const auto shot=NativeRangedFire::shot_serial(side),reload=NativeRangedFire::reload_serial(side);
                 if(seen.comp!=own) seen={own,shot,reload};
-                stand_in_type(base,own,seen.shot!=shot?3:-1);seen.shot=shot;
-                stand_in_type(base,own,seen.reload!=reload?4:-1);seen.reload=reload;
+                const bool fired=seen.shot!=shot,reloading=seen.reload!=reload;
+                stand_in_type(base,own,fired?3:-1);seen.shot=shot;
+                stand_in_type(base,own,reloading?4:-1);seen.reload=reload;
                 stand_in_type(base,own,1);
+                {CrashOperation operation("native copy scene");try {service_copy_scene(base,read,side,own,kind,fired,reloading);} catch(...) {++scene_faults;}}
                 if(kind==held_copy::Kind::crossbow) { // its own bolt: hidden while the hand's magazine is empty or reloading
                     const auto bolt=rig::value<std::uintptr_t>(read,own+0x160).value_or(0);const auto bid=bolt?rig::value<std::uint32_t>(read,bolt+0xa8).value_or(0):0u;
                     if(bolt && alive_entity(base,read,bolt,bid)) {
@@ -1877,6 +2051,7 @@ private:
                 try {service_bolt(base,read,side,0,0,0);} catch(...) {}
                 continue;
             }
+            {CrashOperation operation("native copy scene");try {service_copy_scene(base,read,side,0,kind,false,false);} catch(...) {++scene_faults;}}   // no real copy in the hand: its scene ends
             if(pinned && ent) for(auto& u:ups_) if(u.ent==ent && u.id==id) {
                 const auto shot=NativeRangedFire::shot_serial(side),reload=NativeRangedFire::reload_serial(side);
                 if(u.side!=static_cast<int>(side)) {u.side=static_cast<int>(side);u.shot_seen=shot;u.reload_seen=reload;}
@@ -1943,7 +2118,7 @@ private:
             const auto master=bind && rig::pointer(bind)?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0;const int joint=bind && rig::pointer(bind)?rig::value<std::int16_t>(read,bind+0x3d0).value_or(-9):-9;
             const auto pf=entity_frame(read,e);const double dist=pf?length(pf->position-cf->position):-1.0;
             row(what,i,k,e,fl,dist,master,joint,name);
-            if(fl&1) {if(visible(base,read,e,true)) ++real_parts_unhid;}
+            if(fl&1) {if(k<2 && visible(base,read,e,true)) ++real_parts_unhid;}   // v1113: the bolt's visibility belongs to service_copy_state (hidden while the hand reloads)
             if(!pf || dist<0) return;
             if(dist<.3) {++near_n;return;}
             ++far_n;if(k>1) {++real_bolt_far;return;}   // the bolt: the game's own refresh (0x62b240) places it; only counted
@@ -2030,9 +2205,9 @@ private:
             // a bound child is presented only by its master's Show recursion, 0x87e0a0 -> entity vslot 0x98 = 0x87c5d0): when the copy or any bound child
             // still carries bit1 and the copy's master does not, one Hide/Show cycle on the copy presents the whole tree in the same tick.
             const auto e=shown[i].ent;if(!alive_entity(base,read,e,shown[i].id) || !own_weapon(base,read,e,shown[i].kind)) continue;
-            bool need=(rig::value<std::uint8_t>(read,e+0xd0).value_or(0)&2)!=0;
-            if(const auto ch=rig::list(read,e+0xb0,64)) for(unsigned c=0;c<ch->packed_count && c<16 && !need;++c)
-                if(const auto p=rig::value<std::uintptr_t>(read,ch->data+c*8ull);p && *p && rig::pointer(*p)) need=(rig::value<std::uint8_t>(read,*p+0xd0).value_or(0)&2)!=0;
+            bool need=(rig::value<std::uint8_t>(read,e+0xd0).value_or(0)&3)==2;
+            if(const auto ch=rig::list(read,e+0xb0,64)) for(unsigned c=0;c<ch->packed_count && c<16 && !need;++c)   // v1113: a child hidden on purpose (the bolt while reloading) is left alone (headset v1112: 354 cycles)
+                if(const auto p=rig::value<std::uintptr_t>(read,ch->data+c*8ull);p && *p && rig::pointer(*p)) need=(rig::value<std::uint8_t>(read,*p+0xd0).value_or(0)&3)==2;
             if(!need) continue;
             const auto bind=rig::value<std::uintptr_t>(read,e+0x358).value_or(0);
             const auto master=bind && rig::pointer(bind)?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0;
@@ -2055,7 +2230,7 @@ private:
         }
     }
     static void guns_forget() { // every pointer is dead or already removed: call nothing
-        lying_={};held_={};meas_={};pool_={};ups_={};places_={};bolts_={};bolt_place_.reset();real_seen_={};anchors_={};NativeRangedFire::set_copy_comp(0,0);NativeRangedFire::set_copy_comp(1,0);bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
+        lying_={};held_={};adopt_={};meas_={};pool_={};ups_={};places_={};bolts_={};bolt_place_.reset();real_seen_={};scenes_={};scene_after_={};anchors_={};NativeRangedFire::set_copy_comp(0,0);NativeRangedFire::set_copy_comp(1,0);bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
         std::lock_guard<std::mutex> l(feed_m_);held_pub_={};copy_draw_={};
     }
     template<class Read> static void service_guns(std::uintptr_t base,Read& read) {

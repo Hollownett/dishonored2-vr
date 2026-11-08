@@ -13515,7 +13515,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // a held trigger fires again as soon as the hand's weapon is ready (its fire break and reload from its upgrades), as the game's own
                                         // weapons do; a refused shot (empty, not ready yet) waits 200 ms before the next try so the counters are not flooded.
                                         static std::array<std::uint64_t,2> held_retry{};const auto now_f=GetTickCount64();
-                                        if(!edge && (now_f<held_retry[h] || !d2vr::NativeRangedFire::ready(h) || d2vr::NativeRangedFire::queued(h))) continue;
+                                        if(!edge && (now_f<held_retry[h] || !d2vr::NativeRangedFire::ready(h) || d2vr::NativeRangedFire::queued(h) || d2vr::NativeRangedFire::held_blocked(h))) continue;
                                         if(const auto pose=d2vr::NativeWeaponHands::held_copy_pose(h)) {
                                             d2vr::NativeRangedFire::Shot shot{};shot.side=h;shot.kind=ex==E::crossbow?d2vr::NativeRangedFire::Shot::crossbow:d2vr::NativeRangedFire::Shot::pistol;
                                             const auto muzzle=pose->position+pose->basis[0]*.2; // ponytail: the barrel tip 0.2 m along the model's forward; tune
@@ -15591,6 +15591,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::NativeManualEquipRuntime::carry_keeps_left=!fs::exists(root/L"build"/L"carry-locks-hands"); // v1038: a carried body takes the right arm only
         d2vr::NativeManualEquipRuntime::hold_no_lock=dual_wield_enabled && !fs::exists(root/L"build"/L"hold-locks-sword"); // v789: a bottle never locks the sword hand
         d2vr::NativeWeaponHands::dual_wield(dual_wield_enabled);
+        d2vr::NativeWeaponHands::set_report_dir(output_directory.always());   // v1113: real-parts.csv and the realcopy report go to the artifacts folder in the headset too (v1111 wrote them only after the sim's realcopy command)
         d2vr::NativeWeaponHands::draw_write(&weapon_copy_write);   // v1102: every copy placement feeds the draw-time pair log
         d2vr::weapon_draw::WriteLog::clear();
         d2vr::weapon_draw::Binder::clear();   // v1106: no G survives a reload/restart of the probe

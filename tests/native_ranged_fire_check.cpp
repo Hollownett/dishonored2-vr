@@ -220,6 +220,9 @@ int main() {
         // a dry run still tells why it could not resolve
         build(7,5);M.put<std::uint32_t>(PENT+0xac,99);
         assert(Fire::fire(shot(1,Fire::Shot::pistol)));run_queued();assert(Fire::refused_count(Why::bad_owner)==1);
+        // v1113: a refused shot blocks the held trigger for 250 ms
+        assert(Fire::held_blocked(1) && !Fire::held_blocked(0));
+        g_now+=249;assert(Fire::held_blocked(1));g_now+=1;assert(!Fire::held_blocked(1));
     }
     // ---- a pistol shot, end to end
     {
