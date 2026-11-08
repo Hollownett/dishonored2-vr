@@ -141,6 +141,7 @@ struct NativeRangedFireTest { // the friend: what NativeRangedFire::service does
         return w;
     }
     static bool latched() {return Fire::latched_.load();}
+    static void track_ammo() {Fire::track_ammo(BASE,M);}
     static void swapped(std::uintptr_t base,std::uintptr_t rva,std::uintptr_t comp,std::uintptr_t entity,const float* o,const float* a) {Fire::swapped(base,rva,comp,entity,o,a);}
 };
 }
@@ -357,6 +358,30 @@ int main() {
         assert(Fire::stationary_==1 && Fire::moved_==0 && Fire::comps_started0_==0 && Fire::comps_started100_==0 && Fire::proj_comp_started100_==0);
         g_now+=5000;service({});assert(Fire::alive_4s_==1);
         const auto k=Fire::status_json();int depth=0;for(char c:k) {if(c=='{'||c=='[') ++depth;if(c=='}'||c==']') --depth;assert(depth>=0);}assert(depth==0 && has(k,"\"alive_4s\":1"));
+    }
+    // ---- v1101: a wheel choice by the hand that holds a real copy stays on the copy; the native weapon keeps its ammo
+    {
+        fresh();
+        constexpr std::uintptr_t CCOMP=0x2e000000,CCOMP2=0x2e010000,SLEEP_DECL=0x2e100000,SLEEP_DEF=0x2e200000;
+        M.put<std::uint64_t>(XDECL+0x188,XAMMO);M.put<std::uint32_t>(XDECL+0x190,2);   // the crossbow's ammo table: entry 0 = the native's bolt, entry 1 = sleep darts
+        M.put<std::uint64_t>(XAMMO+0x70,SLEEP_DECL);M.put<std::uint64_t>(XAMMO+0x80,SLEEP_DEF);M.put<std::uint64_t>(SLEEP_DECL,0);M.put<std::uint64_t>(SLEEP_DEF,0);
+        M.put<std::uint64_t>(INV+0x70,RECS+2*0x38);   // the crossbow record is in slot 1
+        for(const auto c:{CCOMP,CCOMP2}) {M.zero(c,0x200);M.put<std::uint64_t>(c,BASE+0x1b9cbf8);M.put<std::uint64_t>(c+8,XDECL);M.put<std::uint64_t>(c+0x98,XAMMO);}
+        Fire::note_copies(-1,1);Fire::set_copy_comp(1,CCOMP);Fire::note_wheel_open(1);
+        assert(Fire::wheel_pick(BASE,M,0xa0000,SLEEP_DECL)==0 && Fire::copy_ammo(1,1)==0);                       // another item chosen: left alone
+        assert(Fire::wheel_pick(BASE,M,0xb0000,SLEEP_DECL)==XAMMO_DECL && Fire::copy_ammo(1,1)==XAMMO+0x70);    // sleep darts for the copy: the game keeps the native's bolt
+        assert(Fire::wheel_pick(BASE,M,0xb0000,0xdead0000)==0 && Fire::copy_ammo(1,1)==XAMMO+0x70);              // not an ammo of this weapon
+        Fire::note_wheel_open(0);assert(Fire::wheel_pick(BASE,M,0xb0000,SLEEP_DECL)==0);                           // the hand without a copy: the native's own choice
+        Fire::note_wheel_open(1);M.put<std::uint64_t>(INV+0x70,0);
+        assert(Fire::wheel_pick(BASE,M,0xb0000,XAMMO_DECL)==0 && Fire::copy_ammo(1,1)==XAMMO);                    // native not in slot 1: recorded, the equip runs as chosen
+        M.put<std::uint64_t>(INV+0x70,RECS+2*0x38);
+        Fire::set_copy_comp(1,CCOMP);assert(Fire::copy_ammo(1,1)==XAMMO);                                            // the same instance keeps its choice
+        Fire::set_copy_comp(1,0);Fire::set_copy_comp(1,CCOMP);assert(Fire::copy_ammo(1,1)==XAMMO);                  // hidden and shown again: kept
+        Fire::set_copy_comp(1,CCOMP2);assert(Fire::copy_ammo(1,1)==0);                                               // a new instance starts as the weapon it copies
+        Test::track_ammo();assert(Fire::copy_ammo(1,1)==XAMMO && Fire::native_ammo(1)==XAMMO);                       // adopted the native's bolt, and now its own
+        M.put<std::uint64_t>(XCOMP+0x98,XAMMO+0x70);g_now+=3000;Test::track_ammo();                                  // the native hand chose sleep darts, no wheel of a copy hand pending
+        assert(Fire::native_ammo(1)==XAMMO+0x70 && Fire::copy_ammo(1,1)==XAMMO);                                     // the copy keeps its own
+        const auto j=Fire::status_json();int depth=0;for(char c:j) {if(c=='{'||c=='[') ++depth;if(c=='}'||c==']') --depth;}assert(depth==0 && has(j,"\"v1094\":[0,0,0,0,0,0,2]"));
     }
     std::puts("native ranged fire checks ok");
 }

@@ -769,8 +769,8 @@ private:
         bool player_gun=false;for(unsigned d=1;d<mirror_def_names.size();++d) player_gun=player_gun || !std::strcmp(name,mirror_def_names[d]);
         if(!player_gun) return 0;
         const auto comp=native_equipment(base,read,held_copy::kind_of(name));
-        const auto weapon=comp?rig::value<std::uintptr_t>(read,comp+0x10):std::nullopt;
-        const auto decl=weapon && *weapon?rig::value<std::uintptr_t>(read,*weapon+0x2e8):std::nullopt;
+        const auto weapon_ent=comp?rig::value<std::uintptr_t>(read,comp+0x10):std::nullopt; // (named apart from the checks' globals: /WX C4459)
+        const auto decl=weapon_ent && *weapon_ent?rig::value<std::uintptr_t>(read,*weapon_ent+0x2e8):std::nullopt;
         return decl && rig::pointer(*decl)?*decl:0;
     }
     template<class Read> static std::uintptr_t spawn_def(std::uintptr_t base,Read& read,const char* name,const float* pos,const float* axis,bool allow_real=true) {
@@ -1667,8 +1667,8 @@ private:
     }
     // The player's own weapon component of a kind (the inventory record's component, as test_equip finds it): 0 none.
     template<class Read> static std::uintptr_t native_equipment(std::uintptr_t base,Read& read,held_copy::Kind kind) {
-        const auto fsm=player_fsm(base,read);const auto inventory=fsm?rig::value<std::uintptr_t>(read,fsm+0x328):std::nullopt;
-        const auto entries=inventory && *inventory?rig::list(read,*inventory+0x38,4096):std::nullopt;if(!entries) return 0;
+        const auto fsm=player_fsm(base,read);const auto inv=fsm?rig::value<std::uintptr_t>(read,fsm+0x328):std::nullopt;
+        const auto entries=inv && *inv?rig::list(read,*inv+0x38,4096):std::nullopt;if(!entries) return 0;
         for(unsigned i=0;i<entries->packed_count;++i) {
             const auto comp=rig::value<std::uintptr_t>(read,entries->data+i*0x38ull+0x10);
             if(comp && *comp && rig::typed(read,base,*comp,kind==held_copy::Kind::crossbow?0x1b9cbf8:0x1b53f58)) return *comp;

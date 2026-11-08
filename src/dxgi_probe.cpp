@@ -13329,6 +13329,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 bool wheel_committed_now=false;
                                 if(dual_wield_enabled && x_wheel.wheel()) {
                                     if(!manual_wheel_was_open) wheel_open_seq=d2vr::NativeManualEquipRuntime::wheel_choice_seq.load(std::memory_order_acquire);
+                                    if(!manual_wheel_was_open && wheel_open_hand>=0) d2vr::NativeRangedFire::note_wheel_open(static_cast<unsigned>(wheel_open_hand)); // v1101: the copy hand's ammo choice
                                     arm_set.wheel_open(GetTickCount64());
                                 }
                                 const auto wheel_to_hand=[&]{if(dual_wield_enabled && wheel_open_hand>=0) {wheel_committed_now=true;
@@ -13481,6 +13482,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     using E=d2vr::arm::Held;static std::array<bool,2> shot_down{};
                                     {const auto kind=[&](unsigned h){const auto ex=arm_set.copy_at(h);return !d2vr::arm::is_gun(ex)?-1:ex==E::crossbow?1:0;}; // v1094: the copies' own ammo (NativeRangedFire::track_ammo)
                                      d2vr::NativeRangedFire::note_copies(kind(0),kind(1));}
+                                    {static bool pick_installed=false;if(!pick_installed) {pick_installed=true; // v1101: a copy hand's wheel ammo choice stays on its copy (NativeRangedFire::wheel_pick)
+                                        d2vr::NativeManualEquipRuntime::wheel_pick.store(+[](std::uintptr_t item,std::uintptr_t ammo)->std::uintptr_t {auto rd=&read_self;return d2vr::NativeRangedFire::wheel_pick(image_base,rd,item,ammo);},std::memory_order_release);}}
                                     for(unsigned h=0;h<2;++h) {
                                         const auto ex=arm_set.copy_at(h);const bool pull=raw_trigger(h)>=(shot_down[h]?.35f:.55f),edge=pull && !shot_down[h];shot_down[h]=pull;
                                         if(!d2vr::arm::is_gun(ex) || !edge || logic!=2) continue;

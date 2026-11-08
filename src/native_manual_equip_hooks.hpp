@@ -23,6 +23,9 @@ public:
     using WheelBefore=bool (*)(void*,std::uintptr_t,std::uintptr_t,std::uintptr_t,std::uintptr_t);
     using WheelAfter=bool (*)(void*,std::uintptr_t,std::uintptr_t,std::uintptr_t,std::uintptr_t,bool,bool);
     struct Callbacks {void* context{};ProcessorHost processor{};WheelBefore wheel_before{};WheelAfter wheel_after{};};
+    // v1101: an ammo item wheel_before asks the game to equip in place of the wheel's (a copy hand's bolt choice stays on its copy: the
+    // native weapon is handed its own ammo, which 0x7fb350 treats as already equipped). Consumed by the next admitted wheel call.
+    inline static std::atomic<std::uintptr_t> wheel_ammo_override{};
     inline static constexpr std::array<std::uintptr_t,2> rvas{0x8363f0,0x7fb350};
     inline static constexpr std::array<unsigned,2> prefixes{5,6};
     inline static constexpr std::array<std::array<unsigned char,32>,2> prologues{{
@@ -126,8 +129,9 @@ private:
         const auto epoch=dispatch_epoch_.load();
         const bool admitted=enabled() && caller==base_+wheel_return_rva;
         if(admitted && !wheel_before(caller,controller,item,ammo))enabled(false);
+        const auto redirected=wheel_ammo_override.exchange(0,std::memory_order_acq_rel);const auto equip_ammo=admitted && redirected?redirected:ammo;
         bool completed=false;
-        __try {native(controller,item,ammo);completed=true;}
+        __try {native(controller,item,equip_ammo);completed=true;}
         __finally {if(admitted && !wheel_after(caller,controller,item,ammo,completed,enabled() && dispatch_epoch_==epoch))enabled(false);}
     }
     bool cpp_processor(std::uintptr_t caller,std::uintptr_t state,Params& params) noexcept {

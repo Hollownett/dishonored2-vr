@@ -374,6 +374,7 @@ private:
     }
     static bool wheel_before(void* context,std::uintptr_t caller,std::uintptr_t controller,std::uintptr_t item,std::uintptr_t ammo) {
         wheel_choice_decl.store(item,std::memory_order_relaxed);wheel_choice_seq.fetch_add(1,std::memory_order_release);   // the chosen item, whatever the grant decides (dual wield: the exact same-item test)
+        if(const auto pick=wheel_pick.load(std::memory_order_acquire)) if(const auto keep=pick(item,ammo)) Hooks::wheel_ammo_override.store(keep,std::memory_order_release); // v1101: a copy hand's ammo choice
         auto& self=*static_cast<NativeManualEquipRuntime*>(context);std::lock_guard<std::mutex> lock(self.mutex_);
         if(wheel_depth_>=wheel_calls_.size()){++wheel_overflow_;self.revoke_locked();return false;}
         auto& call=wheel_calls_[wheel_depth_++];call={&self,controller,item,ammo,0};
@@ -497,6 +498,8 @@ public:
     // before the game decides to skip an item already in the left hand (docs/native-weapon-equip-research.md 2c). dxgi_probe.cpp compares it with the
     // declaration slot 1 held when the wheel closed: the same item gives the opening arm a copy at once, a different one waits for the ticketed arrival.
     inline static std::atomic<std::uintptr_t> wheel_choice_decl{};inline static std::atomic<std::uint64_t> wheel_choice_seq{};
+    // v1101: asked with the wheel's (item, ammo) before the game's equip; returns the ammo item the game should equip instead, 0 = as chosen.
+    inline static std::atomic<std::uintptr_t (*)(std::uintptr_t,std::uintptr_t)> wheel_pick{};
     inline static std::atomic<bool> sword_kept{}; // v780: the sword is drawn and its hand holds it (input thread, SwordGrip)
     // Game thread (NativeWeaponHands::equip): the request id 835590 gave a SwordGrip draw or pickup.
     static void authorize_right_draw(std::uint32_t id) noexcept {authorized_[authorized_next_.fetch_add(1)%authorized_.size()].store(id);}
