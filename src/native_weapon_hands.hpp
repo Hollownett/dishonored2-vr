@@ -809,10 +809,34 @@ private:
     }
     static void present_model(std::uintptr_t base,std::uintptr_t e) {
         __try {
-            reinterpret_cast<void (__fastcall*)(std::uintptr_t)>(base+0x87dd30)(e);
-            const auto flags=*reinterpret_cast<const volatile std::uint8_t*>(e+0xd0);const auto model=*reinterpret_cast<const std::uintptr_t*>(e+0xf0);
-            if(model && (flags&2) && !(flags&1)) {const auto vt=*reinterpret_cast<const std::uintptr_t*>(model);reinterpret_cast<void (__fastcall*)(std::uintptr_t,int)>(*reinterpret_cast<const std::uintptr_t*>(vt+0x28))(model,1);}
+            present_one(base,e);
+            // v1111 (user, headset v1100/v1110: the second-hand copy and the dropped weapon showed the base model; sim v1111: the copy's upgrade
+            // parts and loaded bolt existed, were bound to the copy's joints, visible-flagged and 11 cm from it, yet never drawn): the parts are
+            // bound children of the copy and carry the weapon's own 'not presented' bit (+0xd0 bit1, live 0x8a) as the copy does, so the game
+            // never submits their models either; only the copy was presented here. Its bound children (+0xb0 list, count +0xb8) are presented with it.
+            const auto data=*reinterpret_cast<const std::uintptr_t*>(e+0xb0);const auto n=*reinterpret_cast<const std::uint32_t*>(e+0xb8)&0xffffffu;
+            if(data && n<64) for(unsigned i=0;i<n;++i) {const auto c=*reinterpret_cast<const std::uintptr_t*>(data+i*8ull);if(c) {present_one(base,c);++children_presented;}}
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    static void present_one(std::uintptr_t base,std::uintptr_t e) {
+        reinterpret_cast<void (__fastcall*)(std::uintptr_t)>(base+0x87dd30)(e);
+        const auto flags=*reinterpret_cast<const volatile std::uint8_t*>(e+0xd0);const auto model=*reinterpret_cast<const std::uintptr_t*>(e+0xf0);
+        if(!model || (flags&1)) return;
+        const auto vt=*reinterpret_cast<const std::uintptr_t*>(model);
+        if(flags&2) reinterpret_cast<void (__fastcall*)(std::uintptr_t,int)>(*reinterpret_cast<const std::uintptr_t*>(vt+0x28))(model,1);
+        // v1111 (sim: the crossbow copy was never drawn although presented and placed, the pistol copy was): an animated-class model (vtable
+        // 0x1b0d628) publishes its render-world bounds sphere and cull byte only from model vslot 0x78 (0x25f3c0), which the game runs from the
+        // animation component's pose upload (0x25efe0 <- 0x541270). A weapon copy without a running animation component (the crossbow) keeps the
+        // sphere it last published, or none at all (cull byte 9 = never drawn). Republished here after every move; with no pose it takes the
+        // rest-bounds path from the current origin and axis.
+        if(vt==base+0x1b0d628) {reinterpret_cast<void (__fastcall*)(std::uintptr_t)>(*reinterpret_cast<const std::uintptr_t*>(vt+0x78))(model);++bounds_published;}
+    }
+    inline static std::atomic<std::uint64_t> bounds_published{};
+    inline static std::atomic<std::uint64_t> children_presented{},tree_presents{},tree_present_blocked{};
+    // +0xd0 bit1 = 'not presented' (set by entity vslot 0x90 = 0x8784d0 from the Hide recursion). Cleared raw on the hidden anchor only: its own
+    // model stays out of the render world (bit0), while what is bound to it may be presented.
+    static bool clear_not_presented(std::uintptr_t e) {
+        __try {auto& f=*reinterpret_cast<volatile std::uint8_t*>(e+0xd0);if(f&2) f=static_cast<std::uint8_t>(f&~2u);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
 public:
     // The holstered gun at the left hip (published by the render thread every frame): the player's own pistol or crossbow
@@ -1293,7 +1317,7 @@ public:
         std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
-            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu,%llu,%llu],\"real\":[%llu,%llu,%llu,%llu,%llu]}",dual_wield()?1:0,
+            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu,%llu,%llu],\"real\":[%llu,%llu,%llu,%llu,%llu],\"parts\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}",dual_wield()?1:0,
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1306,7 +1330,10 @@ public:
             static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()),static_cast<unsigned long long>(upgrade_skips.load()),static_cast<unsigned long long>(upgrade_rebinds.load()),
             static_cast<unsigned long long>(upgrade_anims.load()),static_cast<unsigned long long>(copy_bolts.load()),
             static_cast<unsigned long long>(real_spawned.load()),static_cast<unsigned long long>(real_upgrade_sets.load()),static_cast<unsigned long long>(real_reshows.load()),
-            static_cast<unsigned long long>(real_anchors.load()),static_cast<unsigned long long>(real_rebinds.load()));
+            static_cast<unsigned long long>(real_anchors.load()),static_cast<unsigned long long>(real_rebinds.load()),
+            static_cast<unsigned long long>(real_parts_near.load()),static_cast<unsigned long long>(real_parts_far.load()),static_cast<unsigned long long>(real_parts_unhid.load()),
+            static_cast<unsigned long long>(real_parts_rebound.load()),static_cast<unsigned long long>(real_bolt_far.load()),static_cast<unsigned long long>(children_presented.load()),
+            static_cast<unsigned long long>(tree_presents.load()),static_cast<unsigned long long>(tree_present_blocked.load()));
         return b;
     }
 private:
@@ -1655,9 +1682,11 @@ private:
     // joint tag (0x875e80), and applies the decl's model and material overrides. The same call with the copy as owner gives the copy the same
     // parts. A hidden or removed copy loses its parts (removed); a shown one gets them again. ponytail: a model override is not undone when an
     // upgrade leaves the list (the game only adds upgrades); the copy entity would need a respawn.
-    struct CopyUpgrades {std::uintptr_t ent{};std::uint32_t id{};unsigned n{};std::array<std::uintptr_t,8> item{};
-        std::array<std::array<std::uintptr_t,2>,8> att{};std::array<std::array<std::uint32_t,2>,8> att_id{};
-        std::array<std::array<std::uintptr_t,5>,8> rec{};   // v1094: the copy's own upgrade_t array (m_item = the real item), what 0x61a650 walks
+    // v1111 (sim: the player's crossbow carries 9 upgrades, the copy got 8): the lists were capped at 8 items.
+    static constexpr unsigned max_upgrades=16;
+    struct CopyUpgrades {std::uintptr_t ent{};std::uint32_t id{};unsigned n{};std::array<std::uintptr_t,max_upgrades> item{};
+        std::array<std::array<std::uintptr_t,2>,max_upgrades> att{};std::array<std::array<std::uint32_t,2>,max_upgrades> att_id{};
+        std::array<std::array<std::uintptr_t,5>,max_upgrades> rec{};   // v1094: the copy's own upgrade_t array (m_item = the real item), what 0x61a650 walks
         std::uint64_t shot_seen{},reload_seen{};int side{-1};};
     inline static std::array<CopyUpgrades,10> ups_{};inline static std::uint64_t ups_looked_{};
     inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{},upgrade_skips{},upgrade_rebinds{};
@@ -1684,7 +1713,7 @@ private:
     // +0x30c) in the weapon's model frame (model+0x1860, the frame a copy is placed with), cached per upgrade decl and part.
     // The player's weapon may clear m_upgrades while it is put away or dropped: the last non-empty list of each kind is kept and used then.
     struct PartPlace {std::uintptr_t decl{};unsigned part{};held_copy::Pose local{};};
-    inline static std::array<PartPlace,32> places_{};inline static std::array<std::array<std::uintptr_t,8>,4> last_items_{};inline static std::array<unsigned,4> last_n_{};
+    inline static std::array<PartPlace,32> places_{};inline static std::array<std::array<std::uintptr_t,max_upgrades>,4> last_items_{};inline static std::array<unsigned,4> last_n_{};
     static const PartPlace* place_of(std::uintptr_t decl,unsigned part) {
         for(const auto& p:places_) if(p.decl==decl && p.part==part) return &p;
         return nullptr;
@@ -1694,7 +1723,7 @@ private:
         const auto pose=held_copy::from_rows(f.data(),f.data()+3);return held_copy::valid(pose)?std::optional<held_copy::Pose>{pose}:std::nullopt;
     }
     // The player's weapon of `comp`: its upgrade items (and, while its parts live, where each part sits on it).
-    template<class Read> static unsigned native_upgrades(std::uintptr_t base,Read& read,std::uintptr_t comp,held_copy::Kind kind,std::array<std::uintptr_t,8>& items) {
+    template<class Read> static unsigned native_upgrades(std::uintptr_t base,Read& read,std::uintptr_t comp,held_copy::Kind kind,std::array<std::uintptr_t,max_upgrades>& items) {
         const auto list=rig::list(read,comp+0x50,64);unsigned n=0;
         const auto weapon=rig::value<std::uintptr_t>(read,comp+0x10);
         const auto model=weapon && *weapon?rig::value<std::uintptr_t>(read,*weapon+0xf0):std::nullopt;
@@ -1719,7 +1748,7 @@ private:
         if(n) {last=items;ln=n;return n;}
         items=last;return ln;
     }
-    template<class Read> static void upgrades_sync(std::uintptr_t base,Read& read,std::uintptr_t ent,std::uint32_t id,const std::array<std::uintptr_t,8>& want,unsigned wn) {
+    template<class Read> static void upgrades_sync(std::uintptr_t base,Read& read,std::uintptr_t ent,std::uint32_t id,const std::array<std::uintptr_t,max_upgrades>& want,unsigned wn) {
         CopyUpgrades* u=nullptr;
         for(auto& c:ups_) if(c.ent==ent && c.id==id) u=&c;
         if(!u) for(auto& c:ups_) if(!c.ent) {u=&c;break;}
@@ -1880,18 +1909,59 @@ private:
     }
     // The game's own upgrade change on the copy's component (vslot 0xd8 = 0x638020: unload, 0x61a750 detach the removed / grow m_upgrades
     // and AttachUpgrade each added item, vslot 0x100 refresh (modifiers, bolt), vslot 0x148 reload): the player weapon's items, shared.
-    template<class Read> static void real_upgrades(std::uintptr_t base,Read& read,std::uintptr_t comp,const std::array<std::uintptr_t,8>& want,unsigned wn) {
+    template<class Read> static void real_upgrades(std::uintptr_t base,Read& read,std::uintptr_t comp,const std::array<std::uintptr_t,max_upgrades>& want,unsigned wn) {
         if(!wn || !started_weapon(read,comp)) return;
-        std::array<std::uintptr_t,8> have{};unsigned hn=0;
+        std::array<std::uintptr_t,max_upgrades> have{};unsigned hn=0;
         if(const auto list=rig::list(read,comp+0x50,64)) for(unsigned i=0;i<list->packed_count && hn<have.size();++i)
             if(const auto item=rig::value<std::uintptr_t>(read,list->data+i*0x28ull);item && *item) have[hn++]=*item;
-        std::array<std::uintptr_t,8> add{},remove{};unsigned an=0,rn=0;
+        std::array<std::uintptr_t,max_upgrades> add{},remove{};unsigned an=0,rn=0;
         for(unsigned i=0;i<wn;++i) if(std::find(have.begin(),have.begin()+hn,want[i])==have.begin()+hn) add[an++]=want[i];
         for(unsigned i=0;i<hn;++i) if(std::find(want.begin(),want.begin()+wn,have[i])==want.begin()+wn) remove[rn++]=have[i];
-        if(!an && !rn) return;
+        if(!an && !rn) {try {real_parts_audit(base,read,comp);} catch(...) {++upgrade_faults;}return;}   // v1111: wired already: prove the parts, repair the far ones
         const ItemList a{add.data(),an,an<<8},r{remove.data(),rn,rn<<8};
         if(set_upgrades(comp,&a,&r)) ++real_upgrade_sets;else ++upgrade_faults;
     }
+    // v1111 (user, headset v1100/v1110: the second-hand copy and the dropped weapon showed the BASE model although set_upgrades had run once per
+    // copy and the copy's list matched the player's; nothing ever looked at the parts): every part in the copy's m_upgrades (+0x50, stride 0x28,
+    // static part +0x10, animated part +0x18) and the loaded bolt (+0x160) is audited each pass: hidden (+0xd0 bit0) -> shown; farther than 0.3 m
+    // from the copy -> bound again at the place measured on the player's own weapon (place_of, as the model-only path binds), untagged, in the
+    // copy's frame. Gauges in status guns.parts = [near, far, unhidden, rebound, bolt_far]; rows in artifacts/real-parts.csv (one per part per second).
+    template<class Read> static void real_parts_audit(std::uintptr_t base,Read& read,std::uintptr_t comp) {
+        const auto copy=rig::value<std::uintptr_t>(read,comp+0x10).value_or(0);const auto cf=copy?entity_frame(read,copy):std::nullopt;
+        const auto list=rig::list(read,comp+0x50,64);if(!cf || !list) return;
+        const auto now=GetTickCount64();auto& stamp=parts_logged_[(comp>>4)&7u];const bool log=now-stamp>=1000;if(log) stamp=now;
+        std::ofstream o;if(log) o.open(report_dir_/"real-parts.csv",std::ios::app);
+        static const char empty_tag[1]{};const std::uintptr_t tag=reinterpret_cast<std::uintptr_t>(empty_tag);
+        unsigned near_n=0,far_n=0;
+        const auto row=[&](const char* what,unsigned i,unsigned k,std::uintptr_t e,std::uint8_t fl,double dist,std::uintptr_t master,int joint,const std::string& name) {
+            if(!log || !o) return;
+            o<<now<<','<<what<<','<<std::hex<<copy<<','<<comp<<std::dec<<','<<i<<','<<k<<','<<std::hex<<e<<std::dec<<','<<unsigned(fl)<<','<<dist<<','<<(master==copy?"copy":master?"other":"none")<<','<<joint<<','<<name<<'\n';};
+        const auto audit=[&](const char* what,unsigned i,unsigned k,std::uintptr_t e,std::uintptr_t decl,const std::string& name)->void {
+            const auto pid=rig::value<std::uint32_t>(read,e+0xa8);if(!pid || !alive_entity(base,read,e,*pid)) return;
+            const auto fl=rig::value<std::uint8_t>(read,e+0xd0).value_or(0);
+            const auto bind=rig::value<std::uintptr_t>(read,e+0x358).value_or(0);
+            const auto master=bind && rig::pointer(bind)?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0;const int joint=bind && rig::pointer(bind)?rig::value<std::int16_t>(read,bind+0x3d0).value_or(-9):-9;
+            const auto pf=entity_frame(read,e);const double dist=pf?length(pf->position-cf->position):-1.0;
+            row(what,i,k,e,fl,dist,master,joint,name);
+            if(fl&1) {if(visible(base,read,e,true)) ++real_parts_unhid;}
+            if(!pf || dist<0) return;
+            if(dist<.3) {++near_n;return;}
+            ++far_n;if(k>1) {++real_bolt_far;return;}   // the bolt: the game's own refresh (0x62b240) places it; only counted
+            const auto pl=decl?place_of(decl,k):nullptr;if(!pl) return;
+            alignas(16) std::array<float,3> pos{float(pl->local.position.x),float(pl->local.position.y),float(pl->local.position.z)};alignas(16) std::array<float,9> m{};
+            for(unsigned r=0;r<3;++r) {m[r*3]=float(pl->local.basis[r].x);m[r*3+1]=float(pl->local.basis[r].y);m[r*3+2]=float(pl->local.basis[r].z);}
+            reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uintptr_t,const std::uintptr_t*,const float*,const float*,bool)>(base+0x875e80)(copy,e,&tag,pos.data(),m.data(),true);
+            ++real_parts_rebound;};
+        for(unsigned i=0;i<list->packed_count && i<max_upgrades;++i) {
+            const auto at=list->data+i*0x28ull;const auto item=rig::value<std::uintptr_t>(read,at);
+            const auto decl=item && rig::pointer(*item)?rig::value<std::uintptr_t>(read,*item).value_or(0):0;
+            std::string name;if(log && decl) {const auto n=rig::value<std::uintptr_t>(read,decl+0x8);std::array<char,96> t{};if(n && rig::pointer(*n) && read(*n,t.data(),t.size()-1)) {name=t.data();for(auto& c:name) if(c==',' || c<32) c='_';}}
+            for(unsigned k=0;k<2;++k) if(const auto part=rig::value<std::uintptr_t>(read,at+0x10+8ull*k);part && *part) audit("part",i,k,*part,decl,name);
+        }
+        if(rig::typed(read,base,comp,0x1b9cbf8)) if(const auto bolt=rig::value<std::uintptr_t>(read,comp+0x160);bolt && *bolt && rig::pointer(*bolt)) audit("bolt",99,2,*bolt,0,log?entity_decl_name(read,*bolt):std::string{});
+        real_parts_near=near_n;real_parts_far=far_n;
+    }
+    inline static std::atomic<std::uint64_t> real_parts_near{},real_parts_far{},real_parts_unhid{},real_parts_rebound{},real_bolt_far{};inline static std::array<std::uint64_t,8> parts_logged_{};
     // v1099 (sim v1098: the real copies sat at the player's origin, ent_pos = model_pos = the player, bind master = the player at joint 2): a
     // weapon owned by the player is bound to the player by its own components, so the mod's teleports never moved it. Each real copy is bound
     // instead (0x875e80, no tag, zero offset, identity: joint index -1) to a hidden anchor of its own (the kind's *_midnight.def, spawned raw)
@@ -1918,9 +1988,11 @@ private:
                 std::array<float,12> f{};if(!read(e+0x300,f.data(),sizeof(f))) continue;
                 const char* def=mirror_def_names[shown[i].kind==held_copy::Kind::crossbow?2:1];
                 const auto anchor=spawn_def(base,read,def,f.data(),f.data()+3,false);if(!anchor) continue;
-                visible(base,read,anchor,false);
+                visible(base,read,anchor,false);clear_not_presented(anchor);
                 *an={e,anchor,shown[i].id,rig::value<std::uint32_t>(read,anchor+0xa8).value_or(0)};++real_anchors;
             }
+            clear_not_presented(an->anchor);   // v1111: the Hide above set the anchor's +0xd0 bit1 as well (0x87e0a0 unpresents what it hides); every Show over the copy inherits
+                                               // the MASTER's bit1 (RE 0x87e040) and unpresented the copy and its parts. Bit0 keeps the anchor itself unseen.
             const auto bind=rig::value<std::uintptr_t>(read,e+0x358).value_or(0);
             const auto master=bind && rig::pointer(bind)?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0;
             if(master!=an->anchor) {
@@ -1951,12 +2023,25 @@ private:
             const auto f=rig::value<std::uint8_t>(read,shown[i].ent+0xd0);
             if(f && (*f&1) && alive_entity(base,read,shown[i].ent,shown[i].id) && own_weapon(base,read,shown[i].ent,shown[i].kind) && visible(base,read,shown[i].ent,true)) ++real_reshows;
         }
+        for(unsigned i=0;i<ns;++i) { // v1111 (sim: the copy's parts and bolt had +0xd0 bit1 'not presented', live 0x8a, so the render world never held their models;
+            // a bound child is presented only by its master's Show recursion, 0x87e0a0 -> entity vslot 0x98 = 0x87c5d0): when the copy or any bound child
+            // still carries bit1 and the copy's master does not, one Hide/Show cycle on the copy presents the whole tree in the same tick.
+            const auto e=shown[i].ent;if(!alive_entity(base,read,e,shown[i].id) || !own_weapon(base,read,e,shown[i].kind)) continue;
+            bool need=(rig::value<std::uint8_t>(read,e+0xd0).value_or(0)&2)!=0;
+            if(const auto ch=rig::list(read,e+0xb0,64)) for(unsigned c=0;c<ch->packed_count && c<16 && !need;++c)
+                if(const auto p=rig::value<std::uintptr_t>(read,ch->data+c*8ull);p && *p && rig::pointer(*p)) need=(rig::value<std::uint8_t>(read,*p+0xd0).value_or(0)&2)!=0;
+            if(!need) continue;
+            const auto bind=rig::value<std::uintptr_t>(read,e+0x358).value_or(0);
+            const auto master=bind && rig::pointer(bind)?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0;
+            if(master && (rig::value<std::uint8_t>(read,master+0xd0).value_or(0)&2)) {++tree_present_blocked;continue;}   // the master would unpresent it again
+            if(visible(base,read,e,false) && visible(base,read,e,true)) ++tree_presents;else ++upgrade_faults;
+        }
         const auto now=GetTickCount64();
         bool fresh=std::any_of(shown.begin(),shown.begin()+ns,[&](const Shown& s){
-            return std::none_of(ups_.begin(),ups_.end(),[&](const CopyUpgrades& u){return u.ent==s.ent && u.id==s.id;});});
+            return !own_weapon(base,read,s.ent,s.kind) && std::none_of(ups_.begin(),ups_.end(),[&](const CopyUpgrades& u){return u.ent==s.ent && u.id==s.id;});}); // v1111: a real copy has no ups_ entry
         if(!fresh && now-ups_looked_<250) return;   // a newly shown copy at once, the rest (a bought upgrade) four times a second
         ups_looked_=now;
-        std::array<std::array<std::uintptr_t,8>,4> items{};std::array<unsigned,4> n{};
+        std::array<std::array<std::uintptr_t,max_upgrades>,4> items{};std::array<unsigned,4> n{};
         for(const auto kind:{held_copy::Kind::pistol,held_copy::Kind::crossbow}) // measured even with no copy out: a later copy (or drop) needs the places
             if(const auto comp=native_equipment(base,read,kind)) {const auto k=static_cast<unsigned>(kind);try {n[k]=native_upgrades(base,read,comp,kind,items[k]);} catch(...) {++upgrade_faults;}}
         for(unsigned i=0;i<ns;++i) {
@@ -2018,11 +2103,34 @@ public:
     inline static std::atomic<bool> real_copies_{true};inline static std::atomic<std::uint64_t> real_spawned{},real_upgrade_sets{},real_ammo_sets{},real_reshows{},real_anchors{},real_rebinds{};
     inline static std::filesystem::path report_dir_{};inline static std::uintptr_t rc_ent_{};inline static std::uint32_t rc_id_{};inline static int rc_kind_{-1};
     static void set_report_dir(const std::filesystem::path& d) {report_dir_=d;}
+    // v1111: the render model's state words (RE: +0x18bc flags, bit1 = first-person list; +0x1c30 bit0 = freed / not in the render world; +0x1bd0;
+    // +0x1bf8 render world; +0x1c18 def index) and 16 floats after the transform block as bounds candidates.
+    template<class Read> static std::string model_fields(Read& read,std::uintptr_t m) {
+        std::ostringstream s;s<<std::hex<<" m18bc="<<rig::value<std::uint32_t>(read,m+0x18bc).value_or(0)<<" m1c30="<<unsigned(rig::value<std::uint8_t>(read,m+0x1c30).value_or(0))<<" m1bd0="<<rig::value<std::uint64_t>(read,m+0x1bd0).value_or(0)
+         <<" world="<<rig::value<std::uintptr_t>(read,m+0x1bf8).value_or(0)<<" defidx="<<rig::value<std::uint32_t>(read,m+0x1c18).value_or(0)<<" m1c31="<<unsigned(rig::value<std::uint8_t>(read,m+0x1c31).value_or(0))<<std::dec
+         <<" surfaces="<<rig::value<std::uint32_t>(read,m+0xd38).value_or(0)<<" m1fb0="<<std::hex<<rig::value<std::uint32_t>(read,m+0x1fb0).value_or(0)<<" pose="<<rig::value<std::uintptr_t>(read,m+0x1f48).value_or(0)<<std::dec;
+        {std::array<float,6> bb{};if(read(m+0x1840,bb.data(),12) && read(m+0x1850,bb.data()+3,12)) s<<" aabb=["<<bb[0]<<","<<bb[1]<<","<<bb[2]<<" / "<<bb[3]<<","<<bb[4]<<","<<bb[5]<<"]";}
+        const auto world=rig::value<std::uintptr_t>(read,m+0x1bf8);const auto idx=rig::value<std::uint32_t>(read,m+0x1c18);
+        if(world && rig::pointer(*world) && idx && *idx<0x10000) { // RE: sphere at world+0x3e550+idx*16, cull byte at world+0x7a560+idx (9 never drawn, 0xb/0xf drawn)
+            std::array<float,4> sp{};if(read(*world+0x3e550+static_cast<std::uintptr_t>(*idx)*16,sp.data(),16)) s<<" sphere=["<<sp[0]<<","<<sp[1]<<","<<sp[2]<<" r"<<sp[3]<<"]";
+            s<<" cull="<<std::hex<<unsigned(rig::value<std::uint8_t>(read,*world+0x7a560+*idx).value_or(0))<<std::dec;
+        }
+        return s.str();
+    }
     template<class Read> static void dump_entity(std::uintptr_t base,Read& read,std::ostream& o,const char* label,std::uintptr_t e) {
         o<<label<<" entity="<<std::hex<<e<<std::dec;if(!e) {o<<"\n";return;}
         o<<" id="<<std::hex<<rig::value<std::uint32_t>(read,e+0xa8).value_or(0)<<" owner="<<rig::value<std::uint32_t>(read,e+0xac).value_or(0)
          <<" vt="<<(rig::value<std::uintptr_t>(read,e).value_or(base)-base)<<" decl="<<entity_decl_name(read,e)<<" flags_d0="<<unsigned(rig::value<std::uint8_t>(read,e+0xd0).value_or(0))
          <<" model="<<rig::value<std::uintptr_t>(read,e+0xf0).value_or(0)<<std::dec;
+        const auto text=[&](std::uintptr_t p){std::array<char,96> t{};if(p && rig::pointer(p) && read(p,t.data(),t.size()-1)) return std::string(t.data());return std::string{};};
+        if(const auto m=rig::value<std::uintptr_t>(read,e+0xf0);m && rig::pointer(*m)) // v1111: which model object the entity draws (an upgrade may have replaced it)
+            o<<std::hex<<" model_vt="<<(rig::value<std::uintptr_t>(read,*m).value_or(base)-base)<<" asset_static="<<rig::value<std::uintptr_t>(read,*m+0x1c50).value_or(0)<<" asset_anim="<<rig::value<std::uintptr_t>(read,*m+0x1fe8).value_or(0)<<std::dec
+             <<" children="<<(rig::value<std::uint32_t>(read,e+0xb8).value_or(0)&0xffffff)<<std::hex<<" d4="<<unsigned(rig::value<std::uint8_t>(read,e+0xd4).value_or(0))<<std::dec<<" c8="<<rig::value<float>(read,e+0xc8).value_or(-1.f)
+             <<model_fields(read,*m);
+        if(const auto ch=rig::list(read,e+0xb0,64)) for(unsigned c=0;c<ch->packed_count && c<max_upgrades;++c) if(const auto p=rig::value<std::uintptr_t>(read,ch->data+c*8ull);p && *p && rig::pointer(*p)) {
+            std::array<float,3> pp{};read(*p+0x300,pp.data(),12);const auto pm=rig::value<std::uintptr_t>(read,*p+0xf0).value_or(0);
+            o<<"\n  child"<<c<<std::hex<<" ent="<<*p<<" d0="<<unsigned(rig::value<std::uint8_t>(read,*p+0xd0).value_or(0))<<std::dec<<" pos=["<<pp[0]<<","<<pp[1]<<","<<pp[2]<<"]"<<(pm && rig::pointer(pm)?model_fields(read,pm):std::string{});
+        }
         {std::array<float,3> ep{},mp{};read(e+0x300,ep.data(),12);const auto m=rig::value<std::uintptr_t>(read,e+0xf0);if(m && rig::pointer(*m)) read(*m+0x1860,mp.data(),12);
          o<<" ent_pos=["<<ep[0]<<","<<ep[1]<<","<<ep[2]<<"] model_pos=["<<mp[0]<<","<<mp[1]<<","<<mp[2]<<"]";
          const auto bind=rig::value<std::uintptr_t>(read,e+0x358).value_or(0);o<<" bind="<<std::hex<<bind<<std::dec;
@@ -2038,7 +2146,28 @@ public:
                  <<" +68="<<rig::value<std::uintptr_t>(read,*c+0x68).value_or(0)<<" +70="<<rig::value<std::uintptr_t>(read,*c+0x70).value_or(0)<<" +98="<<rig::value<std::uintptr_t>(read,*c+0x98).value_or(0)
                  <<std::dec<<" mag="<<rig::value<std::int32_t>(read,*c+0xa0).value_or(-9)<<"/"<<rig::value<std::int32_t>(read,*c+0xa4).value_or(-9)
                  <<" ups="<<(rig::value<std::uint32_t>(read,*c+0x58).value_or(0)&0xffffff)<<" mods="<<(rig::value<std::uint32_t>(read,*c+0xb0).value_or(0)&0xffffff)
-                 <<std::hex<<" b8="<<unsigned(rig::value<std::uint8_t>(read,*c+0xb8).value_or(0))<<" +160="<<rig::value<std::uintptr_t>(read,*c+0x160).value_or(0)<<std::dec;
+                 <<std::hex<<" b8="<<unsigned(rig::value<std::uint8_t>(read,*c+0xb8).value_or(0))<<" +160="<<rig::value<std::uintptr_t>(read,*c+0x160).value_or(0)<<std::dec
+                 <<" started="<<(rig::value<std::uint32_t>(read,*c+0x1c).value_or(0)&3u);
+                if(const auto ups=rig::list(read,*c+0x50,64)) for(unsigned u=0;u<ups->packed_count && u<max_upgrades;++u) { // v1111: every upgrade_t and its parts (RE: udecl +0x200/+0x208 model override, +0x230 static part, +0x238 part def, +0x240 joint tag)
+                    const auto at=ups->data+u*0x28ull;const auto item=rig::value<std::uintptr_t>(read,at).value_or(0);
+                    const auto udecl=item && rig::pointer(item)?rig::value<std::uintptr_t>(read,item).value_or(0):0;
+                    o<<"\n    up"<<u<<std::hex<<" item="<<item<<" decl="<<udecl<<" orig_model="<<rig::value<std::uintptr_t>(read,at+8).value_or(0)<<" anim="<<rig::value<std::uintptr_t>(read,at+0x20).value_or(0);
+                    if(udecl && rig::pointer(udecl)) o<<" name="<<text(rig::value<std::uintptr_t>(read,udecl+0x8).value_or(0))<<" m200="<<rig::value<std::uintptr_t>(read,udecl+0x200).value_or(0)<<" m208="<<rig::value<std::uintptr_t>(read,udecl+0x208).value_or(0)
+                        <<" p230="<<rig::value<std::uintptr_t>(read,udecl+0x230).value_or(0)<<" d238="<<rig::value<std::uintptr_t>(read,udecl+0x238).value_or(0)<<" tag="<<text(rig::value<std::uintptr_t>(read,udecl+0x240).value_or(0));
+                    o<<std::dec;
+                    for(unsigned k=0;k<2;++k) if(const auto part=rig::value<std::uintptr_t>(read,at+0x10+8ull*k).value_or(0);part && rig::pointer(part)) {
+                        std::array<float,3> pp{},mp{};read(part+0x300,pp.data(),12);const auto pm=rig::value<std::uintptr_t>(read,part+0xf0).value_or(0);if(pm && rig::pointer(pm)) read(pm+0x1860,mp.data(),12);
+                        const auto bind=rig::value<std::uintptr_t>(read,part+0x358).value_or(0);const bool bp=bind && rig::pointer(bind);
+                        o<<"\n      part"<<k<<std::hex<<" ent="<<part<<" id="<<rig::value<std::uint32_t>(read,part+0xa8).value_or(0)<<" d0="<<unsigned(rig::value<std::uint8_t>(read,part+0xd0).value_or(0))<<" d4="<<unsigned(rig::value<std::uint8_t>(read,part+0xd4).value_or(0))
+                         <<" model="<<pm<<" master="<<(bp?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0)<<std::dec<<" joint="<<(bp?rig::value<std::int16_t>(read,bind+0x3d0).value_or(-9):-9)
+                         <<" pos=["<<pp[0]<<","<<pp[1]<<","<<pp[2]<<"] model_pos=["<<mp[0]<<","<<mp[1]<<","<<mp[2]<<"] def="<<entity_decl_name(read,part);
+                    }
+                }
+                if(const auto bolt=rig::value<std::uintptr_t>(read,*c+0x160).value_or(0);bolt && rig::pointer(bolt)) {
+                    std::array<float,3> pp{};read(bolt+0x300,pp.data(),12);const auto bind=rig::value<std::uintptr_t>(read,bolt+0x358).value_or(0);const bool bp=bind && rig::pointer(bind);
+                    o<<"\n    bolt"<<std::hex<<" ent="<<bolt<<" d0="<<unsigned(rig::value<std::uint8_t>(read,bolt+0xd0).value_or(0))<<" master="<<(bp?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0)<<std::dec<<" joint="<<(bp?rig::value<std::int16_t>(read,bind+0x3d0).value_or(-9):-9)
+                     <<" pos=["<<pp[0]<<","<<pp[1]<<","<<pp[2]<<"] def="<<entity_decl_name(read,bolt);
+                }
             }
             o<<"\n";
         }
@@ -2053,6 +2182,7 @@ public:
         const auto comp=native_equipment(base,read,kind);
         const auto native=comp?rig::value<std::uintptr_t>(read,comp+0x10).value_or(0):0;
         dump_entity(base,read,o,"NATIVE",native);
+        if(const auto other=native_equipment(base,read,rc_kind_==1?held_copy::Kind::pistol:held_copy::Kind::crossbow)) dump_entity(base,read,o,"NATIVE_OTHER",rig::value<std::uintptr_t>(read,other+0x10).value_or(0)); // v1111: both player weapons
         if(!std::strcmp(what,"remove")) {if(alive_entity(base,read,rc_ent_,rc_id_)) remove_entity(base,rc_ent_);rc_ent_=0;rc_id_=0;o<<"removed\n";return true;}
         if(spawn) {
             if(alive_entity(base,read,rc_ent_,rc_id_)) remove_entity(base,rc_ent_);

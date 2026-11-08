@@ -51,7 +51,7 @@ struct GunCopiesFixture {
         NWH::held_failed=1;std::snprintf(NWH::held_last_failed_.data(),NWH::held_last_failed_.size(),"bad\"name\\x");
         const auto st=NWH::gun_status();
         assert(st.find("\"lying\":[null,null]")!=std::string::npos && st.find("bad?name?x")!=std::string::npos && st.front()=='{' && st.back()=='}');
-        assert(st.find("\"stuns\":[0,0,0]}")!=std::string::npos); // v783: thrown gun, gun bash, thrown gadget stuns
+        assert(st.find("\"stuns\":[0,0,0],")!=std::string::npos); // v783: thrown gun, gun bash, thrown gadget stuns
         {int fault{};std::vector<std::uintptr_t> struck;auto no_read=[](std::uintptr_t,void*,std::size_t){assert(!"a slow throw reads nothing");return false;};
          assert(!NWH::thrown_stun(0x140000000ull,no_read,{},{1,0,0},{1,0,0},.1,2.9,0,0,struck,fault) && struck.empty());} // under 3 m/s: no stun
         // a lying gun is published with its pose and def, and the hip is told the gun is out
