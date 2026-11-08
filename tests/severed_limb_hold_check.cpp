@@ -36,37 +36,51 @@ WorldTrackedPose pose_of(Vec3 p,Vec3 x,Vec3 y) {WorldTrackedPose o{};o.position=
 Vec3 local(const WorldTrackedPose& f,Vec3 world_point) {const Vec3 d=world_point-f.position;return {dot(d,f.basis[0]),dot(d,f.basis[1]),dot(d,f.basis[2])};}
 Vec3 spin(Vec3 v,Vec3 k,double a) {return v*std::cos(a)+cross(k,v)*std::sin(a)+k*(dot(k,v)*(1-std::cos(a)));}
 // A severed limb at registry index `slot`: entity, skinned model, ragdoll system with one body per part (a chain along `along` from `root`).
-struct Limb {std::uintptr_t entity{};std::vector<WorldTrackedPose> bodies;std::vector<const Part*> parts;};
-Limb make_limb(unsigned slot,const std::vector<const Part*>& parts,Vec3 root,Vec3 along,Vec3 up,const std::vector<double>& joints) {
+// v1089: as the game builds it (static ABI + the v1088 run, native_rigid_body.hpp): a part is a clone of the whole cut ragdoll whose ROOT (the first part)
+// heads an attachment group, `hidden` other bodies of the clone attached to it at `hidden_at` and sharing its one motion (hknpMotion at world +0x120:
+// +0x00 the centre, +0x28 the first attached body = the root); the other parts are standalone. `centre`: that motion's centre (world).
+struct Limb {std::uintptr_t entity{};std::vector<WorldTrackedPose> bodies;std::vector<const Part*> parts;Vec3 centre{};};
+constexpr std::uintptr_t kMotions=0x7000000;
+Limb make_limb(unsigned slot,const std::vector<const Part*>& parts,Vec3 root,Vec3 along,Vec3 up,const std::vector<double>& joints,unsigned hidden,Vec3 hidden_at,Vec3 centre) {
     static bool rtti=false;const std::uintptr_t vtable=0x9010000,locator=0x9020000;const std::uint32_t rva=0x700000;
-    if(!rtti) {rtti=true;put(vtable-8,locator);put(locator+12,rva);const char name[24]=".?AVarkSeveredLimb@@";for(unsigned i=0;i<sizeof(name);++i) put(kBase+rva+16+i,name[i]);}
+    if(!rtti) {rtti=true;put(vtable-8,locator);put(locator+12,rva);const char name[24]=".?AVarkSeveredLimb@@";for(unsigned i=0;i<sizeof(name);++i) put(kBase+rva+16+i,name[i]);put(kWorld+0x120,kMotions);}
     const std::uintptr_t at=0x10000000+slot*0x100000,entity=at,model=at+0x1000,list=at+0x2000,system=at+0x3000,handles=at+0x4000,data=at+0x5000;
-    Limb limb{entity,{},parts};
+    Limb limb{entity,{},parts,centre};
     put(kGame+0x3130b0+slot*8,entity);put(entity,vtable);put(entity+0xa8,std::uint32_t{(slot<<16)|1u});put(entity+0xf0,model);put(model,kBase+0x1b0d628);
     put(entity+0x268,rig::List{list,1,1<<8});put(list,system);put(system,kBase+0x1c54008);put(system+0x18,rig::Identity{9,10});put(system+0x100,handles);
-    put(handles+0x28,data);put(handles+0x30,static_cast<std::uint32_t>(parts.size()));
+    const unsigned total=static_cast<unsigned>(parts.size())+hidden;
+    put(handles+0x28,data);put(handles+0x30,total);
+    const auto handle=[&](unsigned k){return 0x3000000u+slot*32+k;};
+    const std::uint32_t group_motion=slot*32+1;   // the root's group; a standalone part k its own motion slot*32+2+k
+    put(kMotions+group_motion*0x80,std::array<float,4>{static_cast<float>(centre.x),static_cast<float>(centre.y),static_cast<float>(centre.z),0.f});put(kMotions+group_motion*0x80+0x28,handle(0));
     Vec3 joint=root;
-    for(unsigned k=0;k<parts.size();++k) {
-        const unsigned index=slot*8+k;const std::uint32_t h=0x3000000u+index;const auto rec=kPool+index*0xb0;put(data+k*4,h);
+    for(unsigned k=0;k<total;++k) {
+        const bool member=k>=parts.size();const Part* part=member?parts[0]:parts[k];   // a member's shape: any (it is never offered)
+        const unsigned index=slot*32+k;const std::uint32_t h=handle(k);const auto rec=kPool+index*0xb0;put(data+k*4,h);
         const std::uintptr_t shape=at+0x10000+k*0x1000;   // the live hull: convex (dispatch 2), its vertices at +0x40 + 0x30
         put(shape,kBase+0x1ec1ab8);put(shape+0x20,std::uint32_t{1u<<16});put(shape+0x24,static_cast<unsigned char>(2));put(shape+0x28,.01f);
-        put(shape+0x40,parts[k]->n|(0x30u<<16));
-        for(unsigned i=0;i<parts[k]->n;++i) put(shape+0x70+i*16,std::array<float,4>{parts[k]->v[i][0],parts[k]->v[i][1],parts[k]->v[i][2],0.f});
+        put(shape+0x40,part->n|(0x30u<<16));
+        for(unsigned i=0;i<part->n;++i) put(shape+0x70+i*16,std::array<float,4>{part->v[i][0],part->v[i][1],part->v[i][2],0.f});
         // a body's own +y runs along the bone from its joint (its origin); own +z up
-        const auto p=pose_of(joint,cross(along,up),along);limb.bodies.push_back(p);
+        const auto p=pose_of(member?hidden_at:joint,cross(along,up),along);if(!member) limb.bodies.push_back(p);
         rig::Transform t{};for(unsigned r=0;r<3;++r) {t.f[r*4]=static_cast<float>(p.basis[r].x);t.f[r*4+1]=static_cast<float>(p.basis[r].y);t.f[r*4+2]=static_cast<float>(p.basis[r].z);}
         t.f[12]=static_cast<float>(p.position.x);t.f[13]=static_cast<float>(p.position.y);t.f[14]=static_cast<float>(p.position.z);t.f[15]=1;
-        put(rec,t);put(rec+0x44,std::uint32_t{130});put(rec+0x40,std::uint32_t{1});put(rec+0x70,h);put(rec+0x74,h);put(rec+0x60,shape);
-        if(k<joints.size()) joint=joint+along*joints[k];
+        // the attachment ring: the root -> each member -> back to the root; a standalone part points at itself
+        const bool grouped=k==0 || member;
+        const std::uint32_t next=k==0?(hidden?handle(static_cast<unsigned>(parts.size())):h):member?(k+1<total?handle(k+1):handle(0)):h;
+        const std::uint32_t motion=grouped?group_motion:slot*32+2+k;
+        if(!grouped) put(kMotions+motion*0x80+0x28,h);
+        put(rec,t);put(rec+0x44,std::uint32_t{130});put(rec+0x40,motion);put(rec+0x70,h);put(rec+0x74,next);put(rec+0x60,shape);
+        if(!member && k<joints.size()) joint=joint+along*joints[k];
     }
     return limb;
 }
-struct Take {const char* name;const Limb* limb;Vec3 palm,normal,forward;};
-struct Result {int body{};double press_mm{},gap_mm{},out_mm{},slide_mm{},turn_deg{};bool natural{};unsigned settle{};double hold_mm{},run_mm{};unsigned turn_back{};bool grab{},v1086_use{};};
+struct Take {const char* name;const Limb* limb;Vec3 palm,normal,forward;bool lever=true;};   // lever false: v1088's write (no centre correction)
+struct Result {int body{};double press_mm{},gap_mm{},out_mm{},slide_mm{},turn_deg{};bool natural{};unsigned settle{};double hold_mm{},run_mm{},turn_mm{};unsigned turn_back{};bool grab{},v1086_use{},group{};};
 Result take(const Take& t) {
     Result r{};
     const auto body=native_severed_limb_body(read,kBase,t.limb->entity,-1,t.palm);
-    assert(body && body->hull && body->bounds);r.body=body->limb;
+    assert(body && body->hull && body->bounds);r.body=body->limb;r.group=body->group_root;
     // The press: the game's Use target is this limb (kind loot, its whole skinned box round the palm: native cost 0); the grab's pick is the same
     // entity, scored from the hand sphere out to limb_reach_m (native_grab.hpp focus_body's limb pass)
     GripAloneInput in{};PalmTarget use{};use.id=t.limb->entity;use.kind=PalmKind::loot;GrabTuning tuning;use.priority=tuning.priority(use.kind);
@@ -94,6 +108,9 @@ Result take(const Take& t) {
     PhysicalGrab g;g.sample(hand,0.f,true,1,1000);g.sample(hand,0.f,true,1,1010);g.sample(hand,1.f,true,1,1020);
     assert(g.bind(seat.pose,body->contact(t.palm),limb_reach_m));
     auto now=body->pose;Vec3 v{},w{};std::uint64_t tick=1020;
+    // v1089: a part's root moves its group's one motion, which the engine integrates at the group's centre (the setter 0xc85dc0 writes the motion's
+    // velocities); NativeGrab::write gives it motion_centre_velocity (t.lever false: v1088's write, the velocity as is). A standalone part: as v1088's lab.
+    const Vec3 centre_own=local(now,t.limb->centre);
     for(int i=0;i<300;++i) {
         const double s=i/60.;Vec3 carrier{};
         if(s>=1 && s<3) {carrier={5,0,0};hand.position=hand.position+carrier*(1./60);}
@@ -110,8 +127,17 @@ Result take(const Take& t) {
         if(i==59) r.hold_mm=gap*1000;
         if(s>=1.5 && s<3) r.run_mm=std::max(r.run_mm,gap*1000);
         if(i>180 && !r.turn_back && gap<.02) r.turn_back=static_cast<unsigned>(i-180);
-        v=out->motor.linear-Vec3{0,0,sag/60};w=out->motor.angular;
-        now.position=now.position+v*(1./60);const double a=length(w)/60;if(a>1e-12) for(auto& b:now.basis) b=spin(b,unit(w),a);
+        if(i==182) r.turn_mm=gap*1000;   // v1089: the gap two frames after the snap turn (the hold turns 45 deg about the player)
+        w=out->motor.angular;const double a=length(w)/60;
+        if(r.group) {
+            const Vec3 c=now.position+now.basis[0]*centre_own.x+now.basis[1]*centre_own.y+now.basis[2]*centre_own.z;
+            const Vec3 vc=(t.lever?motion_centre_velocity(out->motor.linear,w,c,now.position):out->motor.linear)-Vec3{0,0,sag/60};
+            Vec3 arm=now.position-c;if(a>1e-12) {arm=spin(arm,unit(w),a);for(auto& b:now.basis) b=spin(b,unit(w),a);}
+            const Vec3 moved=c+vc*(1./60)+arm;v=(moved-now.position)*60.;now.position=moved;
+        } else {
+            v=out->motor.linear-Vec3{0,0,sag/60};
+            now.position=now.position+v*(1./60);if(a>1e-12) for(auto& b:now.basis) b=spin(b,unit(w),a);
+        }
     }
     return r;
 }
@@ -122,12 +148,16 @@ int main() {
         fore{"forearm",hull_forearm,sizeof(hull_forearm)/sizeof(hull_forearm[0]),1.5},hand{"hand",hull_hand,sizeof(hull_hand)/sizeof(hull_hand[0]),.6},
         head{"head",hull_head,sizeof(hull_head)/sizeof(hull_head[0]),5.};
     put(kBase+0x39a5290,kGame);put(kGame,kBase+0x1c940a8);put(kGame+0x60410,kWorld);put(kWorld+0x28,kPool);put(kWorld+0x30,std::uint32_t{0x10000});
-    // On the floor, each along +x, up +z: a leg from the hip (knee at 0.46 m, ankle 0.42 m on), an arm from the shoulder, a head.
-    const Limb leg=make_limb(5,{&thigh,&calf,&foot},{0,0,.12},{1,0,0},{0,0,1},{.46,.42});
-    const Limb arm=make_limb(6,{&upper,&fore,&hand},{0,1,.07},{1,0,0},{0,0,1},{.30,.27});
-    const Limb skull=make_limb(7,{&head},{0,2,.10},{1,0,0},{0,0,1},{});
-    const Vec3 down{0,0,-1},across{0,1,0},along{1,0,0},angled=unit(Vec3{.5,.866,0});
+    // On the floor, each along +x, up +z: a leg from the hip (knee at 0.46 m, ankle 0.42 m on), an arm from the shoulder, a head. v1089: as the game builds
+    // them, each part's root (thigh, upper arm, head) heads its group with the clone's other bodies (14 for a leg or an arm, 16 for a head) attached, hidden
+    // 0.6 m off. The head group's centre: on the head (members without weight), or 0.5 m off it (members weighing where they lie) for the second head.
+    const Limb leg=make_limb(5,{&thigh,&calf,&foot},{0,0,.12},{1,0,0},{0,0,1},{.46,.42},14,{0,-.6,.12},{.2,0,.12});
+    const Limb arm=make_limb(6,{&upper,&fore,&hand},{0,1,.07},{1,0,0},{0,0,1},{.30,.27},14,{0,.4,.07},{.15,1,.07});
+    const Limb skull=make_limb(7,{&head},{0,2,.10},{1,0,0},{0,0,1},{},16,{0,2.6,.10},{.05,2,.10});
+    const Limb heavy=make_limb(8,{&head},{0,4,.10},{1,0,0},{0,0,1},{},16,{0,4.6,.10},{.05,4.5,.10});
+    const Vec3 down{0,0,-1},across{0,1,0},along{1,0,0},angled=unit(Vec3{.5,.866,0}),side{0,1,0};
     // The palm faces down (normal -z), its skin 2-3 cm above the part or reaching 10 cm short of it; fingers across the limb, at 30 deg, or along it.
+    // v1089 heads: from above, at 30 deg, from the side (the palm on the cheek), 25 cm short; the heavy-centre head with the centre correction and without.
     const std::vector<Take> takes{
         {"leg: calf, 20 cm reach",&leg,{.80,0,.42},down,across},{"leg: calf, 40 cm reach",&leg,{.80,0,.62},down,across},
         {"arm: forearm, 30 cm reach",&arm,{.45,1,.45},down,across},{"head: 25 cm reach",&skull,{.04,2,.45},down,across},
@@ -136,23 +166,31 @@ int main() {
         {"leg: thigh mid, across",&leg,{.25,0,.28},down,across},{"leg: foot, across",&leg,{1.00,0,.24},down,across},
         {"arm: forearm by the wrist, across",&arm,{.52,1,.15},down,across},{"arm: forearm, 30 deg",&arm,{.45,1,.15},down,angled},
         {"arm: upper arm, across",&arm,{.17,1,.15},down,across},{"arm: hand, across",&arm,{.66,1,.15},down,across},
-        {"head: from above",&skull,{.04,2,.31},down,across},{"head: from above, 30 deg",&skull,{.04,2,.31},down,angled}};
-    std::printf("%-34s %-9s %8s %7s %7s %8s %8s %5s %7s %7s %7s %6s\n","take (palm skin to the part's real surface)","body","press mm","seat mm","out mm","slide mm","turn deg",
-        "seat","settle","hold mm","run mm","turn");
-    bool ok=true;
+        {"head: from above",&skull,{.04,2,.31},down,across},{"head: from above, 30 deg",&skull,{.04,2,.31},down,angled},
+        {"head: from the side (cheek)",&skull,{.04,1.84,.10},side,along},{"head: centre 0.5 m off, 30 deg",&heavy,{.04,4,.31},down,angled},
+        {"head: centre 0.5 m off, v1088 write",&heavy,{.04,4,.31},down,angled,false}};
+    std::printf("%-36s %-9s %4s %8s %7s %7s %8s %8s %5s %7s %7s %7s %6s\n","take (palm skin to the part's real surface)","body","root","press mm","seat mm","out mm","slide mm",
+        "turn deg","seat","settle","hold mm","run mm","turn");
+    bool ok=true;Result heavy_lever{},heavy_plain{};
     for(const auto& t:takes) {
         const auto r=take(t);
-        std::printf("%-34s %-9s %8.1f %7.1f %7.1f %8.1f %8.1f %5s %4u fr %7.1f %7.1f %3u fr\n",t.name,t.limb->parts[static_cast<std::size_t>(r.body)]->name,r.press_mm,r.gap_mm,r.out_mm,
-            r.slide_mm,r.turn_deg,r.natural?"palm":"ball",r.settle,r.hold_mm,r.run_mm,r.turn_back);
+        std::printf("%-36s %-9s %4s %8.1f %7.1f %7.1f %8.1f %8.1f %5s %4u fr %7.1f %7.1f %3u fr\n",t.name,t.limb->parts[static_cast<std::size_t>(r.body)]->name,r.group?"yes":"",
+            r.press_mm,r.gap_mm,r.out_mm,r.slide_mm,r.turn_deg,r.natural?"palm":"ball",r.settle,r.hold_mm,r.run_mm,r.turn_back);
+        if(t.limb==&heavy) (t.lever?heavy_lever:heavy_plain)=r;
+        if(!t.lever) continue;   // the comparison only
         // The press is the grab's (v1087 gave it to the game's Use: no palm pick); after the seat its real surface lies on the palm skin within 2 mm; it is in the
         // hand (2 cm, 5 deg) within 6 frames of the press, stays within 2 cm while running at 5 m/s with the rest of the limb hanging on it, and is back
-        // within 2 cm 6 frames after a snap turn.
-        ok=ok && r.v1086_use && r.grab && std::abs(r.gap_mm)<=2 && std::abs(r.out_mm)<=2 && r.settle>0 && r.settle<=6 && r.run_mm<20 && r.turn_back>0 && r.turn_back<=6;
+        // within 2 cm 6 frames after a snap turn. v1089: a head is held by its root (v1088 refused every body of it); a leg or arm by a standalone part, as in v1088.
+        const bool is_head=t.limb==&skull || t.limb==&heavy;
+        ok=ok && r.v1086_use && r.grab && std::abs(r.gap_mm)<=2 && std::abs(r.out_mm)<=2 && r.settle>0 && r.settle<=6 && r.run_mm<20 && r.turn_back>0 && r.turn_back<=6 && r.group==is_head;
     }
-    std::puts("columns: press = the palm skin to the part at the press (v1086 held it there: no seat; v1087 used the game's carry); seat = after rig::prop_seat; out = after the seat-out's\n"
-              "pull (<= 30 mm along the palm normal); slide = the grasped spot moved along the bone; settle = frames to within 2 cm / 5 deg of the hold;\n"
-              "hold = the standing error with the rest of the limb hanging on the held body; run = the worst gap at 5 m/s; turn = frames back after a 45 deg snap turn");
+    std::puts("columns: root = the part's root (an attachment group: v1088 refused it); press = the palm skin to the part at the press (v1086 held it there: no seat;\n"
+              "v1087 used the game's carry); seat = after rig::prop_seat; out = after the seat-out's pull (<= 30 mm along the palm normal); slide = the grasped spot\n"
+              "moved along the bone; settle = frames to within 2 cm / 5 deg of the hold; hold = the standing error with the rest of the limb hanging on the held body;\n"
+              "run = the worst gap at 5 m/s; turn = frames back after a 45 deg snap turn");
+    std::printf("the head whose group centre is 0.5 m off, two frames after the 45 deg snap turn: %.1f mm off, back in %u fr with the centre correction; %.1f mm, %u fr without (v1088's write)\n",
+        heavy_lever.turn_mm,heavy_lever.turn_back,heavy_plain.turn_mm,heavy_plain.turn_back);
     std::fflush(stdout);
-    assert(ok);
-    std::puts("PASS: severed leg, arm and head - the grab takes the press, the part is seated on the palm and held in the hand (running, snap turn)");
+    assert(ok && heavy_plain.turn_mm>heavy_lever.turn_mm);
+    std::puts("PASS: severed leg, arm and head - the grab takes the press, the part is seated on the palm and held in the hand (running, snap turn); a head by its root (v1089)");
 }

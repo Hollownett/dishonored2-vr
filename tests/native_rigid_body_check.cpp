@@ -223,7 +223,7 @@ int main() {
         assert(std::abs(picked->bounds->minimum.x-10.35)<1e-6 && std::abs(picked->bounds->maximum.x-10.65)<1e-6 && std::abs(picked->contact_distance(over_second)-.03)<1e-6);   // the hull's box
         const auto again=native_severed_limb_body(read,base,limb,1);assert(again && again->record==picked->record);   // the held body, re-read
         assert(native_grab_body(read,base,*picked) && native_grab_body(read,base,*picked)->limb==1);
-        put(pool+6*0xb0+0x74,std::uint32_t{1});assert(!native_severed_limb_body(read,base,limb,1));   // a recycled handle: refused
+        put(pool+6*0xb0+0x74,std::uint32_t{1});assert(!native_severed_limb_body(read,base,limb,1));   // attached to another body (+0x74, no motion read): refused
         const auto other=native_severed_limb_body(read,base,limb,-1,over_second);assert(other && other->limb==2);   // the next valid body instead
         put(pool+6*0xb0+0x74,std::uint32_t{0x2000006});
         put(pool+6*0xb0+0x60,std::uintptr_t{0});const auto shapeless=severed_limb_why[5].load();   // no readable shape: no candidate, counted (why 5)
@@ -232,9 +232,48 @@ int main() {
         const auto record_refusals=severed_limb_why[4].load();
         put(pool+7*0xb0+0x44,std::uint32_t{134});assert(!native_severed_limb_body(read,base,limb,2));   // keyframed: refused
         assert(severed_limb_why[4].load()==record_refusals+1 && severed_limb_last_flags.load()==134);   // counted (why 4) with the record's flags
-        put(pool+7*0xb0+0x44,std::uint32_t{130});put(handles+0x30,std::uint32_t{18});assert(!native_severed_limb_body(read,base,limb,-1,Vec3{10,5,1}));   // more than 17 bodies: nothing
+        put(pool+7*0xb0+0x44,std::uint32_t{130});put(handles+0x30,std::uint32_t{33});assert(!native_severed_limb_body(read,base,limb,-1,Vec3{10,5,1}));   // more than 32 bodies: nothing
         put(handles+0x30,std::uint32_t{3});put(game+0x3130b0+5*8,std::uintptr_t{0});assert(!native_severed_limb_body(read,base,limb,-1,Vec3{10,5,1}));   // not registered: nothing
         put(game+0x3130b0+5*8,limb);
+        // v1089 (v1088 headset: a severed head never offered a body, every read refused): a part's ROOT heads an attachment group (hknpBody +0x74
+        // nextAttachedBodyId, hknpMotion +0x28 firstAttachedBodyId at world +0x120): the cut ragdoll's clone has its other bodies attached to it. Standalone
+        // bodies first (v1088's legs and arms), the root when the part has none (a head); a body attached to another never; every component read.
+        const std::uintptr_t part=0x9800000,plist=0x9810000,psys=0x9820000,phandles=0x9830000,pdata=0x9840000,prigid=0x9850000,motions=0x9900000;
+        const std::uint32_t part_id=0x60001,root_h=0x2000014,m1=0x2000015,m2=0x2000016;
+        put(world+0x120,motions);put(world+0x30,std::uint32_t{64});
+        put(game+0x3130b0+6*8,part);put(part,vtable);put(part+0xa8,part_id);put(part+0xf0,model);
+        put(part+0x268,rig::List{plist,1,1<<8});put(plist,psys);put(psys,base+0x1c54008);put(psys+0x18,rig::Identity{11,10});put(psys+0x100,phandles);put(phandles+0x28,pdata);
+        const auto body_at=[&](unsigned k,std::uint32_t h,float x,std::uint32_t motion,std::uint32_t next) {
+            const auto rec=pool+(20+k)*0xb0;put(pdata+k*4,h);
+            rig::Transform lt{};lt.f[0]=lt.f[5]=lt.f[10]=lt.f[15]=1;lt.f[12]=x;lt.f[13]=8;lt.f[14]=1;
+            put(rec,lt);put(rec+0x44,std::uint32_t{130});put(rec+0x40,motion);put(rec+0x70,h);put(rec+0x74,next);put(rec+0x60,shape);};
+        // the head: its one body heads motion 5 with two attached (hidden) members 0.6 m on: the ring root -> m1 -> m2 -> root
+        body_at(0,root_h,20.f,5,m1);body_at(1,m1,20.6f,5,m2);body_at(2,m2,20.6f,5,root_h);put(phandles+0x30,std::uint32_t{3});
+        put(motions+5*0x80,std::array<float,4>{20.3f,8.f,1.f,0.f});put(motions+5*0x80+0x28,root_h);
+        const auto roots=severed_limb_roots.load(),attached=severed_limb_body_why[6].load();
+        const auto head=native_severed_limb_body(read,base,part,-1,Vec3{20.62,8,1.08});   // the palm over the hidden members: still the root
+        assert(head && head->limb==0 && head->group_root && head->handle==root_h && severed_limb_roots.load()==roots+1);
+        assert(severed_limb_body_why[6].load()==attached+2);   // the members: attached to another body
+        const auto held=native_severed_limb_body(read,base,part,0);assert(held && held->group_root && held->record==head->record);   // re-read while held
+        assert(native_grab_body(read,base,*head) && native_grab_body(read,base,*head)->group_root);
+        assert(!native_severed_limb_body(read,base,part,1));   // a member: never, even by index
+        {std::lock_guard<std::mutex> lock(severed_limb_refusal_mutex);   // one "refuse" row per body and check in 2 s: the second read and the index read added none
+         assert(std::count_if(severed_limb_refusals.begin(),severed_limb_refusals.end(),[&](const LimbRefusal& r){return r.entity_id==part_id;})==2);
+         for(const auto& r:severed_limb_refusals) if(r.entity_id==part_id) assert(r.check==6 && r.first==root_h && (r.index==1 || r.index==2) && r.component_rva==0x1c54008 && r.flags==130 && r.motion==5);}
+        put(motions+5*0x80+0x28,std::uint32_t{0x2000099});assert(!native_severed_limb_body(read,base,part,-1,Vec3{20.02,8,1.08}));put(motions+5*0x80+0x28,root_h);   // the group headed elsewhere: none of them
+        // a leg: a standalone part beside the root is taken first (v1088 unchanged), even with the palm on the root
+        body_at(3,0x2000017,20.35f,6,0x2000017);put(motions+6*0x80+0x28,std::uint32_t{0x2000017});put(phandles+0x30,std::uint32_t{4});
+        const auto leg=native_severed_limb_body(read,base,part,-1,Vec3{20.15,8,1.08});assert(leg && leg->limb==3 && !leg->group_root);
+        // every component: the system's bodies all keyframed (none passes), a second single-body component (arkCpntRigidBody +0xf8) with a standalone body
+        put(part+0x268,rig::List{plist,2,2<<8});put(plist+8,prigid);put(prigid,base+0x1c745c8);put(prigid+0x18,rig::Identity{12,10});put(prigid+0xf8,std::uint32_t{0x2000019});
+        {const auto rec=pool+25*0xb0;rig::Transform lt{};lt.f[0]=lt.f[5]=lt.f[10]=lt.f[15]=1;lt.f[12]=21.f;lt.f[13]=8;lt.f[14]=1;
+         put(rec,lt);put(rec+0x44,std::uint32_t{130});put(rec+0x40,std::uint32_t{7});put(rec+0x70,std::uint32_t{0x2000019});put(rec+0x74,std::uint32_t{0x2000019});put(rec+0x60,shape);}
+        for(unsigned k=0;k<4;++k) put(pool+(20+k)*0xb0+0x44,std::uint32_t{134});
+        const auto single=native_severed_limb_body(read,base,part,-1,Vec3{21.1,8,1.08});   // v1088 stopped at the system and refused the limb
+        assert(single && single->limb==4 && single->component==prigid && single->handle==0x2000019 && !single->group_root);
+        assert(native_severed_limb_body(read,base,part,4) && native_severed_limb_body(read,base,part,4)->record==single->record);
+        // the motion's centre: the velocity meant for the body's origin, given at the centre (NativeGrab::write), moves the origin at it
+        {const Vec3 p{20,8,1},c{20.3,8.2,1.1},v{1,-2,.5},w{0,3,-1};const Vec3 at_p=motion_centre_velocity(v,w,c,p)+cross(w,p-c);assert(length(at_p-v)<1e-12);}
     }
-    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion; guard ragdoll limbs; severed limbs (v1086)\n";
+    std::cout<<"PASS: native dynamic-body registry/component/handle ownership; static/keyframed/compound/attached/recycled/native-carryable exclusion; guard ragdoll limbs; severed limbs (v1086); a part's root and every component (v1089)\n";
 }

@@ -19,6 +19,7 @@
 #include "../src/finger_sphere.hpp"
 #include "../src/physical_grab.hpp"
 #include "../src/weapon_draw_place.hpp"
+#include "../src/selection_policy.hpp"
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -707,6 +708,29 @@ int run(int argc,char** argv) {
                 auto use=seat?*seat:pose;
                 if(!seat) {std::fprintf(stderr,"%s: natural seat unsolvable, support seat\n",name);use.position=use.position+(palm.position+n*(r::held_palm_depth+r::surface_seat_depth(pose,b,n,shape))-r::grip_box(pose,b,shape)->centre);}
                 if(std::getenv("LAB_SEAT_DEBUG")) std::fprintf(stderr,"%s: %s seat\n",name,pinch?"pinch":"palm");
+                std::vector<r::HeldShape> v(shape->pieces.size());v.resize(r::prop_grip_shapes(use,*shape,v.data(),static_cast<unsigned>(v.size())));
+                return seat_out(v,palm,g);};
+            c.shapes=[m=c.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};c.ghost=c.shapes;
+            scenes.push_back(c);
+        }
+        // v1089 (user, v1088 headset: "make the hand and fingers closer to the head, as the other parts"): a severed part seated by the GAME's own limb seat,
+        // as NativeGrab's acquisition seats it - rig::prop_seat (natural, a part's origin may move limb_seat_move_m) then rig::surface_onto_skin (its real
+        // hull surface on the palm skin) - taken lying off square 12 cm beyond the palm skin; the seat-out and the fingers on its real hull as for every prop.
+        if(p.kind.rfind("sheet_limb_",0)==0) {
+            Scene c{};c.name=_strdup(("limbseat_"+p.kind.substr(11)).c_str());c.held=true;c.where=hold_at;c.fingers=hold_fingers;c.normal=hold_in;c.squeeze=1.f;c.index=0.f;
+            c.title=_strdup(("severed "+p.kind.substr(11)+" ("+p.source+"): the game's severed-part seat (prop_seat + surface_onto_skin, v1088/v1089), taken 12 cm off, the fingers on its real hull").c_str());
+            c.shape_name="real shape (Havok hull)";
+            c.moving=[shape,seat_out](const WorldTrackedPose& palm,const r::HandGeometry& g,Vec3,Vec3) {
+                const Vec3 n=r::palm_normal(palm,g),fp=g.finger[2].pivot,f0=palm.basis[0]*fp.x+palm.basis[1]*fp.y+palm.basis[2]*fp.z;Vec3 fw=unit(cross(n,palm.basis[0]));if(dot(fw,f0)<0) fw=fw*-1.;
+                const auto spin=[](Vec3 v,Vec3 k,double a) {return v*std::cos(a)+cross(k,v)*std::sin(a)+k*(dot(k,v)*(1-std::cos(a)));};
+                WorldTrackedPose pose{};pose.basis=palm.basis;   // lying as it fell: off square to the palm by 30, 20 and 15 deg
+                for(unsigned k=0;k<3;++k) {const double a=k==0?.52:k==1?.35:.26;const Vec3 ax=unit(palm.basis[k]);for(auto& row:pose.basis) row=spin(row,ax,a);}
+                pose.position=palm.position+n*(r::held_palm_depth+shape->whole.half.z+.12)-r::body_direction(pose,shape->whole.centre);
+                NativeRigidBody b{};b.pose=pose;b.hull=shape;b.bounds=hull_world_bounds(pose,*shape);b.limb=0;
+                const auto s=r::prop_seat(b,palm.position,n,fw,true,limb_seat_move_m);
+                const auto use=r::surface_onto_skin(b,s.pose,palm.position,n);
+                if(std::getenv("LAB_SEAT_DEBUG")) {const auto st=r::seat_stats(b,use,palm.position,n);
+                    std::fprintf(stderr,"limbseat: natural %d reach %.1f mm gap %.1f mm slide %.1f mm turn %.1f deg\n",s.natural?1:0,st.reach_mm,st.gap_mm,st.slide_mm,st.turn_deg);}
                 std::vector<r::HeldShape> v(shape->pieces.size());v.resize(r::prop_grip_shapes(use,*shape,v.data(),static_cast<unsigned>(v.size())));
                 return seat_out(v,palm,g);};
             c.shapes=[m=c.moving](const WorldTrackedPose& palm,const r::HandGeometry& g) {return m(palm,g,Vec3{},Vec3{});};c.ghost=c.shapes;

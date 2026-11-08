@@ -284,11 +284,37 @@ private:
     // native target is a limb, pick = target; seat: gap mm, slide mm, turn deg, natural, reach mm; hold (each motor write): error to the target mm, rotation
     // error deg, palm skin to the part's surface mm, speed m/s; use_hold: the game's carry took a limb (v1 = native hold count).
     std::ofstream limb_log_;std::uint64_t limb_rows_{};
-    void limb_row(UINT64 now,const char* event,unsigned side,const NativeRigidBody& body,double v1,double v2=0,double v3=0,double v4=0,double v5=0) {
+    void limb_row(UINT64 now,const char* event,unsigned side,const NativeRigidBody& body,double v1,double v2=0,double v3=0,double v4=0,double v5=0,double v6=0,double v7=0,double v8=0) {
         if(!limb_log_.is_open() || limb_rows_>=40000) return;
-        ++limb_rows_;limb_log_<<now<<','<<event<<','<<side<<','<<body.entity_id<<','<<body.limb<<','<<v1<<','<<v2<<','<<v3<<','<<v4<<','<<v5<<'\n';
+        ++limb_rows_;limb_log_<<now<<','<<event<<','<<side<<','<<body.entity_id<<','<<body.limb<<','<<v1<<','<<v2<<','<<v3<<','<<v4<<','<<v5<<','<<v6<<','<<v7<<','<<v8<<'\n';
         if(limb_rows_%64==0 || std::strcmp(event,"hold")!=0) limb_log_.flush();
     }
+    // v1089: the severed-limb reader's refused bodies (native_rigid_body.hpp note_limb_refusal, once per body and check every 2 s) as "refuse" rows:
+    // side 2 (no hand), limb = the body's index, v1 check (0 component not started, 1 slot, 2 not dynamic, 3 motion, 4 transform, 5 id, 6 attached to another
+    // body, 7 no shape), v2 flags, v3 motionId, v4 id (+0x70), v5 nextAttachedBodyId (+0x74), v6 its motion's firstAttachedBodyId (-1 unread), v7 handle,
+    // v8 the component's vtable RVA. Mutex held.
+    void drain_limb_refusals(UINT64 now) {
+        std::vector<LimbRefusal> rows;
+        {std::lock_guard<std::mutex> lock(severed_limb_refusal_mutex);rows.swap(severed_limb_refusals);}
+        for(const auto& r:rows) {NativeRigidBody b{};b.entity_id=r.entity_id;b.limb=r.index;
+            limb_row(now,"refuse",2,b,r.check,r.flags,r.motion,r.id,r.next,static_cast<double>(r.first),r.handle,static_cast<double>(r.component_rva));}
+    }
+    // v1089: the world centre of the motion a body moves with (hknpMotion +0x00, world +0x120, 0x80 each; the setter 0xc85dc0 writes the motion's velocity
+    // there), when finite and within 2 m of the body; its mass from the inverse-mass half (+0x26).
+    struct MotionCentre {Vec3 centre{};double kg{-1};};
+    std::optional<MotionCentre> motion_centre(const NativeRigidBody& body) const {
+        using namespace rig;
+        const auto index=value<std::uint32_t>(read_,body.record+0x40);const auto array=value<std::uintptr_t>(read_,body.world+0x120);
+        if(!index || !*index || *index>=0x100000 || !array || !pointer(*array)) return std::nullopt;
+        const auto at=*array+static_cast<std::uintptr_t>(*index)*0x80;
+        const auto c=value<std::array<float,3>>(read_,at);if(!c) return std::nullopt;
+        const Vec3 centre{(*c)[0],(*c)[1],(*c)[2]};
+        if(!finite(centre) || !(length(centre-body.pose.position)<=2.)) return std::nullopt;
+        MotionCentre out{centre};
+        if(const auto half=value<std::uint16_t>(read_,at+0x26)) {const double inverse=grab_mass_detail::decode_inverse(*half);if(std::isfinite(inverse) && inverse>1e-6) out.kg=1./inverse;}
+        return out;
+    }
+    std::uint64_t limb_group_holds_{},lever_applied_{},lever_rejected_{};double limb_centre_mm_{-1};
     bool two_hand_=true; // phase 2: the second hand may grab a prop the other hand holds (build/no-two-hand)
     bool stick_hold_=true; // v1084: a held prop or corpse limb sticks to the hand like a bottle (build/legacy-weighted-hold: the force-capped hold)
     // build/legacy-sphere-grip-whole-object (read at install): the v642 ball round the thing's whole box instead of the v1024 grip ball (finger_sphere.hpp)
@@ -624,7 +650,13 @@ private:
     void release_all() {std::lock_guard<std::mutex> lock(mutex_);release_all_locked();}
     // Returns false when the setter faulted and every lane was released: the caller must not touch lane state further.
     bool write(Lane& lane,unsigned side,const NativeRigidBody& body,const GrabMotor& motor) {
-        alignas(16) std::array<float,4> linear{static_cast<float>(motor.linear.x),static_cast<float>(motor.linear.y),static_cast<float>(motor.linear.z),0};
+        // v1089: a severed part's root moves its whole attachment group, natively at the group's centre: the velocity for the body's origin becomes the centre's
+        Vec3 at_centre=motor.linear;
+        if(body.group_root) {
+            if(const auto c=motion_centre(body)) {at_centre=motion_centre_velocity(motor.linear,motor.angular,c->centre,body.pose.position);++lever_applied_;limb_centre_mm_=length(c->centre-body.pose.position)*1000;}
+            else ++lever_rejected_;
+        }
+        alignas(16) std::array<float,4> linear{static_cast<float>(at_centre.x),static_cast<float>(at_centre.y),static_cast<float>(at_centre.z),0};
         alignas(16) std::array<float,4> angular{static_cast<float>(motor.angular.x),static_cast<float>(motor.angular.y),static_cast<float>(motor.angular.z),0};
         CrashOperation operation("native physical grab velocity");
         const auto result=write_velocity(reinterpret_cast<void*>(body.world),body.handle,linear.data(),angular.data());
@@ -1043,7 +1075,10 @@ private:
                 if(body->limb>=0) {   // v1088 status severed_limb.holds / seat, and severed-limb-hold.csv "seat"
                     ++limb_holds_;const auto s=p.palm.valid?rig::seat_stats(*body,seated,p.palm.palm,p.palm.direction):rig::SeatStats{};
                     limb_seat_=LimbSeat{s.reach_mm,s.gap_mm,s.slide_mm,s.turn_deg,natural};
-                    limb_row(now,"seat",side,*body,s.gap_mm,s.slide_mm,s.turn_deg,natural?1.:0.,s.reach_mm);
+                    // v1089: v6 1 = the part's root (an attachment group), v7 its motion's centre from the body (mm), v8 that motion's mass (kg); -1 unread
+                    const auto c=motion_centre(*body);if(body->group_root) ++limb_group_holds_;
+                    limb_row(now,"seat",side,*body,s.gap_mm,s.slide_mm,s.turn_deg,natural?1.:0.,s.reach_mm,body->group_root?1.:0.,
+                        c?length(c->centre-body->pose.position)*1000:-1.,c?c->kg:-1.);
                 }
                 lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
@@ -1060,6 +1095,7 @@ private:
         if(!world || !game || !rig::typed(read_,base_,*game,0x1c940a8) || rig::value<std::uintptr_t>(read_,*game+0x60410)!=world) return;
         const auto now=GetTickCount64();
         pass_cost_us_=0;
+        drain_limb_refusals(now);   // v1089
         if(coupling_on_) {std::unique_lock<std::mutex> pub(coupling_mutex_,std::try_to_lock);   // B16: the render thread's couplings (never waited for)
          if(pub.owns_lock()) for(unsigned side=0;side<2;++side) if(coupling_pub_[side].serial!=lanes_[side].coupling.serial || coupling_pub_[side].tick!=lanes_[side].coupling.tick) lanes_[side].coupling=coupling_pub_[side];}
         for(unsigned side=0;side<2;++side) update_lane(side,*world,now);
@@ -1265,7 +1301,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);std::ostringstream o;const auto& s=limb_seat_;
         o<<"\"holds\":"<<limb_holds_<<",\"use_holds\":"<<limb_use_holds_<<",\"presses\":["<<limb_presses_[1]<<','<<limb_presses_[2]<<','<<limb_presses_[3]<<']'
          <<",\"seat\":{\"reach_mm\":"<<s.reach_mm<<",\"gap_mm\":"<<s.gap_mm<<",\"slide_mm\":"<<s.slide_mm<<",\"turn_deg\":"<<s.turn_deg<<",\"natural\":"<<(s.natural?1:0)<<'}'
-         <<",\"hold\":{\"err_mm_max\":"<<limb_err_mm_max_<<",\"gap_mm\":"<<limb_gap_mm_<<'}';
+         <<",\"hold\":{\"err_mm_max\":"<<limb_err_mm_max_<<",\"gap_mm\":"<<limb_gap_mm_<<'}'
+         // v1089: holds of a part's root (an attachment group: a head), and its velocity turned to the group's centre [applied, centre unread], the last centre offset
+         <<",\"group_holds\":"<<limb_group_holds_<<",\"lever\":["<<lever_applied_<<','<<lever_rejected_<<"],\"centre_mm\":"<<limb_centre_mm_;
         return o.str();
     }
     // v1069: the player's world velocity (render thread, the hand servo's Fix B estimate), fed to held props' motors.
@@ -1626,7 +1664,7 @@ public:
             acquisitions_.open(file.parent_path()/L"native-grab-acquisition.csv",std::ios::trunc);
             if(!acquisitions_) throw std::runtime_error("Cannot open native acquisition evidence");
             limb_rows_=0;limb_log_.open(file.parent_path()/L"severed-limb-hold.csv",std::ios::trunc);   // v1088 (optional evidence: no throw)
-            if(limb_log_) limb_log_<<"tick_ms,event,side,entity_id,limb,v1,v2,v3,v4,v5\n";
+            if(limb_log_) limb_log_<<"tick_ms,event,side,entity_id,limb,v1,v2,v3,v4,v5,v6,v7,v8\n";
         }
         mass_probe_=false;mass_probe_rows_=0;mass_probe_out_.close();
         {std::error_code ec;const auto root=root_dir.empty()?file.parent_path().parent_path():root_dir;

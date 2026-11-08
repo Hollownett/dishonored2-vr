@@ -4,8 +4,12 @@
 #include "physical_grab.hpp"
 #include "living_npc_hold.hpp"
 #include "prop_hull.hpp"
+#include <chrono>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <vector>
 namespace d2vr {
 struct NativeGrabBounds {
     Vec3 minimum{},maximum{};
@@ -21,6 +25,7 @@ struct NativeRigidBody {
     std::optional<NativeGrabBounds> bounds{};
     int bone=-1; // ragdoll bone of a guard's body (native_ragdoll_body), -1 for a standalone prop
     int limb=-1; // v1086: the body's index in a severed limb's own bodies (native_severed_limb_body), held like a prop (bone -1)
+    bool group_root{}; // v1089: it heads an attachment group (a severed part's root): its velocity moves the group's one motion (NativeGrab::write)
     const PropShape* hull{}; // its real shape (prop_hull.hpp: its render mesh found by its Havok hull, or the hull alone); nullptr: composite, unreadable or a hull short of the render box (the bounds stand)
     Vec3 contact(Vec3 hand) const {return bounds?bounds->closest(hand):pose.position;}
     double contact_distance(Vec3 hand) const {return length(contact(hand)-hand);}
@@ -196,6 +201,38 @@ inline std::atomic<unsigned long long> severed_limb_reads_ok{0},severed_limb_rea
 // without a readable shape, 6 changed during the read. last_flags: the flags word of the last body record refused (its motion type in bits 0-2).
 inline std::array<std::atomic<unsigned long long>,7> severed_limb_why{};
 inline std::atomic<std::uint32_t> severed_limb_last_flags{0};
+// v1089 (user, v1088 headset: "I can not pick up a severed head with just grip ... the hand and fingers closer, as the other parts"): every read of the head
+// refused (v1088 status why[4] 743: no record passed; severed-limb-hold.csv: 28 presses, no pick). From the game's own Havok reflection (Dishonored2.exe
+// hkReflect): hknpBody +0x40 motionId, +0x44 flags, +0x70 id, +0x74 nextAttachedBodyId; hknpMotion (0x80 each, world +0x120) +0x00 centerOfMass (world),
+// +0x28 firstAttachedBodyId; hknpPhysicsSystemData::bodyCinfoWithAttachment (+0xa0 attachedBody): a system's body may be ATTACHED to another and share its
+// motion. A severed part is a clone of the whole cut ragdoll (0x731a20 -> 0x72ffa0: a new system of all its bodies from the cut NPC's data, the arkCpntPhysics-
+// SystemEvolved m_severRequester +0x2e0 / m_severBody +0x2f0), and v1088 took only a STANDALONE body (+0x74 == its own id). In that run no part's root was ever
+// held: legs gave the calf or foot (12, 13, 15) and arms the forearm (6, 9), taken 13-32 cm from a palm on the thigh or upper arm, and the head, a part of one
+// body, gave nothing. Read (static ABI + that run, not a live read): a part's root heads an attachment group, the clone's other bodies attached to it.
+// Now every physics component is read; a body that heads its group (its motion's first attached body is itself) is the part's root and may be held (its
+// velocity moves the whole group); a body attached to another is never offered. Standalone bodies come first (v1088's legs and arms unchanged); the root is
+// held when its part has none (a head; a hand or foot cut at the wrist or ankle). Each refused body is counted by the check it failed (severed_limb_body_why:
+// 0 component not started, 1 slot, 2 not dynamic, 3 motion, 4 transform, 5 id, 6 attached to another body, 7 no shape) and logged, once per body and check
+// every 2 s (severed_limb_refusals -> severed-limb-hold.csv "refuse"), so the next run proves this or names the check that is left.
+inline std::array<std::atomic<unsigned long long>,8> severed_limb_body_why{};
+inline std::atomic<unsigned long long> severed_limb_roots{0};
+struct LimbRefusal {std::uint32_t entity_id{},handle{},flags{},motion{},id{},next{};std::int64_t first{-1};int index{},check{};std::uintptr_t component_rva{};};
+inline std::mutex severed_limb_refusal_mutex;
+inline std::vector<LimbRefusal> severed_limb_refusals;   // drained into severed-limb-hold.csv by NativeGrab
+inline std::map<std::uint64_t,std::chrono::steady_clock::time_point> severed_limb_refusal_seen;
+inline void note_limb_refusal(const LimbRefusal& r) {
+    severed_limb_body_why[static_cast<std::size_t>(std::clamp(r.check,0,7))].fetch_add(1,std::memory_order_relaxed);
+    const std::uint64_t key=(std::uint64_t{r.entity_id}<<32)|(static_cast<std::uint64_t>(r.index&0xff)<<8)|static_cast<std::uint64_t>(r.check&0xff);
+    const auto now=std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(severed_limb_refusal_mutex);
+    if(severed_limb_refusal_seen.size()>1024) severed_limb_refusal_seen.clear();
+    const auto it=severed_limb_refusal_seen.find(key);
+    if(it!=severed_limb_refusal_seen.end() && now-it->second<std::chrono::seconds(2)) return;
+    severed_limb_refusal_seen[key]=now;
+    if(severed_limb_refusals.size()<256) severed_limb_refusals.push_back(r);
+}
+// v1089: the velocity the native setter must be given at a motion's centre c for the body origin p to move at v (rigid motion: v_p = v_c + w x (p - c)).
+inline Vec3 motion_centre_velocity(Vec3 v_at_point,Vec3 w,Vec3 centre,Vec3 point) {return v_at_point+cross(w,centre-point);}
 template<class Read> bool severed_limb_entity(Read& read,std::uintptr_t base,std::uintptr_t entity) {
     using namespace rig;
     const auto table=value<std::uintptr_t>(read,entity);
@@ -225,32 +262,48 @@ template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Rea
     if(!model || !*model || !entries || !world || !pointer(*world)) return refuse(1);
     const auto pool=value<std::uintptr_t>(read,*world+0x28);const auto count=value<std::uint32_t>(read,*world+0x30);
     if(!pool || !pointer(*pool) || !count || *count>0x100000) return refuse(1);
-    // The component and its body handles (at most 17).
-    std::uintptr_t component{};std::array<std::uint32_t,17> handles{};unsigned n=0;
-    for(unsigned i=0;i<entries->packed_count && !n;++i) {
+    const auto motion_array=value<std::uintptr_t>(read,*world+0x120);   // v1089: hknpMotion[], 0x80 each (+0x28 firstAttachedBodyId)
+    // The body handles of EVERY physics component (v1089: v1088 stopped at the first component that gave any): the ragdoll system's list
+    // (+0x100 -> data +0x28, count +0x30) and a single-body component's handle (+0xf8). A body's index is its place in this order.
+    struct Slot {std::uint32_t handle;std::uintptr_t component;};std::array<Slot,40> handles{};unsigned n=0;
+    for(unsigned i=0;i<entries->packed_count && n<handles.size();++i) {
         const auto at=value<std::uintptr_t>(read,entries->data+i*8);if(!at || !*at) continue;
         if(typed(read,base,*at,0x1c54008)) {
             const auto list_at=value<std::uintptr_t>(read,*at+0x100);if(!list_at || !pointer(*list_at)) continue;
             const auto data=value<std::uintptr_t>(read,*list_at+0x28);const auto c=value<std::uint32_t>(read,*list_at+0x30);
-            if(!data || !pointer(*data) || !c || *c>17) continue;
-            for(unsigned k=0;k<*c;++k) if(const auto h=value<std::uint32_t>(read,*data+k*4);h && *h) handles[n++]=*h;
-            component=*at;
+            if(!data || !pointer(*data) || !c || *c>32) continue;
+            for(unsigned k=0;k<*c && n<handles.size();++k) if(const auto h=value<std::uint32_t>(read,*data+k*4);h && *h) handles[n++]={*h,*at};
         } else if(typed(read,base,*at,0x1c745c8) || typed(read,base,*at,0x1b64b68)) {
-            if(const auto h=value<std::uint32_t>(read,*at+0xf8);h && *h) {handles[n++]=*h;component=*at;}
+            if(const auto h=value<std::uint32_t>(read,*at+0xf8);h && *h) handles[n++]={*h,*at};
         }
     }
-    if(!component || !n) return refuse(2);
-    const auto identity=started(read,component);if(!identity) return refuse(3);
-    std::optional<NativeRigidBody> best;double best_d=std::numeric_limits<double>::infinity();bool any_record=false;
+    if(!n) return refuse(2);
+    std::optional<NativeRigidBody> best,root;double best_d=std::numeric_limits<double>::infinity(),root_d=best_d;bool any_record=false,any_started=false;
     for(unsigned k=0;k<n;++k) {
         if(index>=0 && static_cast<unsigned>(index)!=k) continue;
-        const auto handle=handles[k];const auto slot=handle&0xffffff;
-        if(slot==0xffffff || slot>=*count) continue;
+        const auto handle=handles[k].handle;const auto component=handles[k].component;const auto slot=handle&0xffffff;
+        LimbRefusal no{*id,handle};no.index=static_cast<int>(k);
+        if(const auto table=value<std::uintptr_t>(read,component);table && *table>base) no.component_rva=*table-base;
+        const auto identity=started(read,component);
+        if(!identity) {no.check=0;note_limb_refusal(no);continue;}
+        any_started=true;
+        if(slot==0xffffff || slot>=*count) {no.check=1;note_limb_refusal(no);continue;}
         const auto record=*pool+slot*0xb0;
         const auto flags=value<std::uint32_t>(read,record+0x44),motion=value<std::uint32_t>(read,record+0x40);
         const auto transform=value<Transform>(read,record);
-        if(!flags || (*flags&7)!=2 || !motion || !*motion || *motion>=0x100000 || !transform || !valid(*transform) ||
-           value<std::uint32_t>(read,record+0x70)!=handle || value<std::uint32_t>(read,record+0x74)!=handle) {if(flags) severed_limb_last_flags.store(*flags,std::memory_order_relaxed);continue;}
+        const auto own=value<std::uint32_t>(read,record+0x70),next=value<std::uint32_t>(read,record+0x74);
+        no.flags=flags.value_or(0);no.motion=motion.value_or(0);no.id=own.value_or(0);no.next=next.value_or(0);
+        bool group=false;
+        if(!flags || (*flags&7)!=2) no.check=2;
+        else if(!motion || !*motion || *motion>=0x100000) no.check=3;
+        else if(!transform || !valid(*transform)) no.check=4;
+        else if(own!=handle) no.check=5;
+        else if(next!=handle) {   // one of an attachment group: only the body that heads it (its motion's first attached body)
+            const auto first=motion_array && pointer(*motion_array)?value<std::uint32_t>(read,*motion_array+static_cast<std::uintptr_t>(*motion)*0x80+0x28):std::nullopt;
+            if(first) no.first=*first;
+            if(next && *next && first && *first==handle) group=true;else no.check=6;
+        }
+        if(no.check) {if(flags) severed_limb_last_flags.store(*flags,std::memory_order_relaxed);note_limb_refusal(no);continue;}
         any_record=true;
         const auto& t=transform->f;
         NativeRigidBody body{entity,component,*world,record,*model,*id,handle,*flags,Identity{identity->generation,0},
@@ -260,12 +313,14 @@ template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Rea
         // hand on the shin was 12-25 cm from it (v1086 log: phys_mm 121-243). Its box, the nearest body and the seat are the hull's; no readable
         // convex shape: no candidate (counted), the grip stays the game's Use.
         body.hull=prop_hull(read,base,record);
-        if(!body.hull) continue;
-        body.bounds=hull_world_bounds(body.pose,*body.hull);body.limb=static_cast<int>(k);
+        if(!body.hull) {no.check=7;note_limb_refusal(no);continue;}
+        body.bounds=hull_world_bounds(body.pose,*body.hull);body.limb=static_cast<int>(k);body.group_root=group;
         const double d=index>=0?0.:hull_surface_distance(body.pose,*body.hull,toward);
-        if(!best || d<best_d) {best=body;best_d=d;}
+        auto& pick=group?root:best;auto& pick_d=group?root_d:best_d;
+        if(!pick || d<pick_d) {pick=body;pick_d=d;}
     }
-    if(!best) return refuse(any_record?5:4);
+    if(!best && root) {best=root;severed_limb_roots.fetch_add(1,std::memory_order_relaxed);}   // v1089: a part with no standalone body is held by its root
+    if(!best) return refuse(!any_started?3:any_record?5:4);
     if(value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0)!=model) return refuse(6);
     severed_limb_reads_ok.fetch_add(1,std::memory_order_relaxed);
     return best;
