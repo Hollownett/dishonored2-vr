@@ -1250,7 +1250,7 @@ public:
         std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
-            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu]}",dual_wield()?1:0,
+            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu]}",dual_wield()?1:0,
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1260,7 +1260,7 @@ public:
             held_want_[0].load()?1:0,held_want_[1].load()?1:0,failed.c_str(),kinds.c_str(),static_cast<unsigned long long>(slot1_restores.load()),ride_other_.load()?1:0,
             static_cast<double>(last_return_dz.load()),static_cast<double>(last_return_age_s.load()),
             static_cast<unsigned long long>(gun_hits.load()),static_cast<unsigned long long>(bash_hits.load()),static_cast<unsigned long long>(gadget_hits.load()),
-            static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()),static_cast<unsigned long long>(upgrade_skips.load()));
+            static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()),static_cast<unsigned long long>(upgrade_skips.load()),static_cast<unsigned long long>(upgrade_rebinds.load()));
         return b;
     }
 private:
@@ -1610,7 +1610,7 @@ private:
     struct CopyUpgrades {std::uintptr_t ent{};std::uint32_t id{};unsigned n{};std::array<std::uintptr_t,8> item{};
         std::array<std::array<std::uintptr_t,2>,8> att{};std::array<std::array<std::uint32_t,2>,8> att_id{};};
     inline static std::array<CopyUpgrades,10> ups_{};inline static std::uint64_t ups_looked_{};
-    inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{},upgrade_skips{};
+    inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{},upgrade_skips{},upgrade_rebinds{};
     template<class Read> static void upgrades_drop(std::uintptr_t base,Read& read,CopyUpgrades& u) {
         for(unsigned i=0;i<u.n;++i) for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u.att[i][k],u.att_id[i][k])) remove_entity(base,u.att[i][k]);
         u={};
@@ -1625,35 +1625,87 @@ private:
         }
         return 0;
     }
-    template<class Read> static void upgrades_sync(std::uintptr_t base,Read& read,std::uintptr_t ent,std::uint32_t id,std::uintptr_t comp) {
+    // v1093 (user, headset v1092: "simple rule: the player always sees weapons with the latest upgrades", also a dropped weapon). A copy with
+    // no animation component (the crossbow copies) cannot take a joint-tagged part (v1092 crash: the bind update reads the owner's animation
+    // component at bind+0x400 when the joint index is set). Such a part is attached from a copy of its decl with an empty tag (bound at the
+    // owner's origin, joint index -1, never read) and then bound again where it sits on the player's own weapon: the bind 0x875e80(owner,
+    // child, tag*, offset*, axis*, 1) with no tag places the child at offset/axis in the owner's frame (the game passes vec3_origin
+    // 0x31af668 and mat3_identity 0x228a780 there). That place is measured live on the player's weapon: the part's entity frame (+0x300 /
+    // +0x30c) in the weapon's model frame (model+0x1860, the frame a copy is placed with), cached per upgrade decl and part.
+    // The player's weapon may clear m_upgrades while it is put away or dropped: the last non-empty list of each kind is kept and used then.
+    struct PartPlace {std::uintptr_t decl{};unsigned part{};held_copy::Pose local{};};
+    inline static std::array<PartPlace,32> places_{};inline static std::array<std::array<std::uintptr_t,8>,4> last_items_{};inline static std::array<unsigned,4> last_n_{};
+    static const PartPlace* place_of(std::uintptr_t decl,unsigned part) {
+        for(const auto& p:places_) if(p.decl==decl && p.part==part) return &p;
+        return nullptr;
+    }
+    template<class Read> static std::optional<held_copy::Pose> entity_frame(Read& read,std::uintptr_t e) {
+        std::array<float,12> f{};if(!read(e+0x300,f.data(),sizeof(f))) return std::nullopt;
+        const auto pose=held_copy::from_rows(f.data(),f.data()+3);return held_copy::valid(pose)?std::optional<held_copy::Pose>{pose}:std::nullopt;
+    }
+    // The player's weapon of `comp`: its upgrade items (and, while its parts live, where each part sits on it).
+    template<class Read> static unsigned native_upgrades(std::uintptr_t base,Read& read,std::uintptr_t comp,held_copy::Kind kind,std::array<std::uintptr_t,8>& items) {
+        const auto list=rig::list(read,comp+0x50,64);unsigned n=0;
+        const auto weapon=rig::value<std::uintptr_t>(read,comp+0x10);
+        const auto model=weapon && *weapon?rig::value<std::uintptr_t>(read,*weapon+0xf0):std::nullopt;
+        std::optional<held_copy::Pose> frame;std::array<float,12> mf{};
+        if(model && rig::pointer(*model) && rig::typed(read,base,*model,0x1b0d628) && read(*model+0x1860,mf.data(),sizeof(mf))) {
+            const auto f=held_copy::from_rows(mf.data(),mf.data()+3);if(held_copy::valid(f)) frame=f;}
+        for(unsigned i=0;list && i<list->packed_count && n<items.size();++i) {
+            const auto at=list->data+i*0x28ull;const auto item=rig::value<std::uintptr_t>(read,at);
+            if(!item || !rig::pointer(*item)) continue;
+            items[n++]=*item;
+            const auto decl=rig::value<std::uintptr_t>(read,*item);if(!frame || !decl || !*decl) continue;
+            for(unsigned k=0;k<2;++k) {
+                const auto part=rig::value<std::uintptr_t>(read,at+0x10+8ull*k);if(!part || !*part) continue;
+                const auto pid=rig::value<std::uint32_t>(read,*part+0xa8);if(!pid || !alive_entity(base,read,*part,*pid)) continue;
+                const auto pf=entity_frame(read,*part);if(!pf) continue;
+                PartPlace* slot=nullptr;for(auto& p:places_) if(p.decl==*decl && p.part==k) slot=&p;
+                if(!slot) for(auto& p:places_) if(!p.decl) {slot=&p;break;}
+                if(slot) *slot={*decl,k,held_copy::to_local(*frame,*pf)};
+            }
+        }
+        auto& last=last_items_[static_cast<unsigned>(kind)&3u];auto& ln=last_n_[static_cast<unsigned>(kind)&3u];
+        if(n) {last=items;ln=n;return n;}
+        items=last;return ln;
+    }
+    template<class Read> static void upgrades_sync(std::uintptr_t base,Read& read,std::uintptr_t ent,std::uint32_t id,const std::array<std::uintptr_t,8>& want,unsigned wn) {
         CopyUpgrades* u=nullptr;
         for(auto& c:ups_) if(c.ent==ent && c.id==id) u=&c;
         if(!u) for(auto& c:ups_) if(!c.ent) {u=&c;break;}
         if(!u) return;
         u->ent=ent;u->id=id;
-        const auto list=rig::list(read,comp+0x50,64);if(!list) return;
-        std::array<std::uintptr_t,8> want{};unsigned wn=0;
-        for(unsigned i=0;i<list->packed_count && wn<want.size();++i)
-            if(const auto item=rig::value<std::uintptr_t>(read,list->data+i*0x28ull);item && rig::pointer(*item)) want[wn++]=*item;
-        for(unsigned i=0;i<u->n;) { // an upgrade that left the list: its parts go
+        for(unsigned i=0;i<u->n;) { // an upgrade that left the list (a parent replaced by its child): its parts go
             if(std::find(want.begin(),want.begin()+wn,u->item[i])!=want.begin()+wn) {++i;continue;}
             for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u->att[i][k],u->att_id[i][k])) remove_entity(base,u->att[i][k]);
             --u->n;u->item[i]=u->item[u->n];u->att[i]=u->att[u->n];u->att_id[i]=u->att_id[u->n];
         }
-        // v1092 (headset v1091 crash, the crossbow put in the other hand): a part bound to a joint tag needs the owner's animation component.
-        // The bind (0x752900) stores GetComponent(owner, 0x39dc9d0) at bind+0x400 even when it is null, and the bind update (0x7506d0 ->
-        // 0x53d3f0) reads [+0x400]+0x38 on worker threads whenever the joint index is set. The crossbow copies (crossbow_*_midnight.def)
-        // have no animation component and every crossbow part is tagged (cross_rot_jnt): such a part is skipped (recorded, not retried). An
-        // untagged part keeps joint index -1, which 0x53d3f0 answers without that read.
         const bool animated=reinterpret_cast<std::uintptr_t (__fastcall*)(std::uintptr_t,std::uintptr_t,int)>(base+0x877720)(ent,base+0x39dc9d0,0)!=0;
+        static const char empty_tag[1]{};
         for(unsigned w=0;w<wn && u->n<u->item.size();++w) {
             if(std::find(u->item.begin(),u->item.begin()+u->n,want[w])!=u->item.begin()+u->n) continue;
             alignas(16) std::array<std::uintptr_t,4> self{0,0,ent,0};alignas(16) std::array<std::uintptr_t,5> out{};
             const auto decl=rig::value<std::uintptr_t>(read,want[w]);const auto tag=decl && *decl?rig::value<std::uintptr_t>(read,*decl+0x240):std::nullopt;
             const auto first=tag && *tag?rig::value<char>(read,*tag):std::optional<char>{};
             if(!decl || !*decl || !tag || (*tag && !first)) continue;   // unreadable: try again later
-            if(first && *first && !animated) ++upgrade_skips;
-            else reinterpret_cast<void (__fastcall*)(void*,void*,std::uintptr_t)>(base+0x61a2b0)(self.data(),out.data(),want[w]);
+            const bool tagged=first && *first;
+            if(!tagged || animated) reinterpret_cast<void (__fastcall*)(void*,void*,std::uintptr_t)>(base+0x61a2b0)(self.data(),out.data(),want[w]);
+            else {
+                const auto has=[&](std::uintptr_t at){return rig::value<std::uintptr_t>(read,*decl+at).value_or(0)!=0;};
+                const bool need[2]{has(0x230),has(0x238)};
+                if((need[0] && !place_of(*decl,0)) || (need[1] && !place_of(*decl,1))) {++upgrade_skips;continue;}   // not measured yet: next pass
+                alignas(16) std::array<unsigned char,0x280> fake{};if(!read(*decl,fake.data(),fake.size())) continue;
+                const auto empty=reinterpret_cast<std::uintptr_t>(empty_tag);std::memcpy(fake.data()+0x240,&empty,8);
+                const std::uintptr_t fake_decl=reinterpret_cast<std::uintptr_t>(fake.data());const std::uintptr_t fake_item=reinterpret_cast<std::uintptr_t>(&fake_decl);
+                reinterpret_cast<void (__fastcall*)(void*,void*,std::uintptr_t)>(base+0x61a2b0)(self.data(),out.data(),fake_item);
+                for(unsigned k=0;k<2;++k) if(out[2+k]) if(const auto pl=place_of(*decl,k)) {
+                    alignas(16) std::array<float,3> o{float(pl->local.position.x),float(pl->local.position.y),float(pl->local.position.z)};alignas(16) std::array<float,9> m{};
+                    for(unsigned r=0;r<3;++r) {m[r*3]=float(pl->local.basis[r].x);m[r*3+1]=float(pl->local.basis[r].y);m[r*3+2]=float(pl->local.basis[r].z);}
+                    const std::uintptr_t tag_field=empty;
+                    reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uintptr_t,const std::uintptr_t*,const float*,const float*,bool)>(base+0x875e80)(ent,out[2+k],&tag_field,o.data(),m.data(),true);
+                    ++upgrade_rebinds;
+                }
+            }
             const unsigned i=u->n++;u->item[i]=want[w];
             for(unsigned k=0;k<2;++k) {u->att[i][k]=out[2+k];u->att_id[i][k]=out[2+k]?rig::value<std::uint32_t>(read,out[2+k]+0xa8).value_or(0):0u;if(out[2+k]) ++upgrade_parts;}
         }
@@ -1662,7 +1714,9 @@ private:
         static const bool pinned=[&]{static constexpr std::array<unsigned char,16> code{0x48,0x8b,0xc4,0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x60,0x48,0xc7,0x40,0xd8};
             static constexpr std::array<unsigned char,12> get_component{0x48,0x89,0x5c,0x24,0x10,0x44,0x89,0x44,0x24,0x18,0x55,0x56};
             std::array<unsigned char,16> got{};std::array<unsigned char,12> gc{};
-            return read(base+0x61a2b0,got.data(),got.size()) && got==code && read(base+0x877720,gc.data(),gc.size()) && gc==get_component;}();
+            static constexpr std::array<unsigned char,16> bind{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57};std::array<unsigned char,16> bd{};
+            return read(base+0x61a2b0,got.data(),got.size()) && got==code && read(base+0x877720,gc.data(),gc.size()) && gc==get_component
+                && read(base+0x875e80,bd.data(),bd.size()) && bd==bind;}();
         if(!pinned) return;
         struct Shown {std::uintptr_t ent;std::uint32_t id;held_copy::Kind kind;};std::array<Shown,16> shown{};unsigned ns=0;
         const auto player_kind=[](const char* def) {
@@ -1676,13 +1730,17 @@ private:
             return std::none_of(ups_.begin(),ups_.end(),[&](const CopyUpgrades& u){return u.ent==s.ent && u.id==s.id;});});
         if(!fresh && now-ups_looked_<250) return;   // a newly shown copy at once, the rest (a bought upgrade) four times a second
         ups_looked_=now;
+        std::array<std::array<std::uintptr_t,8>,4> items{};std::array<unsigned,4> n{};
+        for(const auto kind:{held_copy::Kind::pistol,held_copy::Kind::crossbow}) // measured even with no copy out: a later copy (or drop) needs the places
+            if(const auto comp=native_equipment(base,read,kind)) {const auto k=static_cast<unsigned>(kind);try {n[k]=native_upgrades(base,read,comp,kind,items[k]);} catch(...) {++upgrade_faults;}}
         for(unsigned i=0;i<ns;++i) {
             if(!alive_entity(base,read,shown[i].ent,shown[i].id)) continue;
-            if(const auto comp=native_equipment(base,read,shown[i].kind)) {try {upgrades_sync(base,read,shown[i].ent,shown[i].id,comp);} catch(...) {++upgrade_faults;}}
+            const auto k=static_cast<unsigned>(shown[i].kind)&3u;
+            try {upgrades_sync(base,read,shown[i].ent,shown[i].id,items[k],n[k]);} catch(...) {++upgrade_faults;}
         }
     }
     static void guns_forget() { // every pointer is dead or already removed: call nothing
-        lying_={};held_={};meas_={};pool_={};ups_={};bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
+        lying_={};held_={};meas_={};pool_={};ups_={};places_={};bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
         std::lock_guard<std::mutex> l(feed_m_);held_pub_={};copy_draw_={};
     }
     template<class Read> static void service_guns(std::uintptr_t base,Read& read) {
