@@ -71,15 +71,38 @@ struct HandState {
         return Why::ok;
     }
     // The native cycle is fire scene, then the reload scene: the reload starts when the cooldown ends.
-    void fired(std::uint64_t now,bool auto_reload) noexcept {
-        loaded=std::max(loaded-1,0);ready_at=now+cooldown_ms;
-        if(loaded==0 && auto_reload) {reloading=true;reload_done=ready_at+reload_ms(kind);}
+    // v1094: cool / reload_len are the game's scene lengths for the weapon's upgrades (Timing); 0 = the plain weapon.
+    void fired(std::uint64_t now,bool auto_reload,std::uint64_t cool=0,std::uint64_t reload_len=0) noexcept {
+        loaded=std::max(loaded-1,0);ready_at=now+(cool?cool:cooldown_ms);
+        if(loaded==0 && auto_reload) {reloading=true;reload_done=ready_at+(reload_len?reload_len:reload_ms(kind));}
     }
-    bool reload(std::uint64_t now,int capacity,int pool) noexcept {
+    bool reload(std::uint64_t now,int capacity,int pool,std::uint64_t reload_len=0) noexcept {
         if(!used || reloading || loaded>=std::min(std::max(capacity,1),std::max(pool,0))) return false;
-        reloading=true;reload_done=std::max(now,ready_at)+reload_ms(kind);return true;
+        reloading=true;reload_done=std::max(now,ready_at)+(reload_len?reload_len:reload_ms(kind));return true;
     }
 };
+// v1094 (user, headset v1093: the copy "fired as the default weapon": fire rate, reload, magazine, ammo, effects). The reload-speed upgrades
+// carry no attribute: they set a midnight condition (upgrade decl +0x250: ReloadSpeed, ReloadSpeed2, NailGun; set by 0x61b400 from the
+// weapon's m_upgrades) and the fire / reload midnight scenes pick a shorter scene by it (gun_reload / gun_fire / crossbow_fire decls).
+// The times below are those scenes (the end, or the BREAK_PLAYER_STATE event that frees the player first). The nailgun also scales the
+// crossbow scenes by its playrate attributes (fire 2.4, reload 1.55: crossbow_nailgun_corvo). Burst (Emily) = ammo flag bit 0: 3 shots
+// 150 ms apart (FastFire x2 + Fire).
+enum Condition : unsigned {reload_speed=1,reload_speed2=2,nail_gun=4};
+struct Timing {std::uint64_t cool{},reload{};};
+inline Timing timing(Kind k,unsigned conditions) noexcept {
+    if(k==Kind::pistol) return {330,(conditions&reload_speed2)?766u:(conditions&reload_speed)?1000u:1500u};
+    Timing t{(conditions&(reload_speed|nail_gun))?100u:666u,(conditions&reload_speed)?566u:900u};
+    if(conditions&nail_gun) t.reload=static_cast<std::uint64_t>(static_cast<double>(t.reload)/1.55+.5);
+    return t;
+}
+inline unsigned condition_of(const char* name) noexcept {
+    if(!name) return 0;
+    if(!std::strcmp(name,"ReloadSpeed2")) return reload_speed2;
+    if(!std::strcmp(name,"ReloadSpeed")) return reload_speed;
+    if(!std::strcmp(name,"NailGun")) return nail_gun;
+    return 0;
+}
+inline constexpr std::uint64_t burst_gap_ms=150;
 inline Why validate(unsigned side,unsigned kind,const float* origin,const float* axis) noexcept {
     if(side>1 || kind>1) return Why::bad_request;
     for(unsigned i=0;i<3;++i) if(!std::isfinite(origin[i]) || std::abs(origin[i])>1e6f) return Why::bad_frame;
@@ -101,7 +124,7 @@ public:
         // gun, which is the OTHER hand's native pistol: v815 headset 'the flash comes out of the pistol in my left hand'), so they run with this one.
         std::uintptr_t entity{};std::uint32_t entity_id{};
     };
-    struct Request {bool reload{};Shot shot{};};
+    struct Request {bool reload{},burst{};Shot shot{};};
     // The native calls, replaceable so the pure flow is testable. Real ones run under SEH and return false on a fault.
     struct Natives {
         bool (*create)(std::uintptr_t base,std::uintptr_t comp,std::uintptr_t& projectile);
@@ -141,6 +164,17 @@ public:
         return enqueue(r);
     }
     static bool ready(unsigned side) {return side<2 && clock()>=ready_at_[side].load() && clock()>=reload_until_[side].load();}
+    // v1094: what each hand holds as a copy (-1 none, 0 pistol, 1 crossbow; render/control thread, every frame) and which hand chose from
+    // the wheel last (its choice of ammo for a copy is the copy's own, not the other hand's native weapon's).
+    static void note_copies(int left,int right) {copy_kind_[0]=left;copy_kind_[1]=right;}
+    static void note_wheel(unsigned hand) {if(hand<2) {wheel_hand_=static_cast<int>(hand);wheel_tick_=clock();wheel_done_=false;}}
+    // Game thread: the ammo entry a hand's copy fires (0 = the weapon's own) and whether the copy is loaded (its bolt shows).
+    static std::uintptr_t copy_ammo(unsigned side,unsigned kind) {return side<2 && kind<2?copy_ammo_[side][kind]:0;}
+    static std::uintptr_t native_ammo(unsigned kind) {return kind<2?seen_ammo_[kind]:0;}
+    static bool loaded(unsigned side) {return side<2 && hands_[side].used && hands_[side].loaded>0 && !hands_[side].reloading;}
+    // Serials NativeWeaponHands plays the copy's upgrade animations from (fire = ANIMATE_ON_FIRE, reload start = ANIMATE_ON_RELOAD).
+    static std::uint64_t shot_serial(unsigned side) {return side<2?shot_serial_[side]:0;}
+    static std::uint64_t reload_serial(unsigned side) {return side<2?reload_serial_[side]:0;}
     static void reset_latch() {latched_=false;consecutive_faults_=0;}
     static void reset_counters() {
         for(auto* c:{&requests_,&serviced_,&services_,&failures_,&fired_,&created_,&launched_,&reloads_,&dry_plans_,&comps_total_,&comps_started0_,
@@ -162,8 +196,13 @@ public:
         std::vector<Request> work;{std::lock_guard<std::mutex> l(m_);work.swap(queue_);pending_[0]=pending_[1]=false;}
         if(!work.empty()) ++services_;
         if(!verified) {for(const auto& r:work) {(void)r;refuse(Why::unverified);}work.clear();}
-        if(work.empty() && tracks_.empty()) return;
         CrashOperation operation("native ranged fire");
+        if(verified && !latched_) {try {track_ammo(base,read);} catch(...) {++failures_;}}
+        const auto now=clock();
+        for(unsigned side=0;side<2;++side) // burst follow-ups (the shot's frame is the first one's)
+            if(burst_left_[side] && now>=burst_next_[side]) {Request r{};r.shot=burst_shot_[side];r.burst=true;work.push_back(r);}
+        for(unsigned side=0;side<2;++side) if(hands_[side].reloading && !reload_noted_[side] && now>=hands_[side].reload_done-reload_len_[side]) {reload_noted_[side]=true;++reload_serial_[side];}
+        if(work.empty() && tracks_.empty()) return;
         try {service_with(base,read,native_table(),work);} catch(...) {++failures_;}
     }
     template<class Read> static void service_with(std::uintptr_t base,Read& read,const Natives& n,const std::vector<Request>& work) {
@@ -171,7 +210,7 @@ public:
         for(const auto& r:work) {
             ++serviced_;
             const Why why=latched_?Why::latched:handle(base,read,n,r,now);
-            if(why!=Why::ok) refuse(why);
+            if(why!=Why::ok) {refuse(why);if(r.burst) burst_left_[r.shot.side]=0;}
         }
         update_tracks(base,read,now);
     }
@@ -193,7 +232,7 @@ public:
          <<"},\"moved_100ms\":"<<moved_.load()<<",\"stationary_100ms\":"<<stationary_.load()<<",\"ended_early\":"<<ended_early_.load()
          <<",\"alive_4s\":"<<alive_4s_.load()<<",\"entity_finds\":"<<entity_finds_.load()<<",\"unstarted_shots\":"<<unstarted_shots_.load()<<",\"ammo\":{\"pool_before\":"<<pool_before_.load()<<",\"pool_after\":"<<pool_after_.load()
          <<",\"mag_before\":"<<mag_before_.load()<<",\"mag_after\":"<<mag_after_.load()<<",\"spent\":"<<spent_.load()
-         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"hands\":[";
+         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"v1094\":["<<ammo_swaps_.load()<<','<<ammo_splits_.load()<<','<<spreads_.load()<<','<<bursts_.load()<<"],\"hands\":[";
         const auto now=clock();
         for(unsigned s=0;s<2;++s) {
             const auto ra=ready_at_[s].load(),ru=reload_until_[s].load();
@@ -217,6 +256,7 @@ public:
     struct Located {
         std::uintptr_t game{},player{},inventory{},record{},comp{},decl{},entity{},ammo{},ammo_decl{},projectile_def{};
         std::uint32_t entity_id{},player_id{};int capacity{},magazine{},pool{};float speed{1.f};bool mark{},unstarted{};
+        std::uintptr_t native_ammo{};ranged_fire::Timing timing{};
     };
     inline static constexpr std::uintptr_t game_rva=0x39a5290,entities_offset=0x3130b0,player_vtable=0x1c5e428,game_vtable=0x1c940a8,
         inventory_vtable=0x1b9a878,weapon_entity_vtable=0x1ce1e98,projectile_info_rva=0x39d77e0;
@@ -295,6 +335,17 @@ public:
         l.capacity=std::max(value<std::int32_t>(read,l.comp+0xa4).value_or(1),1);
         l.magazine=value<std::int32_t>(read,l.comp+0xa0).value_or(0);
         l.pool=pool_count(read,l.inventory,l.ammo_decl);
+        l.native_ammo=l.ammo;
+        {   // v1094: the upgrade conditions of this weapon (its m_upgrades +0x50; the last non-empty set is kept: a put-away weapon may clear it)
+            unsigned conditions=0;bool any=false;
+            if(const auto ups=list(read,l.comp+0x50,64)) for(std::uint32_t i=0;i<ups->packed_count;++i) {
+                const auto item=value<std::uintptr_t>(read,ups->data+i*0x28ull);const auto decl=item && pointer(*item)?value<std::uintptr_t>(read,*item):std::nullopt;
+                const auto name=decl && *decl?value<std::uintptr_t>(read,*decl+0x250):std::nullopt;any=true;
+                std::array<char,24> text{};if(name && pointer(*name) && read(*name,text.data(),text.size()-1)) conditions|=ranged_fire::condition_of(text.data());
+            }
+            auto& kept=conditions_[static_cast<unsigned>(kind)&1u];if(any) kept=conditions;
+            l.timing=ranged_fire::timing(static_cast<ranged_fire::Kind>(kind),kept);
+        }
         if(kind==Shot::crossbow) { // 62b560's speed argument and extra flag, both from the player's attribute table
             const auto table=value<std::uintptr_t>(read,*attributes+0x48);
             const auto attribute=[&](std::uintptr_t offset)->std::optional<float> {
@@ -322,14 +373,16 @@ public:
     }
     template<class Read> static bool verify(std::uintptr_t base,Read& read) {
         struct Pin {std::uintptr_t rva;std::array<unsigned char,16> code;};
-        static const std::array<Pin,7> pins{{
+        static const std::array<Pin,9> pins{{
             {0x63b5f0,{0x48,0x89,0x4c,0x24,0x08,0x53,0x56,0x41,0x55,0x48,0x81,0xec,0xb0,0x00,0x00,0x00}},
             {0x63b3c0,{0x40,0x53,0x57,0x41,0x56,0x48,0x81,0xec,0xa0,0x00,0x00,0x00,0x48,0x8b,0x81,0x98}},
             {0x877720,{0x48,0x89,0x5c,0x24,0x10,0x44,0x89,0x44,0x24,0x18,0x55,0x56,0x57,0x41,0x54,0x41}},
             {0x614f30,{0x4c,0x8b,0xdc,0x48,0x83,0xec,0x68,0x49,0xc7,0x43,0xb8,0xfe,0xff,0xff,0xff,0x48}},
             {0x614750,{0x4c,0x8b,0xdc,0x57,0x48,0x83,0xec,0x60,0x49,0xc7,0x43,0xb8,0xfe,0xff,0xff,0xff}},
             {0x615680,{0x83,0xfa,0xff,0x7e,0x1a,0x8b,0x41,0x40,0x25,0xff,0xff,0xff,0x00,0x3b,0xd0,0x7d}},
-            {0x44ee80,{0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x40,0x48,0x8b,0x71,0x08,0x48,0x8b}}}}; // 44ee80 read from Dishonored2.exe
+            {0x44ee80,{0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x40,0x48,0x8b,0x71,0x08,0x48,0x8b}}, // 44ee80 read from Dishonored2.exe
+            {0x638190,{0x48,0x89,0x6c,0x24,0x20,0x56,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x20,0x81,0xa1}},   // v1094 modifier rebuild
+            {0x63a490,{0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x59,0x08,0x48,0x8b}}}}; // v1094 ammo switch
         for(const auto& p:pins) {std::array<unsigned char,16> got{};if(!read(base+p.rva,got.data(),got.size()) || got!=p.code) return false;}
         // 639970 is the NativeShotAim / NativeFireSeamTrace hook point: its own prologue, or MinHook's jump over it.
         static const std::array<unsigned char,16> launch{0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x56,0x57,0x41,0x57,0x48,0x83};
@@ -343,6 +396,94 @@ private:
     inline static std::atomic<std::uint64_t> refused_[static_cast<unsigned>(Why::count_)]{};
     inline static std::atomic<std::uint64_t> ready_at_[2]{},reload_until_[2]{};inline static std::atomic<int> last_kind_[2]{{-1},{-1}};
     inline static std::atomic<bool> latched_{false};inline static std::atomic<unsigned> consecutive_faults_{0};
+    inline static std::array<std::array<std::uintptr_t,2>,2> copy_ammo_{};inline static std::array<std::uintptr_t,2> seen_ammo_{},seen_comp_{};inline static std::array<unsigned,2> conditions_{};inline static std::atomic<bool> wheel_done_{true};
+    inline static std::array<std::atomic<int>,2> copy_kind_{{-1,-1}};inline static std::atomic<int> wheel_hand_{-1};inline static std::atomic<std::uint64_t> wheel_tick_{};
+    inline static std::uint64_t ammo_looked_{};
+    inline static std::array<unsigned,2> burst_left_{};inline static std::array<std::uint64_t,2> burst_next_{},reload_len_{};inline static std::array<Shot,2> burst_shot_{};
+    inline static std::array<bool,2> reload_noted_{true,true};inline static std::array<std::uint64_t,2> shot_serial_{},reload_serial_{};
+public:
+    inline static std::atomic<std::uint64_t> ammo_swaps_{},ammo_splits_{},spreads_{},bursts_{};
+private:
+    // An entry of the weapon decl's m_ammoTypes (decl+0x188, count +0x190, stride 0x70): what comp+0x98 points at.
+    template<class Read> static bool entry_valid(Read& read,std::uintptr_t comp,std::uintptr_t entry) {
+        const auto decl=rig::value<std::uintptr_t>(read,comp+8);if(!decl || !rig::pointer(*decl)) return false;
+        const auto first=rig::value<std::uintptr_t>(read,*decl+0x188);const auto count=rig::value<std::uint32_t>(read,*decl+0x190);
+        if(!first || !count) return false;
+        const auto n=*count&0xffffffu;
+        return entry>=*first && entry<*first+n*0x70ull && (entry-*first)%0x70==0;
+    }
+    template<class Read> static std::optional<float> attribute_value(Read& read,std::uintptr_t comp,std::uintptr_t index_offset) {
+        const auto attributes=rig::value<std::uintptr_t>(read,comp+0x30);const auto index=rig::value<std::int32_t>(read,comp+index_offset);
+        if(!attributes || !rig::pointer(*attributes) || !index || *index<0) return std::nullopt;
+        const auto table=rig::value<std::uintptr_t>(read,*attributes+0x48);if(!table || !rig::pointer(*table)) return std::nullopt;
+        const auto v=rig::value<float>(read,*table+0x24+static_cast<std::uintptr_t>(*index)*0x28);
+        return v && std::isfinite(*v)?v:std::nullopt;
+    }
+    static bool set_ammo(std::uintptr_t base,std::uintptr_t comp,std::uintptr_t entry) {
+        __try {*reinterpret_cast<std::uintptr_t*>(comp+0x98)=entry;reinterpret_cast<void (__fastcall*)(std::uintptr_t)>(base+0x638190)(comp);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    // The game's own ammo switch (0x63a490: unload the magazine, select, refresh the bolt, reload) by ammo item decl.
+    static bool select_ammo(std::uintptr_t base,std::uintptr_t comp,std::uintptr_t ammo_item) {
+        __try {reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uintptr_t)>(base+0x63a490)(comp,ammo_item);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    // 44f030 without its camera: the spread-area explosion event (weapon decl +0x238, +0x240 with flag 8, +0x248 with flag 0x10) at the muzzle
+    // plus the decl's offset (+0x250..0x258) in the shot's frame, along the shot; posted through the game's vtable +0x3a0.
+    template<class Read> static void spread(std::uintptr_t base,Read& read,const Located& l,const float* origin,const float* axis,std::uint8_t flags) {
+        const auto decl=rig::value<std::uintptr_t>(read,l.comp+8);if(!decl || !rig::pointer(*decl)) return;
+        const auto area=rig::value<std::uintptr_t>(read,*decl+((flags&8)?0x240:(flags&0x10)?0x248:0x238));if(!area || !rig::pointer(*area)) return;
+        std::array<float,3> off{};if(!read(*decl+0x250,off.data(),sizeof(off))) return;
+        alignas(16) std::array<unsigned char,0x40> ev{};
+        const std::uintptr_t a=*area;std::memcpy(ev.data(),&a,8);std::memcpy(ev.data()+8,&l.entity_id,4);std::memcpy(ev.data()+0xc,&l.player_id,4);
+        float pos[3],dir[3];
+        for(unsigned c=0;c<3;++c) {pos[c]=origin[c]+off[0]*axis[c]+off[1]*axis[3+c]+off[2]*axis[6+c];dir[c]=axis[c];}
+        std::memcpy(ev.data()+0x14,pos,12);std::memcpy(ev.data()+0x20,dir,12);
+        if(post_event(base,l.game,ev.data())) ++spreads_;else fault();
+    }
+    static bool post_event(std::uintptr_t base,std::uintptr_t game,const void* ev) {
+        (void)base;
+        __try {const auto vt=*reinterpret_cast<const std::uintptr_t*>(game);reinterpret_cast<void (__fastcall*)(std::uintptr_t,const void*)>(*reinterpret_cast<const std::uintptr_t*>(vt+0x3a0))(game,ev);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    // After a shot: the hand's timers from the weapon's upgrades, the burst follow-ups, the serials the copy's upgrade animations play from.
+    static void finish_shot(const Shot& s,const Located& l,std::uint64_t now,ranged_fire::HandState& hand,std::uint8_t flags) {
+        const bool burst=s.kind==Shot::pistol && (flags&1);
+        auto& left=burst_left_[s.side];
+        if(burst && !left && hand.loaded>1) {left=2;burst_shot_[s.side]=s;++bursts_;}   // first shot of a burst: two more follow
+        else if(left) --left;
+        const std::uint64_t cool=left?ranged_fire::burst_gap_ms:l.timing.cool;
+        const bool was=hand.reloading;
+        hand.fired(now,auto_reload.load(),cool,l.timing.reload);
+        if(left) burst_next_[s.side]=now+ranged_fire::burst_gap_ms;
+        if(hand.reloading && !was) {reload_len_[s.side]=l.timing.reload;reload_noted_[s.side]=false;left=0;}
+        ++shot_serial_[s.side];
+        publish(s.side,hand);
+    }
+    // Which hand's choice an ammo change is. The wheel's equip sets the weapon's ammo (comp+0x98) for both hands; a choice made by a hand
+    // that holds a copy of that weapon is that copy's own: kept for the copy, and the native weapon gets its ammo back through the game's
+    // own switch. A change by any other hand (within 2.5 s of its wheel choice or not) is the native weapon's.
+    template<class Read> static void track_ammo(std::uintptr_t base,Read& read) {
+        const auto now=clock();if(now-ammo_looked_<100) return;
+        ammo_looked_=now;
+        for(unsigned k=0;k<2;++k) {
+            Why why{};const auto l=locate(base,read,static_cast<Shot::Kind>(k),why);if(!l) continue;
+            if(seen_comp_[k]!=l->comp) {seen_comp_[k]=l->comp;seen_ammo_[k]=l->ammo;copy_ammo_[0][k]=copy_ammo_[1][k]=0;continue;}
+            const auto cur=l->ammo;
+            const int w=wheel_hand_.load();const auto since=now-wheel_tick_.load();const bool recent=since<2500;
+            // a wheel choice by a hand that now holds a copy of this weapon, once the equip has run (0.4 s): what it selected is the copy's
+            if(recent && since>=400 && !wheel_done_.load() && w>=0 && copy_kind_[w].load()==static_cast<int>(k)) {
+                wheel_done_=true;copy_ammo_[w][k]=cur;
+                if(cur!=seen_ammo_[k]) {
+                    const auto back=rig::value<std::uintptr_t>(read,seen_ammo_[k]);
+                    if(entry_valid(read,l->comp,seen_ammo_[k]) && back && *back && select_ammo(base,l->comp,*back)) ++ammo_splits_;
+                    else seen_ammo_[k]=cur;
+                }
+                continue;
+            }
+            if(cur!=seen_ammo_[k] && !recent) seen_ammo_[k]=cur;   // the native hand's own choice (or a pickup): accepted once no wheel choice is pending
+        }
+    }
     inline static ranged_fire::HandState hands_[2]{};
     inline static std::vector<std::string> shots_,plans_;
     struct Track {
@@ -364,7 +505,16 @@ private:
 
     template<class Read> static Why handle(std::uintptr_t base,Read& read,const Natives& n,const Request& r,std::uint64_t now) {
         const auto& s=r.shot;Why why{};
-        const auto l=locate(base,read,s.kind,why);if(!l) return why;
+        auto l=locate(base,read,s.kind,why);if(!l) return why;
+        if(const auto own=copy_ammo_[s.side][static_cast<unsigned>(s.kind)&1u];own && own!=l->ammo && entry_valid(read,l->comp,own)) { // v1094: this hand's own ammo
+            const auto ammo_decl=rig::value<std::uintptr_t>(read,own),def=rig::value<std::uintptr_t>(read,own+0x10);
+            if(ammo_decl && rig::pointer(*ammo_decl) && def && rig::pointer(*def)) {l->ammo=own;l->ammo_decl=*ammo_decl;l->projectile_def=*def;l->pool=pool_count(read,l->inventory,l->ammo_decl);}
+        }
+        if(s.kind==Shot::pistol) { // v1094: the magazine as 0x44e720 computes it (GUN_AMMO_CAPACITY at comp+0x160, 1 for an ammo that does not fit)
+            const auto fits=rig::value<std::uint8_t>(read,l->ammo+0x48).value_or(1);
+            if(!fits) l->capacity=1;
+            else if(const auto cap=attribute_value(read,l->comp,0x160);cap && *cap>=1.f && *cap<100000.f) l->capacity=static_cast<int>(std::floor(*cap+.5f));
+        }
         auto& hand=hands_[s.side];
         const auto kind=static_cast<ranged_fire::Kind>(s.kind);
         const bool shared=shared_native_magazine.load();
@@ -376,12 +526,13 @@ private:
         last_kind_[s.side]=static_cast<int>(s.kind);
         if(r.reload) {
             if(dry_run.load()) {++dry_plans_;keep(plans_,"reload side="+std::to_string(s.side)+" cap="+std::to_string(l->capacity)+" pool="+std::to_string(l->pool));return Why::ok;}
-            if(!hand.reload(now,l->capacity,l->pool)) return Why::full;
+            if(!hand.reload(now,l->capacity,l->pool,l->timing.reload)) return Why::full;
+            reload_len_[s.side]=l->timing.reload;reload_noted_[s.side]=false;
             ++reloads_;publish(s.side,hand);return Why::ok;
         }
         const Why check=hand.check(now,l->pool);
         publish(s.side,hand);
-        if(check!=Why::ok) return check;
+        if(check!=Why::ok) {if(r.burst) burst_left_[s.side]=0;return check;}
         if(dry_run.load()) {plan(*l,s);return Why::ok;}
         return execute(base,read,n,*l,r,now,hand);
     }
@@ -402,11 +553,26 @@ private:
         const auto& s=r.shot;
         alignas(16) float origin[4]{s.origin[0],s.origin[1],s.origin[2],0};
         alignas(16) float axis[12]{};std::memcpy(axis,s.axis,sizeof(float)*9);
+        // v1094: the hand's own ammo for this shot only: comp+0x98 and the modifier list it keys (0x638190 rebuilds +0xa8/+0xb0/+0xb8 from
+        // m_upgrades for the current ammo), put back right after on the same game-thread call. 0x63b5f0, 0x63b3c0, 0x639360 read +0x98 live.
+        struct AmmoSwap {std::uintptr_t base,comp,back;bool on;~AmmoSwap() {if(on) set_ammo(base,comp,back);}};
+        AmmoSwap swap{base,l.comp,l.native_ammo,false};
+        if(l.ammo!=l.native_ammo) {if(!set_ammo(base,l.comp,l.ammo)) return fault();swap.on=true;++ammo_swaps_;}
+        const auto flags=rig::value<std::uint8_t>(read,l.comp+0xb8).value_or(0);
+        const bool no_bullet=(flags&0x20)!=0;
+        if(s.kind==Shot::pistol && rig::value<std::uint8_t>(read,l.ammo+0x4a).value_or(0)) spread(base,read,l,origin,axis,flags); // 44e0c0's spread-area explosion (the shotgun's damage)
         std::uintptr_t projectile{};bool ok;
-        {LaunchScope scope;ok=n.create(base,l.comp,projectile);}
-        if(!ok) return fault();
-        if(!projectile) return Why::spawn_failed; // nothing was spent
-        ++created_;
+        if(!no_bullet) {
+            {LaunchScope scope;ok=n.create(base,l.comp,projectile);}
+            if(!ok) return fault();
+            if(!projectile) return Why::spawn_failed; // nothing was spent
+            ++created_;
+        }
+        if(no_bullet) {
+            const bool spent=n.spend(base,l.inventory,l.ammo_decl);if(!spent) fault();else ++spent_;
+            if(play_sound.load()) n.sound(base,l.comp,l.entity,origin,axis);
+            finish_shot(s,l,now,hand,flags);return Why::ok;
+        }
         Track t{};t.entity=projectile;t.id=rig::value<std::uint32_t>(read,projectile+0xa8).value_or(0);t.born=now;t.side=s.side;t.kind=s.kind;
         {LaunchScope scope;ok=n.launch(base,l.comp,projectile,origin,axis,l.speed);}
         if(!ok) return fault();
@@ -430,7 +596,7 @@ private:
         const int pool_after=pool_count(read,l.inventory,l.ammo_decl);
         pool_after_=pool_after;mag_after_=rig::value<std::int32_t>(read,l.comp+0xa0).value_or(-1);
         if(spent) {++spent_;if(pool_after!=l.pool-1) ++ammo_mismatch_;}
-        hand.fired(now,auto_reload.load());publish(s.side,hand);
+        finish_shot(s,l,now,hand,flags);
         ++fired_;if(l.unstarted) ++unstarted_shots_;if(clean) consecutive_faults_=0;
         if(tracks_.size()>=8) tracks_.erase(tracks_.begin());
         tracks_.push_back(t);

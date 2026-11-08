@@ -157,6 +157,15 @@ static bool has(const std::string& s,const char* t) {return s.find(t)!=std::stri
 
 int main() {
     // ---- HandState: cooldown, reload, magazine
+    { // v1094: the upgrades' scene lengths
+        using ranged_fire::timing;using ranged_fire::condition_of;
+        assert(timing(Kind::pistol,0).cool==330 && timing(Kind::pistol,0).reload==1500);
+        assert(timing(Kind::pistol,condition_of("ReloadSpeed")).reload==1000 && timing(Kind::pistol,condition_of("ReloadSpeed")|condition_of("ReloadSpeed2")).reload==766);
+        assert(timing(Kind::crossbow,0).cool==666 && timing(Kind::crossbow,0).reload==900);
+        assert(timing(Kind::crossbow,condition_of("ReloadSpeed")).cool==100 && timing(Kind::crossbow,condition_of("ReloadSpeed")).reload==566);
+        assert(timing(Kind::crossbow,condition_of("NailGun")).reload==581 && condition_of("Other")==0 && condition_of(nullptr)==0);
+        HandState t;t.sync(0,Kind::pistol,1,5);t.fired(0,true,330,766);assert(t.ready_at==330 && t.reload_done==330+766);
+    }
     {
         HandState h;assert(!h.sync(1000,Kind::pistol,1,7) && h.loaded==1 && h.check(1000,7)==Why::ok);
         h.fired(1000,true);assert(h.loaded==0 && h.ready_at==1666 && h.reloading && h.reload_done==1666+1500);
@@ -226,13 +235,13 @@ int main() {
         assert(Fire::comps_total_==3 && Fire::comps_started0_==3);
         assert(M.get<std::int32_t>(PCOMP+0xa0)==1); // the component's own magazine is untouched in per-hand mode
         assert(!Fire::ready(0) && Fire::ready(1));
-        // cooldown: no second call before 666 ms; the other hand fires at once (two pistols)
-        g_now=1665;assert(!Fire::fire(shot(0,Fire::Shot::pistol)) && Fire::refused_count(Why::cooldown)==1);
+        // cooldown: no second call before 330 ms (v1094: the fire scene's BREAK_PLAYER_STATE); the other hand fires at once (two pistols)
+        g_now=1329;assert(!Fire::fire(shot(0,Fire::Shot::pistol)) && Fire::refused_count(Why::cooldown)==1);
         assert(Fire::fire(shot(1,Fire::Shot::pistol,-5.f)));run_queued();
         assert(Fire::fired_==2 && get_pool(PAMMO_DECL)==5 && g_origin[0]==-5.f);
-        // the pistol of hand 0 reloads by itself (666 + 1500)
-        g_now=1000+666+1499;assert(!Fire::fire(shot(0,Fire::Shot::pistol)));
-        g_now=1000+666+1500;assert(Fire::fire(shot(0,Fire::Shot::pistol)));run_queued();
+        // the pistol of hand 0 reloads by itself (330 + 1500)
+        g_now=1000+330+1499;assert(!Fire::fire(shot(0,Fire::Shot::pistol)));
+        g_now=1000+330+1500;assert(Fire::fire(shot(0,Fire::Shot::pistol)));run_queued();
         assert(Fire::fired_==3 && get_pool(PAMMO_DECL)==4);
     }
     // ---- a crossbow shot: the native bolt speed and flag, the selected bolt's reserve

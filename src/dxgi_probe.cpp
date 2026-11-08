@@ -13321,7 +13321,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const auto wheel_to_hand=[&]{if(dual_wield_enabled && wheel_open_hand>=0) {wheel_committed_now=true;
                                     const unsigned h=static_cast<unsigned>(wheel_open_hand)&1u;const auto now_w=GetTickCount64();
                                     const auto plan=arm_set.derive();const int holder=arm_set.slot1_holder();const auto held=holder>=0?arm_set.a[static_cast<unsigned>(holder)].what:d2vr::arm::Held::none;
-                                    wheel_commit_hand=static_cast<int>(h);wheel_commit_seq=wheel_open_seq;g_wheel_commit_tick=now_w;g_no_catch_until[h]=now_w+1000;wheel_commit_decl=slot1_decl_now.load(std::memory_order_relaxed);wheel_chosen=wheel_dial_sector>=0;
+                                    wheel_commit_hand=static_cast<int>(h);wheel_commit_seq=wheel_open_seq;g_wheel_commit_tick=now_w;g_no_catch_until[h]=now_w+1000;d2vr::NativeRangedFire::note_wheel(h);wheel_commit_decl=slot1_decl_now.load(std::memory_order_relaxed);wheel_chosen=wheel_dial_sector>=0;
                                     arms_apply(arm_set.wheel_commit(h,now_w,left_aim_equip_revision.load(std::memory_order_acquire)),"wheel");
                                     if(!wheel_chosen) arm_set.wheel_nothing(h);   // the dial pointed at no sector: nothing will arrive
                                     dual_wield_event("\"ev\":\"wheel_commit\",\"hand\":"+std::to_string(wheel_open_hand)+",\"sector\":"+std::to_string(wheel_dial_sector)+",\"dial\":"+std::to_string(wheel_open_dial)+",\"stick\":"+std::to_string(wheel_open_stick)+",\"equip\":\""+[]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& c:n) if(c=='"' || c==92 || static_cast<unsigned char>(c)<32) c='?';return n;}()+"\""+
@@ -13466,6 +13466,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 {static bool fire_live{};if(dual_wield_enabled && fire_live && logic!=2) d2vr::NativeRangedFire::reset();fire_live=logic==2;}
                                 if(dual_wield_enabled) { // two active hands: a hand's mod-owned gun fires a real shot from its barrel on its own trigger (NativeRangedFire)
                                     using E=d2vr::arm::Held;static std::array<bool,2> shot_down{};
+                                    {const auto kind=[&](unsigned h){const auto ex=arm_set.copy_at(h);return !d2vr::arm::is_gun(ex)?-1:ex==E::crossbow?1:0;}; // v1094: the copies' own ammo (NativeRangedFire::track_ammo)
+                                     d2vr::NativeRangedFire::note_copies(kind(0),kind(1));}
                                     for(unsigned h=0;h<2;++h) {
                                         const auto ex=arm_set.copy_at(h);const bool pull=raw_trigger(h)>=(shot_down[h]?.35f:.55f),edge=pull && !shot_down[h];shot_down[h]=pull;
                                         if(!d2vr::arm::is_gun(ex) || !edge || logic!=2) continue;

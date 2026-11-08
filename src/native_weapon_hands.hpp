@@ -26,6 +26,7 @@
 #include "native_manual_equip_runtime.hpp"
 #include "crash_observer.hpp"
 #include "held_copy.hpp"
+#include "native_ranged_fire.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -1250,7 +1251,7 @@ public:
         std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
-            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu]}",dual_wield()?1:0,
+            "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu,%llu,%llu]}",dual_wield()?1:0,
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1260,7 +1261,8 @@ public:
             held_want_[0].load()?1:0,held_want_[1].load()?1:0,failed.c_str(),kinds.c_str(),static_cast<unsigned long long>(slot1_restores.load()),ride_other_.load()?1:0,
             static_cast<double>(last_return_dz.load()),static_cast<double>(last_return_age_s.load()),
             static_cast<unsigned long long>(gun_hits.load()),static_cast<unsigned long long>(bash_hits.load()),static_cast<unsigned long long>(gadget_hits.load()),
-            static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()),static_cast<unsigned long long>(upgrade_skips.load()),static_cast<unsigned long long>(upgrade_rebinds.load()));
+            static_cast<unsigned long long>(upgrade_parts.load()),static_cast<unsigned long long>(upgrade_faults.load()),static_cast<unsigned long long>(upgrade_skips.load()),static_cast<unsigned long long>(upgrade_rebinds.load()),
+            static_cast<unsigned long long>(upgrade_anims.load()),static_cast<unsigned long long>(copy_bolts.load()));
         return b;
     }
 private:
@@ -1596,6 +1598,7 @@ private:
     }
     template<class Read> static void guns_teardown(std::uintptr_t base,Read& read) {
         for(auto& u:ups_) upgrades_drop(base,read,u);
+        for(auto& b:bolts_) bolt_drop(base,read,b);
         for(auto& e:pool_) {if(e.ent && alive_entity(base,read,e.ent,e.id)) remove_entity(base,e.ent);e={};}
         guns_forget();
     }
@@ -1608,7 +1611,9 @@ private:
     // parts. A hidden or removed copy loses its parts (removed); a shown one gets them again. ponytail: a model override is not undone when an
     // upgrade leaves the list (the game only adds upgrades); the copy entity would need a respawn.
     struct CopyUpgrades {std::uintptr_t ent{};std::uint32_t id{};unsigned n{};std::array<std::uintptr_t,8> item{};
-        std::array<std::array<std::uintptr_t,2>,8> att{};std::array<std::array<std::uint32_t,2>,8> att_id{};};
+        std::array<std::array<std::uintptr_t,2>,8> att{};std::array<std::array<std::uint32_t,2>,8> att_id{};
+        std::array<std::array<std::uintptr_t,5>,8> rec{};   // v1094: the copy's own upgrade_t array (m_item = the real item), what 0x61a650 walks
+        std::uint64_t shot_seen{},reload_seen{};int side{-1};};
     inline static std::array<CopyUpgrades,10> ups_{};inline static std::uint64_t ups_looked_{};
     inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{},upgrade_skips{},upgrade_rebinds{};
     template<class Read> static void upgrades_drop(std::uintptr_t base,Read& read,CopyUpgrades& u) {
@@ -1678,7 +1683,7 @@ private:
         for(unsigned i=0;i<u->n;) { // an upgrade that left the list (a parent replaced by its child): its parts go
             if(std::find(want.begin(),want.begin()+wn,u->item[i])!=want.begin()+wn) {++i;continue;}
             for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u->att[i][k],u->att_id[i][k])) remove_entity(base,u->att[i][k]);
-            --u->n;u->item[i]=u->item[u->n];u->att[i]=u->att[u->n];u->att_id[i]=u->att_id[u->n];
+            --u->n;u->item[i]=u->item[u->n];u->att[i]=u->att[u->n];u->att_id[i]=u->att_id[u->n];u->rec[i]=u->rec[u->n];
         }
         const bool animated=reinterpret_cast<std::uintptr_t (__fastcall*)(std::uintptr_t,std::uintptr_t,int)>(base+0x877720)(ent,base+0x39dc9d0,0)!=0;
         static const char empty_tag[1]{};
@@ -1706,8 +1711,86 @@ private:
                     ++upgrade_rebinds;
                 }
             }
-            const unsigned i=u->n++;u->item[i]=want[w];
+            const unsigned i=u->n++;u->item[i]=want[w];u->rec[i]={want[w],out[1],out[2],out[3],out[4]};
             for(unsigned k=0;k<2;++k) {u->att[i][k]=out[2+k];u->att_id[i][k]=out[2+k]?rig::value<std::uint32_t>(read,out[2+k]+0xa8).value_or(0):0u;if(out[2+k]) ++upgrade_parts;}
+        }
+    }
+    // v1094: the copy's upgrade parts animate as the player's weapon's do. The weapon plays them from its own fire / reload clips (anim events
+    // 0xcc / 0xcd -> 0x61a650(comp, 3 ANIMATE_ON_FIRE / 4 ANIMATE_ON_RELOAD); per frame 0x61a650(comp, 1 LOOPING)); 0x61a650 reads only
+    // comp+0x50 / +0x58 (the upgrade_t list) and each part's m_anim, so the copy's own list in a stand-in buffer plays its parts.
+    static bool play_upgrades(std::uintptr_t base,void* stand_in,int type) {
+        __try {reinterpret_cast<void (__fastcall*)(void*,int)>(base+0x61a650)(stand_in,type);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    static void copy_anim(std::uintptr_t base,CopyUpgrades& u,int type) {
+        if(!u.n) return;
+        alignas(16) std::array<unsigned char,0x60> stand_in{};const auto list=reinterpret_cast<std::uintptr_t>(u.rec.data());const std::uint32_t n=u.n;
+        std::memcpy(stand_in.data()+0x50,&list,8);std::memcpy(stand_in.data()+0x58,&n,4);
+        if(play_upgrades(base,stand_in.data(),type)) ++upgrade_anims;else ++upgrade_faults;
+    }
+    // v1094: the crossbow copy shows its hand's loaded bolt. The weapon's own (vslot 0x100, 0x62b240) is the ammo entry's +8 def spawned at the
+    // weapon and bound to the decl's bolt tag, kept at comp+0x160; the copy has no animation component, so the copy's bolt is bound with no tag
+    // at the place the player's bolt has on the player's crossbow (measured live, kept).
+    struct CopyBolt {std::uintptr_t copy{},bolt{},def{};std::uint32_t copy_id{},bolt_id{};};
+    inline static std::array<CopyBolt,2> bolts_{};inline static std::optional<held_copy::Pose> bolt_place_{};
+    inline static std::atomic<std::uint64_t> upgrade_anims{},copy_bolts{};
+    template<class Read> static std::optional<held_copy::Pose> weapon_frame(std::uintptr_t base,Read& read,std::uintptr_t weapon) {
+        const auto model=weapon?rig::value<std::uintptr_t>(read,weapon+0xf0):std::nullopt;std::array<float,12> mf{};
+        if(!model || !rig::pointer(*model) || !rig::typed(read,base,*model,0x1b0d628) || !read(*model+0x1860,mf.data(),sizeof(mf))) return std::nullopt;
+        const auto f=held_copy::from_rows(mf.data(),mf.data()+3);return held_copy::valid(f)?std::optional<held_copy::Pose>{f}:std::nullopt;
+    }
+    template<class Read> static void bolt_drop(std::uintptr_t base,Read& read,CopyBolt& b) {
+        if(alive_entity(base,read,b.bolt,b.bolt_id)) remove_entity(base,b.bolt);
+        b={};
+    }
+    template<class Read> static void service_bolt(std::uintptr_t base,Read& read,unsigned side,std::uintptr_t copy,std::uint32_t copy_id,std::uintptr_t comp) {
+        auto& b=bolts_[side];
+        if(comp) { // where the player's bolt sits on the player's crossbow
+            const auto native_bolt=rig::value<std::uintptr_t>(read,comp+0x160);const auto weapon=rig::value<std::uintptr_t>(read,comp+0x10);
+            if(native_bolt && *native_bolt && weapon && *weapon) {
+                const auto id=rig::value<std::uint32_t>(read,*native_bolt+0xa8);
+                if(id && alive_entity(base,read,*native_bolt,*id)) if(const auto frame=weapon_frame(base,read,*weapon)) if(const auto bf=entity_frame(read,*native_bolt)) bolt_place_=held_copy::to_local(*frame,*bf);
+            }
+        }
+        std::uintptr_t def=0;
+        if(copy && comp && NativeRangedFire::loaded(side)) {
+            auto entry=NativeRangedFire::copy_ammo(side,1);if(!entry) entry=rig::value<std::uintptr_t>(read,comp+0x98).value_or(0);
+            if(entry) def=rig::value<std::uintptr_t>(read,entry+8).value_or(0);
+        }
+        if(b.bolt && (b.copy!=copy || b.copy_id!=copy_id || b.def!=def || !alive_entity(base,read,b.bolt,b.bolt_id))) bolt_drop(base,read,b);
+        if(b.bolt || !def || !bolt_place_ || !rig::pointer(def)) return;
+        const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);const auto at=entity_frame(read,copy);if(!game || !at) return;
+        alignas(16) std::array<float,3> pos{float(at->position.x),float(at->position.y),float(at->position.z)};alignas(16) std::array<float,9> axis{};
+        for(unsigned r=0;r<3;++r) {axis[r*3]=float(at->basis[r].x);axis[r*3+1]=float(at->basis[r].y);axis[r*3+2]=float(at->basis[r].z);}
+        static const std::array<float,3> zero{};
+        const auto bolt=reinterpret_cast<std::uintptr_t (__fastcall*)(std::uintptr_t,std::uintptr_t,const float*,const float*,std::uintptr_t,bool,const float*,const float*,const float*)>(
+            base+0x8ae9b0)(*game,def,pos.data(),axis.data(),0,false,nullptr,zero.data(),zero.data());
+        if(!bolt) return;
+        *reinterpret_cast<volatile std::uint8_t*>(bolt+0xd4)|=0x10;   // as 0x62b240 marks its bolt
+        static const char empty_tag[1]{};const std::uintptr_t tag=reinterpret_cast<std::uintptr_t>(empty_tag);
+        const auto& pl=*bolt_place_;
+        alignas(16) std::array<float,3> o{float(pl.position.x),float(pl.position.y),float(pl.position.z)};alignas(16) std::array<float,9> m{};
+        for(unsigned r=0;r<3;++r) {m[r*3]=float(pl.basis[r].x);m[r*3+1]=float(pl.basis[r].y);m[r*3+2]=float(pl.basis[r].z);}
+        reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uintptr_t,const std::uintptr_t*,const float*,const float*,bool)>(base+0x875e80)(copy,bolt,&tag,o.data(),m.data(),true);
+        b={copy,bolt,def,copy_id,rig::value<std::uint32_t>(read,bolt+0xa8).value_or(0)};++copy_bolts;
+    }
+    // Per game tick, before the 250 ms gate: each hand's held copy plays its parts on its shots and reloads (and the looping ones), and the
+    // crossbow copy keeps its loaded bolt.
+    template<class Read> static void service_copy_state(std::uintptr_t base,Read& read) {
+        static const bool pinned=[&]{static constexpr std::array<unsigned char,16> code{0x48,0x89,0x5c,0x24,0x20,0x56,0x48,0x83,0xec,0x50,0x48,0x8b,0x41,0x50,0x8b,0x49};
+            std::array<unsigned char,16> got{};return read(base+0x61a650,got.data(),got.size()) && got==code;}();
+        for(unsigned side=0;side<2;++side) {
+            const auto& h=held_[side];std::uintptr_t ent=0;std::uint32_t id=0;held_copy::Kind kind=held_copy::Kind::other;
+            if(h.pe>=0 && h.pe<static_cast<int>(pool_.size()) && h.shown && pool_[h.pe].ent && pool_[h.pe].def) {ent=pool_[h.pe].ent;id=pool_[h.pe].id;kind=held_copy::kind_of(pool_[h.pe].def);}
+            if(ent && !alive_entity(base,read,ent,id)) ent=0;
+            if(pinned && ent) for(auto& u:ups_) if(u.ent==ent && u.id==id) {
+                const auto shot=NativeRangedFire::shot_serial(side),reload=NativeRangedFire::reload_serial(side);
+                if(u.side!=static_cast<int>(side)) {u.side=static_cast<int>(side);u.shot_seen=shot;u.reload_seen=reload;}
+                if(shot!=u.shot_seen) {u.shot_seen=shot;copy_anim(base,u,3);}
+                if(reload!=u.reload_seen) {u.reload_seen=reload;copy_anim(base,u,4);}
+                copy_anim(base,u,1);
+            }
+            const auto comp=ent && kind==held_copy::Kind::crossbow?native_equipment(base,read,held_copy::Kind::crossbow):0;
+            try {service_bolt(base,read,side,kind==held_copy::Kind::crossbow?ent:0,id,comp);} catch(...) {++upgrade_faults;}
         }
     }
     template<class Read> static void service_upgrades(std::uintptr_t base,Read& read) {
@@ -1725,6 +1808,7 @@ private:
         for(const auto& e:pool_) if(e.ent && e.in_use && e.shown) if(const auto k=player_kind(e.def);k!=held_copy::Kind::other) shown[ns++]={e.ent,e.id,k};
         for(unsigned d=1;d<copies_.size();++d) if(const auto& c=copies_[d];c.ent && c.shown) shown[ns++]={c.ent,c.id,player_kind(mirror_def_names[d])};
         for(auto& u:ups_) if(u.ent && std::none_of(shown.begin(),shown.begin()+ns,[&](const Shown& s){return s.ent==u.ent && s.id==u.id;})) upgrades_drop(base,read,u);
+        service_copy_state(base,read);
         const auto now=GetTickCount64();
         bool fresh=std::any_of(shown.begin(),shown.begin()+ns,[&](const Shown& s){
             return std::none_of(ups_.begin(),ups_.end(),[&](const CopyUpgrades& u){return u.ent==s.ent && u.id==s.id;});});
@@ -1740,7 +1824,7 @@ private:
         }
     }
     static void guns_forget() { // every pointer is dead or already removed: call nothing
-        lying_={};held_={};meas_={};pool_={};ups_={};places_={};bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
+        lying_={};held_={};meas_={};pool_={};ups_={};places_={};bolts_={};bolt_place_.reset();bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
         std::lock_guard<std::mutex> l(feed_m_);held_pub_={};copy_draw_={};
     }
     template<class Read> static void service_guns(std::uintptr_t base,Read& read) {
