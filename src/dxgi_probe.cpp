@@ -5526,6 +5526,19 @@ static std::string run_test_command(const std::string& line) {
         d2vr::WorldTrackedPose hw{};{std::lock_guard<std::mutex> l(hand_state_mutex);hw=hand_world[1];}
         const std::array<float,3> pos{static_cast<float>(hw.position.x),static_cast<float>(hw.position.y),static_cast<float>(hw.position.z-.2)};
         return d2vr::NativeGadgetDrop::spawn_free(k,pos,{0,0,0},{1,0,0,0,1,0,0,0,1})?"gadget spawn requested":"gadget spawn refused";}
+    if(verb=="ammo") { // test (sim, v1097): ammo left|right <index>: the hand's real copy selects that ammo type (NativeRangedFire::test_ammo)
+        std::string hand;int index=-1;in>>hand>>index;const int h=hand=="left"?0:hand=="right"?1:-1;
+        if(h<0 || index<0 || index>8) return "usage: ammo left|right <index 0..8>";
+        d2vr::NativeRangedFire::test_ammo(static_cast<unsigned>(h),index);return "ammo requested";}
+    if(verb=="realcopy") { // EXPERIMENT v1095: realcopy pistol|crossbow|report|remove (NativeWeaponHands::real_copy; realcopy-report.txt)
+        std::string what;in>>what;static constexpr const char* known[]{"pistol","crossbow","report","remove"};
+        const char* w=nullptr;for(const char* k:known) if(what==k) w=k;
+        if(!w) return "usage: realcopy pistol|crossbow|report|remove";
+        d2vr::NativeWeaponHands::set_report_dir(output_directory.always());
+        d2vr::WorldTrackedPose hw{};{std::lock_guard<std::mutex> l(hand_state_mutex);hw=hand_world[1];}
+        d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::real_copy;r.decl=w;
+        r.pos={static_cast<float>(hw.position.x),static_cast<float>(hw.position.y),static_cast<float>(hw.position.z)};
+        return d2vr::NativeWeaponHands::request(r)?"realcopy requested":"realcopy queue full";}
     if(verb=="extra") { // test (sim, v765): give a hand a mod-owned copy, as the wheel's second-weapon route does: extra left|right pistol|crossbow|none
         std::string hand,what;in>>hand>>what;const int h=hand=="left"?0:hand=="right"?1:-1;
         const unsigned kind=what=="pistol"?1u:what=="crossbow"?2u:what=="none"?0u:9u;
