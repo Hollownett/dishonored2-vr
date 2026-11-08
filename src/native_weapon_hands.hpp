@@ -1875,13 +1875,25 @@ private:
     // tick,what,side,kind,handle,rate (fail: why 1 getter 2 no scene 3 driver fault 4 no handle; after: 1 still running),rate_ok,scene,decl+0x11c,
     // native mag,native bolt +0xd0,native hidden parts (hex, bit 2i+k),copy mag,copy bolt,copy hidden,cond source (1 state+0x24, 2 out, 3 after play,
     // -1 no handle when asked),cond rdx (low 32 bits, decimal like the handle). Marks are read before the scene starts; scene_after 1 s later.
-    struct CopyScene {std::uintptr_t comp{},game{};std::uint32_t handle{};char kind{};bool cond{};std::uint64_t at{};};
+    // v1116 (sim run4: only the first fire + reload moved the copy's skin): 0x7d63f0 'finished' is 0x7cf250(inst,0) = time >= length-1-blendOut
+    // (0x195dd0) while the instance still plays its tail; v1114 then forgot the handle, so the tail was never stopped and ended on its own later
+    // (manager 0x7d9740: state 8 -> 0x7d17d0(inst,0x102) -> 0x7de2c0 -> anim track Stop 0x7e24d0), whose 0x700f80(anim+0x2728, no clip) clears
+    // the actor's one Midnight node whoever's clip it holds: the newer scene's clip (set by its track Start 0x7e2710) was wiped. The game's own
+    // tails are ended at the next play by the actor's midnight proxy (0x7cbc20 -> 0x7db850 -> 0x7662f0 conflicts -> 0x7d6ab0 -> 0x7d17d0(0x202));
+    // the copy evidently gets no such preemption. Now a finished scene stays tracked (done) and every replacement stops it first (0x7d9590 on a
+    // gone handle returns 0). Rows scene / scene_fail / scene_after add: prev handle, its 0x7d63f0 (-2 none), its manager state (inst+0x27c, -1 gone),
+    // the stop's result (-2 none, -1 fault, 0 refused / gone, 1 stopped), copy anim +0x2720 (midnight tracks started), Midnight node owner handle,
+    // node active (+0x1bc). Row scene_node 150 ms after each play: handle, its state, groups, proxy (group+0xe8), group anim (+0xf8) == comp+0x28,
+    // needed / held lock bits (+0x1a0 / +0x1a4), then count, owner, active of the group's anim: owner == handle = this scene drives the copy.
+    struct CopyScene {std::uintptr_t comp{},game{};std::uint32_t handle{};char kind{};bool cond{};std::uint64_t at{};bool done{};};
     struct SceneAfter {std::uint64_t due{};std::uint32_t handle{};char kind{};held_copy::Kind wk{};};
     struct SceneFake {   // fake fire state, its player, the player's inventory and the slot-1 record (sizes generous, all zero but the links)
         std::array<std::uintptr_t,0x80> state{},player{};std::array<std::uintptr_t,0x20> equip{};std::array<std::uintptr_t,4> rec{};};
     struct Marks {int mag{-1},bolt{-1};unsigned hidden{};};
     struct SceneMarks {Marks native,copy;int d11c{-1};};
-    inline static std::array<CopyScene,2> scenes_{};inline static std::array<SceneAfter,2> scene_after_{};
+    struct SceneNode {int count{-1};std::uint32_t owner{};int active{-1};};
+    struct SceneDiag {std::uint32_t prev{};int fin{-2},state{-1},halt{-2};SceneNode node{};};
+    inline static std::array<CopyScene,2> scenes_{};inline static std::array<SceneAfter,2> scene_after_{},scene_probe_{};
     inline static std::array<SceneFake,2> scene_fakes_{};inline static std::array<std::uintptr_t,64> scene_vt_{};inline static std::uintptr_t scene_base_{};
     inline static std::array<int,2> scene_cond_src_{};inline static std::array<std::uint32_t,2> scene_cond_arg_{};inline static unsigned scene_rows_{};
     inline static std::atomic<int> scene_knob_{-1},scene_pin_{-1};   // -1 not read yet; knob 1 = build/no-copy-scenes; pin 1 = verified
@@ -1913,9 +1925,36 @@ private:
         __try {return reinterpret_cast<bool (__fastcall*)(std::uintptr_t,std::uint32_t)>(base+0x7d63f0)(mgr,h)?1:0;}
         __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
     }
-    static bool scene_halt(std::uintptr_t base,std::uintptr_t mgr,std::uint32_t h) {   // 0x7d9590 stop (inferred (mgr, handle); r8/r9 zero)
-        __try {reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uint32_t,std::uintptr_t,std::uintptr_t)>(base+0x7d9590)(mgr,h,0,0);return true;}
-        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    static int scene_halt(std::uintptr_t base,std::uintptr_t mgr,std::uint32_t h) {   // 0x7d9590(mgr,h) = 0x7d9460(mgr,h,0x600,0,1): 1 stopped / already ended, 0 gone / refused (state 4), -1 fault
+        __try {return reinterpret_cast<bool (__fastcall*)(std::uintptr_t,std::uint32_t)>(base+0x7d9590)(mgr,h)?1:0;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+    }
+    // v1116 diagnostics, reads only: an instance by handle in the manager's two lists (as 0x7d5860: +0/+8 and +0x610/+0x618, inst+0x158 handle),
+    // and an anim component's midnight count (+0x2720, 0x54a890 / 0x54ebe0) and Midnight node (0x700f80 -> 0x6e2190: **[+0x2728+0x338] +
+    // [[+0x2728+0x4b8]+4]; clip +0x198 = &track+0xc0, owner [[[track+0x10]+0xc8]+0x158], active +0x1bc).
+    template<class Read> static std::uintptr_t scene_inst(Read& read,std::uintptr_t mgr,std::uint32_t h) {
+        if(!h) return 0;
+        for(const std::uintptr_t at:{mgr,mgr+0x610}) if(const auto l=rig::list(read,at,4096)) for(unsigned i=0;i<l->packed_count;++i)
+            if(const auto p=rig::value<std::uintptr_t>(read,l->data+i*8ull);p && rig::pointer(*p) && rig::value<std::uint32_t>(read,*p+0x158)==h) return *p;
+        return 0;
+    }
+    template<class Read> static int scene_state(Read& read,std::uintptr_t mgr,std::uint32_t h) {const auto i=scene_inst(read,mgr,h);return i?rig::value<std::int32_t>(read,i+0x27c).value_or(-2):-1;}
+    template<class Read> static std::uintptr_t comp_anim(Read& read,std::uintptr_t comp) {   // the weapon's anim handle comp+0x20 (generation, pointer +0x28) as 0x3da910 checks it
+        const auto g=comp?rig::value<std::int32_t>(read,comp+0x20):std::nullopt;const auto a=comp?rig::value<std::uintptr_t>(read,comp+0x28).value_or(0):0;
+        return g && *g!=-1 && a && rig::pointer(a) && rig::value<std::int32_t>(read,a+0x18)==*g?a:0;
+    }
+    template<class Read> static SceneNode scene_node(Read& read,std::uintptr_t anim) {
+        SceneNode n{};if(!anim || !rig::pointer(anim)) return n;
+        n.count=rig::value<std::int32_t>(read,anim+0x2720).value_or(-1);
+        const auto desc=rig::value<std::uintptr_t>(read,anim+0x2728+0x4b8).value_or(0),tree=rig::value<std::uintptr_t>(read,anim+0x2728+0x338).value_or(0);
+        const auto t0=tree?rig::value<std::uintptr_t>(read,tree).value_or(0):0;const auto t1=t0?rig::value<std::uintptr_t>(read,t0).value_or(0):0;
+        const auto off=desc?rig::value<std::int32_t>(read,desc+4):std::nullopt;if(!t1 || !off) return n;
+        const auto node=t1+static_cast<std::uintptr_t>(static_cast<std::intptr_t>(*off));
+        n.active=rig::value<std::uint8_t>(read,node+0x1bc).value_or(0xff);
+        if(const auto clip=rig::value<std::uintptr_t>(read,node+0x198).value_or(0);clip>0xc0 && rig::pointer(clip-0xc0))
+            if(const auto g=rig::value<std::uintptr_t>(read,clip-0xc0+0x10);g && rig::pointer(*g)) if(const auto i=rig::value<std::uintptr_t>(read,*g+0xc8);i && rig::pointer(*i))
+                n.owner=rig::value<std::uint32_t>(read,*i+0x158).value_or(0);
+        return n;
     }
     // The fake state's vslot 0x88, called by the driver between create and play: the copy's own conditions on the new scene.
     static void __fastcall scene_conditions(std::uintptr_t state,std::uintptr_t arg) {
@@ -1933,6 +1972,7 @@ private:
     template<class Read> static bool scene_pinned(std::uintptr_t base,Read& read) {
         if(const int p=scene_pin_.load();p>=0) return p==1;
         static constexpr std::array<unsigned char,16> rate_code{0x40,0x53,0x48,0x83,0xec,0x50,0x48,0xc7,0x44,0x24,0x20,0xfe,0xff,0xff,0xff,0x0f};
+        static constexpr std::array<unsigned char,16> cond_code{0x89,0x54,0x24,0x10,0x57,0x48,0x83,0xec,0x30,0x48,0xc7,0x44,0x24,0x20,0xfe,0xff};   // v1115: 0x63a7c0 homes edx first (headset v1114 pin,0)
         struct Slot {std::uintptr_t vt,slot,fn;};
         static constexpr std::array<Slot,8> slots{{{0x1b53f58,0x120,0x44f1e0},{0x1b53f58,0x128,0x63bd90},{0x1b53f58,0x108,0x44e180},{0x1b53f58,0xe0,0x63a7c0},
             {0x1b9cbf8,0x120,0x63bc00},{0x1b9cbf8,0x128,0x63bd90},{0x1b9cbf8,0x108,0x62b990},{0x1b9cbf8,0xe0,0x63a7c0}}};
@@ -1940,9 +1980,10 @@ private:
         for(unsigned i=0;i<scene_pin_rvas.size();++i) {
             auto& b=scene_pin_bytes_[i];if(!read(base+scene_pin_rvas[i],b.data(),b.size())) {good=false;continue;}
             if(i+1==scene_pin_rvas.size()) good=good && ((b[0]==0xc2 && b[1]==0 && b[2]==0) || ((b[0]==0x32 || b[0]==0x33) && b[1]==0xc0 && b[2]==0xc3));   // ret 0 / xor; ret
-            else good=good && (b[0]==0x40 || b[0]==0x48 || b[0]==0x4c || b[0]==0x53 || b[0]==0x55 || b[0]==0x56 || b[0]==0x57);
+            else if(i!=6) good=good && (b[0]==0x40 || b[0]==0x48 || b[0]==0x4c || b[0]==0x53 || b[0]==0x55 || b[0]==0x56 || b[0]==0x57);
         }
-        good=good && scene_pin_bytes_[3]==rate_code;
+        static constexpr std::array<unsigned char,16> stop_code{0x48,0x83,0xec,0x38,0x45,0x33,0xc9,0x41,0xb8,0x00,0x06,0x00,0x00,0xc6,0x44,0x24};   // v1116: 0x7d9590 = 0x7d9460(mgr,h,0x600,0,1), stopping tails too
+        good=good && scene_pin_bytes_[3]==rate_code;   good=good && scene_pin_bytes_[6]==cond_code;   good=good && scene_pin_bytes_[5]==stop_code;
         for(const auto& s:slots) good=good && rig::value<std::uintptr_t>(read,base+s.vt+s.slot)==base+s.fn;
         if(good) {
             scene_base_=base;for(auto& v:scene_vt_) v=base+0x998b0;scene_vt_[0x88/8]=reinterpret_cast<std::uintptr_t>(&scene_conditions);
@@ -1972,21 +2013,27 @@ private:
         if(decl && rig::pointer(decl)) m.d11c=rig::value<std::int32_t>(read,decl+0x11c).value_or(-1);
         return m;
     }
-    static void scene_row(const char* what,unsigned side,char kind,std::uint32_t h,double x,int rate_ok,std::uintptr_t scene,const SceneMarks& m) {
+    static void scene_row(const char* what,unsigned side,char kind,std::uint32_t h,double x,int rate_ok,std::uintptr_t scene,const SceneMarks& m,const SceneDiag& d) {
         if(report_dir_.empty() || scene_rows_>=400) return;   // diagnostics: the first 400 rows of a session
         ++scene_rows_;std::ofstream o(report_dir_/"real-parts.csv",std::ios::app);if(!o) return;
         o<<GetTickCount64()<<','<<what<<','<<side<<','<<(kind=='R'?"reload":"fire")<<','<<h<<','<<x<<','<<rate_ok<<','<<std::hex<<scene<<std::dec<<','<<m.d11c<<','
          <<m.native.mag<<','<<m.native.bolt<<','<<std::hex<<m.native.hidden<<std::dec<<','<<m.copy.mag<<','<<m.copy.bolt<<','<<std::hex<<m.copy.hidden<<std::dec
-         <<','<<scene_cond_src_[side&1u]<<','<<scene_cond_arg_[side&1u]<<'\n';
+         <<','<<scene_cond_src_[side&1u]<<','<<scene_cond_arg_[side&1u]<<','<<d.prev<<','<<d.fin<<','<<d.state<<','<<d.halt<<','<<d.node.count<<','<<d.node.owner<<','<<d.node.active<<'\n';
     }
-    static void scene_stop(std::uintptr_t base,unsigned side,std::uintptr_t game) {   // calls the manager only in the game that made the handle, and only if still running
-        auto& s=scenes_[side];
-        if(s.handle && game && s.game==game) {
-            const int done=scene_finished(base,game+0x1f5338,s.handle);
-            if(done<0) ++scene_faults;
-            else if(!done) {if(scene_halt(base,game+0x1f5338,s.handle)) ++scene_stops;else ++scene_faults;}
-        }
-        s={};
+    template<class Read> static void scene_probe_row(Read& read,unsigned side,std::uintptr_t own,const SceneAfter& p,std::uintptr_t game) {   // v1116 row scene_node
+        if(report_dir_.empty() || scene_rows_>=400) return;
+        const auto mgr=game+0x1f5338;const auto inst=game?scene_inst(read,mgr,p.handle):0;const auto groups=inst?rig::list(read,inst+0xe0,256):std::nullopt;
+        const auto g=groups && groups->packed_count?rig::value<std::uintptr_t>(read,groups->data).value_or(0):0;const bool gp=g && rig::pointer(g);
+        const auto ga=gp?rig::value<std::uintptr_t>(read,g+0xf8).value_or(0):0;const auto ca=comp_anim(read,own);const auto n=scene_node(read,ga?ga:ca);
+        ++scene_rows_;std::ofstream o(report_dir_/"real-parts.csv",std::ios::app);if(!o) return;
+        o<<GetTickCount64()<<",scene_node,"<<side<<','<<(p.kind=='R'?"reload":"fire")<<','<<p.handle<<','<<(inst?rig::value<std::int32_t>(read,inst+0x27c).value_or(-2):-1)<<','
+         <<(groups?static_cast<int>(groups->packed_count):-1)<<','<<(gp?(rig::value<std::uintptr_t>(read,g+0xe8).value_or(0)?1:0):-1)<<','<<(ga?(ga==ca?1:0):-1)<<','
+         <<(gp?rig::value<std::int32_t>(read,g+0x1a0).value_or(-1):-1)<<','<<(gp?rig::value<std::int32_t>(read,g+0x1a4).value_or(-1):-1)<<','<<n.count<<','<<n.owner<<','<<n.active<<'\n';
+    }
+    static int scene_stop(std::uintptr_t base,unsigned side,std::uintptr_t game) {   // calls the manager only in the game that made the handle; v1116: a finished tail too
+        auto& s=scenes_[side];int r=-2;
+        if(s.handle && game && s.game==game) {r=scene_halt(base,game+0x1f5338,s.handle);if(r>0) ++scene_stops;else if(r<0) ++scene_faults;}
+        s={};return r;
     }
     template<class Read> static void scene_play(std::uintptr_t base,Read& read,unsigned side,std::uintptr_t own,held_copy::Kind kind,bool reload,std::uintptr_t game) {
         auto& s=scenes_[side];const char k=reload?'R':'F';const bool crossbow=kind==held_copy::Kind::crossbow;
@@ -1994,32 +2041,36 @@ private:
         const auto before=scene_marks(base,read,own,kind);
         float rate=1.f;std::uintptr_t scene=0;
         const bool got=id && scene_of(base+(reload?0x63bd90:crossbow?0x63bc00:0x44f1e0),own,reload,&rate,&scene);
-        if(!got || !scene) {++scene_fail;if(id && !got) ++scene_faults;scene_row("scene_fail",side,k,0,got?2:1,0,scene,before);return;}
-        if(s.handle) scene_stop(base,side,game);   // a new shot or the reload replaces the running scene (the game's state exit ends its own)
+        if(!got || !scene) {++scene_fail;if(id && !got) ++scene_faults;scene_row("scene_fail",side,k,0,got?2:1,0,scene,before,SceneDiag{});return;}
+        SceneDiag d{};   // a new shot or the reload replaces the scene, running or in its tail: as the engine sees it, then stopped before the new one starts
+        if(s.handle) {d.prev=s.handle;if(game && s.game==game) {d.fin=scene_finished(base,game+0x1f5338,s.handle);d.state=scene_state(read,game+0x1f5338,s.handle);}d.halt=scene_stop(base,side,game);}
         auto& f=scene_fakes_[side];f.rec[1]=id;std::memset(reinterpret_cast<unsigned char*>(f.state.data())+0x24,0,4);
         scene_cond_src_[side]=0;scene_cond_arg_[side]=0;
         s={own,game,0,k,false,GetTickCount64()};
         const bool ran=scene_drive(base,reinterpret_cast<std::uintptr_t>(f.state.data()),&s.handle,scene);
-        if(!ran || !s.handle) {++scene_fail;if(!ran) ++scene_faults;const auto h=s.handle;if(!ran) scene_stop(base,side,game);s={};scene_row("scene_fail",side,k,h,ran?4:3,0,scene,before);return;}
+        if(!ran || !s.handle) {++scene_fail;if(!ran) ++scene_faults;const auto h=s.handle;if(!ran) scene_stop(base,side,game);s={};scene_row("scene_fail",side,k,h,ran?4:3,0,scene,before,d);return;}
         if(!s.cond) {if(comp_call(base+0x63a7c0,own,s.handle)) {s.cond=true;++scene_late;scene_cond_src_[side]=3;} else ++scene_faults;}   // the driver never asked: set them after play
         const int rated=std::isfinite(rate) && rate>0.f?scene_rate(base,game+0x1f5338,s.handle,rate):-2;if(rated<0 && rated!=-2) ++scene_faults;
         if(!reload && !comp_call(base+(crossbow?0x62b990:0x44e180),own,0)) ++scene_faults;   // after a fire: the bolt / bullets as the weapon shows them
         ++(reload?scene_reload:scene_fire);
-        scene_row("scene",side,k,s.handle,rate,rated,scene,before);
-        scene_after_[side]={GetTickCount64()+1000,s.handle,k,kind};
+        d.node=scene_node(read,comp_anim(read,own));scene_row("scene",side,k,s.handle,rate,rated,scene,before,d);
+        scene_after_[side]={GetTickCount64()+1000,s.handle,k,kind};scene_probe_[side]={GetTickCount64()+150,s.handle,k,kind};
     }
     // Per side, per tick: ends a scene that finished, or whose copy is gone, hidden, dropped or replaced (or another game's); a new shot plays
     // the fire scene (not on a burst's follow-up shots while the burst's scene runs), a new reload the reload scene.
     template<class Read> static void service_copy_scene(std::uintptr_t base,Read& read,unsigned side,std::uintptr_t own,held_copy::Kind kind,bool fired,bool reloading) {
-        auto& s=scenes_[side];auto& a=scene_after_[side];
-        if(!s.handle && !a.due && !(own && (fired || reloading))) return;
+        auto& s=scenes_[side];auto& a=scene_after_[side];auto& p=scene_probe_[side];
+        if(!s.handle && !a.due && !p.due && !(own && (fired || reloading))) return;
         const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290).value_or(0);const auto now=GetTickCount64();
         if(s.handle && (s.comp!=own || s.game!=game || now-s.at>10000)) scene_stop(base,side,game);
-        else if(s.handle) {const int done=scene_finished(base,game+0x1f5338,s.handle);if(done) {if(done<0) ++scene_faults;s={};}}
-        if(a.due && now>=a.due) {scene_row("scene_after",side,a.kind,a.handle,s.handle==a.handle?1:0,-9,0,scene_marks(base,read,own,a.wk));a={};}
-        if(fired && !reloading && s.handle && s.kind=='F' && NativeRangedFire::burst_follow_up(side)) fired=false;
+        else if(s.handle && !s.done) {const int done=scene_finished(base,game+0x1f5338,s.handle);if(done<0) {++scene_faults;s={};} else if(done) s.done=true;}   // v1116: its tail stays ours to stop
+        if(p.due && now>=p.due) {if(game) scene_probe_row(read,side,own,p,game);p={};}
+        if(a.due && now>=a.due) {   // x: 1 tracked and running, 2 tracked in its tail, 0 not tracked; prev columns = this handle now
+            SceneDiag d{a.handle};if(game) {d.fin=scene_finished(base,game+0x1f5338,a.handle);d.state=scene_state(read,game+0x1f5338,a.handle);}d.node=scene_node(read,comp_anim(read,own));
+            scene_row("scene_after",side,a.kind,a.handle,s.handle==a.handle?(s.done?2:1):0,-9,0,scene_marks(base,read,own,a.wk),d);a={};}
+        if(fired && !reloading && s.handle && !s.done && s.kind=='F' && NativeRangedFire::burst_follow_up(side)) fired=false;
         if(own && game && (fired || reloading) && scenes_on() && scene_pinned(base,read)) scene_play(base,read,side,own,kind,reloading,game);
-        scene_running=(scenes_[0].handle?1u:0u)+(scenes_[1].handle?1u:0u);
+        scene_running=(scenes_[0].handle && !scenes_[0].done?1u:0u)+(scenes_[1].handle && !scenes_[1].done?1u:0u);
     }
     // Per game tick, before the 250 ms gate: each hand's held copy plays its parts on its shots and reloads (and the looping ones), and the
     // crossbow copy keeps its loaded bolt.
@@ -2230,7 +2281,7 @@ private:
         }
     }
     static void guns_forget() { // every pointer is dead or already removed: call nothing
-        lying_={};held_={};adopt_={};meas_={};pool_={};ups_={};places_={};bolts_={};bolt_place_.reset();real_seen_={};scenes_={};scene_after_={};anchors_={};NativeRangedFire::set_copy_comp(0,0);NativeRangedFire::set_copy_comp(1,0);bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
+        lying_={};held_={};adopt_={};meas_={};pool_={};ups_={};places_={};bolts_={};bolt_place_.reset();real_seen_={};scenes_={};scene_after_={};scene_probe_={};anchors_={};NativeRangedFire::set_copy_comp(0,0);NativeRangedFire::set_copy_comp(1,0);bash_last_={};bash_struck_={};gun_native_lying_=guns_live_=false;held_bits=0;slot1_cur_=slot1_prev_=0;
         std::lock_guard<std::mutex> l(feed_m_);held_pub_={};copy_draw_={};
     }
     template<class Read> static void service_guns(std::uintptr_t base,Read& read) {
