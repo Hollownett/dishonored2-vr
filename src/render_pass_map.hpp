@@ -39,6 +39,7 @@
 #include "command_list_pass_map.hpp"
 #include "render_pass_table.hpp"
 #include "shadow_share.hpp"
+#include "visibility_stamp.hpp"
 
 namespace d2vr {
 class RenderPassMap {
@@ -324,7 +325,7 @@ private:
                         ++self->pass_jobs_;
                         current_pass_=pass;
                         current_context_=deferred;
-                        current_view_=view;
+                        current_view_=view;VisibilityStamp::next_job();
                     }
                     bool result=false;
                     __try {
@@ -387,7 +388,7 @@ private:
                     ++self->pass_jobs_;
                     current_pass_=pass;
                     current_context_=deferred;
-                    current_view_=view;
+                    current_view_=view;VisibilityStamp::next_job();
                 }
                 bool result=false;
                 __try {result=original_(item);}
@@ -411,7 +412,7 @@ private:
         void* previous_view=current_view_;
         current_pass_=pass;
         current_context_=deferred;
-        current_view_=view;
+        current_view_=view;VisibilityStamp::next_job();
         bool result=false;
         __try {result=original_(item);}
         __finally {

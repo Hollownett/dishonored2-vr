@@ -15,6 +15,7 @@
 #include <wrl/client.h>
 #include "fsr3_eye_upscaler.hpp"
 #include "fsr4_eye_upscaler.hpp"
+#include "foveated_upscale.hpp"
 #include "dlss_eye_upscaler.hpp"
 #include "d3d11_temporal_owner.hpp"
 #include "dlss_mode.hpp"
@@ -75,6 +76,10 @@ private:
         Fsr3EyeUpscaler fsr;Fsr4EyeUpscaler fsr4;Ref<ID3D11Texture2D> depth,reactive,colour_in,upscaled;Ref<ID3D11UnorderedAccessView> depth_uav,reactive_uav;
         LARGE_INTEGER last{};bool reset=true;GpuPassTimer timer;
         UINT depth_w{},depth_h{}; // v796: the render rectangle of the last depth copy (eye_depth)
+        // v1107: FSR 4 runs on this display box only (fsr4 created at the box size); FSR 3 upscales the whole eye underneath.
+        bool fovea=false;fovea::Axis fovea_x,fovea_y;
+        bool fovea_box=false;          // v1107: a box exists for this eye (FSR 4 or DLSS)
+        bool fsr3_whole_last=false;    // v1107: FSR 3 upscaled the whole eye last frame under a DLSS box (its history is continuous)
     };
     struct ClearSnapshot {
         temporal_eye::DepthClearObservation event;
@@ -286,7 +291,15 @@ private:
             }
         }
         DlssEyeUpscaler::Desc d{};
-        d.width=w;d.height=h;d.render_width=rw;d.render_height=rh;d.quality=quality?DlssEyeUpscaler::Quality::quality:DlssEyeUpscaler::Quality::dlaa;
+        d.width=w;d.height=h;d.render_width=rw;d.render_height=rh;
+        // v1107 foveated DLSS: one feature pair at eye 0's box size (the eyes' boxes mirror); each eye passes its own offsets.
+        const bool fovea_dlss=upscale && (*eyes_)[0].fovea_box && (*eyes_)[1].fovea_box && fovea::half_deg.load()>0;
+        if(fovea_dlss) {
+            const auto& b=(*eyes_)[0];
+            d.width=std::min(b.fovea_x.display,w);d.height=std::min(b.fovea_y.display,h);
+            d.render_width=std::min<UINT>(static_cast<UINT>(std::lround(double(d.width)*rw/w)),rw);
+            d.render_height=std::min<UINT>(static_cast<UINT>(std::lround(double(d.height)*rh/h)),rh);
+        }d.quality=quality?DlssEyeUpscaler::Quality::quality:DlssEyeUpscaler::Quality::dlaa;
         d.colour=d.output=*colour_format;
         // Motion vectors: the engine renders colour, depth and motion into the top-left render subrect of its full-size
         // targets (dynamic resolution), so the motion field is render-sized content in a display-sized texture; the
@@ -436,6 +449,7 @@ public:
     bool dlss_engaged() const noexcept {const auto s=dlss_state.load(std::memory_order_relaxed);return s==static_cast<unsigned>(DlssFallback::State::pending) || s==static_cast<unsigned>(DlssFallback::State::active);}
     bool dlss_failed() const noexcept {return dlss_state.load(std::memory_order_relaxed)==static_cast<unsigned>(DlssFallback::State::failed);}
     std::array<std::atomic<unsigned>,2> eye_upscaler_generation{};
+    static constexpr unsigned fovea_generation=6; // v1107: FSR 3 whole eye + FSR 4 box (both histories kept)
     std::array<std::atomic<std::uint64_t>,2> eye_fsr4_version{};
     std::atomic<std::uint64_t> timing_create_failures{};
     std::array<std::atomic<float>,2> eye_gpu_ms{},eye_cpu_ms{};
@@ -601,7 +615,28 @@ public:
             return;
         }
         const float f=fraction.load();
-        if(ready.load() && ready_w_==w && ready_h_==h && ready_fraction_==f && ready_native_format_==wanted_native_format_.load() && depth_resource_.p==best.resource &&
+        // v1107: the fovea box each eye wants (zeros = off). Kept while within 4 px of the built one, so float noise never rebuilds.
+        std::array<std::array<UINT,4>,2> fovea_want{};std::array<fovea::Box,2> fovea_boxes{};
+        if(f<.999f && fovea::published.load() && fovea::half_deg.load()>0 &&
+           ((!fsr4_provider_path.empty() && fsr4_active.load(std::memory_order_relaxed)) || dlss_active.load(std::memory_order_relaxed))) {
+            const UINT frw=static_cast<UINT>(std::lround(w*f)),frh=static_cast<UINT>(std::lround(h*f));
+            bool ok=true;
+            for(unsigned eye=0;eye<2;++eye) {
+                fovea_boxes[eye]=fovea::box(w,h,frw,frh,fovea::centre_x[eye].load(),fovea::centre_y[eye].load(),fovea::half_x[eye].load(),fovea::half_y[eye].load());
+                const auto& b=fovea_boxes[eye];ok=ok && b.valid();
+                fovea_want[eye]={b.x.dst,b.y.dst,b.x.display,b.y.display};
+            }
+            if(!ok) fovea_want={};
+        }
+        {
+            bool close_enough=true;
+            for(unsigned eye=0;eye<2;++eye) for(unsigned k=0;k<4;++k) {
+                const long a=static_cast<long>(fovea_want[eye][k]),b=static_cast<long>(fovea_key_[eye][k]);
+                if((a==0)!=(b==0) || std::labs(a-b)>4) close_enough=false;
+            }
+            if(close_enough) fovea_want=fovea_key_;
+        }
+        if(ready.load() && ready_w_==w && ready_h_==h && ready_fraction_==f && ready_native_format_==wanted_native_format_.load() && depth_resource_.p==best.resource && fovea_want==fovea_key_ &&
            (!timing_enabled.load() || ((*eyes_)[0].timer.valid() && (*eyes_)[1].timer.valid()))) {
             if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) {std::lock_guard<std::mutex> lock(mutex_);selected_clear_=best.clear;}return;
         }
@@ -631,7 +666,8 @@ public:
         const bool upscale=f<.999f;
         const UINT rw=upscale?static_cast<UINT>(std::lround(w*f)):w,rh=upscale?static_cast<UINT>(std::lround(h*f)):h;
         if(ready_w_!=w || ready_h_!=h || upscale!=(ready_fraction_<.999f) || rw>context_w_ || rh>context_h_ ||
-           ready_native_format_!=wanted_native_format_.load() || !(*eyes_)[0].fsr.valid() || !(*eyes_)[1].fsr.valid()) {
+           ready_native_format_!=wanted_native_format_.load() || !(*eyes_)[0].fsr.valid() || !(*eyes_)[1].fsr.valid() || fovea_want!=fovea_key_) {
+            if(fovea_want!=fovea_key_) ++fovea::rebuilds;
             ready_w_=ready_h_=0;
             const float cap=std::min(1.f,std::max(f,max_fraction.load()));
             const UINT cw=upscale?std::max(rw,static_cast<UINT>(std::lround(w*cap))):w,ch=upscale?std::max(rh,static_cast<UINT>(std::lround(h*cap))):h;
@@ -667,8 +703,24 @@ public:
                 }
                 if(!e.fsr.create(device,fd)) {++create_failures;enabled=false;return;}
                 const auto format=upscale?DXGI_FORMAT_R8G8B8A8_UNORM:wanted_native_format_.load();
-                if(!fsr4_provider_path.empty() && !e.fsr4.create(device,fd,fsr4_provider_path.c_str(),format,format)) ++fsr4_create_failures;
+                const std::size_t eye_index=static_cast<std::size_t>(&e-&(*eyes_)[0]);
+                e.fovea_box=upscale && fovea_want[eye_index][2]!=0;
+                if(e.fovea_box) {e.fovea_x=fovea_boxes[eye_index].x;e.fovea_y=fovea_boxes[eye_index].y;}
+                e.fovea=e.fovea_box && fsr4_active.load(std::memory_order_relaxed) && !fsr4_provider_path.empty();
+                if(e.fovea) {
+                    // The box context: display = the box, max render = the box at the context's largest render fraction.
+                    const auto& b=fovea_boxes[eye_index];e.fovea_x=b.x;e.fovea_y=b.y;
+                    auto fd4=fd;fd4.display_w=b.x.display;fd4.display_h=b.y.display;
+                    fd4.render_w=std::min(b.x.display,static_cast<UINT>(std::ceil(double(b.x.display)*cw/w))+2);
+                    fd4.render_h=std::min(b.y.display,static_cast<UINT>(std::ceil(double(b.y.display)*ch/h))+2);
+                    if(!fsr4_provider_path.empty() && !e.fsr4.create(device,fd4,fsr4_provider_path.c_str(),format,format)) {++fsr4_create_failures;e.fovea=false;}
+                    fovea::box_x[eye_index]=b.x.dst;fovea::box_y[eye_index]=b.y.dst;fovea::box_w[eye_index]=b.x.display;fovea::box_h[eye_index]=b.y.display;
+                } else {
+                    if(!fsr4_provider_path.empty() && !e.fsr4.create(device,fd,fsr4_provider_path.c_str(),format,format)) ++fsr4_create_failures;
+                    fovea::box_x[eye_index]=fovea::box_y[eye_index]=fovea::box_w[eye_index]=fovea::box_h[eye_index]=0;
+                }
             }
+            fovea_key_=fovea_want;
             ready_w_=w;ready_h_=h;render_w_=rw;render_h_=rh;context_w_=cw;context_h_=ch;ready_fraction_=f;ready_native_format_=wanted_native_format_.load();
             if(rebuild_observer) {
                 char text[256]{};
@@ -806,6 +858,13 @@ private:
             static_cast<std::uint32_t>((ev.frame-1)%dlss_desc_.jitter.phase_count),dlss_desc_.jitter.phase_count,false};
         ev.motion_contract=dlss_desc_.motion;ev.colour_contract=dlss_desc_.colour_contract;
         ev.frame_time_ms=dt;ev.discontinuity=e.reset || previous_generation!=dlss_mode::generation;ev.scratch_owner=dlss_scratch_;
+        if(job.upscale && dlss_desc_.width<ready_w_ && e.fovea_box) { // v1107: the box of a foveated DLSS feature, into the FSR 3 whole eye
+            const double sx=double(render_w_)/ready_w_,sy=double(render_h_)/ready_h_;
+            ev.dst_x=std::min(e.fovea_x.dst,ready_w_-dlss_desc_.width);ev.dst_y=std::min(e.fovea_y.dst,ready_h_-dlss_desc_.height);
+            ev.src_x=std::min<unsigned>(static_cast<unsigned>(std::lround(ev.dst_x*sx)),render_w_-dlss_desc_.render_width);
+            ev.src_y=std::min<unsigned>(static_cast<unsigned>(std::lround(ev.dst_y*sy)),render_h_-dlss_desc_.render_height);
+            ev.output_region=true;
+        }
         auto use=std::make_shared<DlssUse>();use->generation=dlss_lease_.generation();
         D3D11TemporalOwner::Status status;
         auto dlss_ticket=dlss_owner_->reserve(use,dlss_lease_.retained_owner(),status);
@@ -832,6 +891,7 @@ private:
         ++dlss_evaluations;dlss_previous_jitter_[eye_index]={jx,jy};
         return true;
     }
+    std::array<std::array<UINT,4>,2> fovea_key_{}; // v1107: the fovea boxes the contexts were built for (zeros = off)
     void dispatch(ID3D11DeviceContext* c,Job& job) {
         std::lock_guard<std::mutex> lock(mutex_);
         // A split native TAA list still needs a result if settings/resize invalidated FSR before execution.
@@ -910,19 +970,52 @@ private:
         }
         // DLSS (modes 7/8) evaluates first; a refusal or failure leaves this eye to the FSR path below.
         bool dl=false;
+        bool fsr3_whole=false;
         if(dlss_fallback_.should_evaluate() && dlss_lease_) {
             if(job.upscale) {const D3D11_BOX active{0,0,0,render_w_,render_h_,1};c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);}
-            dl=dlss_dispatch_locked(c,job,e,in,dt,previous_generation);
+            if(job.upscale && dlss_desc_valid_ && dlss_desc_.width<w && e.fovea_box && e.upscaled.p) { // v1107: FSR 3 under the DLSS box
+                auto in3=in;in3.colour=e.colour_in.p;in3.output=e.upscaled.p;in3.render_w=render_w_;in3.render_h=render_h_;
+                in3.reset=e.reset || !e.fsr3_whole_last;
+                fsr3_whole=e.fsr.dispatch(c,in3);
+                if(!fsr3_whole) ++fovea::failures[static_cast<std::size_t>(job.eye)];
+            }
+            if(!(job.upscale && dlss_desc_valid_ && dlss_desc_.width<w && e.fovea_box) || fsr3_whole) {
+                dl=dlss_dispatch_locked(c,job,e,in,dt,previous_generation);
+                if(dl && fsr3_whole) ++fovea::dispatches[static_cast<std::size_t>(job.eye)];
+            }
         }
+        e.fsr3_whole_last=fsr3_whole && dl;
         if(dlss_fallback_.selected() && !dl) ++dlss_fallbacks;
         in.reset=e.reset || previous_generation!=4;
         // FSR4 copies its shared output directly to the native eye target. FSR3
         // still needs its UAV-capable intermediate for targets without UAV binds.
         if(job.upscale) in.output=job.output.p;
+        // v1107 foveated: FSR 3 upscales the whole eye, then FSR 4 replaces the centre box. A failed box dispatch leaves the FSR 3 eye.
+        bool fov=false;
+        if(!dl && job.upscale && e.fovea && fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() && e.colour_in.p && e.upscaled.p) {
+            const D3D11_BOX active{0,0,0,render_w_,render_h_,1};
+            c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);
+            auto in3=in;in3.colour=e.colour_in.p;in3.output=e.upscaled.p;in3.render_w=render_w_;in3.render_h=render_h_;
+            in3.reset=e.reset || (previous_generation!=3 && previous_generation!=fovea_generation);
+            if(e.fsr.dispatch(c,in3)) {
+                c->CopyResource(job.output.p,e.upscaled.p);fov=true;
+                const double sx=double(render_w_)/w,sy=double(render_h_)/h;
+                auto in4=in;in4.colour=job.colour.p;in4.output=job.output.p;in4.output_region=true;
+                in4.dst_x=e.fovea_x.dst;in4.dst_y=e.fovea_y.dst;
+                in4.src_x=static_cast<uint32_t>(std::lround(e.fovea_x.dst*sx));in4.src_y=static_cast<uint32_t>(std::lround(e.fovea_y.dst*sy));
+                in4.render_w=std::min<uint32_t>(static_cast<uint32_t>(std::lround(e.fovea_x.display*sx)),render_w_-in4.src_x);
+                in4.render_h=std::min<uint32_t>(static_cast<uint32_t>(std::lround(e.fovea_y.display*sy)),render_h_-in4.src_y);
+                in4.vfov_rad=static_cast<float>(2*std::atan(std::tan(in.vfov_rad*.5)*double(e.fovea_y.display)/h));
+                in4.reset=e.reset || (previous_generation!=4 && previous_generation!=fovea_generation);
+                if(e.fsr4.dispatch(c,in4,fsr4_compute_timing_enabled.load())) ++fovea::dispatches[static_cast<std::size_t>(job.eye)];
+                else ++fovea::failures[static_cast<std::size_t>(job.eye)];
+                publish_fsr4_gpu_timing(static_cast<std::size_t>(job.eye),e.fsr4);
+            }
+        }
         Fsr4EyeUpscaler::Diagnostics diagnostics{};
-        const bool observe_fsr4=!dl && fsr4_diagnostics_observer && fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() &&
+        const bool observe_fsr4=!fov && !dl && fsr4_diagnostics_observer && fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() &&
             fsr4_diagnostics_observer(fsr4_diagnostics_user,job.eye,diagnostics);
-        const bool ml=!dl && fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() &&
+        const bool ml=!fov && !dl && !e.fovea && fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() &&
             e.fsr4.dispatch(c,in,fsr4_compute_timing_enabled.load(),observe_fsr4?&diagnostics:nullptr);
         publish_fsr4_gpu_timing(static_cast<std::size_t>(job.eye),e.fsr4);
         eye_fsr4_failure[static_cast<std::size_t>(job.eye)]=ml?0u:e.fsr4.failure_code();
@@ -931,19 +1024,19 @@ private:
         else if(!fsr4_provider_path.empty() && fsr4_active.load(std::memory_order_relaxed)) ++fsr4_fallbacks;
         // FSR4 already crops the native padded source into its shared input.
         // Materialize the smaller D3D11 source only for FSR3 or its fallback.
-        if(!ml && !dl && job.upscale) {
+        if(!ml && !dl && !fov && job.upscale) {
             const D3D11_BOX active{0,0,0,render_w_,render_h_,1};
             c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);
             in.colour=e.colour_in.p;
             in.output=e.upscaled.p;
         }
         in.reset=e.reset || previous_generation!=3;
-        const bool ok=dl || ml || e.fsr.dispatch(c,in);
+        const bool ok=dl || ml || fov || e.fsr.dispatch(c,in);
         saved.restore(c);
         if(!ok) {e.timer.end(c,ticket);++failures;e.reset=true;fallback();return;}
-        eye_upscaler_generation[static_cast<std::size_t>(job.eye)]=dl?dlss_mode::generation:ml?4u:3u;
+        eye_upscaler_generation[static_cast<std::size_t>(job.eye)]=dl?dlss_mode::generation:fov?fovea_generation:ml?4u:3u;
         eye_fsr4_version[static_cast<std::size_t>(job.eye)]=ml?e.fsr4.version_id():0;
-        if(job.upscale) {if(!ml) c->CopyResource(job.output.p,e.upscaled.p);++upscaled;} // over the game's bilinear upscale
+        if(job.upscale) {if(!ml && !fov) c->CopyResource(job.output.p,e.upscaled.p);++upscaled;} // over the game's bilinear upscale
         e.timer.end(c,ticket);
         const auto timing=e.timer.stats();const auto side=static_cast<std::size_t>(job.eye);
         eye_gpu_ms[side]=static_cast<float>(timing.last_ms);eye_gpu_samples[side]=timing.samples;

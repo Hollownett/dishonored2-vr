@@ -207,6 +207,11 @@ public:
         }
         return true;
     }
+    // v1106: the eye a pass view names (the visibility stamp), -1 when it is not one of the two eye views.
+    static int eye_of_view(std::uintptr_t view) noexcept {
+        if(view) for(unsigned e=0;e<2;++e) if(eye_views_[e].load(std::memory_order_relaxed)==view) return static_cast<int>(e);
+        return -1;
+    }
     // From the engine's view Setup (entry: the view still holds its last frame's matrices). 0 = not a paired eye.
     static void note_eye_view(unsigned eye,std::uintptr_t view) noexcept {
         if(eye>1) return;

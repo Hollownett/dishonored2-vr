@@ -14,6 +14,9 @@
 #include "controller_input.hpp"
 #include "render_size.hpp"
 #include "canted_fov.hpp"
+#include "visibility_mask.hpp"
+#include "visibility_stamp.hpp"
+#include "foveated_upscale.hpp"
 #include "menu_panel.hpp"
 #include "y_hold.hpp"
 #include "xr_continuity.hpp"
@@ -121,6 +124,81 @@ private:
     std::vector<std::uint8_t> vignette_ring_,vignette_baked_;
     XrSpace view_space_{}; // unused: the VIEW-space quad was rejected by SteamVR (POSE_INVALID); the ring is rebuilt from the head pose in LOCAL space
     bool color_scale_supported_{}; // XR_KHR_composition_layer_color_scale_bias enabled on the instance
+    // v1105 probe (read-only): the runtime's extension list and, with XR_KHR_visibility_mask, each eye's hidden area, logged once to
+    // xr-recoveries.log (and again after a mask-changed event). Nothing is drawn with the mask yet.
+    std::string xr_extensions_;bool visibility_mask_supported_{};PFN_xrGetVisibilityMaskKHR xrGetVisibilityMaskKHR_{};
+    bool extensions_logged_{};std::array<bool,2> visibility_mask_logged_{};
+    // v1106: each eye's hidden mesh (tangent xy pairs + indices), kept for the depth stamp, and the inputs its geometry was built from
+    std::array<std::vector<float>,2> mask_xy_{};std::array<std::vector<std::uint32_t>,2> mask_indices_{};
+    std::array<std::array<float,4>,2> stamp_fov_{};bool stamp_canted_{};bool stamp_built_{};unsigned stamp_mask_epoch_{},stamp_built_epoch_{~0u};
+    void update_visibility_stamp_() {
+        if(!views_valid_ || !VisibilityStamp::enabled.load(std::memory_order_relaxed)) return;
+        bool same=stamp_built_ && stamp_canted_==canted_views && stamp_built_epoch_==stamp_mask_epoch_;
+        for(unsigned eye=0;eye<2 && same;++eye) {
+            const auto& f=views_[eye].fov;const std::array<float,4> now{f.angleLeft,f.angleRight,f.angleUp,f.angleDown};
+            for(int k=0;k<4;++k) if(std::abs(now[k]-stamp_fov_[eye][k])>1e-5f) same=false;
+        }
+        if(same) return;
+        if(!VisibilityStamp::create(device_for_stamp_())) return;
+        for(unsigned eye=0;eye<2;++eye) {
+            const auto& f=views_[eye].fov;stamp_fov_[eye]={f.angleLeft,f.angleRight,f.angleUp,f.angleDown};
+            RenderFrustum render{{0,0,0,1},std::tan(std::max(-f.angleLeft,f.angleRight)),std::tan(std::max(f.angleUp,-f.angleDown))};
+            if(canted_views) if(const auto c=canted_fov(f.angleLeft,f.angleRight,f.angleUp,f.angleDown)) render={c->rotation,std::tan(c->half_x),std::tan(c->half_y)};
+            const auto& xy=mask_xy_[eye];const auto& ix=mask_indices_[eye];
+            VisibilityStamp::publish(eye,visibility_stamp_triangles(xy.empty()?nullptr:xy.data(),xy.size()/2,ix.empty()?nullptr:ix.data(),ix.size(),
+                f.angleLeft,f.angleRight,f.angleUp,f.angleDown,render,.01));
+        }
+        stamp_canted_=canted_views;stamp_built_epoch_=stamp_mask_epoch_;stamp_built_=true;
+    }
+    // v1107: each eye's optical centre and fovea half extents in the render frustum's NDC, for FsrTaa's foveated FSR 4 box.
+    void update_fovea_() {
+        if(!views_valid_) return;
+        const double t=std::tan(static_cast<double>(fovea::half_deg.load())*0.017453292519943295);
+        for(unsigned eye=0;eye<2;++eye) {
+            const auto& f=views_[eye].fov;
+            RenderFrustum render{{0,0,0,1},std::tan(std::max(-f.angleLeft,f.angleRight)),std::tan(std::max(f.angleUp,-f.angleDown))};
+            if(canted_views) if(const auto c=canted_fov(f.angleLeft,f.angleRight,f.angleUp,f.angleDown)) render={c->rotation,std::tan(c->half_x),std::tan(c->half_y)};
+            const auto centre=visibility_mask_detail::project(render,0,0);
+            if(std::isnan(centre[0])) return;
+            fovea::centre_x[eye]=static_cast<float>(centre[0]/render.tan_x);fovea::centre_y[eye]=static_cast<float>(centre[1]/render.tan_y);
+            fovea::half_x[eye]=static_cast<float>(t/render.tan_x);fovea::half_y[eye]=static_cast<float>(t/render.tan_y);
+        }
+        fovea::published=true;
+    }
+    ID3D11Device* device_for_stamp_() {Microsoft::WRL::ComPtr<ID3D11Device> d;if(context_) context_->GetDevice(&d);return d.Get();} // the game's device outlives the call
+    void log_visibility_mask_() {
+        if(!observe_xr_event || !views_valid_) return;
+        if(!extensions_logged_) {extensions_logged_=true;observe_xr_event(("xr-probe runtime extensions: "+xr_extensions_).c_str());}
+        for(std::uint32_t eye=0;eye<2;++eye) {
+            if(visibility_mask_logged_[eye]) continue;
+            visibility_mask_logged_[eye]=true;
+            char line[512];
+            if(!xrGetVisibilityMaskKHR_) {std::snprintf(line,sizeof line,"xr-probe %s eye: XR_KHR_visibility_mask unavailable",eye?"right":"left");observe_xr_event(line);continue;}
+            XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};
+            const auto kind=XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR;
+            XrResult r=xrGetVisibilityMaskKHR_(session_,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,eye,kind,&mask);
+            std::vector<XrVector2f> vertices(mask.vertexCountOutput);std::vector<std::uint32_t> indices(mask.indexCountOutput);
+            if(XR_SUCCEEDED(r) && !vertices.empty() && !indices.empty()) {
+                mask.vertexCapacityInput=static_cast<std::uint32_t>(vertices.size());mask.vertices=vertices.data();
+                mask.indexCapacityInput=static_cast<std::uint32_t>(indices.size());mask.indices=indices.data();
+                r=xrGetVisibilityMaskKHR_(session_,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,eye,kind,&mask);
+            }
+            if(XR_FAILED(r) || vertices.empty() || indices.empty()) {
+                std::snprintf(line,sizeof line,"xr-probe %s eye: hidden mesh result %d, %u vertices, %u indices",eye?"right":"left",static_cast<int>(r),mask.vertexCountOutput,mask.indexCountOutput);
+                observe_xr_event(line);continue;
+            }
+            const auto& f=views_[eye].fov;
+            RenderFrustum render{{0,0,0,1},std::tan(std::max(-f.angleLeft,f.angleRight)),std::tan(std::max(f.angleUp,-f.angleDown))}; // plain symmetric frustum
+            if(canted_views) if(const auto c=canted_fov(f.angleLeft,f.angleRight,f.angleUp,f.angleDown)) render={c->rotation,std::tan(c->half_x),std::tan(c->half_y)};
+            static_assert(sizeof(XrVector2f)==2*sizeof(float));
+            mask_xy_[eye].assign(&vertices[0].x,&vertices[0].x+2*vertices.size());mask_indices_[eye]=indices;++stamp_mask_epoch_;
+            const auto s=visibility_mask_stats(&vertices[0].x,vertices.size(),indices.data(),indices.size(),f.angleLeft,f.angleRight,f.angleUp,f.angleDown,render);
+            std::snprintf(line,sizeof line,"xr-probe %s eye: hidden mesh %zu vertices %zu triangles; hidden %.1f%% of the runtime FOV; %.1f%% of our %s render wasted (mask + outside FOV); "
+                "mask x %.3f..%.3f y %.3f..%.3f; fov tan l %.3f r %.3f u %.3f d %.3f%s",eye?"right":"left",vertices.size(),indices.size()/3,s.hidden_of_fov*100,s.wasted_of_render*100,
+                canted_views?"canted":"symmetric",s.min_x,s.max_x,s.min_y,s.max_y,std::tan(f.angleLeft),std::tan(f.angleRight),std::tan(f.angleUp),std::tan(f.angleDown),s.valid?"":" (stats invalid)");
+            observe_xr_event(line);
+        }
+    }
     XrCompositionLayerColorScaleBiasKHR vignette_scale_{XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR}; // chained to the quad; lives until xrEndFrame
     bool vignette_runtime_off_{}; // the runtime rejected a frame carrying the vignette: it stays off for this session instead of dropping frames until recovery
     float vignette_baked_opacity_{-1};UINT64 vignette_bake_tick_{};
@@ -1968,15 +2046,18 @@ public:
                     std::vector<XrExtensionProperties> props(count,{XR_TYPE_EXTENSION_PROPERTIES});
                     if(XR_SUCCEEDED(enumerate(nullptr,count,&count,props.data())))
                         for(const auto& prop:props) {
+                            xr_extensions_+=(xr_extensions_.empty()?"":" ")+std::string(prop.extensionName)+"/"+std::to_string(prop.extensionVersion);
+                            visibility_mask_supported_=visibility_mask_supported_ || !std::strcmp(prop.extensionName,XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
                             cylinder_supported_=cylinder_supported_ || !std::strcmp(prop.extensionName,XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
                             color_scale_supported_=color_scale_supported_ || !std::strcmp(prop.extensionName,XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
                         }
                 }
-            } catch(...) {cylinder_supported_=false;color_scale_supported_=false;}
+            } catch(...) {cylinder_supported_=false;color_scale_supported_=false;visibility_mask_supported_=false;}
             if(!vignette_enabled || !vignette_color_scale_requested) color_scale_supported_=false; // nothing would use it; the chained struct is opt-in (build/vignette-color-scale)
             std::vector<const char*> extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
             if(cylinder_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
             if(color_scale_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
+            if(visibility_mask_supported_) extensions.push_back(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
             XrInstanceCreateInfo create{};create.type=XR_TYPE_INSTANCE_CREATE_INFO;
             strcpy_s(create.applicationInfo.applicationName,"Dishonored 2 game-image preview");
             create.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
@@ -1999,6 +2080,8 @@ public:
                 address=nullptr;
                 if(XR_SUCCEEDED(get_(instance_,"xrPathToString",&address)) && address) xrPathToString=reinterpret_cast<PFN_xrPathToString>(address);
                 palm_.profile_query_available=xrGetCurrentInteractionProfile && xrPathToString;
+                address=nullptr;
+                if(visibility_mask_supported_ && XR_SUCCEEDED(get_(instance_,"xrGetVisibilityMaskKHR",&address)) && address) xrGetVisibilityMaskKHR_=reinterpret_cast<PFN_xrGetVisibilityMaskKHR>(address);
             }
             XrSystemGetInfo query{};query.type=XR_TYPE_SYSTEM_GET_INFO;query.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
             XrSystemId system{};
@@ -2313,6 +2396,10 @@ public:
                     if(running_) checked(xrEndSession(session_),"End game XR session");running_=false;
                 }
             }
+            if(event.type==XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR) {
+                const auto* changed=reinterpret_cast<const XrEventDataVisibilityMaskChangedKHR*>(&event);
+                if(changed->session==session_ && changed->viewIndex<2) visibility_mask_logged_[changed->viewIndex]=false;
+            }
             if(event.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
                 const auto* change=reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
                 if(change->session==session_ && (change->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL || (floor_space_ && change->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_STAGE))) {
@@ -2364,6 +2451,9 @@ public:
         constexpr XrViewStateFlags valid=XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
         views_valid_=count==2 && (view_state.viewStateFlags&valid)==valid;
         last_should_render=frame_.shouldRender!=XR_FALSE;last_views_valid=views_valid_;
+        log_visibility_mask_();
+        update_visibility_stamp_();
+        update_fovea_();
         if(continuity_.advance(state==XR_SESSION_STATE_VISIBLE || state==XR_SESSION_STATE_FOCUSED,
             last_should_render,views_valid_,frame_.predictedDisplayTime)) {
             menu_panel_.reset();authored_panel_.reset();world_ui_pose_valid_=false;rendered_mask_=0;

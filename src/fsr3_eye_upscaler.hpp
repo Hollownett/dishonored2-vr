@@ -103,6 +103,10 @@ struct Fsr3EyeUpscaler {
     float frame_time_ms = 11.1f;
     float sharpness = -1.f;             // <0 disables RCAS
     float cam_near = 0.1f, cam_far = 1000.f, vfov_rad = 1.5f;
+    // v1107 foveated upscaling (FSR4 only): the region of the sources read (origin; size render_w x render_h) and where the display-size
+    // result is written in a larger output. All zero = the whole image, the output exactly display size.
+    uint32_t src_x = 0, src_y = 0, dst_x = 0, dst_y = 0;
+    bool output_region = false;
     float pre_exposure = 1.f;
   };
 

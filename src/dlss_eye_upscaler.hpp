@@ -160,6 +160,10 @@ public:
         temporal_eye::ColourContract colour_contract;
         float frame_time_ms{};
         bool discontinuity{};
+        // v1107 foveated: the inputs are read from (src) and the result written at (dst) in a larger output (UAV, at least dst + the
+        // feature's target size). All zero / false = the whole image, the output exactly the target size.
+        unsigned src_x{}, src_y{}, dst_x{}, dst_y{};
+        bool output_region{};
         // T3 binds this to its generation's retained scratch bundle, and retains
         // all job resources through temporal_eye::RetainedJobs GPU retirement.
         temporal_eye::Lease scratch_owner;
@@ -378,9 +382,9 @@ private:
     }
     // Inputs may be larger than the render size (the engine renders a dynamic-resolution subrect at the top left and
     // DLSS reads InRenderSubrectDimensions); the output must match the feature's target size exactly.
-    static bool matches(Core& c, ID3D11Resource* resource, unsigned w, unsigned h, Format f, bool output = false) noexcept {
+    static bool matches(Core& c, ID3D11Resource* resource, unsigned w, unsigned h, Format f, bool output = false, bool region = false) noexcept {
         Surface s;
-        return resource && c.validation->surface(c.device, resource, s) && (output ? (s.width == w && s.height == h) : (s.width >= w && s.height >= h)) &&
+        return resource && c.validation->surface(c.device, resource, s) && (output && !region ? (s.width == w && s.height == h) : (s.width >= w && s.height >= h)) &&
             s.mip_levels == 1 && s.array_size == 1 && s.sample_count == 1 && s.sample_quality == 0 &&
             s.format == f && (!output || s.unordered_access);
     }
@@ -546,10 +550,11 @@ public:
             !std::isfinite(in.frame_time_ms) || in.frame_time_ms <= 0 || !in.scratch_owner) return fail_eval(Reason::invalid_conventions);
         const unsigned rw = render_w(p.desc), rh = render_h(p.desc);
         if (in.colour == in.output || in.depth == in.output || in.motion == in.output ||
-            !matches(c, in.colour, rw, rh, p.desc.colour) ||
-            !matches(c, in.output, p.desc.width, p.desc.height, p.desc.output, true) ||
-            !matches(c, in.depth, rw, rh, Format::r32_float) ||
-            !matches(c, in.motion, rw, rh, Format::rg16_float) ||
+            (!in.output_region && (in.dst_x || in.dst_y)) ||
+            !matches(c, in.colour, in.src_x + rw, in.src_y + rh, p.desc.colour) ||
+            !matches(c, in.output, in.dst_x + p.desc.width, in.dst_y + p.desc.height, p.desc.output, true, in.output_region) ||
+            !matches(c, in.depth, in.src_x + rw, in.src_y + rh, Format::r32_float) ||
+            !matches(c, in.motion, in.src_x + rw, in.src_y + rh, Format::rg16_float) ||
             (in.colour_contract.exposure == temporal_eye::ExposureSource::texture && !matches(c, in.exposure, 1, 1, Format::r32_float)) ||
             (in.colour_contract.exposure != temporal_eye::ExposureSource::texture && in.exposure)) return fail_eval(Reason::invalid_resource);
         if (p.scratch_owner && (p.scratch_owner.owner_before(in.scratch_owner) ||
@@ -561,6 +566,8 @@ public:
         eval.pInDepth = in.depth; eval.pInMotionVectors = in.motion;
         eval.InJitterOffsetX = in.jitter.current_x; eval.InJitterOffsetY = in.jitter.current_y;
         eval.InRenderSubrectDimensions = {rw, rh};
+        eval.InColorSubrectBase = {in.src_x, in.src_y}; eval.InDepthSubrectBase = {in.src_x, in.src_y};
+        eval.InMVSubrectBase = {in.src_x, in.src_y}; eval.InOutputSubrectBase = {in.dst_x, in.dst_y};
         eval.InReset = eye.reset || in.discontinuity || in.jitter.reset_history ||
             (eye.frame && (in.frame != eye.frame + 1 || in.pair != eye.pair + 1));
         eval.InMVScaleX = in.motion_contract.scale_x; eval.InMVScaleY = in.motion_contract.scale_y;

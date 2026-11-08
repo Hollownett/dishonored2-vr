@@ -313,10 +313,11 @@ public:
             !std::isfinite(in.vfov_rad) || in.vfov_rad<=0 || in.vfov_rad>=3.1415927f ||
             !std::isfinite(in.cam_near) || in.cam_near<=0 || !std::isfinite(in.cam_far) || in.cam_far<=in.cam_near ||
             !std::isfinite(in.pre_exposure) || !std::isfinite(in.sharpness) || in.sharpness>1 ||
-            !matches(s,in.colour,rw,rh,s.colour,false,true) ||
-            !matches(s,in.depth,rw,rh,DXGI_FORMAT_R32_FLOAT,false) || !matches(s,in.motion,rw,rh,DXGI_FORMAT_R16G16_FLOAT,false) ||
-            !matches(s,in.output,s.desc.display_w,s.desc.display_h,s.output,true,true) ||
-            (in.reactive && !matches(s,in.reactive,rw,rh,DXGI_FORMAT_R8_UNORM,false))) {
+            !matches(s,in.colour,in.src_x+rw,in.src_y+rh,s.colour,false,true) ||
+            !matches(s,in.depth,in.src_x+rw,in.src_y+rh,DXGI_FORMAT_R32_FLOAT,false) || !matches(s,in.motion,in.src_x+rw,in.src_y+rh,DXGI_FORMAT_R16G16_FLOAT,false) ||
+            !matches(s,in.output,in.dst_x+s.desc.display_w,in.dst_y+s.desc.display_h,s.output,!in.output_region,true) ||
+            (!in.output_region && (in.dst_x || in.dst_y)) ||
+            (in.reactive && !matches(s,in.reactive,in.src_x+rw,in.src_y+rh,DXGI_FORMAT_R8_UNORM,false))) {
                 s.reset=true;return rejected("FSR4 input dimensions/format/device/parameters differ",3);
             }
         poll_timing(s);
@@ -364,7 +365,7 @@ public:
             slot.list->ResourceBarrier(static_cast<UINT>(after.size()),after.data());hr(slot.list->Close(),"Close actual FSR4 dispatch");
             record_ms_=ms_since(t_record);const auto t_handoff=std::chrono::steady_clock::now();
             const std::array<ID3D11Resource*,5> inputs{in.colour,in.depth,in.motion,in.reactive,in.output};
-            const D3D11_BOX box{0,0,0,rw,rh,1};
+            const D3D11_BOX box{in.src_x,in.src_y,0,in.src_x+rw,in.src_y+rh,1};
             observe(Phase::inputs_begin);
             queued_work=true; // the first D3D11 shared-input copy starts GPU ownership
             for(unsigned i=0;i<4;++i) if(inputs[i]) {slot.caller[i]=inputs[i];context->CopySubresourceRegion(slot.textures[i].dx11.Get(),0,0,0,0,inputs[i],0,&box);}
@@ -400,7 +401,8 @@ public:
             s.submitted=upscaled;hr(s.queue->Signal(s.fence12.Get(),upscaled),"Signal FSR4 output on GPU");
             hr(s.context11->Wait(s.fence11.Get(),upscaled),"Wait for FSR4 output on GPU");
             observe(Phase::output_ready);
-            context->CopyResource(in.output,slot.textures[4].dx11.Get());
+            if(in.output_region) context->CopySubresourceRegion(in.output,0,in.dst_x,in.dst_y,0,slot.textures[4].dx11.Get(),0,nullptr);
+            else context->CopyResource(in.output,slot.textures[4].dx11.Get());
             observe(Phase::output_copied);
             hr(s.context11->Signal(s.fence11.Get(),consumed),"Signal FSR4 consumption on GPU");
             handoff_ms_=ms_since(t_handoff);

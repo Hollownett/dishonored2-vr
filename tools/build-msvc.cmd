@@ -1104,6 +1104,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\canted_fov_check.cpp /F
 if not "%errorlevel%"=="0" exit /b 1
 build\canted_fov_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\visibility_mask_check.cpp /Fo:build\visibility_mask_check.obj /Fe:build\visibility_mask_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\visibility_mask_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Ithird_party\minhook\include tests\sampler_lod_bias_check.cpp build\buffer.obj build\hook.obj build\trampoline.obj build\hde64.obj /Fo:build\sampler_lod_bias_check.obj /Fe:build\sampler_lod_bias_check.exe /link d3d11.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\sampler_lod_bias_check.exe

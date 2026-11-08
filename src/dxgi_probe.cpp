@@ -2744,8 +2744,15 @@ static std::string draw_phase_json() {
     for(unsigned i=0;i<4;++i) o<<(i?",":"")<<instance_count_by_phase[i].load(std::memory_order_relaxed);
     return o.str()+"]]";
 }
+// v1106: the visibility stamp goes in before the first draw of each FORWARD_WORLD pass job (visibility_stamp.hpp).
+static inline void visibility_stamp_before(ID3D11DeviceContext* context) noexcept {
+    if(!d2vr::VisibilityStamp::enabled.load(std::memory_order_relaxed)) return;
+    const int pass=d2vr::RenderPassMap::current_pass();
+    if(pass!=d2vr::VisibilityStamp::forward_world_pass) return;
+    d2vr::VisibilityStamp::before_draw(context,pass,d2vr::ObjectMotion::eye_of_view(d2vr::RenderPassMap::current_view()));
+}
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
-    GpuCallbackDepth depth_guard;note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);d2vr::spyglass_art_probe().observe(context,count,true);
+    GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);d2vr::spyglass_art_probe().observe(context,count,true);
     if(skip_letterbox_draw(context,count)) return;
     NativeNoteDraw note(context,count,1,start,base);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
@@ -2753,19 +2760,19 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
-    GpuCallbackDepth depth_guard;note_draw_phase(count,instances);trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
+    GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
     note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UINT count,UINT start) {
-    GpuCallbackDepth depth_guard;note_draw_phase(count,1);trace_draw(context,"draw_vertices",count,1,true);d2vr::spyglass_art_probe().observe(context,count,false);
+    GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_vertices",count,1,true);d2vr::spyglass_art_probe().observe(context,count,false);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawFn>(gpu_bindings.original(5,Binding))(context,count,start);
 }
 template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,UINT first) {
-    GpuCallbackDepth depth_guard;note_draw_phase(count,instances);trace_draw(context,"draw_instanced_vertices",count,instances,true);
+    GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_instanced_vertices",count,instances,true);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
 }
@@ -5577,6 +5584,19 @@ static std::string run_test_command(const std::string& line) {
         return "move "+std::to_string(x)+" "+std::to_string(y)+" "+std::to_string(ms)+"ms";
     }
     if(verb=="uidump") {std::string v;in>>v;ui_dump_requested=v!="off";ui_dump_state.clear();return std::string("uidump ")+(ui_dump_requested?"on":"off");}
+    if(verb=="fovea") { // v1107 live A/B of foveated FSR 4: "fovea off" or "fovea <10..60 degrees>" (rebuilds the FSR contexts)
+        std::string what;in>>what;
+        if(what=="off") {d2vr::fovea::half_deg=0.f;return "fovea off";}
+        float deg=0;try {deg=std::stof(what);} catch(...) {}
+        if(!(deg>=10.f && deg<=60.f)) return "usage: fovea off|<10..60>";
+        d2vr::fovea::half_deg=deg;return "fovea "+std::to_string(deg);
+    }
+    if(verb=="vstamp") { // v1106 live same-spot A/B of the visibility stamp (the pass map must be installed for the session)
+        std::string what;in>>what;
+        if(what!="on" && what!="off") return "usage: vstamp on|off";
+        d2vr::VisibilityStamp::enabled=what=="on";
+        return std::string("vstamp ")+what;
+    }
     if(verb=="elision") { // v997 live same-spot A/B without touching the build knob; a later knob CHANGE still wins
         std::string what;in>>what;
         if(what!="on" && what!="off") return "usage: elision on|off";
@@ -12570,7 +12590,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"cached_output_reapplies\":" << cached_output_reapplies.load()
                                      << ",\"cached_output_deferred\":" << cached_output_deferred.load()
                                      << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
-                                     << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
+                                     << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                                      << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
@@ -15400,7 +15420,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // draw names the eye it renders (item+0x70 is that pass's view), which is what makes every view pass of the weapon take the same
         // placed rows. Without any of the three there is no hook and no per-list work.
         const bool weapon_pass_needed=!fs::exists(root/L"build"/L"no-weapon-draw-place");
-        if(native_gpu_requested || shadow_share_requested || weapon_pass_needed) {
+        // v1106: the visibility stamp needs the pass map too (FORWARD_WORLD jobs and their eye view). Kill switch build/no-visibility-stamp.
+        const bool visibility_stamp_requested=!fs::exists(root/L"build"/L"no-visibility-stamp");
+        d2vr::VisibilityStamp::enabled=visibility_stamp_requested;
+        // v1107: foveated FSR 4 (the box half angle in degrees, default 30; build/foveated-upscale-deg overrides, build/no-foveated-upscale = off).
+        {
+            float deg=30.f;std::ifstream knob(root/L"build"/L"foveated-upscale-deg");if(knob>>deg && !(deg>=10.f && deg<=60.f)) deg=30.f;
+            d2vr::fovea::half_deg=fs::exists(root/L"build"/L"no-foveated-upscale")?0.f:deg;
+        }
+        if(native_gpu_requested || shadow_share_requested || weapon_pass_needed || visibility_stamp_requested) {
             clear_gpu_passes();render_pass_map.clear();
             render_pass_map.set_shadow_share(shadow_share_requested?&shadow_share:nullptr);
             const bool pass_map_installed=render_pass_map.install(image_base);
@@ -16053,7 +16081,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"cached_output_restored\":" << (cached_output_restored.load()?"true":"false")
                << ",\"requested_native_output\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
                << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
-                                     << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
+                                     << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
