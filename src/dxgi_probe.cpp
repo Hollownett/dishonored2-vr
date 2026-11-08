@@ -13510,14 +13510,19 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         d2vr::NativeManualEquipRuntime::wheel_pick.store(+[](std::uintptr_t item,std::uintptr_t ammo)->std::uintptr_t {auto rd=&read_self;return d2vr::NativeRangedFire::wheel_pick(image_base,rd,item,ammo);},std::memory_order_release);}}
                                     for(unsigned h=0;h<2;++h) {
                                         const auto ex=arm_set.copy_at(h);const bool pull=raw_trigger(h)>=(shot_down[h]?.35f:.55f),edge=pull && !shot_down[h];shot_down[h]=pull;
-                                        if(!d2vr::arm::is_gun(ex) || !edge || logic!=2) continue;
+                                        if(!d2vr::arm::is_gun(ex) || !pull || logic!=2) continue;
+                                        // v1112 (user, headset v1111: the reload-speed crossbow fires automatically while the trigger is held, the copy fired once per pull):
+                                        // a held trigger fires again as soon as the hand's weapon is ready (its fire break and reload from its upgrades), as the game's own
+                                        // weapons do; a refused shot (empty, not ready yet) waits 200 ms before the next try so the counters are not flooded.
+                                        static std::array<std::uint64_t,2> held_retry{};const auto now_f=GetTickCount64();
+                                        if(!edge && (now_f<held_retry[h] || !d2vr::NativeRangedFire::ready(h) || d2vr::NativeRangedFire::queued(h))) continue;
                                         if(const auto pose=d2vr::NativeWeaponHands::held_copy_pose(h)) {
                                             d2vr::NativeRangedFire::Shot shot{};shot.side=h;shot.kind=ex==E::crossbow?d2vr::NativeRangedFire::Shot::crossbow:d2vr::NativeRangedFire::Shot::pistol;
                                             const auto muzzle=pose->position+pose->basis[0]*.2; // ponytail: the barrel tip 0.2 m along the model's forward; tune
                                             shot.origin[0]=static_cast<float>(muzzle.x);shot.origin[1]=static_cast<float>(muzzle.y);shot.origin[2]=static_cast<float>(muzzle.z);
                                             for(unsigned r=0;r<3;++r) {shot.axis[r*3]=static_cast<float>(pose->basis[r].x);shot.axis[r*3+1]=static_cast<float>(pose->basis[r].y);shot.axis[r*3+2]=static_cast<float>(pose->basis[r].z);}
                                             {const auto ge=d2vr::NativeWeaponHands::held_copy_entity(h);shot.entity=ge.first;shot.entity_id=ge.second;} // the shot's sound and flash belong to this gun, not the native one in the other hand
-                                            if(d2vr::NativeRangedFire::fire(shot)) game_xr->pulse(h,.6f,.06f);
+                                            if(d2vr::NativeRangedFire::fire(shot)) game_xr->pulse(h,.6f,.06f);else if(!edge) held_retry[h]=now_f+200;
                                         }
                                     }
                                 } // dual wield: from here left_trigger is the gun hand's (native LT), right_trigger the sword hand's

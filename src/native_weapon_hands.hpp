@@ -1959,6 +1959,9 @@ private:
             for(unsigned k=0;k<2;++k) if(const auto part=rig::value<std::uintptr_t>(read,at+0x10+8ull*k);part && *part) audit("part",i,k,*part,decl,name);
         }
         if(rig::typed(read,base,comp,0x1b9cbf8)) if(const auto bolt=rig::value<std::uintptr_t>(read,comp+0x160);bolt && *bolt && rig::pointer(*bolt)) audit("bolt",99,2,*bolt,0,log?entity_decl_name(read,*bolt):std::string{});
+        if(log && o) {const auto anim=rig::value<std::uintptr_t>(read,comp+0x20).value_or(0);   // v1112: whether the copy's body can animate at all
+            o<<now<<",anim,"<<std::hex<<copy<<','<<comp<<std::dec<<",0,0,"<<std::hex<<anim<<std::dec<<','<<(anim && rig::pointer(anim)?(rig::value<std::uint32_t>(read,anim+0x1c).value_or(0)&3u):9u)<<",-1,"
+             <<(anim?"comp":"none")<<','<<int(rig::value<std::uint8_t>(read,copy+0x288).value_or(0))<<",anim_component\n";}
         real_parts_near=near_n;real_parts_far=far_n;
     }
     inline static std::atomic<std::uint64_t> real_parts_near{},real_parts_far{},real_parts_unhid{},real_parts_rebound{},real_bolt_far{};inline static std::array<std::uint64_t,8> parts_logged_{};
@@ -2148,6 +2151,10 @@ public:
                  <<" ups="<<(rig::value<std::uint32_t>(read,*c+0x58).value_or(0)&0xffffff)<<" mods="<<(rig::value<std::uint32_t>(read,*c+0xb0).value_or(0)&0xffffff)
                  <<std::hex<<" b8="<<unsigned(rig::value<std::uint8_t>(read,*c+0xb8).value_or(0))<<" +160="<<rig::value<std::uintptr_t>(read,*c+0x160).value_or(0)<<std::dec
                  <<" started="<<(rig::value<std::uint32_t>(read,*c+0x1c).value_or(0)&3u);
+                {const auto anim=rig::value<std::uintptr_t>(read,*c+0x20).value_or(0);   // v1112: the weapon body's own animation component (plays decl+0xd0 loaded / +0x228 empty clips)
+                 o<<std::hex<<" anim="<<anim<<std::dec;
+                 if(anim && rig::pointer(anim)) o<<" anim_vt="<<std::hex<<(rig::value<std::uintptr_t>(read,anim).value_or(base)-base)<<std::dec<<" anim_started="<<(rig::value<std::uint32_t>(read,anim+0x1c).value_or(0)&3u)<<" anim_model="<<std::hex<<rig::value<std::uintptr_t>(read,anim+0x38).value_or(0)<<std::dec;
+                 o<<" ctx="<<unsigned(rig::value<std::uint8_t>(read,e+0x288).value_or(0));}
                 if(const auto ups=rig::list(read,*c+0x50,64)) for(unsigned u=0;u<ups->packed_count && u<max_upgrades;++u) { // v1111: every upgrade_t and its parts (RE: udecl +0x200/+0x208 model override, +0x230 static part, +0x238 part def, +0x240 joint tag)
                     const auto at=ups->data+u*0x28ull;const auto item=rig::value<std::uintptr_t>(read,at).value_or(0);
                     const auto udecl=item && rig::pointer(item)?rig::value<std::uintptr_t>(read,item).value_or(0):0;

@@ -164,6 +164,7 @@ public:
         return enqueue(r);
     }
     static bool ready(unsigned side) {return side<2 && clock()>=ready_at_[side].load() && clock()>=reload_until_[side].load();}
+    static bool queued(unsigned side) {return side<2 && pending_[side];} // v1112: a shot already queued for this hand (the held trigger waits for it)
     // v1094: what each hand holds as a copy (-1 none, 0 pistol, 1 crossbow; render/control thread, every frame) and which hand chose from
     // the wheel last (its choice of ammo for a copy is the copy's own, not the other hand's native weapon's).
     static void note_copies(int left,int right) {copy_kind_[0]=left;copy_kind_[1]=right;}
