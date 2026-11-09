@@ -427,7 +427,7 @@
    "kind": "enable",
    "label": "Dual wield (experimental, headset test)",
    "help": "Either hand can hold the sword or the gun, grenade or power. Draw the sword over either shoulder and the gun from the hip with either hand. Hold X for the left hand's weapon wheel and A for the right hand's; push the right stick up to jump (hold it up to swim up or climb); B drinks a health elixir. The wheel is drawn at the hand that opened it; point at what you want.",
-   "default": false
+   "default": true
   },
   {
    "id": "diagnostics",
@@ -451,7 +451,7 @@
    "kind": "enable",
    "label": "Skip the game intro movies",
    "help": "While the game starts, the launcher taps a key so the logo movies are skipped and you reach the title menu sooner. Applies to the next Launch VR. Untested on a headset: if the intro still plays, leave it off.",
-   "default": false
+   "default": true
   }
  ]
 }

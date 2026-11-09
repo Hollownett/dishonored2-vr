@@ -93,6 +93,26 @@ public sealed class Env
     public static bool VcRuntime() => new[] { "msvcp140.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll" }
         .All(f => File.Exists(Path.Combine(Environment.SystemDirectory, f)));
 
+    /// <summary>An AMD display adapter is installed (display device class, ProviderName).</summary>
+    static bool AmdGpu()
+    {
+        using var cls = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}");
+        return cls != null && cls.GetSubKeyNames().Any(n =>
+        {
+            try { using var k = cls.OpenSubKey(n); return k?.GetValue("ProviderName") is string p && p.Contains("Advanced Micro Devices"); }
+            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException) { return false; }
+        });
+    }
+
+    /// <summary>The game ships an old AMD AGS library that kills the game at start on newer AMD drivers (fix: SCell555/amd-ags-stub).
+    /// True when the game folder still has that original file (pinned build's SHA-256).</summary>
+    static bool StockAgs(string gameDir)
+    {
+        var f = Path.Combine(gameDir, "amd_ags_x64.dll");
+        try { return File.Exists(f) && string.Equals(ModHome.Sha256(f), "5BF2CC0F86BD7D7559E493334F090D00A63561E000BFB0DB30E9769514DB346D", StringComparison.OrdinalIgnoreCase); }
+        catch (IOException) { return false; }
+    }
+
     static readonly object buildLock = new();
     static (string exe, long len, DateTime written, bool ok)? buildCache;
 
@@ -145,6 +165,10 @@ public sealed class Env
             : "Build the mod (tools\\build.ps1) so artifacts\\repair-vNNN-test-candidate.json and build\\<dll> exist, and make sure the newest manifest is not launch_blocked."));
         var vc = VcRuntime();
         l.Add(new("VC++ runtime", vc, vc ? "Visual C++ 2015-2022 x64" : "missing", "Install the Microsoft Visual C++ 2015-2022 Redistributable (x64) from Microsoft."));
+        if (gd != null && AmdGpu() && StockAgs(gd))
+            l.Add(new("AMD GPU library", true, "game's original amd_ags_x64.dll",
+                "Usable if the game starts. If it closes right at start (newer AMD drivers), download amd_ags_x64.dll from " +
+                "github.com/SCell555/amd-ags-stub/releases/tag/v1.1 and copy it into " + gd + ", replacing the old file."));
         l.Add(new("Game art", true, artState ?? "imported from your install", artState == null ? "" : "Usable without it: the launcher and VR menus use plain styling until the import finishes."));
         return l;
     }

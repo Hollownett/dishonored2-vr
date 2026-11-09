@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -184,9 +184,10 @@ sealed class MainForm : Form
         var openRuns = new ArtButton("Open runs", Look.Secondary); openRuns.Click += (_, _) => Open(Directory.Exists(env.P("artifacts", "runs")) ? env.P("artifacts", "runs") : env.Art);
         var openRoot = new ArtButton("Open mod folder", Look.Secondary); openRoot.Click += (_, _) => Open(env.Root);
         var deleteLogs = new ArtButton("Delete logs", Look.Secondary); deleteLogs.Click += (_, _) => DeleteLogs();
+        var zipLogs = new ArtButton("Zip logs for a bug report", Look.Secondary); zipLogs.Click += (_, _) => ZipLogs();
         // The self-test is a repo Python tool: developer mode only.
         uninstallProxy.Click += (_, _) => UninstallProxy();
-        diagButtons = env.Standalone ? new[] { uninstallProxy, openArt, openRuns, deleteLogs, openRoot } : new[] { uninstallProxy, selftest, openArt, openRuns, deleteLogs, openRoot };
+        diagButtons = env.Standalone ? new[] { uninstallProxy, zipLogs, openArt, openRuns, deleteLogs, openRoot } : new[] { uninstallProxy, selftest, zipLogs, openArt, openRuns, deleteLogs, openRoot };
         StyleText(toolOut);
         pages[2].Controls.AddRange(cmdButtons); pages[2].Controls.AddRange(new Control[] { custom, send, result }); pages[2].Controls.AddRange(diagButtons); pages[2].Controls.Add(toolOut);
         pages[2].Painter = PaintTools;
@@ -729,6 +730,19 @@ sealed class MainForm : Form
                 MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         var (deleted, bytes, failed) = LogCleanup.Run(env.Art, plan);
         Append(toolOut, $"Deleted {deleted} log files ({LogCleanup.Size(bytes)} freed)." + (failed > 0 ? $" {failed} could not be deleted (in use)." : ""), failed > 0 ? Ui.Gold : Ui.Good);
+    }
+
+    /// <summary>Zips the mod's logs (no game art) onto the Desktop and shows the file, ready to attach to a bug report.</summary>
+    void ZipLogs()
+    {
+        var dest = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), $"DishonoredVR-logs-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+        try
+        {
+            int n = LogCleanup.Zip(env.Art, dest);
+            Append(toolOut, $"Zipped {n} log files to {dest}. Attach it to your bug report. For a fuller report turn on Save diagnostic logs under Features and reproduce the problem first.", Ui.Good);
+            Process.Start("explorer.exe", $"/select,\"{dest}\"");
+        }
+        catch (Exception ex) { Append(toolOut, "Zip failed: " + ex.Message, Ui.Bad); }
     }
 
     /// <summary>Removes our dinput8 proxy and d2vr-linux.ini from the game folder (a foreign dinput8.dll is left alone).</summary>
