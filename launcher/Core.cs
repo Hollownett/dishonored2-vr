@@ -110,7 +110,7 @@ public sealed class Env
     {
         var f = Path.Combine(gameDir, "amd_ags_x64.dll");
         try { return File.Exists(f) && string.Equals(ModHome.Sha256(f), "5BF2CC0F86BD7D7559E493334F090D00A63561E000BFB0DB30E9769514DB346D", StringComparison.OrdinalIgnoreCase); }
-        catch (IOException) { return false; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     static readonly object buildLock = new();
