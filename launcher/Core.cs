@@ -167,8 +167,8 @@ public sealed class Env
         l.Add(new("VC++ runtime", vc, vc ? "Visual C++ 2015-2022 x64" : "missing", "Install the Microsoft Visual C++ 2015-2022 Redistributable (x64) from Microsoft."));
         if (gd != null && AmdGpu() && StockAgs(gd))
             l.Add(new("AMD GPU library", true, "game's original amd_ags_x64.dll",
-                "Usable if the game starts. If it closes right at start (newer AMD drivers), download amd_ags_x64.dll from " +
-                "github.com/SCell555/amd-ags-stub/releases/tag/v1.1 and copy it into " + gd + ", replacing the old file."));
+                "Usable if the game starts. If it closes right at start, download amd_ags_x64.dll from " +
+                "github.com/SCell555/amd-ags-stub/releases/tag/v1.1, put it in your game folder (" + gd + ") and overwrite. The game starts after that."));
         l.Add(new("Game art", true, artState ?? "imported from your install", artState == null ? "" : "Usable without it: the launcher and VR menus use plain styling until the import finishes."));
         return l;
     }
