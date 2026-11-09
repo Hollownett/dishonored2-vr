@@ -93,12 +93,12 @@ sealed class MainForm : Form
     readonly CheckList featList = new();
     readonly ArtButton featToggle = new("Features", Look.Secondary), restore = new("Restore defaults", Look.Secondary);
     readonly ArtButton dlssButton = new("DLSS file", Look.Secondary);  // full sentence (DlssProvider.Prompt) did not fit; it titles the file picker
-    static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
+    static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA (ghosting, not recommended)", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
     static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
     static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 200% + SMAA - maximum clarity", 11);
-    const string AaHelp = "The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
+    const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
     Control settingsLast = null!;  // the last button of the row; the message line sits to its right
