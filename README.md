@@ -155,6 +155,7 @@ Troubleshooting
 | Problem | Fix |
 |---|---|
 | The game closes right after starting, or never opens (the game's old AMD file fails on newer systems) | Download [amd_ags_x64.dll](https://github.com/SCell555/amd-ags-stub/releases/tag/v1.1), put it in your game folder and overwrite. The game starts after that |
+| The game still does not start | Start the game as administrator: right-click `Dishonored2.exe` in the game folder > Properties > Compatibility > **Run this program as an administrator** |
 | Walking looks steppy or the game runs at half rate | Disable Synchronous Spacewarp in Virtual Desktop |
 | Nothing happens in the headset | Check the launcher's Play page: the OpenXR runtime (Virtual Desktop or SteamVR) must be active and SteamVR installed |
 | The headset disconnected | The mod reconnects by itself after a second or two |
