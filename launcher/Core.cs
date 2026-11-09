@@ -93,18 +93,7 @@ public sealed class Env
     public static bool VcRuntime() => new[] { "msvcp140.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll" }
         .All(f => File.Exists(Path.Combine(Environment.SystemDirectory, f)));
 
-    /// <summary>An AMD display adapter is installed (display device class, ProviderName).</summary>
-    static bool AmdGpu()
-    {
-        using var cls = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}");
-        return cls != null && cls.GetSubKeyNames().Any(n =>
-        {
-            try { using var k = cls.OpenSubKey(n); return k?.GetValue("ProviderName") is string p && p.Contains("Advanced Micro Devices"); }
-            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException) { return false; }
-        });
-    }
-
-    /// <summary>The game ships an old AMD AGS library that kills the game at start on newer AMD drivers (fix: SCell555/amd-ags-stub).
+    /// <summary>The game ships an old AMD AGS library that kills the game at start on some newer systems, NVIDIA too (fix: SCell555/amd-ags-stub).
     /// True when the game folder still has that original file (pinned build's SHA-256).</summary>
     static bool StockAgs(string gameDir)
     {
@@ -165,7 +154,7 @@ public sealed class Env
             : "Build the mod (tools\\build.ps1) so artifacts\\repair-vNNN-test-candidate.json and build\\<dll> exist, and make sure the newest manifest is not launch_blocked."));
         var vc = VcRuntime();
         l.Add(new("VC++ runtime", vc, vc ? "Visual C++ 2015-2022 x64" : "missing", "Install the Microsoft Visual C++ 2015-2022 Redistributable (x64) from Microsoft."));
-        if (gd != null && AmdGpu() && StockAgs(gd))
+        if (gd != null && StockAgs(gd))  // any GPU: the first report came from an RTX owner
             l.Add(new("AMD GPU library", true, "game's original amd_ags_x64.dll",
                 "Usable if the game starts. If it closes right at start, download amd_ags_x64.dll from " +
                 "github.com/SCell555/amd-ags-stub/releases/tag/v1.1, put it in your game folder and overwrite."));

@@ -11,6 +11,10 @@ namespace DishonoredVR;
 /// third_party\fsr4\bin\ (optional FSR 4 provider). Everything comes from resources named "home/&lt;relative path&gt;".</summary>
 public static class ModHome
 {
+    /// <summary>Bump to make every existing install take tools/default_features.json's defaults once (Features.RestoreDefaults) on its next start.
+    /// "1": dual wield and intro skip on; only power gestures, performance mode and logging stay off.</summary>
+    const string DefaultsRevision = "1";
+
     public static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DishonoredVR");
 
     /// <summary>Writes every embedded file that is missing or different, then verifies the DLL against its manifest sha256.</summary>
@@ -53,7 +57,16 @@ public static class ModHome
             {
                 var list = Features.Load(fs);
                 var known = list.Any(f => f.RequiresDllKnob != null) ? Features.ScanKnobs(File.ReadAllBytes(dllPath)) : null;
-                log?.Invoke($"Features: {Features.Apply(Path.Combine(dir, "build"), list, known)} seeded");
+                var build = Path.Combine(dir, "build");
+                var mark = Path.Combine(build, "launcher-defaults-revision");
+                if (File.Exists(mark) && File.ReadAllText(mark).Trim() == DefaultsRevision)
+                    log?.Invoke($"Features: {Features.Apply(build, list, known)} seeded");
+                else
+                {   // a launcher with new defaults resets every feature once; the player's later switches are kept until the next bump
+                    Features.RestoreDefaults(build, list, known, log);
+                    File.WriteAllText(mark, DefaultsRevision);
+                    log?.Invoke("Features: reset to this version's defaults");
+                }
             }
         }
         catch (Exception ex)  // a bad list or an unreadable state must not fail an otherwise valid install
