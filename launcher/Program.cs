@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -92,7 +92,7 @@ sealed class MainForm : Form
     // settings: the Features view (default-on features, each switchable; changes are written at once)
     readonly CheckList featList = new();
     readonly ArtButton featToggle = new("Features", Look.Secondary), restore = new("Restore defaults", Look.Secondary);
-    readonly ArtButton dlssButton = new(DlssProvider.Prompt, Look.Secondary);
+    readonly ArtButton dlssButton = new("DLSS file", Look.Secondary);  // full sentence (DlssProvider.Prompt) did not fit; it titles the file picker
     static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
     static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
