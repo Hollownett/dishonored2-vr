@@ -1,179 +1,204 @@
-# Dishonored 2 VR
-
-A full VR conversion of **Dishonored 2** (Steam, PC) for PC VR headsets through OpenXR.
-You play in first person with stereo 3D, head tracking and both hands: swing and throw the sword,
-draw the pistol from your hip, grab guards and bodies, push doors open, read notes held in your hand,
-and pick powers from the game's own wheel.
-
 <p align="center">
-  <img src="docs/images/hero-hands-crossbow.jpg" alt="First-person view: both of the player's hands in front of a pipe-lined room, a crossbow in the right hand" width="800">
+  <a href="https://github.com/Hollownett/dishonored2-vr/releases/latest"><img src="docs/images/readme/hero.jpg" alt="Dishonored 2 VR: the sword raised against a guard in a sunlit Karnaca street, seen from the player's own eyes" width="640"></a>
 </p>
 
-> **Status: early release.** The mod is playable, but expect rough edges. Please report what you see in the headset
-> and attach the logs described under Troubleshooting.
+Dishonored 2 VR
+===============
 
-## Screenshots
-
-Left-eye captures from the mod's own test runs (simulated controller input), not polished promo shots.
-
-<p align="center">
-  <img src="docs/images/weapon-in-hand.jpg" alt="A weapon held in the right hand" width="49%">
-  <img src="docs/images/hand-and-prop.jpg" alt="An open hand reaching toward a prop floating above the floor" width="49%">
-  <img src="docs/images/hands-and-heart.jpg" alt="Both hands and the Heart lying on the floor" width="49%">
-  <img src="docs/images/power-wheel-wrist.jpg" alt="The Quick Access Wheel open in front of the player, hands visible" width="49%">
-</p>
-
-<!-- TODO screenshot: headset-quality capture of the sword in the right fist mid-swing -->
-<!-- TODO screenshot: the left-wrist watch (health, mana, ammo) turned toward the face -->
-<!-- TODO screenshot: the VR Settings page in the game's options menu (current build) -->
-
-## Features
-
-- **Stereo 3D with head tracking** at your headset's resolution, with a comfortable snap or smooth turn.
-- **Your own hands.** The player's hands and arms follow your controllers, with fingers that close as you squeeze.
-- **Physical melee.** Swing the sword to attack, hold it in front of you to block, throw it and call it back.
-  Unaware guards can be taken down from behind or choked out.
-- **Body holsters.** Sword over the right shoulder, pistol or crossbow on the left hip. Health, mana and ammo are on a watch on the back of your left wrist.
-- **Physical objects.** Grab, carry and throw bottles, bodies and loose props. Push doors open with your hand.
-- **The game's own UI in VR.** Menus, the Quick Access Wheel, the journal and notes appear in front of you;
-  point with the right controller to select.
-- **Upscaling and anti-aliasing.** FSR 3 (default), experimental FSR 4, SMAA Ultra 2-pass, game TAA, and DLAA/DLSS on NVIDIA
-  (with your own `nvngx_dlss.dll` from another game; nothing NVIDIA is bundled).
-- **Cutscenes** in 3D with a comfort vignette, or on a flat theatre screen.
-- **A launcher** that installs the mod, checks your setup, edits settings and starts the game in VR.
-
-## Requirements
-
-- Windows 10 or 11, 64-bit.
-- **Dishonored 2, Steam edition**, installed and updated.
-- A PC VR headset with an OpenXR runtime. Tested with **Meta Quest 3 / Quest 2** through
-  **Virtual Desktop** (VDXR runtime, recommended). SteamVR / Steam Link also works.
-- SteamVR installed (the mod loads the OpenXR loader from SteamVR's folder, even with Virtual Desktop).
-- The Microsoft Visual C++ 2015-2022 x64 runtime.
-- A strong GPU: the game renders both eyes at your headset's resolution. The game must run windowed or borderless.
-
-Linux (Proton + SteamVR + Steam Link) has an experimental path; see [linux/README.md](linux/README.md).
-
-## Installation
-
-1. Download `DishonoredVRLauncher.exe` from the [Releases](https://github.com/Hollownett/dishonored2-vr/releases) page.
-2. Put it in any folder and run it. Nothing else is needed: the launcher contains the mod and its runtime.
-3. On first start it installs the mod into `%LOCALAPPDATA%\DishonoredVR`, and imports menu art and
-   renders the tutorial pictures from **your own** Dishonored 2 install (no game files are distributed).
-4. The **Play** page shows setup checks. Fix anything red; each item says how.
-
-The launcher places a small loader (`dinput8.dll`) next to `Dishonored2.exe`. It only loads this mod and
-never replaces a `dinput8.dll` from another mod.
-
-## How to play
-
-1. Start Virtual Desktop and connect your headset (or start SteamVR).
-   In Virtual Desktop, set **Synchronous Spacewarp: Disabled** and the frame rate to 72 or 90 Hz.
-2. Open the launcher and press **LAUNCH VR**. It starts the game through Steam, attaches VR at the title
-   screen and continues your last save.
-3. Put on the headset. VR starts about 20 seconds after the game window appears.
-4. To stop VR, press **Stop VR** in the launcher, or just quit the game.
-
-**Note:** while the loader is installed, every start of Dishonored 2 (also from Steam) starts in VR.
-To play flat, use **Tools > Uninstall proxy** in the launcher with the game closed.
-LAUNCH VR installs it again.
-
-Settings: open the pause menu in the game and choose **VR Settings**, or use the launcher's **Settings** page.
-You can change resolution, anti-aliasing and upscaling, sharpening, HUD size, turning, the monitor view and cutscene mode.
-Optional features (full body, performance mode, Quest button labels and more) are under **Settings > Features**.
-
-## Controls
-
-Made for Meta Quest Touch controllers. **Grip** is the side button under your middle finger,
-**trigger** is under your index finger.
+**Native VR for Dishonored 2.** Stereo 3D, head tracking, two tracked hands, motion combat and the game's own menus in the headset.
+One launcher file installs it next to your Steam copy of the game; nothing from the game is redistributed.
 
 <p align="center">
-  <img src="launcher/assets/touch-plus-left.png" alt="Left Touch Plus controller" height="260">
-  <img src="launcher/assets/touch-plus-right.png" alt="Right Touch Plus controller" height="260">
+  <a href="https://github.com/Hollownett/dishonored2-vr/releases/latest"><b>Download the latest release</b></a> ·
+  <a href="#install-and-play">Install</a> ·
+  <a href="#controls">Controls</a> ·
+  <a href="#troubleshooting">Troubleshooting</a> ·
+  <a href="docs/VR-v1123-RELEASE.md">What's new</a>
 </p>
 
-### Left controller
+<p align="center">
+  <a href="https://github.com/Hollownett/dishonored2-vr/releases/latest"><img src="https://img.shields.io/github/v/release/Hollownett/dishonored2-vr?label=release" alt="Latest release"></a>
+  <a href="https://github.com/Hollownett/dishonored2-vr/releases"><img src="https://img.shields.io/github/downloads/Hollownett/dishonored2-vr/total" alt="Downloads"></a>
+  <a href="https://github.com/Hollownett/dishonored2-vr/stargazers"><img src="https://img.shields.io/github/stars/Hollownett/dishonored2-vr" alt="Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Hollownett/dishonored2-vr" alt="License"></a>
+</p>
 
-| Input | Action |
+<p align="center">
+  <img src="docs/images/readme/reel.webp" alt="Eight seconds of a sword fight in a Karnaca street: a parry, a kill and the blood vignette" width="480"><br>
+  <sub>Mirror recording of a headset session. All pictures on this page are from the author's own play sessions.</sub>
+</p>
+
+> **Works today, still growing.** The mod is complete enough to play the whole game in VR. Headset time finds things the
+> author's tests cannot, so please say what you see: [open an issue](https://github.com/Hollownett/dishonored2-vr/issues).
+
+Features
+--------
+
+- **Real stereo 3D at your headset's resolution**, with the headset's own view mask, foveated upscaling and a frame pacer
+  built for 90 Hz. Snap or smooth turning, a comfort vignette while moving, and physical crouch and lean.
+- **Your own hands.** Corvo's or Emily's hands and arms follow your controllers; the fingers close as you squeeze and
+  wrap around what you hold. Grab bottles, lanterns, bodies and loose props by their real shape, carry them, throw them.
+- **Motion combat.** Swing the sword to attack, hold it up to block, throw it and call it back. Charge a power strike.
+  Take unaware guards down from behind, choke them out, or clamp a hand on their face and throw them down.
+- **Two weapons, one in each hand.** Pick the pistol or crossbow a second time on the wheel and it goes to your other hand:
+  a real second weapon with its own ammo, your upgrades, and the game's own fire, reload and empty animations and sounds.
+- **Body holsters and a wrist watch.** Sword over the right shoulder, gun or crossbow at the left hip. Turn the back of
+  your left wrist to your face for health, mana and ammo. Notes and maps open in your left palm.
+- **The world reacts to your hands.** Push doors open or crack them to peek, turn valves, drag and carry bodies over
+  your shoulder, hold the Heart up and listen.
+- **The game's own UI, in VR.** Menus, the Quick Access Wheel, journal and notes float in front of you; point and pull the
+  trigger. A **VR Settings** page lives in the pause menu. Cutscenes play in 3D or on a theatre screen.
+- **Upscaling and anti-aliasing you can choose.** FSR 3 (default), FSR 4, SMAA, the game's TAA, or DLAA/DLSS on NVIDIA
+  with your own `nvngx_dlss.dll`. A performance mode renders one eye per frame when the GPU is short.
+- **One launcher** installs everything into `%LOCALAPPDATA%\DishonoredVR`, checks your setup, edits settings and starts
+  the game in VR. It never touches the game's files.
+
+<p align="center">
+  <img src="docs/images/readme/dual-wield-pistol-sword.jpg" alt="Pistol in the left hand, sword in the right, on a Dunwall rooftop" width="32%">
+  <img src="docs/images/readme/choke-hold-guard.jpg" alt="Choking a guard from behind" width="32%">
+  <img src="docs/images/readme/heart-in-hand-karnaca.jpg" alt="The Heart held up in a Karnaca street" width="32%">
+</p>
+<p align="center">
+  <img src="docs/images/readme/grab-guard-face.jpg" alt="A hand clamped on a guard's face" width="32%">
+  <img src="docs/images/readme/door-push.jpg" alt="Pushing a door open onto the rooftops" width="32%">
+  <img src="docs/images/readme/pistol-aim-stairs.jpg" alt="Pistol aimed down a staircase at two guards" width="32%">
+</p>
+<p align="center">
+  <img src="docs/images/readme/karnaca-vista.jpg" alt="A Karnaca harbour street, the hand reaching ahead" width="32%">
+  <img src="docs/images/readme/bottle-in-hand.jpg" alt="A bottle held in the hand under a painted ceiling" width="32%">
+  <img src="docs/images/readme/sword-guard-charge.jpg" alt="A guard charges while the sword is held up" width="32%">
+</p>
+
+What you need
+-------------
+
+- **Windows 10 or 11**, 64-bit, and **Dishonored 2 on Steam**, installed and updated.
+- A **PC VR headset with an OpenXR runtime**. Played and tuned on Meta Quest 3 through **Virtual Desktop** (VDXR); SteamVR
+  and Steam Link work too. Any OpenXR headset should; the mod reads its views and sizes from the runtime.
+- **SteamVR installed**, even with Virtual Desktop: the mod loads the OpenXR loader from SteamVR's folder.
+- The **Microsoft Visual C++ 2015-2022 x64** runtime.
+- A **strong GPU**. Both eyes render at headset resolution; the game runs windowed or borderless.
+
+Linux (Proton + SteamVR + Steam Link) has an experimental path: [linux/README.md](linux/README.md).
+
+Install and play
+----------------
+
+1. Download `DishonoredVRLauncher.exe` from the [latest release](https://github.com/Hollownett/dishonored2-vr/releases/latest).
+2. Put it anywhere and run it. On first start it installs the mod into `%LOCALAPPDATA%\DishonoredVR` and imports menu art
+   and the tutorial pictures from **your own** game install.
+3. Fix anything red on the **Play** page. Each check says how.
+4. Start Virtual Desktop (Synchronous Spacewarp **disabled**, 72 or 90 Hz) or SteamVR, then press **LAUNCH VR**.
+   The game starts through Steam, VR attaches at the title screen about 20 seconds after the window appears, and your
+   last save continues.
+
+**What the launcher does**
+
+- Places a small loader (`dinput8.dll`) next to `Dishonored2.exe`. It loads only this mod and never replaces another mod's file.
+  While it is there, every start of the game is a VR start; **Tools > Uninstall proxy** (game closed) makes it flat again.
+- **Settings**: resolution and render scale, anti-aliasing and upscaler, sharpening, HUD size, turning, monitor view,
+  cutscene mode. The same page is in the game: pause menu > **VR Settings**.
+- **Features**: optional switches such as performance mode, Quest button labels, and **Save diagnostic logs**.
+  Logging is **off by default**; nothing is written to disk while you play unless you turn it on for a bug report.
+- **Stop VR** ends the session; quitting the game does too.
+
+<p align="center">
+  <img src="docs/images/readme/vr-settings-menu.jpg" alt="The game's pause menu in the headset, with the VR Settings entry under Options" width="420"><br>
+  <sub>Headset capture: the pause menu with the mod's VR Settings page.</sub>
+</p>
+
+Controls
+--------
+
+Made for Meta Quest Touch controllers; any OpenXR controller with the same buttons works. **Grip** is the side button
+under your middle finger, **trigger** is under your index finger. The same guide, with pictures, is in the game
+(right grip at your right temple) and on the launcher's **Controls** page.
+
+<p align="center">
+  <img src="launcher/assets/touch-plus-left.png" alt="Left Touch Plus controller" height="240">
+  <img src="launcher/assets/touch-plus-right.png" alt="Right Touch Plus controller" height="240">
+</p>
+
+| Do this | With |
 |---|---|
-| Stick | Move where you look; click to sprint |
-| X (hold) | Quick Access Wheel: point at an item, release to equip |
-| Y | Talk (the trigger also talks); hold for the pause menu |
-| Menu | Pause; hold for the journal; hold and flick the right stick for the quick slots |
-| Trigger | Talk or pickpocket with a free hand; fire the gun or cast the power in a weapon hand |
-| Grip | Use what the hand points at, or hold what it touches; hold at a keyhole to keep the peek; at your left hip, draw the pistol or crossbow |
+| Move where you look; sprint | Left stick; click it |
+| Turn (snap or smooth); crouch; zoom | Right stick; flick it down; click it |
+| Jump and climb | A, or raise both hands over your head |
+| Quick Access Wheel | Hold X, point at an item, release |
+| Talk, pickpocket, pick up | Trigger of a free hand |
+| Pause; journal; quick slots | Menu; hold it; hold it and flick the right stick |
+| Pause menu shortcut | Hold Y |
+| Put every weapon away | Hold B |
+| Select in menus and on the wheel | Point with the right controller, right trigger |
+| Draw and sheathe the sword | Right grip over your right shoulder; release it there to sheathe |
+| Draw and holster the pistol or crossbow | Left grip at your left hip; release there to holster |
+| Fire, cast, shoot | Trigger of the hand holding the gun, crossbow or power |
+| Second gun or crossbow | Pick it again on the wheel; it goes to the other hand |
+| Attack | Swing the sword. From behind an unaware guard it is a silent takedown |
+| Block | Hold the sword in front of you |
+| Power strike | Grip + trigger with the sword held still; pulses rise in the hand; release to swing |
+| Throw the sword; call it back | Release the right grip mid-swing; grip over your shoulder |
+| Health, mana, ammo | Turn the back of your left wrist to your face |
+| Use, grab, hold | Grip at what the hand touches or points at; hold at a keyhole to keep the peek |
+| Grab a guard | Palm on him + grip; pull hard to throw him down |
+| Choke a guard | Grip an unaware guard's neck from behind |
+| Drag or carry a body | Grip a limb or the head; let go at your shoulder to carry it |
+| Grenade or mine | Make a fist, open it mid-throw; open it against a surface to place a mine |
+| Doors | Open hand against the door, push; push slowly to peek |
+| Crouch and lean | Do it with your body |
 
-### Right controller
+Full list and the design behind it: [docs/VR-CONTROLS.md](docs/VR-CONTROLS.md).
 
-| Input | Action |
+Troubleshooting
+---------------
+
+| Problem | Fix |
 |---|---|
-| Stick | Turn (snap or smooth); flick down to crouch; click to zoom |
-| A | Jump and climb |
-| B (hold) | Put all weapons away |
-| Trigger | Select in menus and on the wheel; talk or pickpocket with a free hand; with the sword, hold to charge a power strike and release to swing it |
-| Grip | Use or hold, like the left one; over your right shoulder, draw the sword |
+| Walking looks steppy or the game runs at half rate | Disable Synchronous Spacewarp in Virtual Desktop |
+| Nothing happens in the headset | Check the launcher's Play page: the OpenXR runtime (Virtual Desktop or SteamVR) must be active and SteamVR installed |
+| The headset disconnected | The mod reconnects by itself after a second or two |
+| Low frame rate | FSR Quality or Balanced, a lower render scale in VR Settings, or performance mode under Features |
+| The game starts flat | Press LAUNCH VR once; it reinstalls the loader next to `Dishonored2.exe` |
+| I want to play flat again | Game closed: Tools > Uninstall proxy |
+| Reporting a bug | Turn on **Save diagnostic logs** under Features, reproduce it, and attach `%LOCALAPPDATA%\DishonoredVR\artifacts` (the Tools page opens it). Turn it off afterwards |
 
-### Body and gestures
+Uninstall: close the game, choose **Tools > Uninstall proxy**, then delete the launcher and `%LOCALAPPDATA%\DishonoredVR`.
+Game settings the mod changes while VR is on (motion blur, depth of field, camera bob, HUD size) are restored when VR stops.
 
-The sword and your hands need no buttons: attack, block, grab and throw with real movements.
+Building from source
+--------------------
 
-| Where / what | Action |
-|---|---|
-| Right grip at your **right temple** | Open the controls guide |
-| Either grip at your **left temple** | Open the journal |
-| Right grip **over your right shoulder** | Draw the sword; release there to sheathe |
-| Left grip at your **left hip** | Draw the pistol or crossbow; release to holster |
-| Turn the **back of your left wrist** to your face | Read health, mana and ammo |
-| **Swing** the sword | Attack. From behind an unaware guard it is a silent takedown |
-| **Grip + trigger** with the sword in hand, held still | Charge a power strike (pulses rise in the hand); release to swing it hard. A real swing cancels the charge |
-| Sword held **in front of you** | Block (the trigger is the charge, not a block) |
-| **Release** the right grip mid-swing | Throw the sword. Grip over your shoulder calls it back |
-| **Palm on a guard** + grip, then pull hard | Hold him, then throw him down |
-| Grip an unaware guard's **neck from behind** | Choke him out |
-| Grip a **limb or the head** of a body | Drag it; let go at your shoulder to carry it there |
-| Grenade or mine: make a **fist**, open it mid-throw | Throw it (open it with the palm on a surface to place it) |
-| **Open hand** against a door | Push it open; push slowly to peek |
-| **Both hands up** over your head | Jump |
-| **Lean or crouch** in real life | The character leans or crouches with you |
-| In menus | Point with the right controller, pull the right trigger to select |
+Visual Studio 2022 (x64 C++ tools), the .NET 8 SDK and Python 3.
 
-The same guide, with pictures, is in the game (right grip at your right temple, or VR Settings >
-Controls & gestures) and on the launcher's **Controls** page. Full list: [docs/VR-CONTROLS.md](docs/VR-CONTROLS.md).
+```
+tools\build-msvc.cmd                      builds the mod DLL into build\ and runs its checks
+cd launcher && dotnet publish -c Release  packs the newest validated DLL into launcher\dist\DishonoredVRLauncher.exe
+```
 
-## Known limitations
+The test harness, simulated-input runs and labs are described in [docs/TESTING.md](docs/TESTING.md);
+the launcher in [docs/LAUNCHER.md](docs/LAUNCHER.md).
 
-- Windows only, Dishonored 2 on Steam. A Steam library outside `C:\Program Files (x86)\Steam` is not supported yet.
-- The game must run windowed or borderless; it needs a strong GPU because both eyes are rendered.
-- Some options (for example performance mode and automatic recentering on scripted moments) are not yet confirmed in a headset.
-  See [docs/PLAYING.md](docs/PLAYING.md) for details.
-- Linux (Proton + SteamVR) is experimental: [linux/README.md](linux/README.md).
+How it works
+------------
 
-## Troubleshooting
+The mod is one DLL loaded through a `dinput8.dll` proxy. It hooks the game's D3D11 presentation, renders each eye from the
+engine's own camera with the headset's projection, drives the player's real arm and hand skeletons from the controllers, and
+talks to the engine's weapon, interaction and animation systems directly so that swings, grabs, doors and the second weapon
+use the game's own rules rather than scripted stand-ins. Everything else goes through OpenXR.
 
-- **Walking looks steppy or the game runs at half rate:** disable Synchronous Spacewarp in Virtual Desktop.
-- **Nothing happens in the headset:** check the launcher's setup checks. The OpenXR runtime must be active
-  (Virtual Desktop or SteamVR) and SteamVR must be installed.
-- **The headset disconnected:** the mod reconnects by itself after a second or two.
-- **Low frame rate:** try FSR Quality or Balanced, or a lower resolution scale in VR Settings, or the
-  performance mode under Settings > Features.
-- Logs and run records are in `%LOCALAPPDATA%\DishonoredVR\artifacts` (the launcher's Tools page opens it).
-  Please attach them to bug reports.
+**Read more:** [development history](docs/DEVELOPMENT.md) ·
+[playing notes](docs/PLAYING.md) · [controls design](docs/VR-CONTROLS-DESIGN.md) ·
+[performance plan](docs/ENGINE-PERF-PLAN.md) · [release notes](docs/VR-v1123-RELEASE.md)
 
-## Uninstall
+Contributing
+------------
 
-1. Close the game. In the launcher, choose **Tools > Uninstall proxy**.
-2. Delete the launcher and the folder `%LOCALAPPDATA%\DishonoredVR`.
+Bug reports with a short description of what you did and saw are the most useful thing. If you can, record a clip or turn on
+**Save diagnostic logs** for that session. Pull requests are welcome; please keep to the engine's own mechanisms and avoid
+per-item special cases.
 
-The mod does not modify game files. Settings it changes in the game while VR is on (motion blur,
-depth of field, camera bob, HUD size) are restored when VR stops.
+---
 
-## For developers
-
-Build steps and the test harness: [docs/TESTING.md](docs/TESTING.md), [docs/LAUNCHER.md](docs/LAUNCHER.md).
-Development history: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Playing notes: [docs/PLAYING.md](docs/PLAYING.md).
-
-## License and credits
-
-Released under the [MIT License](LICENSE). Third-party code and licenses are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Dishonored 2 belongs to Arkane Studios and Bethesda;
-no game files are distributed, and the mod needs your own copy of the game.
+Released under the [MIT License](LICENSE). Third-party code and licenses: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Dishonored 2 is the property of Arkane Studios and Bethesda Softworks. This project is not affiliated with or endorsed by them,
+Valve or Meta; it needs your own copy of the game and distributes none of its files.
