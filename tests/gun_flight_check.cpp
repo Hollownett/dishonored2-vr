@@ -64,6 +64,27 @@ struct GunCopiesFixture {
             assert(NWH::gun_copy_native().present && NWH::gun_status().find("\"lying\":[null,{")!=std::string::npos);
             NWH::guns_forget();NWH::publish_guns();assert(!NWH::gun_copy(1).present && !NWH::gun_native_lying_);
         }
+        {   // v1123: the copy's animation component gets the equip's Resume / the holster's Suspend only against the pinned engine code
+            const std::uintptr_t base=0x140000000ull;
+            auto none=[](std::uintptr_t,void*,std::size_t){return false;};
+            NWH::equip_anim(base,none,1,0x5000);   // no game: nothing read past it, nothing called
+            assert(NWH::anim_resumes.load()==0 && NWH::anim_faults.load()==0 && NWH::anim_seen_[1].load()==-1 && NWH::anim_pin_.load()==-1);
+            struct Code {std::uintptr_t at;std::vector<unsigned char> b;};
+            std::vector<Code> image{   // Dishonored2.exe (game sha256 b671f824...): Resume / Suspend thunks, the handle resolver, equip and holster call sites
+                {0x7e79a0,{0x48,0x8b,0x15,0xe9,0xd8,0x1b,0x03,0x48,0x8b,0x92,0x60,0x89,0x1e,0x00,0xe9,0x0d,0x00,0x00,0x00}},
+                {0x7e77e0,{0x48,0x8b,0x15,0xa9,0xda,0x1b,0x03,0x48,0x8b,0x92,0x60,0x89,0x1e,0x00,0xe9,0x0d,0x00,0x00,0x00}},
+                {0x3da910,{0x40,0x53,0x48,0x83,0xec,0x20,0x8b,0x01,0x83,0xf8,0xff,0x74,0x1e,0x48,0x8b,0x59}},
+                {0x61af85,{0x8b,0x43,0x1c,0xc1,0xe8,0x1e,0xa8,0x01,0x75,0x1b,0x48,0x8d,0x4b,0x20,0xba,0x01,0x00,0x00,0x00,0xe8,0x73,0xf9,0xdb,0xff,0x48,0x85,0xc0,0x74,0x08,0x48,0x8b,0xc8,0xe8,0xf6,0xc9,0x1c,0x00}},
+                {0x61b0c0,{0xe8,0x4b,0xf8,0xdb,0xff,0x48,0x85,0xc0,0x74,0x08,0x48,0x8b,0xc8,0xe8,0x0e,0xc7,0x1c,0x00}}};
+            auto exe=[&](std::uintptr_t a,void* out,std::size_t n) {
+                for(const auto& c:image) if(a>=base+c.at && a+n<=base+c.at+c.b.size()) {std::memcpy(out,c.b.data()+(a-base-c.at),n);return true;}
+                return false;};
+            assert(NWH::anim_pinned(base,exe) && NWH::anim_pin_.load()==1);
+            NWH::anim_pin_=-1;image[4].b[14]^=1;   // the holster's Suspend call elsewhere: refused
+            assert(!NWH::anim_pinned(base,exe) && NWH::anim_pin_.load()==0);
+            NWH::anim_pin_=-1;
+            assert(NWH::gun_status().find("\"anim\":[-1,-1,0,0,0,-1,-1]")!=std::string::npos);
+        }
         // flag off and nothing live: the service does nothing, even with no game at all
         NWH::dual_wield(false);
         auto read=[](std::uintptr_t,void*,std::size_t){return false;};

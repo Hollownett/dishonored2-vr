@@ -1348,7 +1348,8 @@ public:
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
             "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu,%llu,%llu],\"real\":[%llu,%llu,%llu,%llu,%llu],\"parts\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu],"
-            "\"scenes\":{\"knob_off\":%d,\"pin\":%d,\"faults\":%llu,\"conds\":%llu,\"late_conds\":%llu,\"stops\":%llu,\"dry\":%llu,\"arm\":[%d,%llu,%llu,%llu,%llu],\"transient\":[%llu,%llu],\"events\":%s,\"bytes\":\"%s\"}}",dual_wield()?1:0,
+            "\"scenes\":{\"knob_off\":%d,\"pin\":%d,\"faults\":%llu,\"conds\":%llu,\"late_conds\":%llu,\"stops\":%llu,\"dry\":%llu,\"arm\":[%d,%llu,%llu,%llu,%llu],\"transient\":[%llu,%llu],"
+            "\"anim\":[%d,%d,%llu,%llu,%llu,%d,%d],\"events\":%s,\"bytes\":\"%s\"}}",dual_wield()?1:0,
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1368,7 +1369,9 @@ public:
             static_cast<unsigned long long>(scene_fire.load()),static_cast<unsigned long long>(scene_reload.load()),static_cast<unsigned long long>(scene_fail.load()),static_cast<unsigned long long>(scene_running.load()),
             scene_knob_.load(),scene_pin_.load(),static_cast<unsigned long long>(scene_faults.load()),static_cast<unsigned long long>(scene_conds.load()),
             static_cast<unsigned long long>(scene_late.load()),static_cast<unsigned long long>(scene_stops.load()),static_cast<unsigned long long>(scene_dry.load()),
-            arm_knob_.load(),static_cast<unsigned long long>(arm_spawned.load()),static_cast<unsigned long long>(arm_bound.load()),static_cast<unsigned long long>(arm_failed.load()),static_cast<unsigned long long>(arm_rehides.load()),static_cast<unsigned long long>(transient_marks.load()),static_cast<unsigned long long>(transient_faults.load()),events.c_str(),pin.c_str());
+            arm_knob_.load(),static_cast<unsigned long long>(arm_spawned.load()),static_cast<unsigned long long>(arm_bound.load()),static_cast<unsigned long long>(arm_failed.load()),static_cast<unsigned long long>(arm_rehides.load()),static_cast<unsigned long long>(transient_marks.load()),static_cast<unsigned long long>(transient_faults.load()),
+            anim_knob_.load(),anim_pin_.load(),static_cast<unsigned long long>(anim_resumes.load()),static_cast<unsigned long long>(anim_suspends.load()),static_cast<unsigned long long>(anim_faults.load()),
+            anim_seen_[0].load(),anim_seen_[1].load(),events.c_str(),pin.c_str());
         return b;
     }
 private:
@@ -2255,7 +2258,63 @@ private:
         }
     }
     template<class Read> static void copy_events_drop(std::uintptr_t base,Read& read) {   // teardown, before the copies are removed
-        for(unsigned side=0;side<2;++side) copy_events(base,read,side,0,0,held_copy::Kind::other);
+        for(unsigned side=0;side<2;++side) {copy_events(base,read,side,0,0,held_copy::Kind::other);equip_anim(base,read,side,0);}
+    }
+    // v1123 (user, headset v1122: the copy sounds right but its body does not play the original's animations; static RE + live reads of the
+    // v1122c sim game): a weapon's start 0x61ac10 marks its animation component start-suspended (0x61adb6: 0x7e7ab0(anim, 1); suspend count
+    // = component flags +0x1c bits 6-26, state bits 4-5), and the arkCpntAnimEvolvedFactory ([mgr+0x158]) walks only its active index list
+    // (+0x10) in its stage jobs: graph evaluation and the palette upload 0x952ee0 -> 0x550a00 -> 0x541270 -> 0x25efe0. Only the EQUIP
+    // 0x61aed0 resumes it (0x61af85..0x61afa5: unless the weapon component's flag bit 30, Resume 0x7e79a0 on the handle at comp+0x20); the
+    // holster 0x61b010 suspends it again (0x61b0b7..0x61b0cd: 0x7e77e0). A copy is never equipped: in the hand its component stayed suspended
+    // (v1122c: HELD_LEFT anim flags a800006a = count 1, state 2, absent from the factory list, which holds the arms' a000000a), so the scenes
+    // set its clips and nothing evaluated them. The hand's started copy now gets the equip's Resume once and, when it leaves the hand, the
+    // holster's Suspend (Resume leaves a running component as it is; the handle goes through the engine's 0x3da910, so a removed copy is
+    // never touched). build/no-copy-anim turns it off (read once).
+    struct CopyAnim {std::array<unsigned char,16> handle{};std::uintptr_t comp{},game{};};
+    inline static std::array<CopyAnim,2> copy_anim_{};inline static std::atomic<int> anim_pin_{-1},anim_knob_{-1};
+    inline static std::array<std::atomic<int>,2> anim_seen_{{{-1},{-1}}};   // the hand copy's animation component: state*100 + suspend count (0 = running), -1 none
+    inline static std::atomic<std::uint64_t> anim_resumes{},anim_suspends{},anim_faults{};
+    static bool anim_on() {
+        if(anim_knob_.load()<0) {if(report_dir_.empty()) return false;std::error_code ec;anim_knob_=std::filesystem::exists(report_dir_.parent_path()/"build"/"no-copy-anim",ec)?1:0;}
+        return anim_knob_.load()==0;
+    }
+    template<class Read> static bool anim_pinned(std::uintptr_t base,Read& read) {
+        if(const int p=anim_pin_.load();p>=0) return p==1;
+        const auto calls=[&](std::uintptr_t at,std::uintptr_t to) {std::array<unsigned char,5> c{};std::int32_t d{};
+            return read(base+at,c.data(),c.size()) && (c[0]==0xe8 || c[0]==0xe9) && (std::memcpy(&d,c.data()+1,4),at+5+static_cast<std::intptr_t>(d)==to);};
+        bool ok=true;
+        static constexpr std::array<std::array<std::uintptr_t,2>,2> thunks{{{0x7e79a0,0x7e79c0},{0x7e77e0,0x7e7800}}};
+        for(const auto& [at,to]:thunks) {   // Resume / Suspend: mov rdx,[game]; mov rdx,[rdx+0x1e8960]; jmp
+            std::array<unsigned char,14> b{};std::int32_t d{};ok=ok && read(base+at,b.data(),b.size()) && b[0]==0x48 && b[1]==0x8b && b[2]==0x15
+                && (std::memcpy(&d,b.data()+3,4),at+7+static_cast<std::intptr_t>(d)==0x39a5290) && b[7]==0x48 && b[8]==0x8b && b[9]==0x92 && b[10]==0x60 && b[11]==0x89 && b[12]==0x1e && b[13]==0
+                && calls(at+14,to);
+        }
+        static constexpr std::array<unsigned char,16> resolve{0x40,0x53,0x48,0x83,0xec,0x20,0x8b,0x01,0x83,0xf8,0xff,0x74,0x1e,0x48,0x8b,0x59};
+        static constexpr std::array<unsigned char,19> equip{0x8b,0x43,0x1c,0xc1,0xe8,0x1e,0xa8,0x01,0x75,0x1b,0x48,0x8d,0x4b,0x20,0xba,0x01,0,0,0};
+        std::array<unsigned char,16> r{};std::array<unsigned char,19> e{};
+        ok=ok && read(base+0x3da910,r.data(),r.size()) && r==resolve && read(base+0x61af85,e.data(),e.size()) && e==equip
+            && calls(0x61af98,0x3da910) && calls(0x61afa5,0x7e79a0) && calls(0x61b0c0,0x3da910) && calls(0x61b0cd,0x7e77e0);
+        anim_pin_=ok?1:0;return ok;
+    }
+    static int anim_call(std::uintptr_t base,std::uintptr_t fn,const unsigned char* handle) {   // 1 called, 0 the handle no longer resolves, -1 fault
+        __try {const auto a=reinterpret_cast<std::uintptr_t (__fastcall*)(const void*,int)>(base+0x3da910)(handle,1);
+            if(!a) return 0;reinterpret_cast<void (__fastcall*)(std::uintptr_t)>(base+fn)(a);return 1;} __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+    }
+    // own = the hand's started copy component (0: none). Per game tick, beside copy_events.
+    template<class Read> static void equip_anim(std::uintptr_t base,Read& read,unsigned side,std::uintptr_t own) {
+        auto& c=copy_anim_[side];const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290).value_or(0);
+        if(c.comp && (c.comp!=own || c.game!=game)) {   // left the hand: the holster's Suspend, in the game the handle belongs to
+            if(c.game==game) {const int r=anim_call(base,0x7e77e0,c.handle.data());if(r>0) ++anim_suspends;else if(r<0) ++anim_faults;}
+            c={};
+        }
+        const auto anim=own?comp_anim(read,own):0;const auto af=anim?rig::value<std::uint32_t>(read,anim+0x1c):std::nullopt;
+        anim_seen_[side]=af?static_cast<int>((*af>>4&3u)*100u+(*af>>6&0x1fffffu)):-1;
+        if(!own || c.comp || !game || !af || !anim_on() || !anim_pinned(base,read)) return;
+        if(rig::value<std::uint32_t>(read,own+0x1c).value_or(1u<<30)>>30&1u) return;   // the equip's own test
+        if((*af&0xcu)<8u) return;   // not started yet: Resume would only log 'tried to resume while being stopped'
+        CopyAnim n{{},own,game};if(!read(own+0x20,n.handle.data(),n.handle.size())) return;
+        const int r=anim_call(base,0x7e79a0,n.handle.data());
+        if(r>0) {c=n;++anim_resumes;} else if(r<0) ++anim_faults;
     }
     // Per game tick, before the 250 ms gate: each hand's held copy plays its parts on its shots and reloads (and the looping ones), and the
     // crossbow copy keeps its loaded bolt.
@@ -2278,6 +2337,7 @@ private:
             const auto own=ent && kind!=held_copy::Kind::other && kind!=held_copy::Kind::sword?own_weapon(base,read,ent,kind):0;
             NativeRangedFire::set_copy_comp(side,own && started_weapon(read,own)?own:0,ent);
             if(scenes_on()) {CrashOperation operation("native copy events");try {copy_events(base,read,side,own && started_weapon(read,own)?own:0,ent,kind);} catch(...) {++event_faults;}}
+            {CrashOperation operation("native copy anim");try {equip_anim(base,read,side,own && started_weapon(read,own)?own:0);} catch(...) {++anim_faults;}}   // v1123
             if(now_census) {   // v1119 diagnostics: handlers at the copy's id for 200 and 169 (the audio component's sound message)
                 const auto cid=ent?rig::value<std::uint32_t>(read,ent+0xa8).value_or(0):0u;
                 if(own && cid) {handler_census_[side*2]=handlers(base,read,0xc8,cid);handler_census_[side*2+1]=handlers(base,read,0xa9,cid);}   // v1121: kept after the copy goes
