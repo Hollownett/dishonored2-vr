@@ -40,9 +40,9 @@ Features
   wrap around what you hold. Grab bottles, lanterns, bodies and loose props by their real shape, carry them, throw them.
 - **Motion combat.** Swing the sword to attack, hold it up to block, throw it and call it back. Charge a power strike.
   Take unaware guards down from behind, choke them out, or clamp a hand on their face and throw them down.
-- **Two weapons, one in each hand.** Pick the pistol or crossbow a second time on the wheel and it goes to your other hand:
+- **Two weapons, one in each hand.** Each hand has its own wheel (X left, A right); pick the pistol or crossbow on both:
   a real second weapon with its own ammo, your upgrades, and the game's own fire, reload and empty animations and sounds.
-- **Body holsters and a wrist watch.** Sword over the right shoulder, gun or crossbow at the left hip. Turn the back of
+- **Body holsters and a wrist watch.** Sword over either shoulder, gun or crossbow at either hip. Turn the back of
   your left wrist to your face for health, mana and ammo. Notes and maps open in your left palm.
 - **The world reacts to your hands.** Push doors open or crack them to peek, turn valves, drag and carry bodies over
   your shoulder, hold the Heart up and listen.
@@ -123,21 +123,21 @@ under your middle finger, **trigger** is under your index finger. The same guide
 |---|---|
 | Move where you look; sprint | Left stick; click it |
 | Turn (snap or smooth); crouch; zoom | Right stick; flick it down; click it |
-| Jump and climb | A, or raise both hands over your head |
-| Quick Access Wheel | Hold X, point at an item, release |
+| Jump and climb | Push the right stick up (hold it to swim up or climb), or raise both hands over your head |
+| Quick Access Wheel | Hold X for the left hand, A for the right; point at an item, release. It goes to that hand |
 | Talk, pickpocket, pick up | Trigger of a free hand |
 | Pause; journal; quick slots | Menu; hold it; hold it and flick the right stick |
 | Pause menu shortcut | Hold Y |
-| Put every weapon away | Hold B |
+| Drink a health elixir | B |
 | Select in menus and on the wheel | Point with the right controller, right trigger |
-| Draw and sheathe the sword | Right grip over your right shoulder; release it there to sheathe |
-| Draw and holster the pistol or crossbow | Left grip at your left hip; release there to holster |
+| Draw and sheathe the sword | Grip over either shoulder; release it there to sheathe |
+| Draw and holster the pistol or crossbow | Grip at either hip; release there to holster |
 | Fire, cast, shoot | Trigger of the hand holding the gun, crossbow or power |
-| Second gun or crossbow | Pick it again on the wheel; it goes to the other hand |
+| Second gun or crossbow | Pick it on the other hand's wheel |
 | Attack | Swing the sword. From behind an unaware guard it is a silent takedown |
 | Block | Hold the sword in front of you |
 | Power strike | Grip + trigger with the sword held still; pulses rise in the hand; release to swing |
-| Throw the sword; call it back | Release the right grip mid-swing; grip over your shoulder |
+| Throw the sword; call it back | Release the grip mid-swing; grip over your shoulder |
 | Health, mana, ammo | Turn the back of your left wrist to your face |
 | Use, grab, hold | Grip at what the hand touches or points at; hold at a keyhole to keep the peek |
 | Grab a guard | Palm on him + grip; pull hard to throw him down |

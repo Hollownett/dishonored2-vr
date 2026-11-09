@@ -6,37 +6,37 @@ Grip is the side button under your middle finger, trigger the one under your ind
 
 ## Where things are
 - **Right temple** — squeeze the right grip to open this guide.
-- **Over your right shoulder** — squeeze the right grip to draw the sword; release there to sheathe.
+- **Over either shoulder** — squeeze that hand's grip to draw the sword; release there to sheathe.
 - **Back of either wrist** — turn it toward your face to read health and mana.
 - **Left temple** — squeeze either grip to open the journal.
-- **Left hip** — squeeze the left grip to draw the pistol or crossbow; release to holster.
+- **Either hip** — squeeze that hand's grip to draw the pistol or crossbow; release to holster.
 
 <!-- vr-page:controllers|Controllers -->
 
 ## Left controller
 - **Y** — talk; hold for the pause menu.
-- **X** — hold for the wheel; point, release to equip.
+- **X** — hold for the left hand's wheel; point, release to equip in that hand.
 - **Stick** — move where you look; click to sprint.
 - **Menu** — pause; hold for the journal; flick the right stick for quick slots.
 - **Trigger** — talk or pickpocket with a free hand; otherwise fire or cast.
 - **Grip** — use or hold; hold at a keyhole to peek.
 
 ## Right controller
-- **B** — hold to put all weapons away.
-- **A** — jump and climb.
-- **Stick** — turn; flick down to crouch; click to zoom.
+- **B** — drink a health elixir.
+- **A** — hold for the right hand's wheel; point, release to equip in that hand.
+- **Stick** — turn; push up to jump (hold to swim up or climb); flick down to crouch; click to zoom.
 - **Trigger** — select in menus; talk or pickpocket; hold with the sword to charge a strike.
-- **Grip** — use or hold; over your right shoulder, draw the sword.
+- **Grip** — use or hold; over your shoulder, draw the sword.
 
 <!-- vr-page:tips|Gestures -->
 
 ## The sword
-<!-- vr-figure:sword_draw_block|Grip over your right shoulder to draw the sword, then hold the blade in front of you to block. -->
+<!-- vr-figure:sword_draw_block|Grip over your shoulder to draw the sword, then hold the blade in front of you to block. -->
 - **Swing** — attack. Behind an unaware guard it is a silent takedown.
 - **Hold the trigger with the sword drawn** — charge a power strike (a pulse rises in the hand); release to swing it. A fast swing cancels the charge.
 - **Hold it in front of you** — block. No button; a swing ends it.
 - **Let go mid-swing** — throw it. Grip next to it to pick it up.
-- **Grip over your right shoulder** — call a thrown sword back.
+- **Grip over your shoulder** — call a thrown sword back.
 
 ## Your hands
 <!-- vr-figure:enemy_grab|Palm on the guard: grip to hold, then pull hard away from him. -->
