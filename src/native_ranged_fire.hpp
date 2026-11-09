@@ -19,6 +19,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#if __has_include(<MinHook.h>)
+#include <MinHook.h>
+#define D2VR_COPY_FIRE_GATE 1   // v1117: the copy's WEAPON_FIRE gate needs MinHook (the DLL); builds without it get a gate that never installs
+#else
+#define D2VR_COPY_FIRE_GATE 0
+#endif
 #include "game_rig.hpp"
 #include "gameplay_aim.hpp"
 #include "crash_observer.hpp"
@@ -177,11 +183,93 @@ public:
     static std::uintptr_t native_ammo(unsigned kind) {return kind<2?seen_ammo_[kind]:0;}
     static bool loaded(unsigned side) {return side<2 && (!hands_[side].used || (hands_[side].loaded>0 && !hands_[side].reloading));} // never fired: as the weapon is
     // v1096: the hand's copy is a real weapon with this started component (game thread; 0 = none): its shots, magazine and ammo are its own.
-    static void set_copy_comp(unsigned side,std::uintptr_t comp) {
+    static void set_copy_comp(unsigned side,std::uintptr_t comp,std::uintptr_t entity=0) {
         if(side>1) return;
         if(comp && comp!=copy_last_[side]) {copy_ammo_[side]={};copy_last_[side]=comp;} // v1101: a new instance starts as the weapon it copies, then keeps its own choice (a hidden one keeps it too)
-        copy_comp_[side]=comp;
+        copy_comp_[side]=comp;gate_comp_[side].store(comp,std::memory_order_relaxed);gate_ent_[side].store(comp?entity:0,std::memory_order_relaxed);
     }
+    // v1118: the player's own pistol (0) / crossbow (1) component and entity, for the event counters (game thread, a few times a second).
+    static void note_native(unsigned kind,std::uintptr_t comp,std::uintptr_t entity) {if(kind<2) {native_comp_[kind].store(comp);native_ent_[kind].store(entity);}}
+    // [class][event]: class 0 native weapon, 1 a hand's copy, 2 other; event 200, 201, 202, 203, 204, 205, 242.
+    static std::uint64_t received(unsigned cls,unsigned ev) {return cls<3 && ev<7?recv_count_[cls][ev].load():0;}
+    static std::uint64_t keys_sent(unsigned cls,unsigned ev) {return cls<3 && ev<7?keys_count_[cls][ev].load():0;}
+    static int hook_status(unsigned i) {return i<hook_status_.size()?hook_status_[i]:-99;}
+    static std::uint64_t sfx_sent(unsigned cls) {return cls<3?sfx_count_[cls].load():0;}
+    static std::uint64_t sounds(unsigned cls) {return cls<4?sound_count_[cls].load():0;}   // v1120: messages 169 (play sound) received per class
+    static void note_arm(unsigned side,std::uintptr_t entity) {if(side<2) arm_ent_[side].store(entity);}
+    inline static std::atomic<std::uint64_t> scene_refills_{};
+    // v1117 (user, headset v1116: the copy "does not use the same sound, animations and potentially upgrades"). Static RE: the player's fire,
+    // reload and out-of-ammo scenes (gun_fire, crossbow_fire, *_reload, *_ooa .midnightscene) carry event keys on the PlayerLeftEquipment group
+    // that 0x84bca0 posts to that group's actor entity: ARK_MDNT_MSG_WEAPON_FIRE 200 (crossbow at 30 ms, gun at 10 ms, every FastFire / Burst
+    // loop), CONSUME_AMMO_FROM_MAGAZINE 202, RELOAD 201, RELOAD_MAGAZINE 203, UPGRADE_ANIMATE_FOR_FIRE 204 / _RELOAD 205, BREAK_PLAYER_STATE 242.
+    // The weapon component registers its handlers on its own entity at start (crossbow 0x62bd20: 200 -> thunk 0x62bfd0 -> 0x62b560, 201 -> vslot
+    // 0x148, 204 -> 0x44f4b0; gun 0x44e570: 200 -> thunk 0x44f430 -> 0x44e0c0 ... 205, 242). So a copy scene (the copy bound as
+    // PlayerLeftEquipment) makes the copy's OWN component do everything the native weapon does on that scene, including a second, camera-aimed
+    // shot from its 200 handler (0x44e0c0: CanFire = magazine > 0 -> consume, 0x44ee80 flash, 63b3c0 FX + sound, spread, 0x44ebd0 bullet) after
+    // this module already fired the hand-aimed one: a pistol copy fired twice per pull (six times per Burst). The gate below swallows a copy's
+    // WEAPON_FIRE (MinHook on the two 200 thunks; every other component, the native weapon included, passes through), so the hand-aimed shot
+    // stays the only shot and every other scene event still reaches the copy. Installed on the game thread before the first copy scene,
+    // removed by ungate_copy_fire() (NativeWeaponHands::dual_wield(false), the stop path).
+    // v1118 (sim v1117: gate [1,0,0]: neither the 7 copy fire scenes nor one native crossbow shot reached a hooked 200 thunk): the same hooks
+    // also COUNT. Receivers (the handlers the weapon components register on their entity, dispatched by 0x810000 as fn(component, &message)):
+    // 200 crossbow 0x62bfd0 / gun 0x44f430 (the gate), 201 crossbow 0x62bfe0 / gun 0x44f440, 202 gun 0x44f3d0, 203 gun 0x44f470, 204 both
+    // 0x44f4b0, 205 gun 0x44f4c0, 242 gun 0x44f3b0, each by the receiving component: the player's native pistol / crossbow, a hand's copy, any
+    // other. Senders: the scene event track's key firing 0x84bca0(trackInst, keys) (arkMidnightTrackInstEvent slot 0x80; key +0x28 prop, prop +8
+    // event id, target = [[trackInst+0x10]+0xd0], the group's actor), by the same target classes. Only the two 200 hooks are required (the gate);
+    // the rest are best effort and never block a scene.
+    struct EventHook {std::uintptr_t rva;unsigned ev;std::array<unsigned char,8> code;};
+    static constexpr std::array<EventHook,9> event_hooks{{
+        {0x44f430,0,{0xe9,0x8b,0xec,0xff,0xff,0xcc,0xcc,0xcc}},{0x62bfd0,0,{0xe9,0x8b,0xf5,0xff,0xff,0xcc,0xcc,0xcc}},   // 200 gun / crossbow (the gate)
+        {0x62bfe0,1,{0x48,0x8b,0x01,0x48,0xff,0xa0,0x48,0x01}},{0x44f440,1,{0x48,0x8b,0xc1,0x48,0x8b,0x89,0x58,0x01}},   // 201 crossbow / gun
+        {0x44f3d0,2,{0x40,0x53,0x48,0x83,0xec,0x20,0x83,0xb9}},{0x44f470,3,{0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b}},   // 202, 203 gun
+        {0x44f4b0,4,{0xba,0x03,0x00,0x00,0x00,0xe9,0x96,0xb1}},{0x44f4c0,5,{0xba,0x04,0x00,0x00,0x00,0xe9,0x86,0xb1}},   // 204 both, 205 gun
+        {0x44f3b0,6,{0x83,0xb9,0xa4,0x00,0x00,0x00,0x04,0x7e}}}};                                                       // 242 gun
+    static constexpr std::array<unsigned char,9> keys_code{0x40,0x55,0x56,0x41,0x54,0x48,0x83,0xec,0x30};             // 0x84bca0
+    static constexpr std::array<unsigned char,9> sfx_code{0x48,0x89,0x54,0x24,0x10,0x48,0x89,0x4c,0x24};              // 0x827c30 (Sfx keys: the out-of-ammo click)
+    static constexpr std::array<unsigned char,9> sound_code{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24};            // 0x70a030 (audio component, message 169)
+    template<class Read> static bool gate_copy_fire(std::uintptr_t base,Read& read) {
+        if(const int s=gate_state_.load();s>=0) return s==1;
+        bool ok=false;
+#if D2VR_COPY_FIRE_GATE
+        ok=true;
+        for(const auto& r:{std::array<std::uintptr_t,3>{0x44f430,0x44e0c0,0x44e597},std::array<std::uintptr_t,3>{0x62bfd0,0x62b560,0x62bd3d}}) {   // thunk, target, 200 registration
+            std::array<unsigned char,7> l{};std::int32_t rel{},lrel{};std::array<unsigned char,5> j{};
+            if(!read(base+r[0],j.data(),j.size()) || j[0]!=0xe9 || !read(base+r[2],l.data(),l.size()) || l[0]!=0x48 || l[1]!=0x8d || l[2]!=0x05) {ok=false;break;}
+            std::memcpy(&rel,j.data()+1,4);std::memcpy(&lrel,l.data()+3,4);
+            if(base+r[0]+5+rel!=base+r[1] || base+r[2]+7+lrel!=base+r[0]) {ok=false;break;}
+        }
+        std::array<unsigned char,12> c{};
+        ok=ok && read(base+0x44e0c0,c.data(),c.size()) && c==std::array<unsigned char,12>{0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0x01,0x48,0x8b,0xd9}
+              && read(base+0x62b560,c.data(),c.size()) && c==std::array<unsigned char,12>{0x40,0x55,0x57,0x48,0x8d,0x6c,0x24,0x88,0x48,0x81,0xec,0x78};
+        const auto hook=[&](unsigned i,void* at,void* detour,void** original)->int {   // created once, then only enabled / disabled
+            std::array<unsigned char,9> got{};
+            if(i<event_hooks.size()) {if(!read(reinterpret_cast<std::uintptr_t>(at),got.data(),8) || std::memcmp(got.data(),event_hooks[i].code.data(),8)) return -100;}
+            else if(!read(reinterpret_cast<std::uintptr_t>(at),got.data(),9) || got!=(i==9?keys_code:i==10?sfx_code:sound_code)) return -100;
+            auto st=hook_at_[i]==at?MH_OK:MH_CreateHook(at,detour,original);
+            if(st==MH_OK) {hook_at_[i]=at;st=MH_EnableHook(at);}
+            return static_cast<int>(st);
+        };
+        static constexpr std::array<GateFn,9> receivers{&recv<0>,&recv<1>,&recv<2>,&recv<3>,&recv<4>,&recv<5>,&recv<6>,&recv<7>,&recv<8>};
+        for(unsigned i=0;i<event_hooks.size() && ok;++i) {
+            hook_status_[i]=hook(i,reinterpret_cast<void*>(base+event_hooks[i].rva),reinterpret_cast<void*>(receivers[i]),reinterpret_cast<void**>(&recv_original_[i]));
+            if(i<2 && hook_status_[i]!=MH_OK) ok=false;   // the 200 gate is required; the other receivers are only counted
+        }
+        if(ok) hook_status_[9]=hook(9,reinterpret_cast<void*>(base+0x84bca0),reinterpret_cast<void*>(&keys_fired),reinterpret_cast<void**>(&keys_original_));
+        if(ok) hook_status_[10]=hook(10,reinterpret_cast<void*>(base+0x827c30),reinterpret_cast<void*>(&sfx_fired),reinterpret_cast<void**>(&sfx_original_));
+        if(ok) hook_status_[11]=hook(11,reinterpret_cast<void*>(base+0x70a030),reinterpret_cast<void*>(&sound_posted),reinterpret_cast<void**>(&sound_original_));
+        if(!ok) for(const auto at:hook_at_) if(at) MH_DisableHook(at);
+        ungate_=ok?+[]() noexcept {for(const auto at:hook_at_) if(at) MH_DisableHook(at);gate_state_=-1;}:nullptr;
+#else
+        (void)base;(void)read;
+#endif
+        gate_state_=ok?1:0;
+        return ok;
+    }
+    static void ungate_copy_fire() noexcept {if(const auto f=ungate_.exchange(nullptr)) f();}
+    static int gate_state() noexcept {return gate_state_.load();}
+    // v1117: a dry pull of a hand whose copy has no magazine and no reserve (refused no_ammo): NativeWeaponHands plays the copy's
+    // out-of-ammo scene (vslot 0x130 = 0x63bd40), whose Sfx key on PlayerLeftEquipment is the game's own empty click.
+    static std::uint64_t dry_serial(unsigned side) {return side<2?dry_serial_[side]:0;}
     // v1101 (headset v1100: the right hand chose a bolt type for its own crossbow three times; each time the game switched the LEFT hand's
     // native crossbow and the mod switched it back 0.4 s later, so neither crossbow showed the choice): the wheel's equip 0x7fb350(controller,
     // item, ammo) is hooked (NativeManualEquipRuntime::wheel_pick). When the hand that opened the wheel holds a real copy of the chosen
@@ -242,8 +330,14 @@ public:
             if(burst_left_[side] && now>=burst_next_[side]) {Request r{};r.shot=burst_shot_[side];r.burst=true;work.push_back(r);}
         for(unsigned side=0;side<2;++side) if(hands_[side].reloading && !reload_noted_[side] && now>=hands_[side].reload_done-reload_len_[side]) {reload_noted_[side]=true;++reload_serial_[side];}
         for(unsigned side=0;side<2;++side) // v1096: a real copy's magazine refills when its reload ends (its own 0x63a2b0), not at the next pull
-            if(const auto cc=copy_comp_[side];cc && verified && hands_[side].used && hands_[side].reloading && now>=hands_[side].reload_done && real_native_reload(base,cc)) {
-                hands_[side].reloading=false;hands_[side].loaded=std::max(rig::value<std::int32_t>(read,cc+0xa0).value_or(0),0);++reloads_;publish(side,hands_[side]);}
+            if(const auto cc=copy_comp_[side];cc && verified && hands_[side].used && hands_[side].reloading && now>=hands_[side].reload_done) {
+                // v1120: the copy's reload scene refills it at the scene's own RELOAD key (its registered 201 / 203 handler -> vslot 0x148);
+                // the mod's refill is the fallback for a reload no scene delivered (magazine still below capacity)
+                const auto mag=rig::value<std::int32_t>(read,cc+0xa0).value_or(0),cap=rig::value<std::int32_t>(read,cc+0xa4).value_or(1);
+                if(mag>=std::max(cap,1) || real_native_reload(base,cc)) {
+                    if(mag>=std::max(cap,1)) ++scene_refills_;
+                    hands_[side].reloading=false;hands_[side].loaded=std::max(rig::value<std::int32_t>(read,cc+0xa0).value_or(0),0);++reloads_;publish(side,hands_[side]);}
+            }
         if(work.empty() && tracks_.empty()) return;
         try {service_with(base,read,native_table(),work);} catch(...) {++failures_;}
     }
@@ -252,7 +346,8 @@ public:
         for(const auto& r:work) {
             ++serviced_;
             const Why why=latched_?Why::latched:handle(base,read,n,r,now);
-            if(why!=Why::ok) {refuse(why);if(!r.reload && r.shot.side<2) refused_at_[r.shot.side]=now;if(r.burst) burst_left_[r.shot.side]=0;}
+            if(why!=Why::ok) {refuse(why);if(!r.reload && r.shot.side<2) refused_at_[r.shot.side]=now;if(r.burst) burst_left_[r.shot.side]=0;
+                if(why==Why::no_ammo && !r.reload && !r.burst && r.shot.side<2) {++dry_serial_[r.shot.side];++dry_pulls_;}}   // v1117: the copy's empty click
         }
         update_tracks(base,read,now);
     }
@@ -274,7 +369,8 @@ public:
          <<"},\"moved_100ms\":"<<moved_.load()<<",\"stationary_100ms\":"<<stationary_.load()<<",\"ended_early\":"<<ended_early_.load()
          <<",\"alive_4s\":"<<alive_4s_.load()<<",\"entity_finds\":"<<entity_finds_.load()<<",\"unstarted_shots\":"<<unstarted_shots_.load()<<",\"ammo\":{\"pool_before\":"<<pool_before_.load()<<",\"pool_after\":"<<pool_after_.load()
          <<",\"mag_before\":"<<mag_before_.load()<<",\"mag_after\":"<<mag_after_.load()<<",\"spent\":"<<spent_.load()
-         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"v1094\":["<<ammo_swaps_.load()<<','<<ammo_splits_.load()<<','<<spreads_.load()<<','<<bursts_.load()<<','<<own_shots_.load()<<','<<copy_ammo_sets_.load()<<','<<wheel_picks_.load()<<"],\"hands\":[";
+         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"v1094\":["<<ammo_swaps_.load()<<','<<ammo_splits_.load()<<','<<spreads_.load()<<','<<bursts_.load()<<','<<own_shots_.load()<<','<<copy_ammo_sets_.load()<<','<<wheel_picks_.load()<<"],\"gate\":["<<gate_state_.load()<<','<<gated_.load()<<','<<gate_passed_.load()
+         <<','<<hook_status_[0]<<','<<hook_status_[1]<<','<<dry_pulls_.load()<<','<<scene_refills_.load()<<"],\"hands\":[";   // v1117: copy WEAPON_FIRE gate [state, swallowed, passed, MH gun, MH crossbow], dry pulls
         const auto now=clock();
         for(unsigned s=0;s<2;++s) {
             const auto ra=ready_at_[s].load(),ru=reload_until_[s].load();
@@ -442,6 +538,66 @@ private:
     inline static std::array<std::array<std::uintptr_t,2>,2> copy_ammo_{};inline static std::array<std::uintptr_t,2> seen_ammo_{},seen_comp_{};inline static std::array<unsigned,2> conditions_{};inline static std::atomic<bool> wheel_done_{true};
     inline static std::array<std::atomic<int>,2> copy_kind_{{-1,-1}};inline static std::atomic<int> wheel_hand_{-1};inline static std::atomic<std::uint64_t> wheel_tick_{};
     inline static std::uint64_t ammo_looked_{};inline static std::array<std::uintptr_t,2> copy_comp_{},copy_last_{};inline static std::array<std::atomic<int>,2> test_ammo_{{-1,-1}};
+    // v1117 copy WEAPON_FIRE gate (see gate_copy_fire): the detours read the hands' copy components from any thread the event pump runs on.
+    using GateFn=std::uint64_t (__fastcall*)(std::uintptr_t,std::uintptr_t,std::uintptr_t,std::uintptr_t);
+    inline static std::array<std::atomic<std::uintptr_t>,2> gate_comp_{},gate_ent_{},native_comp_{},native_ent_{};
+    inline static std::array<GateFn,9> recv_original_{};inline static GateFn keys_original_{},sfx_original_{},sound_original_{};
+    inline static std::array<void*,12> hook_at_{};inline static std::array<int,12> hook_status_{{-99,-99,-99,-99,-99,-99,-99,-99,-99,-99,-99,-99}};
+    inline static std::array<std::atomic<std::uint64_t>,3> sfx_count_{};inline static std::array<std::atomic<std::uint64_t>,4> sound_count_{};
+    inline static std::array<std::atomic<std::uintptr_t>,2> arm_ent_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,7>,3> recv_count_{},keys_count_{};
+    inline static std::atomic<int> gate_state_{-1};inline static std::atomic<void (*)() noexcept> ungate_{nullptr};
+    inline static std::array<std::uint64_t,2> dry_serial_{};
+    static unsigned comp_class(std::uintptr_t comp) noexcept {
+        if(!comp) return 2;
+        if(comp==native_comp_[0].load(std::memory_order_relaxed) || comp==native_comp_[1].load(std::memory_order_relaxed)) return 0;
+        return comp==gate_comp_[0].load(std::memory_order_relaxed) || comp==gate_comp_[1].load(std::memory_order_relaxed)?1:2;
+    }
+    static std::uint64_t gate(unsigned k,std::uintptr_t comp,std::uintptr_t a,std::uintptr_t b,std::uintptr_t c) {   // k: event_hooks index
+        const auto& h=event_hooks[k];const unsigned cls=comp_class(comp);++recv_count_[cls][h.ev];
+        if(h.ev==0 && cls==1) {++gated_;return 0;}   // a copy's WEAPON_FIRE: the hand-aimed shot already left
+        if(h.ev==0) ++gate_passed_;
+        const auto f=recv_original_[k];return f?f(comp,a,b,c):0;
+    }
+    template<unsigned K> static std::uint64_t __fastcall recv(std::uintptr_t comp,std::uintptr_t a,std::uintptr_t b,std::uintptr_t c) {return gate(K,comp,a,b,c);}
+    static unsigned event_index(std::uint32_t ev) noexcept {return ev>=200 && ev<=205?ev-200:ev==242?6u:7u;}
+    static unsigned actor_class(std::uintptr_t track) noexcept {   // the track group's actor ([[track+0x10]+0xd0]) as 0 native weapon, 1 a copy, 2 other
+        const auto group=*reinterpret_cast<const std::uintptr_t*>(track+0x10);const auto actor=group?*reinterpret_cast<const std::uintptr_t*>(group+0xd0):0;
+        if(actor && (actor==native_ent_[0].load() || actor==native_ent_[1].load())) return 0;
+        return actor && (actor==gate_ent_[0].load() || actor==gate_ent_[1].load())?1u:2u;
+    }
+    static void count_keys(std::uintptr_t track,std::uintptr_t list) noexcept {   // reads only, every pointer guarded
+        __try {
+            const unsigned cls=actor_class(track);
+            const auto data=*reinterpret_cast<const std::uintptr_t*>(list);const auto n=*reinterpret_cast<const std::uint32_t*>(list+8)&0xffffffu;
+            for(unsigned i=0;data && i<n && i<64;++i) {
+                const auto key=*reinterpret_cast<const std::uintptr_t*>(data+i*0x10ull);const auto prop=key?*reinterpret_cast<const std::uintptr_t*>(key+0x28):0;
+                const unsigned e=prop?event_index(*reinterpret_cast<const std::uint32_t*>(prop+8)):7u;
+                if(e<7) ++keys_count_[cls][e];
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    static std::uint64_t __fastcall keys_fired(std::uintptr_t track,std::uintptr_t list,std::uintptr_t a,std::uintptr_t b) {
+        count_keys(track,list);const auto f=keys_original_;return f?f(track,list,a,b):0;
+    }
+    static void count_sfx(std::uintptr_t track,std::uintptr_t list) noexcept {
+        __try {const auto n=*reinterpret_cast<const std::uint32_t*>(list+8)&0xffffffu;if(n) sfx_count_[actor_class(track)]+=n;} __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    static std::uint64_t __fastcall sfx_fired(std::uintptr_t track,std::uintptr_t list,std::uintptr_t a,std::uintptr_t b) {
+        count_sfx(track,list);const auto f=sfx_original_;return f?f(track,list,a,b):0;
+    }
+    static void count_sound(std::uintptr_t audio) noexcept {   // the receiving audio component's entity (comp+0x10): 0 a copy, 1 a stand-in arm, 2 a native weapon, 3 other
+        __try {const auto e=*reinterpret_cast<const std::uintptr_t*>(audio+0x10);
+            const unsigned cls=e && (e==gate_ent_[0].load() || e==gate_ent_[1].load())?0u:e && (e==arm_ent_[0].load() || e==arm_ent_[1].load())?1u:
+                e && (e==native_ent_[0].load() || e==native_ent_[1].load())?2u:3u;
+            ++sound_count_[cls];} __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    static std::uint64_t __fastcall sound_posted(std::uintptr_t audio,std::uintptr_t message,std::uintptr_t a,std::uintptr_t b) {
+        count_sound(audio);const auto f=sound_original_;return f?f(audio,message,a,b):0;
+    }
+public:
+    inline static std::atomic<std::uint64_t> gated_{},gate_passed_{},dry_pulls_{};
+private:
 public:
     inline static std::atomic<std::uint64_t> own_shots_{},copy_ammo_sets_{},wheel_picks_{};
 private:
