@@ -13716,6 +13716,25 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         if(!x_wheel.wheel() && now_t<tail_until) {input.left_grip=1;input.turn_x=tail_dir[0];input.turn_y=tail_dir[1];}
                                         tail_open=x_wheel.wheel();
                                     }
+                                    if(dual_wield_enabled) { // v1129 diagnostic (wheel highlight frozen while the hand's sectors change): per opening, where the pointer was lost.
+                                        // gate_fail bits (GameXr, on frames the hand points at an item): 1 pointer off, 2 note, 4 build/wheel-no-pointer, 8 no wheel capture,
+                                        // 16 gameplay scene, 32 cinematic, 64 VR settings open, 128 continuity, 256 not focused, 512 controller inactive, 1024 world UI not the wheel, 2048 not hand mode.
+                                        // menu_*: Iggy hook calls while open; offered = a pointer was published; unknown_movie = the hook did not recognise the screen;
+                                        // gated = logic/fresh/pointing dropped it; stale = older than 250 ms; moves = cursor events the game took.
+                                        static bool was_open=false;static std::array<UINT64,8> at_open{};static UINT64 open_tick{};
+                                        const bool open_now=x_wheel.wheel();
+                                        if(open_now && !was_open) {game_xr->wheel_gate_fail_or=0;game_xr->wheel_gate_frames=0;game_xr->wheel_gate_pass=0;at_open=native_menu.wheel_counters();open_tick=GetTickCount64();}
+                                        else if(!open_now && was_open) {
+                                            const auto now_c=native_menu.wheel_counters();std::array<UINT64,8> d{};for(std::size_t i=0;i<d.size();++i) d[i]=now_c[i]-at_open[i];
+                                            dual_wield_event("\"ev\":\"wheel_pointer\",\"open_ms\":"+std::to_string(GetTickCount64()-open_tick)+",\"menu_mode\":"+std::to_string(native_menu_mode)+
+                                                ",\"menu_failed\":"+(native_menu.failed()?"1":"0")+",\"pointing\":"+(native_menu.pointing()?"1":"0")+",\"native_pointer_knob\":"+(game_xr->wheel_native_pointer?"1":"0")+
+                                                ",\"dial_frames\":"+std::to_string(game_xr->wheel_gate_frames.load())+",\"gate_pass\":"+std::to_string(game_xr->wheel_gate_pass.load())+
+                                                ",\"gate_fail\":"+std::to_string(game_xr->wheel_gate_fail_or.load())+",\"menu_calls\":"+std::to_string(d[0])+",\"offered\":"+std::to_string(d[1])+
+                                                ",\"unknown_movie\":"+std::to_string(d[2])+",\"gated\":"+std::to_string(d[3])+",\"stale\":"+std::to_string(d[4])+",\"moves\":"+std::to_string(d[5])+
+                                                ",\"refused\":"+std::to_string(d[6])+",\"clicks\":"+std::to_string(d[7])+",\"logic\":"+std::to_string(native_menu.last_logic()));
+                                        }
+                                        was_open=open_now;
+                                    }
                                 }
                                 if(physical_grab_requested) {
                                     CpuSpan grab_span{grab_control_cpu_ns};

@@ -38,6 +38,11 @@ class NativeMenu {
     std::array<FileInput,64> file_inputs_{};
     std::ofstream log_;
     std::string error_;
+    unsigned evict_{};
+    // Last refusal kept for error(); failed() stays for the unexpected (a thrown exception), which still turns the pointer off.
+    // v1129 diagnostic counters (journal wheel_pointer): calls that found a published pointer, and where each was lost.
+    std::atomic<UINT64> offered_{0},offered_unknown_movie_{0},offered_gated_{0},offered_stale_{0},refused_{0};std::atomic<UINT> last_logic_{0};
+    void note_rejection(const char* why) noexcept {++refused_;try {std::lock_guard<std::mutex> lock(mutex_);error_=why;} catch(...) {}}
     bool matches(std::uintptr_t rva,std::string_view hex) {
         std::array<unsigned char,32> bytes{};
         if(hex.size()!=64 || !read_(base_+rva,bytes.data(),bytes.size())) return false;
@@ -48,17 +53,19 @@ class NativeMenu {
     void observe(void* manager,void* wrapper,unsigned char fresh,UINT64 call) noexcept {
         if(!active_) return;
         try {
-            const auto state=native_menu_state(read_,base_,reinterpret_cast<std::uintptr_t>(manager),reinterpret_cast<std::uintptr_t>(wrapper));
-            if(!state) {++rejected_;return;}
-            const auto logic=logic_();const auto now=GetTickCount64();
             Publication publication;
             {std::lock_guard<std::mutex> lock(mutex_);publication=publication_;}
+            const bool offered=publication.input.active;if(offered) ++offered_;
+            const auto state=native_menu_state(read_,base_,reinterpret_cast<std::uintptr_t>(manager),reinterpret_cast<std::uintptr_t>(wrapper));
+            if(!state) {++rejected_;if(offered) ++offered_unknown_movie_;return;}
+            const auto logic=logic_();const auto now=GetTickCount64();last_logic_=logic;
             auto input=publication.input;
-            if(logic==2 || !logic || fresh || !pointing_) input.active=false;
-            auto* file_state=static_cast<FileInput*>(nullptr);
-            for(auto& file:file_inputs_) if(file.wrapper==state->wrapper) {file_state=&file;break;}
-            if(!file_state) for(auto& file:file_inputs_) if(!file.wrapper) {file_state=&file;break;}
-            if(!file_state) throw std::runtime_error("Native menu file input slots exhausted");
+            if(logic==2 || !logic || fresh || !pointing_) {input.active=false;if(offered) ++offered_gated_;}
+            else if(offered && !(now>=input.tick && now-input.tick<=250)) ++offered_stale_;
+            // A frame the pointer cannot place is skipped, never the session's pointer: the hand wheel (dual wield) selects only through it.
+            const int slot=menu_input_slot(file_inputs_,state->wrapper,evict_);
+            if(slot<0) {note_rejection("Native menu file input slots all hold a click");return;}
+            auto* file_state=&file_inputs_[static_cast<std::size_t>(slot)];
             if(file_state->wrapper!=state->wrapper || file_state->file!=state->file || file_state->player!=state->player) {
                 if(file_state->click.down()) --pending_buttons_; // The former Iggy owner was replaced.
                 *file_state={state->wrapper,state->file,state->player,{}};
@@ -68,22 +75,19 @@ class NativeMenu {
             interactive_tick_.store(now,std::memory_order_release);
             const auto event=file_state->click.update(input,now);
             const bool live=input.active && now>=input.tick && now-input.tick<=250;
-            if(live) {
+            if(live) [&] { // a refused move skips this frame's move; the click below still goes so down/up stay paired
                 const auto mx=rig::value<int>(read_,base_+0x3309cb8),my=rig::value<int>(read_,base_+0x3309cbc);
                 const double w=publication.width,h=publication.height;
-                if(!mx || !my || *mx<0 || *my<0 || w<=2.*(*mx) || h<=2.*(*my))
-                    throw std::runtime_error("Native menu viewport margins differ");
+                if(!mx || !my || *mx<0 || *my<0 || w<=2.*(*mx) || h<=2.*(*my)) return note_rejection("Native menu viewport margins differ");
                 const int x=static_cast<int>(std::lround(input.u*w-*mx)),y=static_cast<int>(std::lround(input.v*h-*my));
                 const float sx=static_cast<float>(x*1920./(w-2.*(*mx))),sy=static_cast<float>(y*1080./(h-2.*(*my)));
                 CrashOperation operation("native Iggy controller pointer");
-                if(!set_cursor_(reinterpret_cast<void*>(state->wrapper+0x860),&sx,&sy))
-                    throw std::runtime_error("Native Iggy cursor setter rejected input");
+                if(!set_cursor_(reinterpret_cast<void*>(state->wrapper+0x860),&sx,&sy)) return note_rejection("Native Iggy cursor setter rejected input");
                 std::array<std::uint32_t,6> move{};std::array<std::byte,16> result{};
                 move_event_(move.data(),x,y);
-                if(!dispatch_(reinterpret_cast<void*>(state->file),move.data(),result.data()))
-                    throw std::runtime_error("Native Iggy cursor event rejected input");
+                if(!dispatch_(reinterpret_cast<void*>(state->file),move.data(),result.data())) return note_rejection("Native Iggy cursor event rejected input");
                 ++moves_;
-            }
+            }();
             if(event!=MenuClick::Event::none) {
                 struct Mouse {int code=0xe0;float value{};std::uint32_t unused{};std::uint32_t flags{};} mouse;
                 const bool down=event==MenuClick::Event::down;mouse.value=down?1.f:0.f;mouse.flags=down?3:2;
@@ -120,7 +124,7 @@ public:
         dispatch_=reinterpret_cast<Dispatch>(base+0x2cb20);button_=reinterpret_cast<Button>(base+0x33450);
         if(!file.empty()) {log_.open(file,std::ios::trunc);if(!log_) throw std::runtime_error("Cannot open native menu trace");}  // v1046: an empty path (diagnostics off) is not an error
         log_<<std::setprecision(9)<<"call,thread,tick_ms,logic,wrapper,file,cached_x,cached_y,pointing,u,v,button_event\n";log_.flush();
-        publication_={};file_inputs_={};calls_=0;samples_=0;rejected_=0;moves_=0;buttons_=0;pending_buttons_=0;interactive_tick_=0;error_.clear();failed_=false;instance_=this;
+        publication_={};file_inputs_={};evict_=0;calls_=0;samples_=0;rejected_=0;moves_=0;buttons_=0;pending_buttons_=0;interactive_tick_=0;error_.clear();failed_=false;instance_=this;
         if(!original_ && MH_CreateHook(reinterpret_cast<void*>(base+update_rva),reinterpret_cast<void*>(&update),reinterpret_cast<void**>(&original_))!=MH_OK)
             throw std::runtime_error("Cannot create native Iggy cursor adapter");
         active_=true;if(MH_EnableHook(reinterpret_cast<void*>(base+update_rva))!=MH_OK) {active_=false;throw std::runtime_error("Cannot enable native menu adapter");}
@@ -158,5 +162,10 @@ public:
     UINT64 moves() const {return moves_.load();}
     UINT64 buttons() const {return buttons_.load();}
     std::string error() {std::lock_guard<std::mutex> lock(mutex_);return error_;}
+    // v1129: {calls, offered, unknown movie, gated (logic/fresh/pointing), stale, moves, refused moves, clicks}, and the last logic seen.
+    std::array<UINT64,8> wheel_counters() const noexcept {
+        return {calls_.load(),offered_.load(),offered_unknown_movie_.load(),offered_gated_.load(),offered_stale_.load(),moves_.load(),refused_.load(),buttons_.load()};}
+    UINT last_logic() const noexcept {return last_logic_.load();}
+    bool pointing() const noexcept {return pointing_;}
 };
 } // namespace d2vr

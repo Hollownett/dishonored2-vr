@@ -1965,6 +1965,7 @@ public:
     // wedge its hand points at, WheelPointer::update_plane), so the game's pointer is put on the ring in that direction (ring_m: the ring radius in
     // metres on the quad), never where the aim ray meets the quad. on=false: no pointer (the hand points at the centre or at a button).
     void wheel_dial(bool on,float x,float y,float ring_m) noexcept {wheel_dial_x_.store(x);wheel_dial_y_.store(y);wheel_dial_r_.store(ring_m);wheel_dial_on_.store(on);}
+    std::atomic<unsigned> wheel_gate_fail_or{};std::atomic<unsigned long long> wheel_gate_frames{},wheel_gate_pass{}; // v1129 diagnostic (pointer gate on dial frames)
     std::atomic<bool> wheel_dial_on_{},hand_wheel_mode{};std::atomic<float> wheel_dial_x_{},wheel_dial_y_{},wheel_dial_r_{}; // hand_wheel_mode: dual wield (set every frame)
     std::array<float,2> grip_speeds{}; // Metres per second, when the runtime reports velocity.
     unsigned grip_velocity_hands{}; // Missing velocity is not a stationary hand.
@@ -2600,6 +2601,13 @@ public:
         }
         // Notes (2) get no pointer: pointer input switches the game to keyboard glyphs ("Esc Close") and a note has nothing to click.
         // The wheel keeps it: its sector selection runs through the native pointer (without it the wheel ignored the cursor).
+        if(wheel_dial_on_.load()) { // v1129 diagnostic: on frames the hand points at an item, which check below holds the pointer back (journal wheel_pointer)
+            const unsigned fail=(!native_pointer_enabled_?1u:0u)|(world_ui_kind_==2?2u:0u)|(world_ui_kind_==1 && !wheel_native_pointer?4u:0u)|
+                (world_ui_kind_!=0 && !world_ui_source_?8u:0u)|(scene_render?16u:0u)|(cinematic?32u:0u)|(settings_.open()?64u:0u)|
+                (!continuity_.usable()?128u:0u)|(state!=XR_SESSION_STATE_FOCUSED?256u:0u)|(!controller_input.active?512u:0u)|
+                (world_ui_kind_!=1?1024u:0u)|(!hand_wheel_mode.load()?2048u:0u);
+            wheel_gate_fail_or.fetch_or(fail);wheel_gate_frames.fetch_add(1);if(!fail) wheel_gate_pass.fetch_add(1);
+        }
         if(native_pointer_enabled_ && world_ui_kind_!=2 && (world_ui_kind_!=1 || wheel_native_pointer) && (world_ui_kind_==0 || world_ui_source_) && !scene_render && !cinematic && !settings_.open() && continuity_.usable() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) {
             constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
             const auto& aim=aim_locations[menu_pointer_hand&1];

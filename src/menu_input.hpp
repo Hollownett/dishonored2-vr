@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 
 namespace d2vr {
@@ -40,4 +41,14 @@ public:
         return Event::none;
     }
 };
+// The Iggy input slot for `wrapper`: its own slot, else an empty one, else (every slot taken by movies that came and went: the wheel,
+// notes, menus over a long session) the next slot after `evict` with no button held, which is then reset. -1 only when every slot holds a
+// click down. Slots are never freed by the game's callback, so without eviction the 65th movie disabled the pointer for the session.
+template<class Slots> int menu_input_slot(const Slots& slots,std::uintptr_t wrapper,unsigned& evict) noexcept {
+    const int n=static_cast<int>(std::size(slots));
+    for(int i=0;i<n;++i) if(slots[i].wrapper==wrapper) return i;
+    for(int i=0;i<n;++i) if(!slots[i].wrapper) return i;
+    for(int k=0;k<n;++k) {const int i=static_cast<int>((evict+k)%n);if(!slots[i].click.down()) {evict=static_cast<unsigned>(i+1);return i;}}
+    return -1;
+}
 } // namespace d2vr
