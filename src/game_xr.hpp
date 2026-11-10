@@ -1462,6 +1462,44 @@ private:
             suggest.countSuggestedBindings=static_cast<uint32_t>(bindings.size());suggest.suggestedBindings=bindings.data();
             checked(xrSuggestInteractionProfileBindings(instance_,&suggest),"Bind Quest controls");
         }
+        // SteamVR binds a controller only to a profile the app suggested; PSVR2 Sense, Index and WMR-on-SteamVR map to Index or
+        // Vive wands, not Touch. Same actions, nearest components; optional, so a refusal never costs the Touch binding.
+        auto suggest_extra=[&](const char* profile,auto component_for) noexcept {
+            try {
+                std::vector<XrActionSuggestedBinding> extra;
+                for(UINT index=0;index<InputCount;++index) for(UINT side=0;side<2;++side) {
+                    const char* component=component_for(index,side);
+                    if(!component) continue;
+                    extra.push_back({actions_[index],path((std::string(side?"/user/hand/right/input/":"/user/hand/left/input/")+component).c_str())});
+                }
+                extra.push_back({haptic_action_,path("/user/hand/left/output/haptic")});
+                extra.push_back({haptic_action_,path("/user/hand/right/output/haptic")});
+                if(!touch_bindings.empty() && std::string(profile).find("index")!=std::string::npos)
+                    for(UINT index=0;index<TouchCount;++index) for(UINT side=0;side<2;++side) {
+                        const char* component=index==TriggerTouch?"trigger/touch":index==ThumbstickTouch?"thumbstick/touch":
+                            index==FirstTouch?"a/touch":index==SecondTouch?"b/touch":nullptr; // Index has no thumbrest
+                        if(component) extra.push_back({touch_actions_[index],path((std::string(side?"/user/hand/right/input/":"/user/hand/left/input/")+component).c_str())});
+                    }
+                XrInteractionProfileSuggestedBinding other{};other.type=XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
+                other.interactionProfile=path(profile);other.countSuggestedBindings=static_cast<uint32_t>(extra.size());other.suggestedBindings=extra.data();
+                xrSuggestInteractionProfileBindings(instance_,&other);
+            } catch(...) {}
+        };
+        suggest_extra("/interaction_profiles/valve/index_controller",[](UINT index,UINT side)->const char* {
+            switch(index) {
+                case Grip:return "grip/pose";case Aim:return "aim/pose";case Stick:return "thumbstick";case Trigger:return "trigger/value";
+                case Squeeze:return "squeeze/value";case StickClick:return "thumbstick/click";case FirstButton:return "a/click";
+                case SecondButton:return side?"b/click":nullptr; // left B is the pause menu: Index has no menu button
+                case Menu:return side?nullptr:"b/click";default:return nullptr;
+            }
+        });
+        suggest_extra("/interaction_profiles/htc/vive_controller",[](UINT index,UINT side)->const char* {
+            switch(index) {
+                case Grip:return "grip/pose";case Aim:return "aim/pose";case Stick:return "trackpad";case Trigger:return "trigger/value";
+                case Squeeze:return "squeeze/click";case StickClick:return "trackpad/click";case Menu:return side?nullptr:"menu/click";
+                case FirstButton:return side?"menu/click":nullptr;default:return nullptr; // wands have no face buttons
+            }
+        });
         XrSessionActionSetsAttachInfo attach{};attach.type=XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO;
         attach.countActionSets=1;attach.actionSets=&action_set_;
         checked(xrAttachSessionActionSets(session_,&attach),"Attach game controls");
