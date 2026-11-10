@@ -30,6 +30,8 @@ One launcher file installs it next to your Steam copy of the game; nothing from 
 
 > **Works today, still growing.** The mod is complete enough to play the whole game in VR. Headset time finds things the
 > author's tests cannot, so please say what you see: [open an issue](https://github.com/Hollownett/dishonored2-vr/issues).
+> The illustrated controls tutorial (in the game and on the launcher's **Controls** page) does not fully work yet; the
+> controls list below is the reliable reference.
 
 Features
 --------
@@ -112,7 +114,8 @@ Controls
 
 Made for Meta Quest Touch controllers; any OpenXR controller with the same buttons works. **Grip** is the side button
 under your middle finger, **trigger** is under your index finger. The same guide, with pictures, is in the game
-(right grip at your right temple) and on the launcher's **Controls** page.
+(right grip at your right temple) and on the launcher's **Controls** page. That tutorial does not fully work yet: some
+pages or pictures may be missing or out of date, so trust the list below when they differ.
 
 <p align="center">
   <img src="launcher/assets/touch-plus-left.png" alt="Left Touch Plus controller" height="240">
