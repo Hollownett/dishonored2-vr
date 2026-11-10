@@ -7,6 +7,8 @@ using DishonoredVR;
 
 static class Program
 {
+    /// <summary>The single-instance mutex while this launcher owns it; an update releases it before starting the new exe (which may be an older build without --updated).</summary>
+    public static Mutex? Single;
     // [STAThread]: WinForms common dialogs (OpenFileDialog etc.), Clipboard and drag-drop need a single-threaded apartment; top-level statements run MTA and ShowDialog threw ThreadStateException.
     [STAThread]
     static int Main(string[] args)
@@ -49,13 +51,25 @@ static class Program
         if (Flag("--guide-figures") is string figuresDir) { ControlsDocument.CheckParser(); return GuideFigures.Check(figuresDir, Console.Out); }
         // Headless probe check (no game access): probe configuration and launch record against an inject_probe.py headset record, DLL exports.
         if (Flag("--check-probe") is string record) return Probe.Check(record, Flag("--dll"), Console.Out);
+        // Headless self-update to the latest release (the Updates page's Update now, without the window).
+        if (args.Contains("--update"))
+        {
+            var rel = Updates.Latest().GetAwaiter().GetResult();
+            if (Updates.OwnSha256() != rel.ExeSha256) Updates.Install(rel, new Progress<int>()).GetAwaiter().GetResult();
+            return 0;
+        }
         // Developer mode uses the repo the exe was built in; a copy anywhere else is standalone and works in %LOCALAPPDATA%\DishonoredVR
         // (or --home <dir>).
         var root = Env.FindRoot(args);
         var env = root != null ? new Env(root) : new Env(Path.GetFullPath(Flag("--home") ?? ModHome.Dir)) { Standalone = true };
-        int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools", "controls" }, (Flag("--page") ?? "play").ToLowerInvariant()));
+        int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools", "controls", "updates" }, (Flag("--page") ?? "play").ToLowerInvariant()));
         // Two launcher windows would each press Launch VR and start the game twice. Review runs (--screenshot/--exit) may coexist.
         using var single = new Mutex(true, @"Local\DishonoredVR-Launcher", out var firstLauncher);
+        // A launcher restarted by its own update waits for the old one to exit.
+        if (!firstLauncher && args.Contains("--updated"))
+            try { firstLauncher = single.WaitOne(TimeSpan.FromSeconds(30)); } catch (AbandonedMutexException) { firstLauncher = true; }
+        if (firstLauncher) Single = single;
+        if (firstLauncher) try { File.Delete(Environment.ProcessPath + ".old"); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         if (!firstLauncher && Flag("--screenshot") == null && !args.Contains("--exit"))
         {
             MessageBox.Show("The Dishonored VR launcher is already open.", "Dishonored VR");
@@ -70,8 +84,8 @@ sealed class MainForm : Form
 {
     readonly Env env;
     readonly string? shotFile; readonly bool exitAfterShot, noArt;
-    readonly ArtPanel[] pages = { new(), new(), new(), new() };
-    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav) };
+    readonly ArtPanel[] pages = { new(), new(), new(), new(), new() };
+    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav), new("Updates", Look.Nav) };
     readonly ControlsGuide guide;
     readonly ArtButton importArt = new("Import game art", Look.Secondary);
     int page;
@@ -108,6 +122,12 @@ sealed class MainForm : Form
     readonly TextBox custom = new();
     readonly ArtButton[] cmdButtons, diagButtons;
     readonly ArtButton uninstallProxy = new("Uninstall proxy", Look.Secondary);
+    // updates
+    readonly RichTextBox notes = new();
+    readonly ArtButton updateNow = new("Update now", Look.Primary), openRelease = new("Open release page", Look.Secondary), checkUpdates = new("Check again", Look.Secondary);
+    Release? latest; bool updateAvailable, updBusy;
+    string updTitle = "Updates", updDetail = ""; Color updColor = Ui.Dim;
+
     readonly ArtButton send = new("Send", Look.Secondary), result = new("Show result", Look.Secondary), selftest = new("Run self-test", Look.Secondary);
 
     public MainForm(Env e, int startPage, string? shot, bool exitAfter, bool plainStyle, string? guidePage = null, string? guideCharacter = null)
@@ -119,7 +139,7 @@ sealed class MainForm : Form
         try { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch (Exception) { }  // the exe icon (launcher.ico) in the title bar and taskbar
         LoadArt();
 
-        for (int i = 0; i < 4; i++) { int idx = i; nav[i].Click += (_, _) => ShowPage(idx); Controls.Add(nav[i]); }
+        for (int i = 0; i < nav.Length; i++) { int idx = i; nav[i].Click += (_, _) => ShowPage(idx); Controls.Add(nav[i]); }
         importArt.Click += async (_, _) => await ImportArt(); Controls.Add(importArt);
         foreach (var p in pages) { p.Visible = false; Controls.Add(p); }
 
@@ -197,6 +217,15 @@ sealed class MainForm : Form
         if (guideCharacter != null) guide.SelectCharacter(guideCharacter);
         pages[3].Controls.Add(guide);
 
+        // ---- Updates page
+        StyleText(notes); notes.Text = "Release notes appear here after the check.";
+        updateNow.Click += async (_, _) => await UpdateNow();
+        openRelease.Click += (_, _) => Process.Start(new ProcessStartInfo(latest?.Url ?? Updates.LatestPage) { UseShellExecute = true });
+        checkUpdates.Click += async (_, _) => await CheckForUpdates();
+        pages[4].Controls.AddRange(new Control[] { updateNow, openRelease, checkUpdates, notes });
+        pages[4].Painter = PaintUpdates;
+        RefreshUpdButtons();
+
         poll.Tick += (_, _) => Tick(); poll.Start();
         Shown += async (_, _) =>
         {
@@ -219,7 +248,8 @@ sealed class MainForm : Form
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
             featList.Prewarm();
-            if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();  // review runs must not write a knob into a real mod home
+            if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();
+            var updCheck = (shotFile == null && !exitAfterShot) || page == 4 ? CheckForUpdates() : Task.CompletedTask;  // review runs must not write a knob into a real mod home
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are
             // rendered alone when only they are missing. Review screenshots wait for it.
             // An install imported before the game crosshair (v671) gets the whole import once more.
@@ -228,7 +258,7 @@ sealed class MainForm : Form
                 : !noArt && Ui.Art.Present && Env.FindGameDir() != null && (PoseRender.Missing(env.P("artifacts", "game-art")) || GuideFigures.Missing(env.P("artifacts", "game-art"))) ? ImportArt(false, posesOnly: true)
                 : Task.CompletedTask;
             if (shotFile == null) return;
-            await import;
+            await import; await updCheck;
             await Task.Delay(600);
             try { SaveShot(shotFile); } catch (Exception ex) { Console.Error.WriteLine("Screenshot failed: " + ex.Message); }
             if (exitAfterShot) Close();
@@ -356,14 +386,15 @@ sealed class MainForm : Form
     {
         if (!IsHandleCreated || ClientSize.Width < 50 || ClientSize.Height < 50) return;
         SuspendLayout();
-        for (int i = 0; i < 4; i++) { nav[i].Bounds = new Rectangle(S(40), S(176) + i * S(50), S(224), S(46)); nav[i].TabIndex = i; }
+        for (int i = 0; i < nav.Length; i++) { nav[i].Bounds = new Rectangle(S(40), S(176) + i * S(50), S(224), S(46)); nav[i].TabIndex = i; }
         importArt.Bounds = new Rectangle(S(44), ClientSize.Height - S(120), Math.Max(S(200), importArt.Natural), S(38)); importArt.TabIndex = 8;
-        for (int i = 0; i < 4; i++) { pages[i].Bounds = PageRect(i); pages[i].TabIndex = 3 + i; }
+        for (int i = 0; i < pages.Length; i++) { pages[i].Bounds = PageRect(i); pages[i].TabIndex = 3 + i; }
         var mono = Ui.Font(this, 9.5f, FontStyle.Regular, Ui.Mono);
         foreach (var t in new[] { log, toolOut }) if (!ReferenceEquals(t.Font, mono)) t.Font = mono;
         var sans = Ui.Font(this, 10.5f, FontStyle.Regular, Ui.Sans);
         if (!ReferenceEquals(custom.Font, sans)) custom.Font = sans;
-        LayoutPlay(); LayoutSettings(); LayoutTools(); LayoutGuide();
+        if (!ReferenceEquals(notes.Font, sans)) notes.Font = sans;
+        LayoutPlay(); LayoutSettings(); LayoutTools(); LayoutGuide(); LayoutUpdates();
         ResumeLayout(false);
         RebuildBackdrop();
         Invalidate(true);
@@ -631,9 +662,72 @@ sealed class MainForm : Form
     void ShowPage(int i)
     {
         page = i;
-        for (int k = 0; k < 4; k++) { pages[k].Visible = k == i; nav[k].Selected = k == i; nav[k].Invalidate(); }
+        for (int k = 0; k < pages.Length; k++) { pages[k].Visible = k == i; nav[k].Selected = k == i; nav[k].Invalidate(); }
         RebuildBackdrop(); Invalidate(true);
         if (i == 1) LoadSettings();
+    }
+
+    // ---------- updates
+    void LayoutUpdates()
+    {
+        var p = pages[4]; int w = p.Width;
+        int top = Flow(0, S(96), w, S(40), updateNow, openRelease, checkUpdates) + S(20);
+        p.Panes.Clear(); p.Panes.Add(new Rectangle(0, top, w, p.Height - top));
+        notes.Bounds = new Rectangle(S(10), top + S(8), w - S(20), p.Height - top - S(16));
+    }
+
+    void PaintUpdates(Graphics g)
+    {
+        var p = pages[4];
+        const TextFormatFlags np = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+        TextRenderer.DrawText(g, updTitle, Ui.Font(p, 25f), new Point(0, -S(2)), updColor, np);
+        TextRenderer.DrawText(g, updDetail, Ui.Font(p, 10f, FontStyle.Regular, Ui.Sans), new Rectangle(S(1), S(44), p.Width - S(4), S(46)), Ui.Dim, np | TextFormatFlags.WordBreak);
+    }
+
+    void SetUpd(string title, Color c, string detail) { updTitle = title; updColor = c; updDetail = detail; pages[4].Invalidate(); }
+
+    void RefreshUpdButtons()
+    {
+        updateNow.Enabled = updateAvailable && !updBusy && env.Standalone && !launching;
+        checkUpdates.Enabled = !updBusy;
+        nav[4].Text = updateAvailable ? "New update" : "Updates"; nav[4].Invalidate();
+    }
+
+    async Task CheckForUpdates()
+    {
+        if (updBusy) return;
+        updBusy = true; RefreshUpdButtons(); SetUpd("Checking", Ui.Gold, "Asking GitHub for the latest release...");
+        try
+        {
+            var (r, own) = await Task.Run(async () => (await Updates.Latest(), Updates.OwnSha256()));
+            latest = r; notes.Text = r.Name + "\n\n" + r.Notes;
+            int local = Updates.LocalVersion;
+            updateAvailable = own != r.ExeSha256 && local <= r.Version;
+            if (own == r.ExeSha256) SetUpd("Up to date", Ui.Good, $"This launcher is {r.Tag}, the latest release.");
+            else if (!updateAvailable) SetUpd("Newer than the release", Ui.Teal, $"This launcher carries mod v{local}; the latest release is {r.Tag}.");
+            else SetUpd("Update available", Ui.Gold, env.Standalone
+                ? $"{r.Tag} is out (this launcher carries mod v{local}). Update now downloads it, checks its sha256 and restarts the launcher. Your settings and imported art are kept."
+                : $"{r.Tag} is out. Developer mode runs from the repo: update with git, not here.");
+        }
+        catch (Exception ex) { SetUpd("Cannot check for updates", Ui.Bad, ex.Message); }
+        finally { updBusy = false; RefreshUpdButtons(); }
+    }
+
+    async Task UpdateNow()
+    {
+        if (latest == null || updBusy) return;
+        if (launching) { SetUpd("Update waits", Ui.Gold, "VR is running from this launcher. Stop VR first, then update."); return; }
+        updBusy = true; RefreshUpdButtons();
+        try
+        {
+            var r = latest;
+            await Updates.Install(r, new Progress<int>(pct => SetUpd("Updating", Ui.Gold, $"Downloading {r.Tag}: {pct}%")));
+            SetUpd("Restarting", Ui.Good, $"{r.Tag} installed. Starting the new launcher...");
+            Program.Single?.ReleaseMutex(); Program.Single?.Dispose(); Program.Single = null;  // older launchers check that the mutex exists, so close it too
+            Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--updated --page updates") { UseShellExecute = false });
+            Close();
+        }
+        catch (Exception ex) { SetUpd("Update failed", Ui.Bad, ex.Message + " The current launcher was kept."); updBusy = false; RefreshUpdButtons(); }
     }
 
     void ShowLog(bool on)
