@@ -133,7 +133,7 @@ sealed class MainForm : Form
     public MainForm(Env e, int startPage, string? shot, bool exitAfter, bool plainStyle, string? guidePage = null, string? guideCharacter = null)
     {
         env = e; page = startPage; shotFile = shot; exitAfterShot = exitAfter; noArt = plainStyle;
-        Text = "Dishonored 2 VR Launcher"; BackColor = Ui.Ink; ForeColor = Ui.Text;
+        Text = $"Dishonored 2 VR Launcher  (launcher {Updates.LauncherVersion}, mod v{Updates.LocalVersion})"; BackColor = Ui.Ink; ForeColor = Ui.Text;
         AutoScaleMode = AutoScaleMode.None;  // layout and fonts scale by DeviceDpi in DoLayout / Ui.Font
         DoubleBuffered = true; StartPosition = FormStartPosition.Manual;
         try { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch (Exception) { }  // the exe icon (launcher.ico) in the title bar and taskbar

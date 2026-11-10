@@ -21,6 +21,10 @@ public static class Updates
         .Select(n => Regex.Match(n, @"^home/artifacts/repair-v(\d+)-test-candidate\.json$")).Where(m => m.Success)
         .Select(m => int.Parse(m.Groups[1].Value)).DefaultIfEmpty(0).Max();
 
+    /// <summary>The release tag stamped at publish (dotnet publish -p:LauncherVersion=vNNNN.N), "dev" when unstamped.</summary>
+    public static string LauncherVersion => Assembly.GetExecutingAssembly().GetCustomAttributes<AssemblyMetadataAttribute>()
+        .FirstOrDefault(a => a.Key == "LauncherVersion")?.Value ?? "dev";
+
     public static string OwnSha256() => ModHome.Sha256(Environment.ProcessPath!);
 
     public static async Task<Release> Latest()

@@ -22,6 +22,10 @@
     <BaseOutputPath>obj\bin\</BaseOutputPath>
     <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))</RepoRoot>
   </PropertyGroup>
+  <!-- Release tag shown in the window title: dotnet publish -c Release -p:LauncherVersion=vNNNN.N -->
+  <ItemGroup Condition="'$(LauncherVersion)' != ''">
+    <AssemblyMetadata Include="LauncherVersion" Value="$(LauncherVersion)" />
+  </ItemGroup>
   <ItemGroup>
     <Compile Remove="dist\**;obj\**" />
     <EmbeddedResource Include="assets\touch-plus-left.png" LogicalName="guide/touch-plus-left.png" WithCulture="false" />
