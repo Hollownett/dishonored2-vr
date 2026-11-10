@@ -24,7 +24,7 @@ Grip is the side button under your middle finger, trigger the one under your ind
 ## Right controller
 - **B** — drink a health elixir.
 - **A** — hold for the right hand's wheel; point, release to equip in that hand.
-- **Stick** — turn; push up to jump (hold to swim up or climb); flick down to crouch; click to zoom.
+- **Stick** — turn; push up to jump (hold to swim up or climb); push down to crouch (hold to dive while swimming); click to zoom.
 - **Trigger** — select in menus; talk or pickpocket; hold with the sword to charge a strike.
 - **Grip** — use or hold; over your shoulder, draw the sword.
 

@@ -30,9 +30,9 @@ One launcher file installs it next to your Steam copy of the game; nothing from 
 
 > **Works today, still growing.** The mod is complete enough to play the whole game in VR. Headset time finds things the
 > author's tests cannot, so please say what you see: [open an issue](https://github.com/Hollownett/dishonored2-vr/issues).
-> **The game's tutorial section does not fully work in VR yet:**
-> - **Swimming:** it is very hard to swim down under the gates, because the player stays standing in the water.
-> - **Combat training:** a sword you grab can drop out of your hand and disappear.
+> **The game's tutorial can be finished in VR (v1126).** Two things there are still rough:
+> - **Parrying is hard:** Block is held while the sword is in front of you, and a parry needs a fresh Block press as the enemy swings.
+> - **Crossbow aim in the firing range looks wrong:** the tutorial puts an invisible wall in front of the range.
 
 Features
 --------
@@ -125,7 +125,7 @@ under your middle finger, **trigger** is under your index finger. The same guide
 | Do this | With |
 |---|---|
 | Move where you look; sprint | Left stick; click it |
-| Turn (snap or smooth); crouch; zoom | Right stick; flick it down; click it |
+| Turn (snap or smooth); crouch, dive while swimming; zoom | Right stick; push it down (hold to dive); click it |
 | Jump and climb | Push the right stick up (hold it to swim up or climb), or raise both hands over your head |
 | Quick Access Wheel | Hold X for the left hand, A for the right; point at an item, release. It goes to that hand |
 | Talk, pickpocket, pick up | Trigger of a free hand |

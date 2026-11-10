@@ -13,14 +13,13 @@ int main() {
         require(!c.update(-.69f,true,5),"a push inside the flick dead zone never crouches");
         require(c.update(-.7f,true,10),"a full flick starts the crouch pulse");
         require(c.update(-.7f,true,129),"the crouch pulse holds through 120 ms");
-        require(!c.update(-.7f,true,130),"the crouch pulse ends after 120 ms");
-        require(!c.update(-.7f,true,500),"a held flick never pulses twice");
-        require(!c.update(-.4f,true,600),"the re-arm margin needs -0.3");
-        require(!c.update(-.8f,true,610),"a push below the margin stays spent");
-        require(!c.update(-.3f,true,620),"the -0.3 boundary re-arms");
-        require(c.update(-.8f,true,630),"a re-armed flick pulses again");
-        require(c.update(-.8f,true,749),"the second pulse holds its 120 ms");
-        require(!c.update(-.8f,true,750),"the second pulse ends on its own");
+        require(c.update(-.7f,true,500),"a held stick keeps crouch held (swim dive)");
+        require(c.update(-.4f,true,600),"still held until the stick passes -0.3");
+        require(!c.update(-.2f,true,610),"the stick back past -0.3 lets crouch go");
+        require(c.update(-.8f,true,630),"a new push crouches again");
+        require(c.update(-.2f,true,640),"a quick flick still holds its 120 ms");
+        require(c.update(-.2f,true,749),"a flick released early holds through 120 ms");
+        require(!c.update(-.2f,true,750),"a flick released early ends after 120 ms");
     }
     {
         d2vr::CrouchFlick c;

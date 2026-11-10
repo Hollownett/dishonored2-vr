@@ -421,6 +421,14 @@ private:
         // own): a left draw asks the right hand to draw too (code 8), and the emptied request put away the sword the hand was holding. A sword its
         // hand holds (SwordGrip) keeps the game's request: the veto is for a sword drawn into an empty hand.
         if(sword_kept.load(std::memory_order_relaxed)){++right_draws_kept;return;}
+        // User, headset v1125 (tutorial: "the player cannot draw a sword"): the tutorial gives the sword by a game draw and no hand ever
+        // held one, so the right hand's selected item (ctrl+0x1b0) is empty and the shoulder draw (code 4 = the selected item) has nothing
+        // to draw. Its combat section also empties the inventory and gives a NEW sword item (Set Loadout player_loadout_sword), so the
+        // selected one may be the removed sword. A draw with nothing selected, or of an explicit item other than the selected one, passes;
+        // SwordGrip puts the ungripped sword away at once, which selects it (836f60), and the shoulder draw then has it.
+        if(const auto controller=rig::value<std::uintptr_t>(reader,machine+0x2f8);controller && *controller &&
+           rig::value<std::uintptr_t>(reader,*controller+0x58)==machine)
+            if(const auto selected=rig::value<std::uintptr_t>(reader,*controller+0x1b0);selected && (!*selected || (item && item!=*selected))){++right_draws_first;return;}
         const bool from_draw=(code&0x08u)!=0;
         code&=~0x0cu;item=0;std::memcpy(params.bytes.data()+0x18,&code,4);std::memcpy(params.bytes.data()+8,&item,8);
         std::memset(params.bytes.data()+0x10,0,8);++right_draw_vetoes;
@@ -493,7 +501,7 @@ public:
     inline static std::atomic<std::uint64_t> carry_left_kept{},carry_left_unequips{};   // v1041: unequips of a held left item the carry required (it needs both hands empty)
     inline static std::atomic<bool> right_draw_veto{true};
     inline static std::array<std::atomic<std::uint64_t>,9> wheel_reject_why{}; // see wheel_before
-    inline static std::atomic<std::uint64_t> right_draw_vetoes{},right_draws_allowed{},right_draw_ends{},right_draws_kept{};
+    inline static std::atomic<std::uint64_t> right_draw_vetoes{},right_draws_allowed{},right_draw_ends{},right_draws_kept{},right_draws_first{};
     // The declaration the game's equip 0x7fb350 was last asked for (the wheel's choice) and a counter of its calls, written on the game thread at entry,
     // before the game decides to skip an item already in the left hand (docs/native-weapon-equip-research.md 2c). dxgi_probe.cpp compares it with the
     // declaration slot 1 held when the wheel closed: the same item gives the opening arm a copy at once, a different one waits for the ticketed arrival.

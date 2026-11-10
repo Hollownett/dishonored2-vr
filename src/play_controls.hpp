@@ -45,7 +45,9 @@ class CrouchFlick {
 public:
     bool update(float turn_y,bool allowed,std::uint64_t now) noexcept {
         if(state_==State::active) {
-            if(!allowed || now>=until_) state_=State::spent;
+            // Held while the stick stays down (user, headset v1123: "very hard to swim under gates"): swimming dives only while
+            // crouch is held. On land crouch toggles on the press, so holding it changes nothing there.
+            if(!allowed || (now>=until_ && turn_y>-.3f)) state_=State::spent;
             else return true;
         } else if(state_==State::ready && turn_y<=-.7f) {
             if(allowed) {until_=now+120;state_=State::active;return true;}
