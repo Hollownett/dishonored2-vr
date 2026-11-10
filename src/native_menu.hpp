@@ -131,7 +131,8 @@ public:
         enabled_=true;
     }
     void publish(NativeMenuInput input,UINT width,UINT height) {
-        if(width<64 || width>4096 || height<64 || height>4096 || !std::isfinite(input.u) || !std::isfinite(input.v) ||
+        // v1130: D3D11's limit, not 4096 (Pimax Crystal-class eyes render ~4312x5104; 4096 silently dropped every wheel pointer).
+        if(width<64 || width>16384 || height<64 || height>16384 ||!std::isfinite(input.u) || !std::isfinite(input.v) ||
            input.u<0 || input.u>1 || input.v<0 || input.v>1) input.active=false;
         std::lock_guard<std::mutex> lock(mutex_);publication_={input,width,height};
     }
