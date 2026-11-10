@@ -264,6 +264,18 @@ int main() {
     { Sim s;s.f.pos={.65f,1.5f,-.4f};s.run(10);s.f.aim={1,0,0};                             // swept in from the side fast: parry
       s.run(4,{-2.f,0,0});s.run(30);
       CHECK(s.any_rb && s.parry); }
+    { // parry re-press (v1126 "hard to parry"): a quick push while blocking lets RB go ~50 ms, then presses it again, once per push
+      Sim s;s.f.aim={1,0,0};s.f.pos={0,1.55f,-.4f};s.run(30);CHECK(s.any_rb);
+      auto rb=[&](GV3 v){s.t+=11;const float dt=.011f;s.f.pos={s.f.pos.x+v.x*dt,s.f.pos.y+v.y*dt,s.f.pos.z+v.z*dt};s.f.vel=v;s.f.now_ms=s.t;return s.c.update(s.f).rb;};
+      for(int i=0;i<40;++i) CHECK(rb({0,0,-.3f}) || i<1);                                // slow movement keeps Block held
+      s.f.pos={0,1.55f,-.4f};
+      int off=0,edges=0;bool was=true;
+      for(int i=0;i<12;++i) {const bool r=rb({0,0,i<4?-1.8f:0.f});if(!r) ++off;if(r && !was) ++edges;was=r;}
+      CHECK(off>=4 && off<=5 && edges==1);                                                // one gap of ~50 ms, then Block again
+      off=0;for(int i=0;i<20;++i) if(!rb({0,0,0})) ++off;CHECK(off==0);
+      s.f.pos={0,1.55f,-.4f};
+      off=0;for(int i=0;i<4;++i) if(!rb({0,0,-1.8f})) ++off;CHECK(off==4);                // a new push after the hand stopped parries again
+    }
     { Sim s;s.f.pos={.1f,1.55f,-.45f};s.f.grip=1;s.run(5);CHECK(!s.any_rb);               // grip alone is native
       s.f.choke=true;s.f.kill=true;s.run(3);CHECK(s.choke && s.any_rb);
       s.f.choke=false;s.run(20);CHECK(s.choke);                                          // grace
@@ -280,17 +292,17 @@ int main() {
     for(const bool explicit_block:{false,true}) { // swings out of a held block: RB let go before a short RT pulse, no RB while the slash runs, presses spaced past the slash
       Sim s;s.run(5);s.f.aim={1,0,0};s.f.pos={-.3f,1.55f,-.4f};s.f.kill=true;s.run(30);CHECK(s.any_rb);
       s.f.explicit_block=explicit_block;s.f.trigger=explicit_block?1.f:0.f;
-      std::uint64_t fire[2]{},on[2]{},off[2]{};int k=0;bool rb_in_slash=false;
+      std::uint64_t fire[2]{},on[2]{},off[2]{},rb_last=0;int k=0;bool rb_in_slash=false;
       for(int i=0;i<120;++i) {
           s.t+=11;const float dt=.011f;const GV3 v=i<8?GV3{4.f,0,0}:(i>=30 && i<38)?GV3{-4.f,0,0}:GV3{0,0,0};
           s.f.pos={s.f.pos.x+v.x*dt,s.f.pos.y,s.f.pos.z};s.f.vel=v;s.f.now_ms=s.t;
-          const auto d=s.c.update(s.f);
+          const auto d=s.c.update(s.f);if(d.rb && !on[0]) rb_last=s.t;
           if(d.swing!=SwingKind::none && k<2) fire[k]=s.t;
           if(k<2 && fire[k] && d.rt && !on[k]) on[k]=s.t;
           if(k<2 && on[k] && !d.rt && !off[k]) {off[k]=s.t;++k;}
           if(d.rb && ((fire[0] && !on[0]) || (on[0] && s.t<on[0]+350) || (on[1] && s.t<on[1]+350))) rb_in_slash=true;
       }
-      CHECK(fire[0] && on[0]>=fire[0]+40 && off[0]-on[0]<=60 && !rb_in_slash);
+      CHECK(fire[0] && on[0]>=fire[0] && on[0]>=rb_last+40 && off[0]-on[0]<=60 && !rb_in_slash); // Block off >= 40 ms before the press (a parry gap may have let it go already)
       CHECK(fire[1] && on[1]+11>=on[0]+340); } // within one 11 ms frame of the 340 ms spacing
     std::puts("vr_combat_check OK");
 }

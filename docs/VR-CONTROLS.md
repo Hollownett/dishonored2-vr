@@ -34,7 +34,7 @@ Grip is the side button under your middle finger, trigger the one under your ind
 <!-- vr-figure:sword_draw_block|Grip over your shoulder to draw the sword, then hold the blade in front of you to block. -->
 - **Swing** — attack. Behind an unaware guard it is a silent takedown.
 - **Hold the trigger with the sword drawn** — charge a power strike (a pulse rises in the hand); release to swing it. A fast swing cancels the charge.
-- **Hold it in front of you** — block. No button; a swing ends it.
+- **Hold it in front of you** — block. No button; a swing ends it. A quick short push into the enemy's swing parries.
 - **Let go mid-swing** — throw it. Grip next to it to pick it up.
 - **Grip over your shoulder** — call a thrown sword back.
 

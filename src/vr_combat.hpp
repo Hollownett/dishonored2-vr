@@ -44,6 +44,9 @@ struct CombatTuning {
     float rt_hold_ms=45,rt_hold_thrust_ms=45,rearm_gap_ms=40;
     float rb_release_ms=45,press_interval_ms=340,block_after_press_ms=350;
     float parry_prior_speed=1.5f,parry_window_ms=250,parry_lookback_ms=300;
+    // A parry is a fresh Block press as the enemy swings (native). The sword in front holds Block the whole time, so a quick push of the
+    // already-blocking hand (parry_prior_speed) lets Block go for parry_gap_ms and presses it again; re-armed below arm_speed.
+    float parry_gap_ms=50;
     float drop_lead_ms=600;                 // an attack this recent is released onto the drop target
     float guard_slash_scale=1.3f,guard_thrust_scale=1.6f; // in the block pose an attack needs this much more speed and hand
                                             // travel: parry moves (a small push toward the attacker read as a thrust) keep the block
@@ -93,7 +96,7 @@ class VrCombat {
     SwordBlockPose block_;
     GV3 tip_{},tip_v_{},prev_head_{},prev_fwd_{},seg_start_{},head_v_{},hand_prev_{};
     std::uint64_t last_ms_{},seg_ms_{},cool_until_{},rt_until_{},rearm_until_{};
-    std::uint64_t press_ms_{},parry_until_{},choke_seen_{},peak_ms_{},press_at_{};bool rb_was_{};
+    std::uint64_t press_ms_{},parry_until_{},choke_seen_{},peak_ms_{},press_at_{},parry_gap_until_{},rb_off_at_{};bool rb_was_{},parry_fast_{};
     float prev_s_{},peak_acc_{},travel_{},yaw_dps_{},peak_speed_{},hand_travel_{},tip_speed_{};
     bool have_{},armed_{},in_seg_{},drop_was_{},trig_was_{},grab_was_{},block_was_{},choke_on_{},shadow_walk_{};
     enum class Pending {none,waiting,target_scheduled,ordinary_scheduled};
@@ -184,6 +187,7 @@ public:
         auto fire=[&](std::uint64_t hold,std::uint64_t release=0) {
             std::uint64_t start=now;
             if(rb_was_) start=now+static_cast<std::uint64_t>(t_.rb_release_ms);                    // Block must have exited
+            else if(rb_off_at_) start=std::max(start,rb_off_at_+static_cast<std::uint64_t>(t_.rb_release_ms)); // also when a parry gap let it go just before
             start=std::max(start,now+release);
             if(press_at_) start=std::max(start,press_at_+static_cast<std::uint64_t>(t_.press_interval_ms)); // the running slash ignores presses
             if(now<rt_until_) start=std::max(start,rt_until_+static_cast<std::uint64_t>(t_.rearm_gap_ms)); // a new edge
@@ -241,6 +245,11 @@ public:
                 parry_until_=now+static_cast<std::uint64_t>(t_.parry_window_ms);
             d.haptic=stronger(d.haptic,{.2f,.03f});
         }
+        // Parry re-press (user, v1126 release: "it is hard to parry"): a quick push while already blocking.
+        if(blk && block_was_ && !parry_fast_ && hand_speed>=t_.parry_prior_speed) {
+            parry_fast_=true;parry_gap_until_=now+static_cast<std::uint64_t>(t_.parry_gap_ms);
+            parry_until_=parry_gap_until_+static_cast<std::uint64_t>(t_.parry_window_ms);
+        } else if(hand_speed<t_.arm_speed) parry_fast_=false;
         block_was_=blk;
         d.block=blk;d.parry=blk && now<parry_until_;
 
@@ -259,7 +268,7 @@ public:
             cancel_attack();d.rt=false;
         }
         const bool slashing=press_at_ && now<press_at_+static_cast<std::uint64_t>(t_.block_after_press_ms);
-        d.rb=((blk || (!f.shadow_walk && f.explicit_block)) && !f.choke && !d.rt && !slashing && pending_!=Pending::waiting) || choke_on_;rb_was_=d.rb;
+        d.rb=((blk || (!f.shadow_walk && f.explicit_block)) && !f.choke && !d.rt && !slashing && pending_!=Pending::waiting && now>=parry_gap_until_) || choke_on_;if(rb_was_ && !d.rb) rb_off_at_=now;rb_was_=d.rb;
         if(d.rt && pending_!=Pending::none) {
             d.attack_target=pending_target_;
             ++attacks_.dispatched;dispatched_press_=press_at_;d.attack_transition=AttackTransition::dispatched;pending_=Pending::none;pending_target_={};pending_deadline_=0;

@@ -30,8 +30,7 @@ One launcher file installs it next to your Steam copy of the game; nothing from 
 
 > **Works today, still growing.** The mod is complete enough to play the whole game in VR. Headset time finds things the
 > author's tests cannot, so please say what you see: [open an issue](https://github.com/Hollownett/dishonored2-vr/issues).
-> **The game's tutorial can be finished in VR (v1126).** Two things there are still rough:
-> - **Parrying is hard:** Block is held while the sword is in front of you, and a parry needs a fresh Block press as the enemy swings.
+> **The game's tutorial can be finished in VR (v1126).** One thing there is still rough:
 > - **Crossbow aim in the firing range looks wrong:** the tutorial puts an invisible wall in front of the range.
 
 Features
@@ -138,7 +137,7 @@ under your middle finger, **trigger** is under your index finger. The same guide
 | Fire, cast, shoot | Trigger of the hand holding the gun, crossbow or power |
 | Second gun or crossbow | Pick it on the other hand's wheel |
 | Attack | Swing the sword. From behind an unaware guard it is a silent takedown |
-| Block | Hold the sword in front of you |
+| Block; parry | Hold the sword in front of you; push it quickly into the enemy's swing |
 | Power strike | Grip + trigger with the sword held still; pulses rise in the hand; release to swing |
 | Throw the sword; call it back | Release the grip mid-swing; grip over your shoulder |
 | Health, mana, ammo | Turn the back of your left wrist to your face |
