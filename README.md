@@ -30,8 +30,9 @@ One launcher file installs it next to your Steam copy of the game; nothing from 
 
 > **Works today, still growing.** The mod is complete enough to play the whole game in VR. Headset time finds things the
 > author's tests cannot, so please say what you see: [open an issue](https://github.com/Hollownett/dishonored2-vr/issues).
-> **The game's tutorial section does not fully work in VR yet.** Parts of it may not play as intended; the rest of the
-> game is not affected.
+> **The game's tutorial section does not fully work in VR yet:**
+> - **Swimming:** it is very hard to swim down under the gates, because the player stays standing in the water.
+> - **Combat training:** a sword you grab can drop out of your hand and disappear.
 
 Features
 --------
