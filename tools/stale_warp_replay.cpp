@@ -172,6 +172,28 @@ float4 WarpPS(Vertex v) : SV_TARGET {
 }
 )";
 }
+// STALE_REPLAY_EXITS=1: which return of WarpPS painted each pixel (written as -exits.rgba: red = 10 * (index + 1), in source order).
+static std::string exits_variant(std::string s) {
+    const std::string head = "float4 WarpPS(Vertex v) : SV_TARGET {";
+    const std::size_t a = s.find(head), b = s.find("\n}", a);
+    CHECK(a != std::string::npos && b != std::string::npos);
+    std::string f = s.substr(a, b - a); int i = 0; std::size_t at = head.size();
+    while ((at = f.find("return ", at)) != std::string::npos) {
+        const std::size_t end = f.find(';', at);
+        const std::string expr = f.substr(at + 7, end - at - 7);
+        const std::string r = "{replayExit=" + std::to_string(++i) + ";return " + expr + ";}";
+        f.replace(at, end - at + 1, r); at += r.size();
+    }
+    f.replace(0, head.size(), "static int replayExit;\nfloat4 WarpCore(Vertex v) {");
+    s.replace(a, b - a, f);
+    return s + R"(
+float4 WarpPS(Vertex v) : SV_TARGET {
+    replayExit=0;WarpCore(v);
+    const float e=pow(saturate(replayExit*10/255.0),2.2);
+    return float4(e,e,e,1);
+}
+)";
+}
 struct Box {int x{}, y{}, w{}, h{};};
 static Box box_of(const Json& j) {return {static_cast<int>(j.at(0)), static_cast<int>(j.at(1)), static_cast<int>(j.at(2)), static_cast<int>(j.at(3))};}
 
@@ -326,7 +348,7 @@ int main(int argc, char** argv) {
         const StaleRig kept_rig = rig ? StaleRig{kr_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
         const StaleRig fresh_rig = rig ? StaleRig{fr_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleRig{};
         const auto run = [&](bool variant) {
-            const bool rules = ab_rig ? true : variant, masks = ab_rig ? variant : rig;
+            const bool rules = ab_rig ? true : variant, masks = ab_rig && variant;  // v1160: the dumped stencil is not the rig: masks only on request
             layers.motion_rules = rules;
             const auto t0 = std::chrono::steady_clock::now();
             auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
@@ -339,6 +361,18 @@ int main(int argc, char** argv) {
         const auto on = run(true), off = run(false);
         for (const auto& [suffix, bytes] : {std::pair<const char*, const std::vector<unsigned char>*>{"-replay-on.rgba", &on}, {"-replay-off.rgba", &off}})
             std::ofstream(out + "/stale-warp-" + std::to_string(n) + suffix, std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()), static_cast<std::streamsize>(bytes->size()));
+        if (std::getenv("STALE_REPLAY_EXITS")) {
+            const std::string src = exits_variant(shader_source("src/stale_eye_warp.hpp"));
+            ComPtr<ID3DBlob> blob, errors; ComPtr<ID3D11PixelShader> exits;
+            if (FAILED(D3DCompile(src.data(), src.size(), "replay exits", nullptr, nullptr, "WarpPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &blob, &errors))) {
+                std::fprintf(stderr, "exits variant: %s\n", errors ? static_cast<const char*>(errors->GetBufferPointer()) : "compile failed"); return 1;
+            }
+            CHECK(SUCCEEDED(device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &exits)));
+            auto& exit_slot = pixel_of(warp); exit_slot = exits;
+            const auto ex = run(true);
+            exit_slot = shipped;
+            std::ofstream(out + "/stale-warp-" + std::to_string(n) + "-exits.rgba", std::ios::binary).write(reinterpret_cast<const char*>(ex.data()), static_cast<std::streamsize>(ex.size()));
+        }
         // scores inside the margin
         constexpr int margin = 48;
         const auto diff = [&](const std::vector<unsigned char>& a, const std::vector<unsigned char>& c, std::size_t i) {

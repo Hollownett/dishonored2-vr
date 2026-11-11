@@ -443,14 +443,14 @@ float2 Solve(float4 h[4],Texture2D<float> depth,float2 extent,float2 m,float3 t,
     return q;
 }
 // Is the point at inverse target-side distance w on the ray (fresh image coordinates s*k+shift) at or behind what the fresh eye sees there?
+// v1162 (headset v1158: "white shimmering around the right arm near the corner of the view"; "artifacts around the arms/body"; v1160
+// dumps 5 and 2): what the fresh eye sees at fresh image point p, metres ahead; 0 outside its image. Ahead clamps to the edge texel, so the
+// near search "met" whatever the fresh image has at its edge for a ray that leaves it: the 1-3 px white border of the eye image at the
+// bottom-right corner (dump 5), the fresh eye's own sleeve at its left edge drawn over the floor this eye sees beside it (dump 2).
+float AheadSeen(float2 p) {return any(p<0) || any(p>1)?0:Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);}
 bool Behind(float3 s,float3 shift,float w) {
     const float k=1/w,ray=k*s.z+shift.z;
-    const float2 p=(k*s.xy+shift.xy)/ray;
-    // v1159 (headset v1158: "white shimmering around the right arm near the corner of the view"): outside the fresh image nothing is seen
-    // (Ahead clamps to its edge texel, so NearHit "hit" the fresh edge and drew its edge pixels stretched over the canted corner). With the
-    // rig masks only for now: without them the pass stays byte-identical to v1158.
-    if(rigMap.x>0 && (ray<=0 || any(p<0) || any(p>1))) return false;
-    const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);
+    const float a=AheadSeen((k*s.xy+shift.xy)/ray);
     return a>0 && ray>=a;
 }
 // The front-most surface on target pixel t's ray in the fresh image between 0.1 m and 1.25 reaches (headset v798: a hand 0.3 m
@@ -477,10 +477,10 @@ int NearHit(float3 t,out float2 hit,out float k,out float2 edge) {
             // A surface the ray meets is there on both sides of the crossing. Passing behind a near edge, the ray had the far
             // scene just before it (the edge's shadow starts only centimetres behind the edge, so a gap test alone took it).
             const float k_front=1/lo,ray_front=k_front*s.z+shift.z;
-            const float a_front=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,(k_front*s.xy+shift.xy)/ray_front);
+            const float a_front=AheadSeen((k_front*s.xy+shift.xy)/ray_front);
             k=1/hi;const float ray=k*s.z+shift.z;
             hit=(k*s.xy+shift.xy)/ray;
-            const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,hit);
+            const float a=AheadSeen(hit);
             if(a>0 && abs(ray-a)<0.02+0.03*a && a_front>0 && a_front-ray_front<0.02+0.03*a) return 1;
             // v804: 15 px in front (4 px sampled the edge's own dark rim on some rows and not others: stripes of it over the fill)
             const float k_edge=1/min(wn,lo+0.15);
@@ -727,10 +727,10 @@ bool FarHit(float3 t,out float2 hit,out float k) {
             float lo=front,hi=w;
             [unroll] for(int j=0;j<5;++j) {const float m=0.5*(lo+hi);if(Behind(s,shift,m)) hi=m; else lo=m;}
             const float k_front=1/lo,ray_front=k_front*s.z+shift.z;
-            const float a_front=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,(k_front*s.xy+shift.xy)/ray_front);
+            const float a_front=AheadSeen((k_front*s.xy+shift.xy)/ray_front);
             k=1/hi;const float ray=k*s.z+shift.z;
             hit=(k*s.xy+shift.xy)/ray;
-            const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,hit);
+            const float a=AheadSeen(hit);
             return a>0 && abs(ray-a)<0.02+0.03*a && a_front>0 && a_front-ray_front<0.02+0.03*a;
         }
         front=w;

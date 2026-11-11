@@ -951,6 +951,57 @@ static void gpu_rig() {
     }
 }
 
+// v1162 (headset v1158 "white shimmering at the corner of the view", "artifacts around the arms/body"; v1160 dumps 5 and 2): a ray at the
+// rebuilt eye's edge leaves the fresh image at near distances, and the near search read the clamped edge texel as a surface there: the
+// fresh eye's own sleeve at its edge (dump 2) or the eye image's 1 px white border (dump 5) was drawn over what this eye sees beside the
+// sleeve. Here a dark sleeve 0.3 m ahead reaches the fresh (left) eye's right edge but ends before the rebuilt (right) eye's; the rebuilt
+// eye's last columns must show its own wall 1.2 m away, neither the sleeve nor white.
+static void gpu_edges() {
+    ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
+    CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+    constexpr UINT W = 256, H = 128;
+    struct Frame {ComPtr<ID3D11Texture2D> image, depth; std::vector<int> row;};
+    const auto render = [&](double eye_x, bool white_border) {
+        Frame f; f.row.resize(W);
+        std::vector<unsigned char> pixels(W * H * 4); std::vector<float> d(W * H);
+        for (UINT y = 0; y < H; ++y) for (UINT x = 0; x < W; ++x) {
+            const double tx = (x + 0.5) / W * 2 - 1, ty = 1 - (y + 0.5) / H * 2, sx = eye_x + 0.3 * tx;
+            double a = 1.2; int c = 100 + (static_cast<int>((eye_x + 1.2 * tx + 10) * 60) * 7) % 40;
+            if (sx >= 0.10 && sx <= 0.30 && std::abs(0.3 * ty) < 0.3) {a = 0.3; c = 40;}
+            if (white_border && x == W - 1) c = 254;  // the eye image's border column (its depth is the scene's)
+            auto* p = &pixels[(y * W + x) * 4]; p[0] = p[1] = p[2] = static_cast<unsigned char>(c); p[3] = 255; d[y * W + x] = static_cast<float>(0.01 / a);
+            if (y == H / 2) f.row[x] = c;
+        }
+        D3D11_TEXTURE2D_DESC desc{}; desc.Width = W; desc.Height = H; desc.MipLevels = 1; desc.ArraySize = 1; desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;
+        const D3D11_SUBRESOURCE_DATA data{pixels.data(), W * 4, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &data, &f.image)));
+        desc.Format = DXGI_FORMAT_R32_FLOAT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        const D3D11_SUBRESOURCE_DATA ddata{d.data(), W * 4, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &ddata, &f.depth)));
+        return f;
+    };
+    const WarpCamera kept = camera({}, {0.032, 0, 0}), fresh = camera({}, {-0.032, 0, 0});
+    const auto layers = *stale_eye_layers(kept, square, kept, square, &fresh, square, 2.0);
+    StaleEyeWarp warp(device.Get());
+    const auto id = *stale_eye_homography({}, square, {}, square);
+    const Frame k = render(0.032, false);
+    const int first = static_cast<int>(std::ceil(((0.30 - 0.032) / 0.3 + 1) / 2 * W)) + 1;  // the rebuilt eye's first column past the sleeve
+    for (const bool border : {false, true}) {
+        const Frame f = render(-0.032, border);
+        const auto image = read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &layers, {k.depth.Get(), W, H}, f.image.Get(), {f.depth.Get(), W, H}));
+        int sleeve = 0, white = 0, other = 0, n = 0;
+        for (int x = first; x < static_cast<int>(W) - 1; ++x) {
+            const int v = image[((H / 2) * W + x) * 4]; ++n;
+            sleeve += v < 60; white += v > 200; other += std::abs(v - k.row[x]) > 8;
+            if (std::abs(v - k.row[x]) > 8) std::printf("   column %d: %d (own %d)\n", x, v, k.row[x]);
+        }
+        std::printf("%s: beside a near sleeve at the edge, %d columns: %d the sleeve, %d white, %d not this eye's own wall\n",
+                    border ? "a. fresh image's white border" : "b. fresh eye's sleeve at its edge", n, sleeve, white, other);
+        CHECK(n >= 8 && sleeve == 0 && white == 0 && other == 0);
+    }
+}
+
 // v802: the drawn hands held still from the kept frame's Setup to the target's (what is within reach may show from the kept image)
 static void hands_still() {
     WarpCamera a = camera({}, {0, 0, 0}), b = a;
@@ -978,6 +1029,7 @@ int main() {
     gpu_turn();
     gpu_movers();
     gpu_rig();
+    gpu_edges();
     uncant_math();
     hands_still();
     std::puts("PASS: stale eye warp (homography: identity, yaw, pitch, relative rotation, round trip, behind, invalid; WARP: identity copy, line shift on both read paths;"
@@ -991,5 +1043,6 @@ int main() {
               " v813 no hand where its recorded motion put it and the fresh eye sees past it;"
               " v1150 movers: a walking guard at its new place in its own shading, wall where it was, other eye brighter, half hidden by a pillar (M3),"
               " accelerating, gone; zero motion and rules off byte-identical; a still hand unchanged;"
-              " v1159 rig masks: a still prop and a wall beside a moving palm stay, a forearm and a held stick move whole, a still hand exact, the view corner)");
+              " v1159 rig masks: a still prop and a wall beside a moving palm stay, a forearm and a held stick move whole, a still hand exact, the view corner;"
+              " v1162 a ray leaving the fresh image meets nothing there (no sleeve, no white border beside a near edge))");
 }
