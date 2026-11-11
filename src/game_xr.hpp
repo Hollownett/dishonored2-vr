@@ -414,6 +414,8 @@ private:
     // handed over for the Present in the *_frame_ stamps, and the parallax of each eye's last warp (the reticle follows it).
     std::array<WarpCamera,2> rendered_cameras_{},kept_cameras_{},stale_target_cameras_{};
     std::array<WarpPlaySpace,2> rendered_play_{},kept_play_{},stale_target_play_{}; // v1184: each camera's play space (warp_play_space.hpp)
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_rig_target_{};std::array<UINT,2> stale_rig_target_w_{},stale_rig_target_h_{}; // v1190
+    std::array<std::uint64_t,2> stale_rig_target_frame_{};std::array<bool,2> stale_rig_target_valid_{};
     std::array<std::uint64_t,2> rendered_camera_frame_{},stale_target_camera_frame_{},stale_depth_frame_{};
     std::array<bool,2> kept_camera_valid_{};
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_depth_{};
@@ -1966,6 +1968,14 @@ public:
     void stale_eye_motion(UINT eye,ID3D11Texture2D* motion,UINT width,UINT height,std::uint64_t frame) noexcept {
         if(eye<2) {stale_motion_[eye]=motion;stale_motion_width_[eye]=width;stale_motion_height_[eye]=height;stale_motion_frame_[eye]=motion?frame:0;}
     }
+    // v1190: the rig target the fresh eye's render drew for `eye` (the stale eye's target camera; FsrTaa::eye_rig_target), for this Present
+    void stale_eye_rig_target(UINT eye,ID3D11Texture2D* target,UINT width,UINT height,std::uint64_t frame,bool valid) noexcept {
+        if(eye<2) {stale_rig_target_[eye]=target;stale_rig_target_w_[eye]=width;stale_rig_target_h_[eye]=height;stale_rig_target_frame_[eye]=target?frame:0;stale_rig_target_valid_[eye]=target && valid;}
+    }
+    StaleRig stale_rig_target(UINT eye) const noexcept {
+        if(eye>1 || !stale_rig_target_valid_[eye] || stale_rig_target_frame_[eye]!=alternate_frame || !stale_rig_target_[eye]) return {};
+        return {stale_rig_target_[eye].Get(),stale_rig_target_w_[eye],stale_rig_target_h_[eye]};
+    }
     void stale_eye_rig(UINT eye,ID3D11Texture2D* rig,UINT width,UINT height,std::uint64_t frame,bool live=false,bool motion=false) noexcept { // v1160; v1162 live; v1167 motion
         if(eye<2) {stale_rig_[eye]=rig;stale_rig_width_[eye]=width;stale_rig_height_[eye]=height;stale_rig_frame_[eye]=rig?frame:0;stale_rig_live_[eye]=rig && live;stale_rig_motion_[eye]=rig && live && motion;}
     }
@@ -2860,6 +2870,7 @@ public:
                                 stale_layers_[eye]->rig_motion_rules=stale_rig_motion_rules; // v1167: rig pixels by their own motion (knob no-stale-eye-rig-motion)
                                 stale_layers_[eye]->rig_motion={stale_rig_motion(eye),fresh_now && stale_rig_motion(fresh_eye)};
                                 stale_layers_[eye]->afw2=stale_afw2; // v1184: knob build/afw2
+                                stale_layers_[eye]->rig_target=static_cast<bool>(stale_rig_target(eye).texture); // v1190: the exact rig in this eye's target camera
                             }
                             if(!stale_layers_[eye]) ++stale_eye_parallax_misses;
                         }
@@ -2873,7 +2884,7 @@ public:
                         StaleRig kept_rig=stale_rig_mask(eye),fresh_rig=fresh_now?stale_rig_mask(fresh_eye):StaleRig{};
                         if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fresh_rig.texture) ++stale_rig_one_sided;kept_rig={};fresh_rig={};}
                         else if(stale_layers_[eye]) ++stale_rig_warps;
-                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion,kept_rig,fresh_rig):stale_warp_->apply(processed,*h);
+                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion,kept_rig,fresh_rig,stale_rig_target(eye)):stale_warp_->apply(processed,*h);
                         if(stale_warp_->parallax_passes==parallax_before) stale_layers_[eye].reset(); // depth refused: rotation only, the reticle too
                         if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
                         stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;

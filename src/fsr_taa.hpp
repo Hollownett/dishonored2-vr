@@ -80,6 +80,18 @@ public:
         return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.motion.p);
     }
     std::atomic<std::uint64_t> rig_copies{}; // v1163: rig masks made (rig_mask.hpp)
+    // v1190 (rig_mask.hpp RigMask::take_target): the rig target made at the OTHER eye's last render for `eye` (the stale eye's target camera):
+    // R32G32_FLOAT at the scene depth's size (render rectangle top left; x reverse-Z depth, y class 255 rig / 253 held, 0 0 none); `valid` =
+    // every rig/held draw of that render was retargeted; `draws` = how many.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_rig_target(int eye,UINT& width,UINT& height,bool& valid,std::uint64_t& draws) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        width=height=0;valid=false;draws=0;
+        if((eye!=0 && eye!=1) || !enabled.load() || !ready.load()) return {};
+        const auto& e=(*eyes_)[static_cast<std::size_t>(eye)];
+        if(!e.rig_target.p) return {};
+        width=e.rig_target_w;height=e.rig_target_h;valid=e.rig_target_valid;draws=e.rig_target_draws;
+        return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.rig_target.p);
+    }
     // v1163: the player-rig mask of `eye`'s last render (R8, 255 = rig, 0 = not; its render rectangle at the top left, like eye_depth): only
     // for a render of the alternate one-view with the rig target of this scene depth (rig_mask.hpp); empty otherwise. `live` = there is one.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_rig(int eye,UINT& width,UINT& height,bool* live=nullptr) {
@@ -137,6 +149,7 @@ private:
         Ref<ID3D11Texture2D> motion;Ref<ID3D11UnorderedAccessView> motion_uav;Ref<ID3D11ShaderResourceView> depth_srv,mv_srv;ID3D11Resource* mv_key{};
         // v1160/v1163: this render's rig mask (R8, render rectangle; eye_rig)
         Ref<ID3D11Texture2D> rig;Ref<ID3D11UnorderedAccessView> rig_uav;bool rig_valid{};
+        Ref<ID3D11Texture2D> rig_target;UINT rig_target_w{},rig_target_h{};bool rig_target_valid{};std::uint64_t rig_target_draws{}; // v1190 (eye_rig_target)
         // v1162: the mask read view (motion pass), whether the last copy was a marked mask, its pixel counter and read-back ring
         Ref<ID3D11ShaderResourceView> rig_srv;bool rig_live{},rig_motion{};Ref<ID3D11Buffer> rig_count;Ref<ID3D11UnorderedAccessView> rig_count_uav;
         std::array<Ref<ID3D11Buffer>,4> rig_count_staging{};std::uint64_t rig_count_serial{},rig_read_serial{};
@@ -1138,6 +1151,21 @@ private:
                 c->CopyResource(e.rig_count_staging[e.rig_count_serial%e.rig_count_staging.size()].p,e.rig_count.p);++e.rig_count_serial;++rig_live_renders;
                 e.rig_valid=true;e.rig_live=true;++rig_copies;
                 e.rig_motion=rig_motion_now; // v1166: every rig prepass draw of this render had the eye's own previous palette and rows
+                // v1190: the rig target this render drew for the OTHER eye's target camera, copied out for that eye and cleared
+                if(RigMask::target_on.load(std::memory_order_relaxed) && (job.eye==0 || job.eye==1)) {
+                    auto& se=(*eyes_)[static_cast<std::size_t>(job.eye^1)];D3D11_TEXTURE2D_DESC td{};
+                    if(RigMask::target_desc(depth_resource_.p,td)) {
+                        D3D11_TEXTURE2D_DESC have{};if(se.rig_target.p) se.rig_target.p->GetDesc(&have);
+                        if(!se.rig_target.p || have.Width!=td.Width || have.Height!=td.Height || have.Format!=td.Format) {
+                            td.BindFlags=D3D11_BIND_SHADER_RESOURCE;ID3D11Device* dev{};c->GetDevice(&dev);ID3D11Texture2D* t{};
+                            se.rig_target.reset();if(dev && SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&t))) se.rig_target.adopt(t);
+                            if(dev) dev->Release();
+                        }
+                        std::uint64_t draws{};
+                        se.rig_target_valid=RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws) && se.rig_target.p;se.rig_target_draws=draws;
+                        se.rig_target_w=depth_w;se.rig_target_h=depth_h;
+                    }
+                }
             }
         }
         c->CSSetShaderResources(0,1,null_srv);c->CSSetUnorderedAccessViews(0,2,null_uav,nullptr);

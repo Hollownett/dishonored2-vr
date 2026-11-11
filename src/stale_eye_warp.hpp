@@ -195,6 +195,11 @@ struct StaleLayers {
     // target's and the fresh eye's FOV (stale_eye_layers; invalid: the kept one stands in)
     bool afw2{};
     WarpFov target_fov{},fresh_fov{};
+    // v1190 (engine side, rig_target.hpp): the first-person rig and held items drawn depth-only into THIS eye's target camera at the fresh
+    // eye's render (exact silhouette and depth for this tick). apply()'s rig_target: R32G32_FLOAT at the depth's size (x reverse-Z depth in the
+    // engine's convention, y class 255 rig / 253 held, 0 0 none); bound at t15 of the AFW v2 pass. True only when every rig/held draw of
+    // that render was retargeted.
+    bool rig_target{};
 };
 inline constexpr double near_range_default=2.;
 // v811: a drawn hand owns the kept pixels within this distance of its palm: the hand, its wrist, what it holds (a glass, the Heart, a pistol).
@@ -389,6 +394,7 @@ public:
     std::uint64_t motion_passes{},motion_refusals{};  // v1150: passes with the mover rules; motion textures refused (format, size)
     std::uint64_t rig_passes{},rig_refusals{};        // v1159: passes with the rig masks; masks refused (format, size)
     std::uint64_t cut_passes{};                       // v1171: frames rebuilt from the fresh eye alone (a camera cut)
+    std::uint64_t rig_target_passes{};                // v1190: AFW v2 passes given the rig target (t15)
     std::unique_ptr<Afw2Pass> afw2;                   // v1177: the forward-splat rebuild (StaleLayers::afw2), made on first use
     // v811: hand fits run, and read back with a correction; each read-back: the Present and eye, per hand the correction (target pixels
     // x, y; 0 0 none), the fraction of its kept pixels the fresh eye sees there and with no correction. The caller takes hand_fits.
@@ -1055,7 +1061,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     // v1159: with both eyes' rig masks (kept_rig, fresh_rig) the player's own pixels are the masks' (Owner); without, the palm spheres.
     ID3D11Texture2D* apply(ID3D11Texture2D* source,const WarpMatrix& h,const StaleLayers* layers=nullptr,const StaleDepth& depth={},
                            ID3D11Texture2D* fresh=nullptr,const StaleDepth& fresh_depth={},const StaleMotion& kept_motion={},
-                           const StaleMotion& fresh_motion={},const StaleRig& kept_rig={},const StaleRig& fresh_rig={}) {
+                           const StaleMotion& fresh_motion={},const StaleRig& kept_rig={},const StaleRig& fresh_rig={},const StaleRig& rig_target={}) {
         if(!source) throw std::runtime_error("Stale eye warp input is missing");
         D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
         Ptr<ID3D11Device> owner;source->GetDevice(&owner);
@@ -1094,8 +1100,17 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             const bool rig_ok=kept_rig_read && kept_rig.width==depth.width && kept_rig.height==depth.height && same;
             if(!afw2) afw2=std::make_unique<Afw2Pass>(device_.Get());
             ++parallax_passes;++fresh_passes;if(motion_ok) ++motion_passes;if(rig_ok) ++rig_passes;
-            return afw2->run(*layers,width_,height_,read,depth_read,depth.width,depth.height,fresh_read,fresh_depth_read,fresh_depth.width,fresh_depth.height,
+            // v1190 (engine side): the rig target at t15 (compute and pixel stages) for the pass; unbound after it
+            Ptr<ID3D11ShaderResourceView> target_view;
+            if(layers->rig_target && rig_target.texture && rig_target.width==depth.width && rig_target.height==depth.height) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R32G32_FLOAT;v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
+                if(FAILED(device_->CreateShaderResourceView(rig_target.texture,&v,&target_view))) target_view.Reset();
+            }
+            if(target_view) {ID3D11ShaderResourceView* t=target_view.Get();context_->CSSetShaderResources(15,1,&t);context_->PSSetShaderResources(15,1,&t);++rig_target_passes;}
+            ID3D11Texture2D* afw2_out=afw2->run(*layers,width_,height_,read,depth_read,depth.width,depth.height,fresh_read,fresh_depth_read,fresh_depth.width,fresh_depth.height,
                              motion_ok?kept_motion_read:nullptr,motion_ok?fresh_motion_read:nullptr,rig_ok?kept_rig_read:nullptr,rig_ok?fresh_rig_read:nullptr);
+            if(target_view) {ID3D11ShaderResourceView* none{};context_->CSSetShaderResources(15,1,&none);context_->PSSetShaderResources(15,1,&none);}
+            return afw2_out;
         }
         std::array<float,192> parameters{};std::size_t at=0;
         const auto put=[&](double x,double y,double z,double w) {

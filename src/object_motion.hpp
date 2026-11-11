@@ -35,6 +35,7 @@
 #include "weapon_draw_place.hpp"
 #include "rig_mask.hpp"
 #include "skin_motion.hpp"
+#include "rig_target.hpp"
 
 namespace d2vr {
 // Draws of the recent eye views keyed by their exact current rows -> the engine's original previous rows.
@@ -520,6 +521,20 @@ private:
             }
         return false;
     }
+    // v1190: the draw's retargeted rows (prepare) and their binding for RigMask's target replay (same thread, right after the engine's draw)
+    inline static thread_local float tl_target_rows_[16]{};inline static thread_local ContextState* tl_target_s_{};inline static thread_local const Shadow* tl_target_sh_{};
+public:
+    static bool target_bind(ID3D11DeviceContext* c) noexcept {
+        ContextState* s=tl_target_s_;const Shadow* sh=tl_target_sh_;
+        if(!s || !sh || sh->buffer!=s->cb[1]) return false;
+        return bind_pool(c,*s,*sh,tl_target_rows_,nullptr); // previous rows as the engine wrote them (a depth-only replay never reads them)
+    }
+    static void target_restore(ID3D11DeviceContext* c) noexcept { // the engine's per-instance buffer again (DrawScope restores it too)
+        ContextState* s=tl_target_s_;if(!s) return;
+        if(const auto observe=wide_direct_cb_observer.load(std::memory_order_relaxed)) observe(c,2,1,&s->cb[1]);
+        set_cb_[s->type](c,2,1,&s->cb[1]);tl_target_s_=nullptr;tl_target_sh_=nullptr;
+    }
+private:
     // Eye views: snapshots of view (+0x7450) and view-projection (+0x7510) at engine frame +0x77B4.
     static void snapshot(unsigned eye,std::uintptr_t view) noexcept {
         if(!read_) return;
@@ -727,6 +742,14 @@ private:
         // v1183 (knob stale-eye-held-mask): a near draw whose model frame is a held weapon's / held thing's engine frame joins the rig mask (253)
         if(have_view && alternate() && held_mask.load(std::memory_order_relaxed) && cur[15]>0.01f && cur[15]<weapon_draw::Place::near_w.load(std::memory_order_relaxed) &&
            held_match(view,cur)) RigMask::mark_held();
+        // v1190 (rig_target.hpp, knob stale-eye-rig-target): a depth-writing rig/held draw of the one-view gets its rows for the stale eye's target
+        // camera, E * rows, E found by this draw's view-projection (the per-view write it was classified by); the mask replay draws it with them
+        if(alternate() && RigMask::target_wanted()) {
+            rig_target::M4 e{};
+            const bool ok=have_view && rig_target::book().find(view.vp,e);
+            if(ok) {rig_target::apply(e,cur,tl_target_rows_);tl_target_s_=&s;tl_target_sh_=sh;}
+            RigMask::mark_target(ok);
+        }
         bool have_prev=gather_previous(s.layout,sh->data,sh->size,z,prev);
         count(motion);if(have_prev) std::memcpy(engine,prev,64);
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);

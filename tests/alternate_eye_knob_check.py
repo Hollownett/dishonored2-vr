@@ -172,7 +172,7 @@ print('PASS: v796 parallax routing (knob, cameras recorded and handed over, kept
 # v798 fresh layer: the fresh eye goes first, its depth and kept image reach the stale eye's warp with its camera, knob and status
 assert 'const UINT eye=alternate_enabled && alternate_fresh_eye==1?1u-pass:pass;' in xr
 assert 'fresh_now?&rendered_cameras_[fresh_eye]:nullptr,f(alt_records_[fresh_eye].view.fov),stale_near_range);' in xr
-assert 'stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion,kept_rig,fresh_rig)' in xr
+assert 'stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion,kept_rig,fresh_rig,stale_rig_target(eye))' in xr
 assert 'fsr_taa.eye_depth(alt_fresh,depth_w,depth_h)' in probe
 assert '{std::ifstream knob(root/L"build"/L"stale-near-range");' in probe
 assert 'game_xr->stale_near_range=stale_near_range;' in probe
@@ -235,3 +235,9 @@ print('PASS: v1184 AFW v2 knob (layers, status, meta) and play spaces with the c
 assert 'const int share_order=alternate_on() && !alt_shadow_share_knob?0:begin_order;' in probe and 'shadow_share.on_eye_begin(share_order,address,gate,' in probe
 assert 'alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share");' in probe
 print('PASS: v1189 no shadow sharing on one-view frames (knob alt-shadow-share)')
+
+# v1190: rig target (knob stale-eye-rig-target): retargeted rig/held replay, published per render for the stale eye, t15 of AFW v2
+assert 'rig_target_knob=fs::exists(root/L"build"/L"stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob;' in probe
+assert 'game_xr->stale_eye_rig_target(other,target.Get(),tw,th,number,tv);' in probe and 'stale_layers_[eye]->rig_target=static_cast<bool>(stale_rig_target(eye).texture);' in xr
+assert 'd2vr::rig_target::book().publish(vp,e,frame);' in probe
+print('PASS: v1190 rig target routing (knob, E at Setup, replay, per-render hand-off to the stale eye)')

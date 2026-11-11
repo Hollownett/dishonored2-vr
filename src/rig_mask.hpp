@@ -98,6 +98,33 @@ public:
     // v1183, ObjectMotion: this depth-writing one-view draw is a held weapon / held prop (its model frame is a held thing's): replayed into
     // the rig target with the held flag (mask 253). Not for rig draws (they keep their own class).
     static void mark_held() noexcept {if(tl_depth_ && !tl_rig_) {tl_held_=true;held_draws_.fetch_add(1,std::memory_order_relaxed);}}
+    // v1190 rig target (rig_target.hpp, knob build/stale-eye-rig-target): each rig/held draw this mask replays is drawn once more, depth-only,
+    // into the STALE eye's target camera: ObjectMotion binds the draw's per-instance constants with its rows retargeted (target_bind) and
+    // restores them (target_restore). Target: R32G32_FLOAT at the scene depth's size (x = reverse-Z depth in the target camera, the engine's
+    // depth convention; y = class 255 rig / 253 held; 0 0 = none), its own D32 depth (GREATER: the nearest replayed draw wins). FsrTaa copies it
+    // out per render (take_target) and clears it.
+    inline static std::atomic<bool> target_on{false};
+    using TargetBind=bool (*)(ID3D11DeviceContext*) noexcept;using TargetRestore=void (*)(ID3D11DeviceContext*) noexcept;
+    inline static std::atomic<TargetBind> target_bind{};inline static std::atomic<TargetRestore> target_restore{};
+    static bool target_wanted() noexcept {return target_on.load(std::memory_order_relaxed) && tl_depth_ && (tl_rig_ || tl_held_);}
+    static bool draw_is_held() noexcept {return tl_held_;}
+    static void mark_target(bool ok) noexcept {tl_target_=ok;} // false: no retarget for this render (counted at the replay)
+    // FsrTaa's copy (immediate/job context of the render's TAA pass): the target of this scene depth copied into `out` (same size and format;
+    // created by the caller from target_desc) and cleared; true when this render replayed rig draws and none missed its retarget.
+    static bool target_desc(ID3D11Resource* depth,D3D11_TEXTURE2D_DESC& d) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!depth || target_.depth!=depth || !target_.trg) return false;
+        target_.trg->GetDesc(&d);return true;
+    }
+    static bool take_target(ID3D11DeviceContext* c,ID3D11Resource* depth,ID3D11Texture2D* out,std::uint64_t& draws) {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
+        {std::lock_guard<std::mutex> lock(mutex_);if(!depth || target_.depth!=depth || !target_.trg) return false;trg=target_.trg;rtv=target_.trg_rtv;dsv=target_.trg_dsv;}
+        draws=target_draws_frame_.exchange(0,std::memory_order_relaxed);target_draws_last_.store(draws,std::memory_order_relaxed);const auto misses=target_misses_frame_.exchange(0,std::memory_order_relaxed);
+        if(out) c->CopyResource(out,trg.Get());
+        const float zero[4]{};c->ClearRenderTargetView(rtv.Get(),zero);c->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0.f,0);
+        const bool valid=draws>0 && misses==0;(valid?target_valid_:target_invalid_).fetch_add(1,std::memory_order_relaxed);
+        return valid;
+    }
     // v1166, ObjectMotion at a rig draw (alternate): binds at the previous-palette slot (t0 in the prepass) this eye's own previous palette
     // (v1179: the model's ring P, see rig_ring_valid) when `rows_own` (the draw gets the eye's own previous rows) and the ring is valid, else
     // the current palette (zero motion; the caller then uses the current rows too). True: the own pair is in place; the mask replay of this
@@ -178,7 +205,8 @@ public:
          <<",\"distinct\":"<<foreign_distinct_.load()<<",\"draw_count\":"<<foreign_count_.load()<<",\"mod_ring\":"<<foreign_ours_.load()<<"}"
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"ring\":{\"rotations\":"<<rotations_.load()<<",\"restarts\":"<<ring_restarts_.load()
          <<",\"repeats\":"<<ring_repeats_.load()<<",\"late\":"<<ring_late_.load()<<",\"young\":"<<ring_young_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
-         <<",\"held_draws\":"<<held_draws_.load()<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
+         <<",\"held_draws\":"<<held_draws_.load()<<",\"target\":{\"on\":"<<(target_on.load()?"true":"false")<<",\"draws\":"<<target_draws_.load()
+         <<",\"misses\":"<<target_misses_.load()<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
         return o.str();
     }
@@ -187,7 +215,7 @@ public:
     class Scope {
     public:
         Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass=-1) noexcept {
-            tl_rig_=false;tl_own_=false;tl_held_=false;tl_depth_=false;tl_pass_=pass;
+            tl_rig_=false;tl_own_=false;tl_held_=false;tl_depth_=false;tl_target_=false;tl_pass_=pass;
             if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;
             view_draws_.fetch_add(1,std::memory_order_relaxed);
             ID3D11DepthStencilState* bound{};UINT ref{};c->OMGetDepthStencilState(&bound,&ref);
@@ -203,7 +231,7 @@ public:
             if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets);
             c_=nullptr;
         }
-        ~Scope() {restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        ~Scope() {restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_target_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
             c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
@@ -214,7 +242,11 @@ public:
         ID3D11DeviceContext* c_{};
     };
 private:
-    struct Target {ID3D11Resource* depth{};Microsoft::WRL::ComPtr<ID3D11Resource> hold;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;UINT w{},h{};};
+    struct Target {ID3D11Resource* depth{};Microsoft::WRL::ComPtr<ID3D11Resource> hold;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;UINT w{},h{};
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> trg_rtv;Microsoft::WRL::ComPtr<ID3D11DepthStencilView> trg_dsv;}; // v1190
+    inline static thread_local bool tl_target_{};
+    inline static std::atomic<std::uint64_t> target_draws_{},target_draws_frame_{},target_draws_last_{},target_misses_{},target_misses_frame_{},target_valid_{},target_invalid_{};
+    inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_target_rig_,ps_target_held_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> nearest_;
     struct Entry {std::atomic<ID3D11DepthStencilState*> key{};std::atomic<bool> used{};bool writes{};};
     static constexpr unsigned slots=1024;
     inline static std::array<Entry,slots> table_{};inline static std::atomic<int> default_writes_{1}; // a null state is the default: depth written
@@ -327,7 +359,7 @@ private:
     // Under mutex_: the shader and states (once), and the rig target for this depth resource (recreated on a new depth/size).
     static bool prepare(ID3D11Device* device,ID3D11Resource* depth,const D3D11_TEXTURE2D_DESC& dd,bool& created) {
         created=false;
-        if(device_!=device) {target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;} // a new device
+        if(device_!=device) {target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();ps_target_rig_.Reset();ps_target_held_.Reset();nearest_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;} // a new device
         if(!made_ && !make_failed_) {
             // v1179: y = 1 when the draw had this eye's own previous palette and rows (its MV pixels are own motion), else 0
             static const char src[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,0);}";
@@ -343,6 +375,16 @@ private:
                 FAILED(D3DCompile(src_held,sizeof src_held-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code_held,nullptr)) ||
                 FAILED(device->CreatePixelShader(code_held->GetBufferPointer(),code_held->GetBufferSize(),nullptr,&ps_held_)) ||
                 FAILED(device->CreateDepthStencilState(&ds,&equal_)) || FAILED(device->CreateBlendState(&bs,&blend_));
+            if(!make_failed_) { // v1190: the rig target's shaders and nearest-wins depth state
+                static const char src_tr[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,255);}";
+                static const char src_th[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,253);}";
+                Microsoft::WRL::ComPtr<ID3DBlob> a,b;D3D11_DEPTH_STENCIL_DESC nd{};nd.DepthEnable=TRUE;nd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;nd.DepthFunc=D3D11_COMPARISON_GREATER;
+                make_failed_=FAILED(D3DCompile(src_tr,sizeof src_tr-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&a,nullptr)) ||
+                    FAILED(device->CreatePixelShader(a->GetBufferPointer(),a->GetBufferSize(),nullptr,&ps_target_rig_)) ||
+                    FAILED(D3DCompile(src_th,sizeof src_th-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&b,nullptr)) ||
+                    FAILED(device->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&ps_target_held_)) ||
+                    FAILED(device->CreateDepthStencilState(&nd,&nearest_));
+            }
             made_=!make_failed_;
         }
         if(!made_) return false;
@@ -353,6 +395,11 @@ private:
         Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;Target n{};
         if(FAILED(device->CreateTexture2D(&t,nullptr,&tex)) || FAILED(device->CreateRenderTargetView(tex.Get(),nullptr,&n.rtv)) ||
            FAILED(device->CreateShaderResourceView(tex.Get(),nullptr,&n.srv))) return false;
+        { // v1190: the rig target and its own depth (same size)
+            if(FAILED(device->CreateTexture2D(&t,nullptr,&n.trg)) || FAILED(device->CreateRenderTargetView(n.trg.Get(),nullptr,&n.trg_rtv))) return false;
+            D3D11_TEXTURE2D_DESC z=t;z.Format=DXGI_FORMAT_D32_FLOAT;z.BindFlags=D3D11_BIND_DEPTH_STENCIL;Microsoft::WRL::ComPtr<ID3D11Texture2D> zt;
+            if(FAILED(device->CreateTexture2D(&z,nullptr,&zt)) || FAILED(device->CreateDepthStencilView(zt.Get(),nullptr,&n.trg_dsv))) return false;
+        }
         n.depth=depth;n.hold=depth;n.w=dd.Width;n.h=dd.Height;target_=n;created=true;
         return true;
     }
@@ -362,6 +409,7 @@ private:
         const auto release_targets=[&] {for(auto* r:rtvs) if(r) r->Release();if(dsv) dsv->Release();};
         if(!dsv) {no_dsv_.fetch_add(1,std::memory_order_relaxed);release_targets();return;}
         ID3D11RenderTargetView* rig{};Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal;Microsoft::WRL::ComPtr<ID3D11BlendState> opaque; // held: a reset cannot free them mid-replay
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> trg_rtv;Microsoft::WRL::ComPtr<ID3D11DepthStencilView> trg_dsv;Microsoft::WRL::ComPtr<ID3D11PixelShader> trg_ps;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> nearest; // v1190
         {
             ID3D11Resource* depth{};dsv->GetResource(&depth);
             D3D11_TEXTURE2D_DESC dd{};ID3D11Texture2D* dt{};
@@ -371,10 +419,11 @@ private:
                 ID3D11Device* device{};c->GetDevice(&device);bool created=false;
                 try {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if(device && dd.Width && prepare(device,depth,dd,created)) {rig=target_.rtv.Get();rig->AddRef();ps=tl_held_?ps_held_:tl_own_?ps_own_:ps_;equal=equal_;opaque=blend_;}
+                    if(device && dd.Width && prepare(device,depth,dd,created)) {rig=target_.rtv.Get();rig->AddRef();ps=tl_held_?ps_held_:tl_own_?ps_own_:ps_;equal=equal_;opaque=blend_;
+                        trg_rtv=target_.trg_rtv;trg_dsv=target_.trg_dsv;trg_ps=tl_held_?ps_target_held_:ps_target_rig_;nearest=nearest_;}
                 } catch(...) {}
                 if(device) device->Release();
-                if(rig && created) {const float zero[4]{};c->ClearRenderTargetView(rig,zero);}
+                if(rig && created) {const float zero[4]{};c->ClearRenderTargetView(rig,zero);c->ClearRenderTargetView(trg_rtv.Get(),zero);c->ClearDepthStencilView(trg_dsv.Get(),D3D11_CLEAR_DEPTH,0.f,0);}
                 if(!rig) failures_.fetch_add(1,std::memory_order_relaxed);
             }
             if(depth) depth->Release();
@@ -387,6 +436,16 @@ private:
         targets(c,1,&rig,dsv);
         c->PSSetShader(ps.Get(),nullptr,0);c->OMSetDepthStencilState(equal.Get(),0);c->OMSetBlendState(opaque.Get(),nullptr,0xffffffff);
         draw(c,a);
+        // v1190: the same draw in the stale eye's target camera (retargeted per-instance rows), nearest wins among the replayed draws
+        if(tl_target_ && trg_rtv && trg_dsv) {
+            const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);
+            ID3D11RenderTargetView* t=trg_rtv.Get();
+            if(bind && restore && bind(c)) {
+                targets(c,1,&t,trg_dsv.Get());c->PSSetShader(trg_ps.Get(),nullptr,0);c->OMSetDepthStencilState(nearest.Get(),0);
+                draw(c,a);restore(c);
+                target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);
+            } else {target_misses_.fetch_add(1,std::memory_order_relaxed);target_misses_frame_.fetch_add(1,std::memory_order_relaxed);}
+        } else if(target_on.load(std::memory_order_relaxed) && !tl_target_) target_misses_frame_.fetch_add(1,std::memory_order_relaxed); // a rig/held draw without its retarget
         targets(c,rtv_count,rtvs.data(),dsv); // the engine's exact set again; the rig target is unbound
         c->PSSetShader(engine_ps,class_count?classes.data():nullptr,class_count);c->OMSetDepthStencilState(dss,ref);c->OMSetBlendState(blend,factor,mask);
         if(engine_ps) engine_ps->Release();
