@@ -173,7 +173,7 @@ struct StaleLayers {
     double fresh_part{.5},kept_part{.5};
     // v1167: the eye images' non-scene band at their right and bottom edges, fractions of the image (measured: up to 46 px of 2496 x 2688;
     // the caller may pass the exact one)
-    std::array<double,2> border{.019,.018};
+    std::array<double,2> border{.0045,.0042}; // v1174: the narrow band (8-11 px), measured; wider (36-46 px) when the caller says so
     // v1167: rig pixels by their own motion where both renders' rig motion is valid (rig_motion: kept, fresh); rig_motion_rules false
     // (knob no-stale-eye-rig-motion) keeps the hand and carried layers. Not used by the pass yet.
     bool rig_motion_rules{true};
@@ -873,14 +873,16 @@ float4 FreshOnly(float3 t) {
     return Smooth(freshTex,clamp(g,size.zw,validRect.zw-size.zw));
 }
 float4 WarpPS(Vertex v) : SV_TARGET {
-    const float3 t=float3(v.uv,1);
     if(depthMap.w<=0) {
-        const float3 s=float3(dot(row0.xyz,t),dot(row1.xyz,t),dot(row2.xyz,t));
+        const float3 t0=float3(v.uv,1);
+        const float3 s=float3(dot(row0.xyz,t0),dot(row1.xyz,t0),dot(row2.xyz,t0));
         if(s.z<=1e-6) return float4(0,0,0,1);
         return Smooth(sourceTex,s.xy/s.z);
     }
+    // v1174 (headset v1173: artifacts at the view's edges in turns): a pixel in the image's own band is rebuilt like the rest, as the ray at
+    // the valid rectangle's inner edge (the last valid column and row replicated outward), not this eye's frozen kept pixel
+    const float3 t=float3(min(v.uv,validRect.xy),1);
     if(frameMap.x>0) return FreshOnly(t);                         // v1171: a camera cut: the fresh eye alone, the band too
-    if(any(v.uv>validRect.xy)) return Smooth(sourceTex,v.uv); // v1167: the image's own band keeps what this eye's frames have there
     float kept_k;bool kept_ok;
     const float2 q=Solve(scene,depthTex,depthSize.xy,depthMap.xy,t,0,kept_k,kept_ok);
     const bool kept_in=kept_k>=0 && InKept(q);
@@ -899,6 +901,9 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         if(nh>0 && InFresh(p) && !FreshRig(p)) {fresh_scenery=true;f=p;}
         else if(nh==0) {bool ok;float kf;f=Solve(fresh,freshDepthTex,depthSize.zw,freshMap.xy,t,0,kf,ok);fresh_scenery=ok && kf>0 && InFresh(f);}
         if(fresh_scenery && kept_in && KeptMovingHand(q)) return Smooth(freshTex,f);
+        // v1174 (headset v1173: moving hands near the view's edge): a moving hand's kept rig pixel at a spot outside the fresh eye's view
+        // shows in place (this eye's own pixel a tick old), not moved by the recorded grip
+        if(kept_in && kept_ok && KeptRig(q) && MovingHandAt(KeptPoint(q))!=0) {float2 cp;if(Confirm(t,kept_k,cp)==2) return Smooth(sourceTex,q);}
     }
     // v810 (headset v809, see StaleLayers): this eye's own kept image wherever one of the motions explains it. Each layer gives its kept
     // pixel for this ray; the fresh eye, which sees this moment, confirms or refutes the surface there; the nearest confirmed one shows
@@ -989,7 +994,10 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     if(kept_in) return Smooth(sourceTex,q);                                             // v810: never the fresh image's clamped edge (stretched)
     // v1166 (v1165 hold dump 2, a camera cut: the kept view barely overlapped and NearHit's edge point lay outside the fresh image): black
     // only where the fresh eye has no point on the ray either
-    return k>0 && InFresh(f)?Smooth(freshTex,f):float4(0,0,0,1);
+    if(k>0 && InFresh(f)) return Smooth(freshTex,f);
+    // v1174: never black: the nearest valid fresh pixel to the ray's far point (as on a cut)
+    const float3 sf=float3(dot(fresh[0].xyz,t),dot(fresh[1].xyz,t),dot(fresh[2].xyz,t));
+    return Smooth(freshTex,clamp(sf.z>1e-6?sf.xy/sf.z:t.xy,size.zw,validRect.zw-size.zw));
 }
 )HLSL";
         auto v=compile(source,"WarpVS","vs_5_0"),p=compile(source,"WarpPS","ps_5_0");

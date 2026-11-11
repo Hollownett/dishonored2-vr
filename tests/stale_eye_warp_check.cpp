@@ -11,6 +11,14 @@
 #pragma comment(lib,"d3d11.lib")
 #pragma comment(lib,"d3dcompiler.lib")
 using namespace d2vr;
+// v1174: the lab's synthetic images have no bright edge band (their last rows and columns are scene): every case sees band-less layers;
+// a case that models the band sets its own (r9)
+template<class... A> static std::optional<StaleLayers> lab_layers(A&&... a) {
+    auto l = d2vr::stale_eye_layers(std::forward<A>(a)...);
+    if (l) l->border = {0, 0};
+    return l;
+}
+#define stale_eye_layers lab_layers
 using Microsoft::WRL::ComPtr;
 #define CHECK(x) do { if(!(x)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); std::exit(1); } } while(0)
 
@@ -986,6 +994,17 @@ static void gpu_rig() {
                     over, n_over, hand_missing, n_hand, scenery, n_scenery);
         CHECK(n_over >= 3 && over == 0 && hand_missing == 0 && n_scenery > 40 && scenery == 0);
     }
+    // r11. (v1174, headset v1173: moving hands near the view's edge) canted eyes as in r7: the right hand at the rebuilt eye's outer edge,
+    // where the fresh eye has no view, drawn 2.5 cm further out, its recorded grip 5 cm: its kept pixels in place, not shifted by the grip
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = 0.78; fresh.hand = now.hand = 0.805; kept.yaw = now.yaw = -0.25; fresh.yaw = 0.25; fresh.lift = 30;
+        const Frame k = render(0.032, kept), f = render(-0.032, fresh);
+        const auto out = row(k, f, layers_for(0.78, 0.83, std::nan(""), -0.25, 0.25), true);
+        int n = 0, moved = 0;
+        for (int x = W - 60; x < static_cast<int>(W) - 2; ++x) if (k.kind[(H / 2) * W + x] == hand_kind) {++n; moved += std::abs(out[x] - k.row[x]) > 2;}
+        std::printf("r11. moving hand outside the fresh view: %d of %d kept hand columns not shown in place\n", moved, n);
+        CHECK(n > 10 && moved == 0);
+    }
     // r7. the view corner (canted eyes turned 14 degrees apart each way): the right hand and its stick at the right edge of the rebuilt
     // eye, 3 cm further out now, where the fresh eye has no view. No black or white there, and this eye's own rig where it was.
     {
@@ -999,7 +1018,7 @@ static void gpu_rig() {
             for (int x = W - 60; x < static_cast<int>(W); ++x) {
                 const int kind = truth.kind[(H / 2) * W + x];
                 if (kind == wall_kind || kind == prop_kind) continue;
-                ++rig; black += out[x] < 10; white += out[x] > 250 && truth.row[x] < 250; off_truth += !near_truth(out, truth, x);
+                ++rig; black += out[x] < 10; white += out[x] > 250 && truth.row[x] < 250 && k.row[x] < 250;  // v1174: not the hand's own white line where it was (B: shown in place) off_truth += !near_truth(out, truth, x);
                 if (!near_truth(out, truth, x)) std::printf("   column %d: %d (truth %d, kept %d)\n", x, out[x], truth.row[x], k.row[x]);
             }
             std::printf("r7. rig at the view corner, %s: %d rig columns, %d black, %d white, %d off the truth\n", masks ? "masks" : "sphere", rig, black, white, off_truth);
