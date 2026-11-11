@@ -1399,6 +1399,7 @@ static struct AltMotionTimes {
     double kept_part(UINT64 n) const noexcept {return part(n,0,1,1,3);}
 } alt_motion_times;
 static bool stale_eye_motion_knob=true; // v1151: build/no-stale-eye-motion = no motion textures, no mover rules, no alternate object-motion fix
+static bool stale_eye_rig_knob=true; // v1162: build/no-stale-eye-rig = no rig stencil marking or detection, raw stencil copies, no masks to the warp
 static std::atomic<unsigned> alt_motion_left{0},alt_motion_burst{0},alt_motion_index{0};
 static unsigned alt_motion_bursts=6,alt_motion_size=8,alt_motion_interval_s=10;static UINT64 alt_motion_next_tick=0;
 static void alt_motion_snapshot_json(std::ostream& o,const d2vr::alternate_taa::Snapshot& s) {
@@ -2832,6 +2833,7 @@ static inline void visibility_stamp_before(ID3D11DeviceContext* context) noexcep
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);d2vr::spyglass_art_probe().observe(context,count,true);
     if(skip_letterbox_draw(context,count)) return;
+    const d2vr::RigStencil::Scope rig_stencil(context,d2vr::RenderPassMap::current_view()); // v1162: before the note's skin swap
     NativeNoteDraw note(context,count,1,start,base);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
@@ -2839,6 +2841,7 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
 }
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
+    const d2vr::RigStencil::Scope rig_stencil(context,d2vr::RenderPassMap::current_view()); // v1162
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
@@ -2846,11 +2849,13 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
 }
 template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UINT count,UINT start) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_vertices",count,1,true);d2vr::spyglass_art_probe().observe(context,count,false);
+    const d2vr::RigStencil::Scope rig_stencil(context,d2vr::RenderPassMap::current_view()); // v1162
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawFn>(gpu_bindings.original(5,Binding))(context,count,start);
 }
 template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,UINT first) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_instanced_vertices",count,instances,true);
+    const d2vr::RigStencil::Scope rig_stencil(context,d2vr::RenderPassMap::current_view()); // v1162
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
 }
@@ -3347,6 +3352,18 @@ static bool image_skin_commit(void* model) noexcept {
         reinterpret_cast<void(__fastcall*)(void*,const float*)>(image_base+0x25f200)(model,packed.data());
         ++image_skin_writes[slot];return true;
     } catch(...) {return false;}
+}
+// v1162: the skin-palette buffers of the rig's skinned models (both arms, the full-body avatar: the models the arm upload hook names), both
+// wrappers each (+0x2008 / +0x2040; native_skin_buffers checks the model is skinned with that joint count), for RigStencil's draw match.
+static void publish_rig_buffers() noexcept {
+    std::array<std::uintptr_t,d2vr::RigStencil::buffer_slots> buffers{};
+    try {
+        auto reader=&read_self;
+        for(unsigned i=0;i<3;++i) if(const auto m=image_skin_slots[i].model.load(std::memory_order_relaxed))
+            if(d2vr::rig::native_skin_buffers(reader,m,i<2?69u:20u)) for(unsigned w=0;w<2;++w)
+                if(const auto b=d2vr::rig::value<std::uintptr_t>(reader,m+0x2008+w*0x38ull);b && d2vr::rig::pointer(*b)) buffers[i*2+w]=*b;
+    } catch(...) {buffers={};}
+    d2vr::RigStencil::publish(buffers);
 }
 // Each hand's held weapon render model (inventory body+0x60, hand slots +0x68 right / +0x70 left, item+8 entity id, entity table
 // game+0x3130b0, render model entity+0xf0; its frame at model+0x1860: origin + forward/left/up rows). 0 for an empty or unreadable slot.
@@ -6055,6 +6072,7 @@ void observe_eye_setup(void* view) noexcept {
             d2vr::ObjectMotion::note_eye_view(static_cast<unsigned>(eye),mono || alternate_on()?0:address); // paired eyes only
             if(mono || alternate_on()) d2vr::ObjectMotion::note_eye_view(static_cast<unsigned>(eye)^1u,0); // v1153: no stale paired view of the other slot
             d2vr::ObjectMotion::note_alternate_view(alternate_on() && mono && stale_eye_motion_knob?address:0); // v1151: alternate one-view frames
+            d2vr::RigStencil::view=alternate_on() && mono && stale_eye_rig_knob?address:0; // v1162: the passes of this view are marked
             if(mono) d2vr::PostTonemapPass::eye_views[1]=0; // no second view: nothing may name eye 1
         }
         std::lock_guard<std::mutex> lock(log_mutex);
@@ -10326,6 +10344,9 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"stencil_plane\":[" << fsr_taa.stencil_format.load() << ',' << fsr_taa.rig_copies.load() << ']'
+               << ",\"rig_mask\":" << d2vr::RigStencil::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << ']' // v1162
+               << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load()
+               << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
                << ",\"object_motion\":" << d2vr::ObjectMotion::alternate_status_json()
                << ",\"taa_plan_cancels\":" << alternate_taa_plan_cancels.load() << ",\"taa_failure_site\":" << alternate_taa_runtime.failure_site.load()
@@ -10819,6 +10840,7 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
                 <<"],\"shadow_share\":"<<(shadow_share.enabled()?"true":"false")<<",\"shadow_slicing_cvars\":"<<(shadow_slicing_cvars?"true":"false");
         }
         meta<<",\"fresh_part\":"<<layers.fresh_part<<",\"kept_part\":"<<layers.kept_part<<",\"motion_rules\":"<<(layers.motion_rules?"true":"false"); // v1151
+        meta<<",\"rig_mask\":["<<(game_xr->stale_rig_mask(eye).texture?"true":"false")<<','<<(game_xr->stale_rig_mask(static_cast<UINT>(game_xr->alternate_fresh_eye)).texture?"true":"false")<<']'; // v1162: -kept-rig/-fresh-rig are marked masks (255 = rig), else raw stencil
         meta<<",\"start\":["<<layers.start[0]<<','<<layers.start[1]<<','<<layers.start[2]<<']';
         meta<<",\"palms\":["; // v811: each drawn palm in the kept camera and the reach it owns
         for(unsigned side=0;side<2;++side) {const auto& p=layers.palms[side];meta<<(side?",":"")<<'['<<p[0]<<','<<p[1]<<','<<p[2]<<','<<p[3]<<']';}
@@ -11792,8 +11814,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             for(const UINT motion_eye:{other,static_cast<UINT>(alt_fresh)}) {
                                 UINT motion_w{},motion_h{};const auto motion=stale_eye_motion_knob?fsr_taa.eye_motion(static_cast<int>(motion_eye),motion_w,motion_h):nullptr;
                                 game_xr->stale_eye_motion(motion_eye,motion.Get(),motion_w,motion_h,number);
-                                UINT rig_w{},rig_h{};const auto rig=fsr_taa.eye_rig(static_cast<int>(motion_eye),rig_w,rig_h); // v1160: the stencil plane
-                                game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number);
+                                UINT rig_w{},rig_h{};bool rig_live{};const auto rig=fsr_taa.eye_rig(static_cast<int>(motion_eye),rig_w,rig_h,&rig_live); // v1160: the stencil plane
+                                game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob); // v1162: a marked mask
                             }
                             game_xr->stale_motion_rules=stale_eye_motion_knob;
                             alt_motion_times.note(number,alt_fresh);
@@ -11873,6 +11895,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         }
                         alt_motion_probe_arm(gameplay); // diagnostic (build/alt-motion-probe): perf-mode motion Phase 0 bursts
                         if(!alternate_on() || !stale_eye_motion_knob) d2vr::ObjectMotion::note_alternate_view(0); // v1153: Setup's early returns cannot leave it set
+                        { // v1162: the rig stencil mask (performance mode only; build/no-stale-eye-rig: inert)
+                            const bool rig_on=alternate_on() && stale_eye_rig_knob;
+                            if(!rig_on) d2vr::RigStencil::view=0;
+                            d2vr::RigStencil::enabled=rig_on;if(game_xr) game_xr->stale_rig_masks=rig_on;
+                            if(rig_on) publish_rig_buffers();
+                            d2vr::RigStencil::present(gameplay);
+                            if(rig_on) if(auto* rig_device=gpu_game_device.load()) {ComPtr<ID3D11DeviceContext> immediate;rig_device->GetImmediateContext(&immediate);fsr_taa.poll_rig_pixels(immediate.Get());}
+                        }
                         if(!cached_output_frame_ready) {completed_left.Reset();completed_right.Reset();}
                         // Do not hold the GPU-observer lock across OpenXR calls.
                         // VDXR dispatches D3D11 work on its own thread and waits
@@ -15246,6 +15276,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose
             stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion"); // v1151: motion textures + mover rules (design 2026-11-11)
+            stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig"); // v1162: the player-rig stencil mask (rig_stencil.hpp)
             stale_eye_parallax_knob=!fs::exists(root/L"build"/L"no-stale-eye-parallax"); // v796: and its world pixels with parallax (walking)
             stale_near_range=d2vr::near_range_default; // v798: near content from the fresh eye within this many metres (0: off)
             {std::ifstream knob(root/L"build"/L"stale-near-range");double metres{};if(knob>>metres && metres>=0 && metres<=20) stale_near_range=metres;}

@@ -421,7 +421,7 @@ private:
     std::array<std::uint64_t,2> stale_motion_frame_{};
     // v1160: each eye's stencil plane of its last render (FsrTaa::eye_rig), handed in like the motion textures; not yet read by the warp
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_rig_{};std::array<UINT,2> stale_rig_width_{},stale_rig_height_{};
-    std::array<std::uint64_t,2> stale_rig_frame_{};
+    std::array<std::uint64_t,2> stale_rig_frame_{};std::array<bool,2> stale_rig_live_{}; // v1162: the texture is a marked rig mask (rig_stencil.hpp)
     std::array<std::optional<StaleLayers>,2> stale_layers_{}; // v797: scene, player and hand layers of each eye's last warp
     bool stale_warped_(UINT eye) const noexcept {return eye<2 && alternate_frame && stale_warped_frame_[eye]==alternate_frame;}
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
@@ -1955,9 +1955,15 @@ public:
     void stale_eye_motion(UINT eye,ID3D11Texture2D* motion,UINT width,UINT height,std::uint64_t frame) noexcept {
         if(eye<2) {stale_motion_[eye]=motion;stale_motion_width_[eye]=width;stale_motion_height_[eye]=height;stale_motion_frame_[eye]=motion?frame:0;}
     }
-    void stale_eye_rig(UINT eye,ID3D11Texture2D* rig,UINT width,UINT height,std::uint64_t frame) noexcept { // v1160
-        if(eye<2) {stale_rig_[eye]=rig;stale_rig_width_[eye]=width;stale_rig_height_[eye]=height;stale_rig_frame_[eye]=rig?frame:0;}
+    void stale_eye_rig(UINT eye,ID3D11Texture2D* rig,UINT width,UINT height,std::uint64_t frame,bool live=false) noexcept { // v1160; v1162 live
+        if(eye<2) {stale_rig_[eye]=rig;stale_rig_width_[eye]=width;stale_rig_height_[eye]=height;stale_rig_frame_[eye]=rig?frame:0;stale_rig_live_[eye]=rig && live;}
     }
+    // v1162: the warp takes the rig masks only when both renders' masks are marked ones of this Present (knob build/no-stale-eye-rig: never)
+    StaleRig stale_rig_mask(UINT eye) const noexcept {
+        if(!stale_rig_masks || eye>1 || !stale_rig_live_[eye] || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};
+        return {stale_rig_[eye].Get(),stale_rig_width_[eye],stale_rig_height_[eye]};
+    }
+    bool stale_rig_masks=true;std::uint64_t stale_rig_warps=0,stale_rig_one_sided=0; // v1162: warps given both masks; warps with only one live
     StaleDepth stale_rig(UINT eye) const noexcept { // v1160: this Present's (R8_UINT raw stencil), else none
         if(eye>1 || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};
         return {stale_rig_[eye].Get(),stale_rig_width_[eye],stale_rig_height_[eye]};
@@ -2840,7 +2846,11 @@ public:
                         ID3D11Texture2D* const fresh_image=fresh_now?alt_kept_[fresh_eye].Get():nullptr;
                         // v1151: the kept frame's motion and the fresh frame's (both, or the mover rules stay off)
                         const StaleMotion kept_motion=stale_motion(eye),fresh_motion=fresh_now?stale_motion(fresh_eye):StaleMotion{};
-                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion):stale_warp_->apply(processed,*h);
+                        // v1162: both rig masks (marked renders of this Present), else none: the warp keeps its palm-sphere ownership
+                        StaleRig kept_rig=stale_rig_mask(eye),fresh_rig=fresh_now?stale_rig_mask(fresh_eye):StaleRig{};
+                        if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fresh_rig.texture) ++stale_rig_one_sided;kept_rig={};fresh_rig={};}
+                        else if(stale_layers_[eye]) ++stale_rig_warps;
+                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion,kept_rig,fresh_rig):stale_warp_->apply(processed,*h);
                         if(stale_warp_->parallax_passes==parallax_before) stale_layers_[eye].reset(); // depth refused: rotation only, the reticle too
                         if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
                         stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;

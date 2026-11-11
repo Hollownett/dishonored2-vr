@@ -80,15 +80,33 @@ public:
     }
     std::atomic<std::uint64_t> rig_copies{};std::atomic<UINT> stencil_format{}; // v1160: stencil plane copies; the stencil view format (0 = none)
     // v1160: the stencil plane of `eye`'s last render (R8_UINT raw stencil, its render rectangle at the top left, like eye_depth); empty without one
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_rig(int eye,UINT& width,UINT& height) {
+    // v1162: `live` = that render was marked (rig_stencil.hpp): the texture is then the rig mask (255 = rig, 0 = not), else the raw stencil
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_rig(int eye,UINT& width,UINT& height,bool* live=nullptr) {
         std::lock_guard<std::mutex> lock(mutex_);
-        width=height=0;
+        width=height=0;if(live) *live=false;
         if((eye!=0 && eye!=1) || !enabled.load() || !ready.load()) return {};
         const auto& e=(*eyes_)[static_cast<std::size_t>(eye)];
         if(!e.rig_valid || !e.rig.p) return {};
-        width=e.depth_w;height=e.depth_h;
+        width=e.depth_w;height=e.depth_h;if(live) *live=e.rig_live;
         return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.rig.p);
     }
+    // v1162: rig mask pixels of each eye's last counted mask (read back a few renders late, -1 none yet), renders with a live mask
+    std::array<std::atomic<std::int64_t>,2> rig_pixels{-1,-1};std::atomic<std::uint64_t> rig_live_renders{};
+    // Present thread, immediate context: picks up finished mask counts (never waits for the GPU).
+    void poll_rig_pixels(ID3D11DeviceContext* immediate) noexcept {
+        if(!immediate) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(unsigned eye=0;eye<2;++eye) {
+            auto& e=(*eyes_)[eye];
+            if(e.rig_count_serial<3 || e.rig_read_serial>=e.rig_count_serial-2) continue;
+            const auto serial=e.rig_count_serial-2;auto& staging=e.rig_count_staging[(serial-1)%e.rig_count_staging.size()];
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if(!staging.p || FAILED(immediate->Map(staging.p,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m)) || !m.pData) continue;
+            std::uint32_t n{};std::memcpy(&n,m.pData,4);immediate->Unmap(staging.p,0);
+            rig_pixels[eye].store(n,std::memory_order_relaxed);e.rig_read_serial=serial;
+        }
+    }
+    std::atomic<std::uint64_t> motion_rig_masks{}; // v1162: motion passes that used the rig mask for the arm rule
     std::atomic<std::uint64_t> motion_passes{},motion_refused{},motion_srv_misses{},motion_other_tests{},motion_no_other{}; // v1154: passes with the other-eye still test; v1158: renders without it (no texture) // v1151: motion textures written; renders with a receipt that made none
     // Perf-mode motion Phase 0 (dxgi_probe knob build/alt-motion-probe, diagnostics only): handed to replace() by the TAA dispatch it
     // belongs to; that eye's next FSR/DLSS dispatch writes <stem>-mv.rg16f (raw engine motion vectors), <stem>-depth.r32 (the Eye::depth
@@ -110,6 +128,9 @@ private:
         Ref<ID3D11Texture2D> motion;Ref<ID3D11UnorderedAccessView> motion_uav;Ref<ID3D11ShaderResourceView> depth_srv,mv_srv;ID3D11Resource* mv_key{};
         // v1160: the scene depth's stencil plane of this render (R8_UINT, render rectangle, raw values; eye_rig), when the depth is typeless
         Ref<ID3D11Texture2D> rig;Ref<ID3D11UnorderedAccessView> rig_uav;bool rig_valid{};
+        // v1162: the mask read view (motion pass), whether the last copy was a marked mask, its pixel counter and read-back ring
+        Ref<ID3D11ShaderResourceView> rig_srv;bool rig_live{};Ref<ID3D11Buffer> rig_count;Ref<ID3D11UnorderedAccessView> rig_count_uav;
+        std::array<Ref<ID3D11Buffer>,4> rig_count_staging{};std::uint64_t rig_count_serial{},rig_read_serial{};
         UINT motion_w{},motion_h{};bool motion_valid{};
         // v1107: FSR 4 runs on this display box only (fsr4 created at the box size); FSR 3 upscales the whole eye underneath.
         bool fovea=false;fovea::Axis fovea_x,fovea_y;
@@ -147,6 +168,7 @@ private:
     std::unique_ptr<std::array<Eye,2>> eyes_{std::make_unique<std::array<Eye,2>>()};
     Ref<ID3D11ComputeShader> copy_;Ref<ID3D11Resource> depth_resource_;Ref<ID3D11ShaderResourceView> depth_view_;
     Ref<ID3D11ComputeShader> stencil_copy_;Ref<ID3D11ShaderResourceView> stencil_view_; // v1160: the depth's G8 stencil view (none: no stencil plane readable)
+    Ref<ID3D11Buffer> stencil_cb_; // v1162: the copy's mode (bit, mask on, rectangle)
     UINT ready_w_{},ready_h_{},render_w_{},render_h_{},context_w_{},context_h_{};float ready_fraction_{1}; // context_*: max render size the FSR contexts/inputs were built for
     DXGI_FORMAT ready_native_format_{DXGI_FORMAT_UNKNOWN};
     std::array<Ref<ID3D11Resource>,2> motion_{}; // upscale mode: this frame's motion vectors per eye (from the TAA dispatch)
@@ -725,7 +747,7 @@ public:
                 e.timer.clear();
                 e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();
                 e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.motion_valid=false;e.motion_w=e.motion_h=0; // v1153
-                e.rig.reset();e.rig_uav.reset();e.rig_valid=false; // v1160
+                e.rig.reset();e.rig_uav.reset();e.rig_valid=false;e.rig_srv.reset();e.rig_live=false;e.rig_count.reset();e.rig_count_uav.reset();for(auto& s:e.rig_count_staging) s.reset(); // v1160
                 e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
                 D3D11_TEXTURE2D_DESC d{};d.Width=cw;d.Height=ch;d.MipLevels=1;d.ArraySize=1;d.Format=DXGI_FORMAT_R32_FLOAT;d.SampleDesc.Count=1;
                 d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
@@ -743,11 +765,35 @@ public:
                     D3D11_TEXTURE2D_DESC m=d;m.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;ID3D11Texture2D* mt{};ID3D11UnorderedAccessView* mu{};ID3D11ShaderResourceView* ds{};
                     if(SUCCEEDED(device->CreateTexture2D(&m,nullptr,&mt))) {e.motion.adopt(mt);if(SUCCEEDED(device->CreateUnorderedAccessView(mt,nullptr,&mu))) e.motion_uav.adopt(mu);}
                     if(SUCCEEDED(device->CreateShaderResourceView(e.depth.p,nullptr,&ds))) e.depth_srv.adopt(ds);
-                    D3D11_TEXTURE2D_DESC r8=d;r8.Format=DXGI_FORMAT_R8_UINT;ID3D11Texture2D* rt{};ID3D11UnorderedAccessView* ru{}; // v1160: Eye::rig
-                    if(SUCCEEDED(device->CreateTexture2D(&r8,nullptr,&rt))) {e.rig.adopt(rt);if(SUCCEEDED(device->CreateUnorderedAccessView(rt,nullptr,&ru))) e.rig_uav.adopt(ru);}
+                    // v1160: Eye::rig. v1162: R8_TYPELESS (written as R8_UINT): the warp reads it as R8_UNORM (StaleRig), the motion pass as R8_UINT
+                    D3D11_TEXTURE2D_DESC r8=d;r8.Format=DXGI_FORMAT_R8_TYPELESS;ID3D11Texture2D* rt{};ID3D11UnorderedAccessView* ru{};
+                    D3D11_UNORDERED_ACCESS_VIEW_DESC r8u{};r8u.Format=DXGI_FORMAT_R8_UINT;r8u.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2D;
+                    if(SUCCEEDED(device->CreateTexture2D(&r8,nullptr,&rt))) {e.rig.adopt(rt);if(SUCCEEDED(device->CreateUnorderedAccessView(rt,&r8u,&ru))) e.rig_uav.adopt(ru);}
+                    { // v1162: its read view and the mask pixel counter (16-byte raw buffer, cleared per copy) with a 4-deep read-back ring
+                        D3D11_SHADER_RESOURCE_VIEW_DESC r8s{};r8s.Format=DXGI_FORMAT_R8_UINT;r8s.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;r8s.Texture2D.MipLevels=1;
+                        ID3D11ShaderResourceView* rs{};if(e.rig.p && SUCCEEDED(device->CreateShaderResourceView(e.rig.p,&r8s,&rs))) e.rig_srv.adopt(rs);
+                        D3D11_BUFFER_DESC cd{};cd.ByteWidth=16;cd.Usage=D3D11_USAGE_DEFAULT;cd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;cd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+                        ID3D11Buffer* cb{};ID3D11UnorderedAccessView* cu{};
+                        if(SUCCEEDED(device->CreateBuffer(&cd,nullptr,&cb))) {
+                            e.rig_count.adopt(cb);
+                            D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=DXGI_FORMAT_R32_TYPELESS;ud.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;ud.Buffer.NumElements=4;ud.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+                            if(SUCCEEDED(device->CreateUnorderedAccessView(cb,&ud,&cu))) e.rig_count_uav.adopt(cu);
+                        }
+                        D3D11_BUFFER_DESC sd2{};sd2.ByteWidth=16;sd2.Usage=D3D11_USAGE_STAGING;sd2.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                        for(auto& s:e.rig_count_staging) {ID3D11Buffer* sb{};if(SUCCEEDED(device->CreateBuffer(&sd2,nullptr,&sb))) s.adopt(sb);}
+                        e.rig_count_serial=e.rig_read_serial=0;e.rig_live=false;
+                    }
+                    if(!stencil_cb_.p) {D3D11_BUFFER_DESC kd{};kd.ByteWidth=16;kd.Usage=D3D11_USAGE_DEFAULT;kd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ID3D11Buffer* kb{};if(SUCCEEDED(device->CreateBuffer(&kd,nullptr,&kb))) stencil_cb_.adopt(kb);}
                     if(!stencil_copy_.p) {
-                        static const char src[]="Texture2D<uint2> s:register(t0);RWTexture2D<uint> o:register(u0);"
-                            "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID){o[i.xy]=s.Load(int3(i.xy,0)).g;}";
+                        // k.y = 0: the raw stencil value (v1160). k.y = 1 (a marked render): 255 where the stencil has bit k.x and the depth was
+                        // written (a stencil plane that is not cleared keeps old bits only under the sky), else 0; counted inside the rectangle k.zw.
+                        static const char src[]="Texture2D<uint2> s:register(t0);Texture2D<float> z:register(t1);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
+                            "cbuffer C:register(b0){uint4 k;};groupshared uint g;"
+                            "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID,uint t:SV_GroupIndex){"
+                            "if(t==0) g=0;GroupMemoryBarrierWithGroupSync();"
+                            "uint v=s.Load(int3(i.xy,0)).g;"
+                            "if(k.y){v=((v&k.x)!=0 && z.Load(int3(i.xy,0))>0)?255:0;if(v && all(i.xy<k.zw)) InterlockedAdd(g,1);}"
+                            "o[i.xy]=v;GroupMemoryBarrierWithGroupSync();if(t==0 && g) n.InterlockedAdd(0,g);}";
                         ID3DBlob* code{};ID3D11ComputeShader* cs{};
                         if(SUCCEEDED(D3DCompile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr))) {
                             if(SUCCEEDED(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs))) stencil_copy_.adopt(cs);
@@ -812,13 +858,13 @@ public:
         ready=false;++reset_epoch_;
         dlss_session_end_locked();
         for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();
-            e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.mv_srv.reset();e.mv_key=nullptr;e.motion_valid=false;e.rig.reset();e.rig_uav.reset();e.rig_valid=false;}
+            e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.mv_srv.reset();e.mv_key=nullptr;e.motion_valid=false;e.rig.reset();e.rig_uav.reset();e.rig_valid=false;e.rig_srv.reset();e.rig_live=false;e.rig_count.reset();e.rig_count_uav.reset();for(auto& s:e.rig_count_staging) s.reset();}
         for(auto& r:receipt_) r.reset();
         for(auto& r:last_receipt_) r.reset();
         Fsr4EyeUpscaler::poll_retired();
         for(auto& m:motion_) m.reset();
         for(auto& p:probe_) p={};
-        selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();stencil_view_.reset();stencil_copy_.reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
+        selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();stencil_view_.reset();stencil_copy_.reset();stencil_cb_.reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
         {std::lock_guard<std::mutex> jobs(jobs_mutex_);for(auto& r:recording_) {r.first=nullptr;r.second.reset();}queued_.clear();}
         std::lock_guard<std::mutex> lock2(candidate_mutex_);
         for(auto& c:candidates_) {if(c.resource) c.resource->Release();c={};}
@@ -1052,12 +1098,20 @@ private:
         c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
         e.depth_w=depth_w;e.depth_h=depth_h;
         // v1160: and the same rectangle of the stencil plane into Eye::rig (raw stencil; whether a value marks the player rig is measured, not assumed)
-        e.rig_valid=false;
-        if(stencil_view_.p && stencil_copy_.p && e.rig_uav.p) {
-            c->CSSetShader(stencil_copy_.p,nullptr,0);c->CSSetShaderResources(0,1,&stencil_view_.p);c->CSSetUnorderedAccessViews(0,1,&e.rig_uav.p,nullptr);
+        e.rig_valid=false;e.rig_live=false;
+        if(stencil_view_.p && stencil_copy_.p && e.rig_uav.p && stencil_cb_.p) {
+            // v1162: a marked render (RigStencil live and depth-writing draws marked since the last copy) gets the mask; else the raw plane
+            const bool marks=RigStencil::take_marks()>0;
+            const bool live=marks && RigStencil::live() && e.rig_count_uav.p && e.rig_count_staging[0].p;
+            const std::uint32_t k[4]{RigStencil::bit,live?1u:0u,depth_w,depth_h};c->UpdateSubresource(stencil_cb_.p,0,nullptr,k,0,0);
+            if(live) {const UINT zero[4]{};c->ClearUnorderedAccessViewUint(e.rig_count_uav.p,zero);}
+            ID3D11ShaderResourceView* in[2]{stencil_view_.p,depth_view_.p};ID3D11UnorderedAccessView* outs2[2]{e.rig_uav.p,live?e.rig_count_uav.p:nullptr};
+            c->CSSetShader(stencil_copy_.p,nullptr,0);c->CSSetShaderResources(0,2,in);c->CSSetUnorderedAccessViews(0,2,outs2,nullptr);c->CSSetConstantBuffers(0,1,&stencil_cb_.p);
             c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
-            ID3D11ShaderResourceView* none{};ID3D11UnorderedAccessView* no_uav{};c->CSSetShaderResources(0,1,&none);c->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
-            e.rig_valid=true;++rig_copies;
+            ID3D11ShaderResourceView* none[2]{};ID3D11UnorderedAccessView* no_uav[2]{};ID3D11Buffer* no_cb{};
+            c->CSSetShaderResources(0,2,none);c->CSSetUnorderedAccessViews(0,2,no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
+            if(live) {c->CopyResource(e.rig_count_staging[e.rig_count_serial%e.rig_count_staging.size()].p,e.rig_count.p);++e.rig_count_serial;++rig_live_renders;}
+            e.rig_valid=true;e.rig_live=live;++rig_copies;
         }
         c->CSSetShaderResources(0,1,null_srv);c->CSSetUnorderedAccessViews(0,2,null_uav,nullptr);
         // v1151: this render's motion texture (eye_motion_pass.hpp), from its alternate receipt; none without one
@@ -1079,7 +1133,9 @@ private:
                     if(dev && SUCCEEDED(dev->CreateShaderResourceView(job.motion.p,nullptr,&v))) {e.mv_srv.adopt(v);e.mv_key=job.motion.p;}
                     if(dev) dev->Release();
                 }
-                if(e.mv_srv.p && motion_pass_.dispatch(c,e.mv_srv.p,e.depth_srv.p,e.motion_uav.p,k)) {e.motion_valid=true;e.motion_w=depth_w;e.motion_h=depth_h;++motion_passes;}
+                // v1162: a live rig mask replaces the 0.5 m arm rule for this render (rig pixels: no motion, the warp's hand layers own them)
+                if(e.rig_live && e.rig_srv.p) {k.mv_scale[2]=1;++motion_rig_masks;}
+                if(e.mv_srv.p && motion_pass_.dispatch(c,e.mv_srv.p,e.depth_srv.p,e.motion_uav.p,k,e.rig_live?e.rig_srv.p:nullptr)) {e.motion_valid=true;e.motion_w=depth_w;e.motion_h=depth_h;++motion_passes;}
             }
             if(!e.motion_valid) ++motion_refused;
         }

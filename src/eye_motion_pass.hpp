@@ -28,7 +28,7 @@ struct EyeMotionConstants {
     float then[16];   // previous NDC -> world point minus the current camera position (homogeneous)
     float size_step[4]; // render width, height; jitter step (UV)
     float proj[4];      // current projection [10], [11]; arm reach (m); on (1) / off (0)
-    float mv_scale[4];  // engine MV -> render UV
+    float mv_scale[4];  // engine MV -> render UV; [2] v1162: 1 = the rig mask (t2, nonzero = rig) is the arm rule instead of arm reach
     float other[16];    // v1154: current NDC -> the other eye's clip one Present earlier (its receipt's current render)
     float other_step[4];// v1154: its jitter step (UV), the still bound (px), mover_px; 0 0 0 0 = no other-eye test
 };
@@ -93,13 +93,13 @@ class EyeMotionPass {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> cs_;Microsoft::WRL::ComPtr<ID3D11Buffer> cb_;
 public:
     static constexpr char shader_source[]=
-        "Texture2D<float2> mvTex:register(t0);Texture2D<float> depthTex:register(t1);RWTexture2D<float4> outTex:register(u0);"
+        "Texture2D<float2> mvTex:register(t0);Texture2D<float> depthTex:register(t1);Texture2D<uint> rigTex:register(t2);RWTexture2D<float4> outTex:register(u0);"
         "cbuffer C:register(b0){float4 R[4];float4 Now[4];float4 Then[4];float4 sizeStep;float4 proj;float4 mvScale;float4 Other[4];float4 otherStep;};"
         "float4 Apply(float4 m0,float4 m1,float4 m2,float4 m3,float4 v){return float4(dot(m0,v),dot(m1,v),dot(m2,v),dot(m3,v));}"
         "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID){"
         "if(any(float2(i.xy)>=sizeStep.xy)) return;"
         "const float d=depthTex.Load(int3(i.xy,0));float4 o=float4(0,0,0,0);"
-        "if(proj.w>0 && d>1e-7 && proj.y/(d+proj.x)>=proj.z){"
+        "if(proj.w>0 && d>1e-7 && (mvScale.z>0?rigTex.Load(int3(i.xy,0))==0:proj.y/(d+proj.x)>=proj.z)){"
         "const float2 uv=(float2(i.xy)+0.5)/sizeStep.xy;"
         "const float2 puv=uv-mvTex.Load(int3(i.xy,0))*mvScale.xy-sizeStep.zw;"
         "const float4 n=float4(uv.x*2-1,1-uv.y*2,d,1);"
@@ -131,17 +131,17 @@ public:
         if(FAILED(device->CreateBuffer(&d,nullptr,&cb_))) {cs_.Reset();return false;}
         return true;
     }
-    // Records the pass on `c` (compute state is the caller's to save and restore). k.proj[3]==0 writes zeros.
+    // Records the pass on `c` (compute state is the caller's to save and restore). k.proj[3]==0 writes zeros. v1162: k.mv_scale[2] > 0 needs `rig`.
     // False: nothing recorded (no shader, no inputs).
     bool dispatch(ID3D11DeviceContext* c,ID3D11ShaderResourceView* motion,ID3D11ShaderResourceView* depth,ID3D11UnorderedAccessView* out,
-                  const EyeMotionConstants& k) noexcept {
-        if(!cs_ || !cb_ || !c || !out || !motion || !depth) return false;
+                  const EyeMotionConstants& k,ID3D11ShaderResourceView* rig=nullptr) noexcept {
+        if(!cs_ || !cb_ || !c || !out || !motion || !depth || (k.mv_scale[2]>0 && !rig)) return false;
         c->UpdateSubresource(cb_.Get(),0,nullptr,&k,0,0);
-        ID3D11ShaderResourceView* in[2]{motion,depth};ID3D11Buffer* cb=cb_.Get();
-        c->CSSetShader(cs_.Get(),nullptr,0);c->CSSetShaderResources(0,2,in);c->CSSetUnorderedAccessViews(0,1,&out,nullptr);c->CSSetConstantBuffers(0,1,&cb);
+        ID3D11ShaderResourceView* in[3]{motion,depth,rig};ID3D11Buffer* cb=cb_.Get();
+        c->CSSetShader(cs_.Get(),nullptr,0);c->CSSetShaderResources(0,3,in);c->CSSetUnorderedAccessViews(0,1,&out,nullptr);c->CSSetConstantBuffers(0,1,&cb);
         c->Dispatch((static_cast<UINT>(k.size_step[0])+7)/8,(static_cast<UINT>(k.size_step[1])+7)/8,1);
-        ID3D11ShaderResourceView* none[2]{};ID3D11UnorderedAccessView* no_uav{};ID3D11Buffer* no_cb{};
-        c->CSSetShaderResources(0,2,none);c->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
+        ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no_uav{};ID3D11Buffer* no_cb{};
+        c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
         return true;
     }
 };

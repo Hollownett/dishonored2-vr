@@ -33,6 +33,7 @@
 #include <sstream>
 #include <string>
 #include "weapon_draw_place.hpp"
+#include "rig_stencil.hpp"
 
 namespace d2vr {
 // Draws of the recent eye views keyed by their exact current rows -> the engine's original previous rows.
@@ -231,7 +232,7 @@ public:
     static std::string alternate_status_json() {
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
-        return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
+        return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_raw\":"+std::to_string(alt_rig_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -363,7 +364,7 @@ private:
     inline static std::atomic<std::uint64_t> alt_resnapped_{};
     inline static std::array<std::atomic<std::uint64_t>,17> oversize_kb_{}; // v1158: oversize cb2 writes by size in KB (16 = 16 KB or more)
     inline static std::atomic<std::uintptr_t> alt_view_{};inline static std::atomic<AlternateEye> alt_eye_{}; // v1151
-    inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{};
+    inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{},alt_rig_{};
     inline static std::array<std::array<EyeView,4>,2> eye_records_{};
     inline static std::array<std::atomic<std::uint32_t>,2> newest_eye_frame_{}; // the frame of that eye's newest recorded view (lock-free for the draw hooks)
     inline static std::array<std::array<std::atomic<float>,4>,2> eye_z_{};       // that view's VP z row (0,0,0,near), for a layout without a z row
@@ -679,6 +680,9 @@ private:
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool near_draw=cur[15]>0.01f && cur[15]<near_w;
         const bool alt=alternate(); // v1151: the held-weapon placement is a paired-mode binder; alternate draws take the general path
+        // v1162: a rig draw (rig_stencil.hpp: binds an arm/body skin buffer) keeps the engine's own rows in alternate mode: the mod re-poses
+        // those models per render (image skin), so no table row of them is this eye's true previous; the warp's hand layers own their pixels.
+        if(alt && RigStencil::draw_is_rig()) {alt_rig_.fetch_add(1,std::memory_order_relaxed);return false;}
         if(near_draw && !alt && weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);
             const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;
