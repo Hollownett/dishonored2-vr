@@ -268,6 +268,13 @@ public:
     static bool weapon_wanted() noexcept {return installed_ && weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1;}
     // v1101: the placement gate (the knob build/no-weapon-draw-place sets weapon_mode 0; object-motion-mode 0 is diagnostic only).
     static bool weapon_draw_on(int weapon_mode,int mode) noexcept {return weapon_mode>=1 && mode>=1;}
+    // v1140 (user, 2026-11-10: held props lag and wobble; the v1132 headset status had weapon_mode 0 and held_draw_placed [0,0]): the held-prop
+    // exact draw (v1067-v1074) rides this placement, which v1019 made opt-in for weapons, so it never ran on a default install. A held thing
+    // is now placed whenever the publisher placed one this render (held_placing_); weapons stay opt-in. build/no-held-draw-place turns it off.
+    static bool held_wanted() noexcept {return installed_ && mode_.load(std::memory_order_relaxed)>=1;}
+    static void set_held_placing(bool on) noexcept {held_placing_.store(on,std::memory_order_relaxed);}
+    static int placing_mode(int weapon_mode,bool held) noexcept {return weapon_mode>=1 || held?1:0;}
+    static int placing_mode() noexcept {return placing_mode(weapon_mode_.load(std::memory_order_relaxed),held_placing_.load(std::memory_order_relaxed));}
     // v1101: the render pass a draw hook runs in. `view` is the pass job's view (item+0x70, src/render_pass_map.hpp): one of the eye
     // views for every pass that renders that eye (the exact eye, no cache certificate), a light/other view for a pass that does not.
     struct DrawPass {int pass{-1};std::uintptr_t view{0};};
@@ -358,6 +365,7 @@ private:
     // v930: held weapons placed at the draw (weapon_draw_place.hpp). 1 on (default), 0 off (build/no-weapon-draw-place); the probe
     // (build/weapon-draw-probe) logs the model matrices of near draws and the published placements to artifacts/weapon-draw-probe.csv.
     inline static std::atomic<int> weapon_mode_{1};
+    inline static std::atomic<bool> held_placing_{};   // v1140: the newest render published a held prop for placement
     inline static std::atomic<bool> weapon_probe_on_{};
     // v1101: the draw's render pass (src/render_pass_map.hpp). No pass map installed: the v931 certificate path runs unchanged.
     inline static std::atomic<PassSource> pass_source_{};
@@ -604,7 +612,7 @@ private:
         if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);return false;}
         // v1040: no previous rows and no weapon placement: the draw ends in no_rows below whatever the view says. Skip the view lookup,
         // the pass callback and the row gather (the b1 agree/untagged diagnostics no longer count these draws).
-        if(!has_previous(s.layout,sh->size) && !weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
+        if(!has_previous(s.layout,sh->size) && !weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed))) {
             count(motion);count(no_rows);return false;
         }
         View view{};
@@ -630,7 +638,7 @@ private:
         count(motion);if(have_prev) std::memcpy(engine,prev,64);
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool near_draw=cur[15]>0.01f && cur[15]<near_w;
-        if(near_draw && weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
+        if(near_draw && weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);
             const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;
             weapon_pass_near_[pass_index].fetch_add(1,std::memory_order_relaxed);
@@ -887,7 +895,7 @@ private:
             <<"],\"proxy_fields\":\"created,with_previous,unstored,unhooked_devices,current_only\""
             <<",\"presents\":"<<frames<<",\"us_per_present\":"<<us_per_frame;
         for(unsigned i=0;i<ticks;++i) json<<",\""<<names[i]<<"\":"<<stats_[i].load();
-        json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"weapon_published\":"<<weapon_draw::Place::published()
+        json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"held_placing\":"<<(held_placing_.load()?1:0)<<",\"weapon_published\":"<<weapon_draw::Place::published()
             <<",\"weapon_status\":"<<weapon_status_json();
         json<<",\"b1_eye_mode\":"<<(b1_eye_on_.load()?1:0)<<",\"taa_b1\":\""; // v950: eyes' TAA b1; sampled draws' VS b1 "buffer:own L/own R/fallback"
         for(unsigned e=0;e<2;++e) for(const auto& p:taa_b1_[e]) json<<(e?'R':'L')<<std::hex<<reinterpret_cast<std::uintptr_t>(p.load())<<std::dec<<' ';
