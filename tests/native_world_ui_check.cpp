@@ -24,6 +24,10 @@ int main() {
         assert(!native_world_ui_owner(read,base,player)); // Input player is not the render Iggy object.
     }
     path("ui/choice_emily.iggy");{const auto o=native_world_ui_owner(read,base,iggy);assert(o && o->kind==WorldUiKind::journal);} // dialogue choices
+    // v1144: the wheel's frame removal (Unframe) runs only for WorldUiKind::wheel, and that kind is the quick access wheel alone.
+    for(const char* other:{"ui/notes.iggy","ui/journal.iggy","ui/choice_corvo.iggy","ui/choice_emily.iggy","ui/narrative.iggy","ui/corvo_blackmarket.iggy",
+                           "ui/emily_blackmarket.iggy","ui/hud.iggy","ui/lib_wheel.iggy","ui/pausemenu.iggy"}) assert(world_ui_kind(other)!=WorldUiKind::wheel);
+    assert(world_ui_kind("ui/quick_access_wheel.iggy")==WorldUiKind::wheel);
     path("ui/narrative.iggy");{const auto o=native_world_ui_owner(read,base,iggy);assert(narrative_world_ui?(o && o->kind==WorldUiKind::journal):!o);} // v724: the choices' real movie
     path("ui/choice_emily.iggy");
     // v722: a newer batch above the one that holds the choice movie (a scripted scene) does not hide it
