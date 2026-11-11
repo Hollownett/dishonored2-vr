@@ -109,6 +109,8 @@ public:
         }
     }
     std::atomic<std::uint64_t> motion_rig_masks{}; // v1162: motion passes that used the rig mask for the arm rule
+    std::atomic<std::uint64_t> motion_rig_moving{}; // v1166: of those, rig pixels with real motion (rig_motion valid)
+    bool eye_rig_motion(int eye) {std::lock_guard<std::mutex> lock(mutex_);return (eye==0 || eye==1) && (*eyes_)[static_cast<std::size_t>(eye)].rig_motion;} // v1166
     std::atomic<std::uint64_t> motion_passes{},motion_refused{},motion_srv_misses{},motion_other_tests{},motion_no_other{}; // v1154: passes with the other-eye still test; v1158: renders without it (no texture) // v1151: motion textures written; renders with a receipt that made none
     // Perf-mode motion Phase 0 (dxgi_probe knob build/alt-motion-probe, diagnostics only): handed to replace() by the TAA dispatch it
     // belongs to; that eye's next FSR/DLSS dispatch writes <stem>-mv.rg16f (raw engine motion vectors), <stem>-depth.r32 (the Eye::depth
@@ -131,7 +133,7 @@ private:
         // v1160/v1163: this render's rig mask (R8, render rectangle; eye_rig)
         Ref<ID3D11Texture2D> rig;Ref<ID3D11UnorderedAccessView> rig_uav;bool rig_valid{};
         // v1162: the mask read view (motion pass), whether the last copy was a marked mask, its pixel counter and read-back ring
-        Ref<ID3D11ShaderResourceView> rig_srv;bool rig_live{};Ref<ID3D11Buffer> rig_count;Ref<ID3D11UnorderedAccessView> rig_count_uav;
+        Ref<ID3D11ShaderResourceView> rig_srv;bool rig_live{},rig_motion{};Ref<ID3D11Buffer> rig_count;Ref<ID3D11UnorderedAccessView> rig_count_uav;
         std::array<Ref<ID3D11Buffer>,4> rig_count_staging{};std::uint64_t rig_count_serial{},rig_read_serial{};
         UINT motion_w{},motion_h{};bool motion_valid{};
         // v1107: FSR 4 runs on this display box only (fsr4 created at the box size); FSR 3 upscales the whole eye underneath.
@@ -1031,7 +1033,7 @@ private:
             const auto& me=(*eyes_)[static_cast<std::size_t>(job.eye)];
             sizes+=std::string(",\"eye_motion_valid\":")+(me.motion_valid?"true":"false");
             if(me.motion_valid) save(me.motion.p,L"-motion.rgba16f","eye_motion"); // v1151: the motion pass's output of this render
-            if(me.rig_valid) save(me.rig.p,L"-rig.r8","rig"); // v1160: the depth's stencil plane of this render (raw)
+            if(me.rig_valid) save(me.rig.p,L"-rig.r8","rig"); // v1163: the rig mask of this render (0/255)
             if(p.colour) save(job.colour.p,L"-colour.raw","colour");
             // b1 = CBPerViewGlobals (0x320 bytes) as the TAA dispatch read it, copied on the game's context before the split
             std::string b1;
@@ -1084,9 +1086,10 @@ private:
         c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
         e.depth_w=depth_w;e.depth_h=depth_h;
         // v1163: the rig mask of this render: the rig depth (rig_mask.hpp, replayed rig draws) where it equals the final scene depth
-        e.rig_valid=false;e.rig_live=false;
+        e.rig_valid=false;e.rig_live=false;e.rig_motion=false;
         {
             const bool view_render=RigMask::take_view_draws()>0;
+            const bool rig_motion_now=RigMask::take_rig_motion(); // v1166: once a render, copied or not
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rig_depth;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rig_target;
             if(view_render && rig_copy_.p && rig_cb_.p && e.rig_uav.p && e.rig_count_uav.p && e.rig_count_staging[0].p && RigMask::target(depth_resource_.p,rig_depth,rig_target)) {
                 float k[4]{0,0,static_cast<float>(depth_w),static_cast<float>(depth_h)};rig_mask_eps(depth_srv_format_,k[0],k[1]);
@@ -1100,6 +1103,7 @@ private:
                 const float far_value[4]{};c->ClearRenderTargetView(rig_target.Get(),far_value); // the next render's rig depth starts empty
                 c->CopyResource(e.rig_count_staging[e.rig_count_serial%e.rig_count_staging.size()].p,e.rig_count.p);++e.rig_count_serial;++rig_live_renders;
                 e.rig_valid=true;e.rig_live=true;++rig_copies;
+                e.rig_motion=rig_motion_now; // v1166: every rig prepass draw of this render had the eye's own previous palette and rows
             }
         }
         c->CSSetShaderResources(0,1,null_srv);c->CSSetUnorderedAccessViews(0,2,null_uav,nullptr);
@@ -1123,7 +1127,11 @@ private:
                     if(dev) dev->Release();
                 }
                 // v1162: a live rig mask replaces the 0.5 m arm rule for this render (rig pixels: no motion, the warp's hand layers own them)
-                if(e.rig_live && e.rig_srv.p) {k.mv_scale[2]=1;++motion_rig_masks;}
+                if(e.rig_live && e.rig_srv.p) {
+                    // v1166: rig pixels keep their motion when this render's rig vectors are the eye's own (no zeroing at all); else zeroed
+                    if(e.rig_motion) {k.proj[2]=0;++motion_rig_moving;} else k.mv_scale[2]=1;
+                    ++motion_rig_masks;
+                }
                 if(e.mv_srv.p && motion_pass_.dispatch(c,e.mv_srv.p,e.depth_srv.p,e.motion_uav.p,k,e.rig_live?e.rig_srv.p:nullptr)) {e.motion_valid=true;e.motion_w=depth_w;e.motion_h=depth_h;++motion_passes;}
             }
             if(!e.motion_valid) ++motion_refused;

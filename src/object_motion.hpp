@@ -232,7 +232,7 @@ public:
     static std::string alternate_status_json() {
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
-        return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_raw\":"+std::to_string(alt_rig_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
+        return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_draws\":"+std::to_string(alt_rig_.load())+",\"rig_own\":"+std::to_string(alt_rig_own_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -364,7 +364,7 @@ private:
     inline static std::atomic<std::uint64_t> alt_resnapped_{};
     inline static std::array<std::atomic<std::uint64_t>,17> oversize_kb_{}; // v1158: oversize cb2 writes by size in KB (16 = 16 KB or more)
     inline static std::atomic<std::uintptr_t> alt_view_{};inline static std::atomic<AlternateEye> alt_eye_{}; // v1151
-    inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{},alt_rig_{};
+    inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{},alt_rig_{},alt_rig_own_{};
     inline static std::array<std::array<EyeView,4>,2> eye_records_{};
     inline static std::array<std::atomic<std::uint32_t>,2> newest_eye_frame_{}; // the frame of that eye's newest recorded view (lock-free for the draw hooks)
     inline static std::array<std::array<std::atomic<float>,4>,2> eye_z_{};       // that view's VP z row (0,0,0,near), for a layout without a z row
@@ -682,7 +682,22 @@ private:
         const bool alt=alternate(); // v1151: the held-weapon placement is a paired-mode binder; alternate draws take the general path
         // v1162: a rig draw (rig_mask.hpp: binds an arm/body skin buffer) keeps the engine's own rows in alternate mode: the mod re-poses
         // those models per render (image skin), so no table row of them is this eye's true previous; the warp's hand layers own their pixels.
-        if(alt && RigMask::draw_is_rig()) {alt_rig_.fetch_add(1,std::memory_order_relaxed);return false;}
+        // v1166: no longer the raw rows. The eye's own previous rows (the two-hop chain) together with the eye's own previous palette
+        // (RigMask::previous_palette at VS t0); without either, both are the current ones (zero motion). Never one without the other.
+        if(alt && RigMask::draw_is_rig()) {
+            alt_rig_.fetch_add(1,std::memory_order_relaxed);
+            if(mode_.load(std::memory_order_relaxed)<1) return false;
+            bool rows_own=false;
+            if(have_view && have_prev && (affine(view.inv[0],cur) || affine(view.inv[1],cur))) {
+                const auto kind=table_.fix(view.eye,view.frame,cur,prev,2u);
+                rows_own=kind==PrevMvpTable::own_last || kind==PrevMvpTable::other_now || kind==PrevMvpTable::other_last;
+            }
+            const bool own=RigMask::previous_palette(c,have_view?static_cast<int>(view.eye):-1,have_view?view.frame:0u,rows_own && have_prev);
+            if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
+            if(!have_prev) return false; // no previous rows in this layout (not a prepass variant)
+            if(!own) std::memcpy(prev,cur,64);
+            return bind_pool(c,s,*sh,nullptr,prev);
+        }
         if(near_draw && !alt && weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);
             const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;

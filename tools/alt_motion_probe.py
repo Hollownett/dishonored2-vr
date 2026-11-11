@@ -208,6 +208,17 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
                 msg += (f'; pass w vs script: |diff| {pct(diff)}, mover agreement {agree * 100:.2f}%, pass movers {r["pass_movers"] * 100:.3f}% (>=3 px {r["pass_movers_3px"] * 100:.3f}%),'
                         f' w=0 outside cover: {r["pass_w_zero_outside"]}, own movers written still {r["pass_netted"] * 100:.3f}%')
             log(msg)
+            # v1166: the rig pixels (the dispatch's -rig.r8 mask, 255 = rig): their residual against this eye's own previous render
+            rig_path = d['stem'] + '-rig.r8'
+            if os.path.exists(rig_path):
+                rw, rh, _, rrow, rdata = read_raw(rig_path)
+                mask = np.frombuffer(rdata, np.uint8)[:rh * rrow].reshape(rh, rrow)[:, :rw]
+                inside = (ys < rh) & (xs < rw)
+                rig = np.zeros(len(own), bool); rig[inside] = mask[ys[inside], xs[inside]] == 255
+                r['rig_px'] = int(rig.sum())
+                if rig.any():
+                    r['rig_own_p50'] = float(np.percentile(own[rig], 50)); r['rig_own_p90'] = float(np.percentile(own[rig], 90))
+                    log(f'      rig pixels {rig.sum()}: own {pct(own[rig])}')
             per.append(r)
             if out:
                 os.makedirs(out, exist_ok=True)

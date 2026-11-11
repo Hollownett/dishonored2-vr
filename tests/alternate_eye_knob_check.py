@@ -206,9 +206,10 @@ assert '\\"rig_mask\\":' in probe and '\\"rig_mask_pixels\\":' in probe
 assert 'if(!stale_rig_masks || eye>1 || !stale_rig_live_[eye] || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};' in xr
 assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fresh_rig.texture) ++stale_rig_one_sided;kept_rig={};fresh_rig={};}' in xr
 assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
-assert 'if(e.rig_live && e.rig_srv.p) {k.mv_scale[2]=1;++motion_rig_masks;}' in fsr
+assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
 assert '(mvScale.z>0?rigTex.Load(int3(i.xy,0))==0:proj.y/(d+proj.x)>=proj.z)' in mp
-assert 'if(alt && RigMask::draw_is_rig()) {alt_rig_.fetch_add(1,std::memory_order_relaxed);return false;}' in om
+assert 'const bool own=RigMask::previous_palette(c,have_view?static_cast<int>(view.eye):-1,have_view?view.frame:0u,rows_own && have_prev);' in om and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
+assert 'restore_t0(); // v1166' in rig and 'if(e.rig_motion) {k.proj[2]=0;++motion_rig_moving;} else k.mv_scale[2]=1;' in fsr
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
 assert 'ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;' in rig and 'targets(c,rtv_count,rtvs.data(),dsv);' in rig
 print('PASS: v1163 rig mask routing (knob, one-view rig draws replayed, mask at the copy, both-or-none masks, motion arm rule, raw rig rows, status)')

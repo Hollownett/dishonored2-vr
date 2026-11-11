@@ -10363,7 +10363,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
                << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' // v1162
-               << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load()
+               << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
                << ",\"object_motion\":" << d2vr::ObjectMotion::alternate_status_json()
@@ -10862,7 +10862,8 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
                 <<"],\"shadow_share\":"<<(shadow_share.enabled()?"true":"false")<<",\"shadow_slicing_cvars\":"<<(shadow_slicing_cvars?"true":"false");
         }
         meta<<",\"fresh_part\":"<<layers.fresh_part<<",\"kept_part\":"<<layers.kept_part<<",\"motion_rules\":"<<(layers.motion_rules?"true":"false"); // v1151
-        meta<<",\"rig_mask\":["<<(game_xr->stale_rig_mask(eye).texture?"true":"false")<<','<<(game_xr->stale_rig_mask(static_cast<UINT>(game_xr->alternate_fresh_eye)).texture?"true":"false")<<']'; // v1162: -kept-rig/-fresh-rig are marked masks (255 = rig), else raw stencil
+        meta<<",\"rig_mask\":["<<(game_xr->stale_rig_mask(eye).texture?"true":"false")<<','<<(game_xr->stale_rig_mask(static_cast<UINT>(game_xr->alternate_fresh_eye)).texture?"true":"false")<<']'; // v1162: -kept-rig/-fresh-rig are masks (255 = rig)
+        meta<<",\"rig_motion\":["<<(fsr_taa.eye_rig_motion(static_cast<int>(eye))?"true":"false")<<','<<(fsr_taa.eye_rig_motion(game_xr->alternate_fresh_eye)?"true":"false")<<']'; // v1166: rig pixels carry their own-eye motion
         meta<<",\"start\":["<<layers.start[0]<<','<<layers.start[1]<<','<<layers.start[2]<<']';
         meta<<",\"palms\":["; // v811: each drawn palm in the kept camera and the reach it owns
         for(unsigned side=0;side<2;++side) {const auto& p=layers.palms[side];meta<<(side?",":"")<<'['<<p[0]<<','<<p[1]<<','<<p[2]<<','<<p[3]<<']';}

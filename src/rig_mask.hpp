@@ -44,6 +44,24 @@ inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) 
     else {absolute=1e-9f;relative=4.f/8388608.f;}
 }
 
+// v1166: rig motion vectors in alternate mode. The skinned depth-prepass VS (arkdefault/vertex TransformVertex, USESKINNING) skins the
+// previous position with ro_previousframeskinningmatrices = VS t0 and the current with ro_matrices = VS t1 (v663 draw census: t0 = the
+// model's previous wrapper, t1 its current; the colour pass binds the current at t2), then multiplies with cb_previousmvpmatrix rows.
+// The engine ping-pongs the two wrappers every engine frame (0x25dfd0: previous index = current, current ^= 1 while dirty; 0x25f930
+// writes the CPU palette into the new current; 0x25da80 supplies the current as "previous" while +0x1fb0 has 4/0x10/0x20), so the
+// previous palette is the last ENGINE frame's: in alternate mode the other eye's render one tick ago. Its rows are the other eye's too
+// (raw). This file keeps, per eye and rig model, the palette of that eye's own last render (two GPU slots), and ObjectMotion binds it at
+// t0 together with the eye's own previous rows; either missing, both become the current ones (zero motion), counted.
+// Pure: the history slots for `frame` from the two slots' frames (stored +1, 0 = empty): read = the slot holding frame - step (-1 none),
+// write = the other one (done: this frame was copied already).
+struct RigHistorySlots {int read{-1};unsigned write{};bool done{};};
+inline RigHistorySlots rig_history_slots(std::uint32_t key0,std::uint32_t key1,std::uint32_t frame,unsigned step) noexcept {
+    RigHistorySlots s{};const std::uint32_t want=frame-step+1,now=frame+1;
+    s.read=key0==want?0:key1==want?1:-1;
+    if(key0==now) {s.write=0;s.done=true;} else if(key1==now) {s.write=1;s.done=true;} else s.write=s.read==0?1u:0u;
+    return s;
+}
+
 class RigMask {
 public:
     static constexpr unsigned buffer_slots=6;
@@ -62,6 +80,34 @@ public:
         replays_last_.store(replays_frame_.exchange(0,std::memory_order_relaxed),std::memory_order_relaxed);
     }
     static bool draw_is_rig() noexcept {return tl_rig_;} // the draw now in a Scope binds a rig skin buffer (ObjectMotion)
+    // v1166, ObjectMotion at a rig draw (alternate): binds at VS t0 this eye's own previous palette when `rows_own` (the draw gets the eye's
+    // own previous rows) and that palette exists (this eye's render `frame - 2`), else the current palette (zero motion; the caller then
+    // uses the current rows too). Records the current palette for this eye's next render. True: the own pair is in place. Restored in after().
+    static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own) noexcept {
+        if(!tl_rig_ || !tl_prepass_ || !tl_current_ || !c) return false;
+        ID3D11ShaderResourceView* bind=tl_current_;bool own=false;
+        if(eye==0 || eye==1) if(History* h=history(c,static_cast<unsigned>(eye),tl_model_)) {
+            const auto pick=rig_history_slots(h->key[0].load(std::memory_order_acquire),h->key[1].load(std::memory_order_acquire),frame,2);
+            if(!pick.done) {
+                std::uint32_t old=h->key[pick.write].load(std::memory_order_relaxed);
+                if(old!=frame+1 && h->key[pick.write].compare_exchange_strong(old,frame+1,std::memory_order_acq_rel)) {
+                    ID3D11Resource* current{};tl_current_->GetResource(&current);
+                    if(current) {c->CopyResource(h->buffer[pick.write].Get(),current);current->Release();history_copies_.fetch_add(1,std::memory_order_relaxed);}
+                }
+            }
+            if(rows_own && pick.read>=0) {bind=h->view[static_cast<unsigned>(pick.read)].Get();own=true;}
+            else if(rows_own) no_history_.fetch_add(1,std::memory_order_relaxed);
+        }
+        if(!tl_saved_set_) {c->VSGetShaderResources(0,1,&tl_saved_t0_);tl_saved_set_=true;}
+        c->VSSetShaderResources(0,1,&bind);
+        (own?own_pairs_:zero_pairs_).fetch_add(1,std::memory_order_relaxed);(own?own_since_:zero_since_).fetch_add(1,std::memory_order_relaxed);
+        return own;
+    }
+    // FsrTaa's motion pass, once a render: every rig prepass draw since the last call had its own pair (and there was one)
+    static bool take_rig_motion() noexcept {
+        const auto own=own_since_.exchange(0,std::memory_order_relaxed),zero=zero_since_.exchange(0,std::memory_order_relaxed);
+        return own>0 && zero==0;
+    }
     // FsrTaa's copy: draws of the alternate view seen since the last call (0: no one-view render, the mask is not live), and the rig target
     // of this scene depth (empty: none yet / another depth).
     static std::uint64_t take_view_draws() noexcept {return view_draws_.exchange(0,std::memory_order_relaxed);}
@@ -73,7 +119,8 @@ public:
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);target_={};ps_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
     static std::string json() {
         std::ostringstream o;
-        o<<"{\"enabled\":"<<(enabled.load()?"true":"false")<<",\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
+        o<<"{\"enabled\":"<<(enabled.load()?"true":"false")<<",\"rig_motion\":{\"own\":"<<own_pairs_.load()<<",\"zero\":"<<zero_pairs_.load()
+         <<",\"no_previous_slot\":"<<no_history_.load()<<",\"copies\":"<<history_copies_.load()<<"},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
         return o.str();
@@ -94,10 +141,16 @@ public:
             if(tl_rig_) {rig_draws_.fetch_add(1,std::memory_order_relaxed);rig_draws_frame_.fetch_add(1,std::memory_order_relaxed);c_=c;}
         }
         void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {
+            restore_t0(); // v1166: the engine's previous palette again before the replay (it sees the engine's bindings)
             if(c_ && draw && targets) replay(c_,args,draw,targets);
             c_=nullptr;
         }
-        ~Scope() {tl_rig_=false;}
+        ~Scope() {restore_t0();tl_rig_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        void restore_t0() noexcept {
+            if(!tl_saved_set_ || !c_) return;
+            c_->VSSetShaderResources(0,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
+            tl_saved_t0_=nullptr;tl_saved_set_=false;
+        }
         Scope(const Scope&)=delete;Scope& operator=(const Scope&)=delete;
     private:
         ID3D11DeviceContext* c_{};
@@ -114,6 +167,34 @@ private:
     inline static std::atomic<std::uint64_t> rig_draws_{},rig_draws_frame_{},rig_draws_last_{},replays_{},replays_frame_{},replays_last_{},view_draws_{},
         no_dsv_{},msaa_{},failures_{};
     inline static thread_local bool tl_rig_{};
+    // v1166: this draw's rig model (0, 1 arms, 2 body), its current palette view (t1, held), whether t0/t1 are that model's previous/current
+    inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
+    inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
+    struct History {std::atomic<std::uint32_t> key[2]{};Microsoft::WRL::ComPtr<ID3D11Buffer> buffer[2];Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view[2];
+        std::uintptr_t source{};UINT bytes{};std::atomic<bool> ready{};};
+    inline static std::array<std::array<History,3>,2> history_{};
+    inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},own_since_{},zero_since_{},no_history_{},history_copies_{};
+    // The eye's two palette slots of `model`, made like the current palette buffer and view (recreated when the model's buffers change).
+    static History* history(ID3D11DeviceContext* c,unsigned eye,unsigned model) noexcept {
+        History& h=history_[eye][model];
+        const auto source=buffers_[model*2].load(std::memory_order_relaxed)^(buffers_[model*2+1].load(std::memory_order_relaxed)<<1);
+        if(h.ready.load(std::memory_order_acquire) && h.source==source) return &h;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(h.ready.load(std::memory_order_relaxed) && h.source==source) return &h;
+        h.ready.store(false,std::memory_order_relaxed);h.key[0]=0;h.key[1]=0;
+        ID3D11Resource* r{};tl_current_->GetResource(&r);ID3D11Buffer* b{};
+        if(r) {r->QueryInterface(__uuidof(ID3D11Buffer),reinterpret_cast<void**>(&b));r->Release();}
+        if(!b) {failures_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
+        D3D11_BUFFER_DESC d{};b->GetDesc(&d);b->Release();
+        d.Usage=D3D11_USAGE_DEFAULT;d.CPUAccessFlags=0;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};tl_current_->GetDesc(&vd);
+        ID3D11Device* device{};c->GetDevice(&device);bool ok=device!=nullptr;
+        for(unsigned i=0;i<2 && ok;++i) {h.buffer[i].Reset();h.view[i].Reset();ok=SUCCEEDED(device->CreateBuffer(&d,nullptr,&h.buffer[i])) && SUCCEEDED(device->CreateShaderResourceView(h.buffer[i].Get(),&vd,&h.view[i]));}
+        if(device) device->Release();
+        if(!ok) {failures_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
+        h.source=source;h.bytes=d.ByteWidth;h.ready.store(true,std::memory_order_release);
+        return &h;
+    }
 
     static unsigned hash(const void* p) noexcept {return static_cast<unsigned>((reinterpret_cast<std::uintptr_t>(p)>>4)*0x9e3779b97f4a7c15ull>>54);}
     static int writes_depth(ID3D11DepthStencilState* s) noexcept { // 1 writes, 0 not, -1 table full
@@ -133,13 +214,16 @@ private:
     static bool is_rig(ID3D11DeviceContext* c) noexcept {
         if(!published_buffers_.load(std::memory_order_relaxed)) return false;
         ID3D11ShaderResourceView* views[3]{};c->VSGetShaderResources(0,3,views);
-        bool hit=false;
-        for(auto* v:views) if(v) {
+        bool hit=false;int which[3]{-1,-1,-1}; // the rig buffer slot (model*2 + wrapper) each view is of
+        for(unsigned k=0;k<3;++k) if(auto* v=views[k]) {
             ID3D11Resource* r{};v->GetResource(&r);const auto at=reinterpret_cast<std::uintptr_t>(r);
-            for(const auto& b:buffers_) hit=hit || (at && b.load(std::memory_order_relaxed)==at);
+            for(unsigned i=0;i<buffer_slots;++i) if(at && buffers_[i].load(std::memory_order_relaxed)==at) {which[k]=static_cast<int>(i);hit=true;}
             if(r) r->Release();
-            v->Release();
         }
+        // v1166: the prepass binding (t0 previous, t1 current, the two wrappers of one model): keep the current view for previous_palette
+        tl_prepass_=which[0]>=0 && which[1]>=0 && which[0]/2==which[1]/2 && which[0]!=which[1];
+        if(tl_prepass_) {tl_model_=static_cast<unsigned>(which[1]/2);tl_current_=views[1];views[1]=nullptr;}
+        for(auto* v:views) if(v) v->Release();
         return hit;
     }
     // Under mutex_: the shader and states (once), and the rig target for this depth resource (recreated on a new depth/size).
