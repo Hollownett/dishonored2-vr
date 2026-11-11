@@ -1121,8 +1121,12 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         if(layers) {const double u=1-std::clamp(layers->border[0],0.,.25),v=1-std::clamp(layers->border[1],0.,.25);put(u,v,u,v);} else put(1,1,1,1); // v1167
         const bool cut=fresh_read && layers->cut; // v1171: the fresh eye alone (needs it)
         const bool fresh_hands=kept_rig_read && !cut && layers->rig_from_fresh; // v1173
-        // v1175: w: near scenery from the fresh eye (masks live, the camera or a hand moving)
-        const bool near_fresh=fresh_hands && (layers->camera_moving || layers->hand_moving[0] || layers->hand_moving[1]);
+        // v1175: w: near scenery from the fresh eye (masks live, the camera moving)
+        // v1176: the camera only. Replay of real frames with a still camera and a moving hand (v1165 door 2 and 5): the whole near field
+        // from the fresh eye was 2.6 and 2.1 levels off the eye's next frame against 1.8 and 1.7 from its own kept frame, on scenery that
+        // changes 1.1-1.3 levels between its own frames: a flicker over all near objects whenever a hand moves. The moving hand itself and
+        // its old place are handled by the hand rules above.
+        const bool near_fresh=fresh_hands && layers->camera_moving;
         put(cut?1:0,fresh_hands && layers->hand_moving[0]?1:0,fresh_hands && layers->hand_moving[1]?1:0,near_fresh?1:0);
         if(cut) {fit_on=false;++cut_passes;}
         if(depth_read) ++parallax_passes;

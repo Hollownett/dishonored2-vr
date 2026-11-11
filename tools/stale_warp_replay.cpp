@@ -317,6 +317,13 @@ int main(int argc, char** argv) {
             const double step = std::sqrt(sx * sx + sy * sy + sz * sz), turn = std::acos(std::clamp(m[8], -1.0, 1.0)) * 180 / 3.14159265358979;
             layers.cut = std::getenv("STALE_REPLAY_NO_CUT") ? false : (step > cut_step || (step > cut_turn_step && turn > cut_turn_deg));
             std::fprintf(stderr, "  dump %d: step %.3f m, turn %.1f deg%s\n", n, step, turn, layers.cut ? ": CUT" : "");
+            // v1175: the motion flags the game sets in stale_eye_layers(). The replay builds its layers from the meta, so it set none and
+            // never ran the v1173-v1175 rules. STALE_REPLAY_MOVING=0: none (pre-v1173), 1: hands only (v1173/v1174), 2 or unset: as the game.
+            const char* mv = std::getenv("STALE_REPLAY_MOVING"); const int moving = mv ? std::atoi(mv) : 2;
+            const bool hands = !layers.near_from_kept;  // the game's hands-still test at dump time (both hands: the meta has no per-hand flag)
+            layers.hand_moving = {moving >= 1 && hands, moving >= 1 && hands};
+            layers.camera_moving = moving >= 2 && !(step <= camera_still_m && turn <= camera_still_deg);
+            std::fprintf(stderr, "  dump %d: hands moving %d, camera moving %d\n", n, int(layers.hand_moving[0]), int(layers.camera_moving));
         }
         // kept_axes: the probe's yaw, the fitted pitch
         const double L = std::tan(layers.kept_fov.left), R = std::tan(layers.kept_fov.right), U = std::tan(layers.kept_fov.up), D = std::tan(layers.kept_fov.down);
