@@ -91,8 +91,14 @@ public:
     static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own) noexcept {
         if(!tl_rig_ || !c) return false;
         if(!tl_prepass_ || !tl_current_) {
-            note_frame(frame,false);unpaired_.fetch_add(1,std::memory_order_relaxed);
-            const unsigned p=tl_pattern_%64;unpaired_patterns_[p].fetch_add(1,std::memory_order_relaxed);
+            // v1168: no previous-palette slot to set. Only a draw that writes a colour target (the prepass's motion-vector target) can carry
+            // motion; a depth-only draw (no render target bound) cannot, and never touches validity.
+            std::array<ID3D11RenderTargetView*,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs{};c->OMGetRenderTargets(static_cast<UINT>(rtvs.size()),rtvs.data(),nullptr);
+            UINT targets=0;for(auto* r:rtvs) if(r) {++targets;r->Release();}
+            const unsigned p=tl_pattern_%625;
+            if(targets) {note_frame(frame,false);unpaired_.fetch_add(1,std::memory_order_relaxed);unpaired_patterns_[p].fetch_add(1,std::memory_order_relaxed);
+                unpaired_pass_.store(tl_pass_,std::memory_order_relaxed);unpaired_targets_.store(targets,std::memory_order_relaxed);}
+            else {depth_only_.fetch_add(1,std::memory_order_relaxed);depth_only_patterns_[p].fetch_add(1,std::memory_order_relaxed);depth_only_pass_.store(tl_pass_,std::memory_order_relaxed);}
             return false;
         }
         const std::uint32_t epoch=epoch_for(frame);
@@ -110,8 +116,8 @@ public:
             if(rows_own && pick.read>=0) {bind=h->view[static_cast<unsigned>(pick.read)].Get();own=true;}
             else if(rows_own) no_history_.fetch_add(1,std::memory_order_relaxed);
         }
-        if(!tl_saved_set_) {c->VSGetShaderResources(0,1,&tl_saved_t0_);tl_saved_set_=true;}
-        c->VSSetShaderResources(0,1,&bind);
+        if(!tl_saved_set_) {c->VSGetShaderResources(tl_prev_slot_,1,&tl_saved_t0_);tl_saved_set_=true;tl_saved_slot_=tl_prev_slot_;}
+        c->VSSetShaderResources(tl_prev_slot_,1,&bind);
         (own?own_pairs_:zero_pairs_).fetch_add(1,std::memory_order_relaxed);note_frame(frame,own);
         return own;
     }
@@ -135,9 +141,14 @@ public:
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);target_={};ps_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
     static std::string json() {
         std::ostringstream o;
-        std::string patterns;for(unsigned p=0;p<64;++p) if(const auto n=unpaired_patterns_[p].load()) patterns+=(patterns.empty()?"":" ")+std::to_string(p/16)+std::to_string(p/4%4)+std::to_string(p%4)+':'+std::to_string(n);
+        // v1168: t0..t3 per digit: 0 none, 1 this model's wrapper 0, 2 its wrapper 1, 3 another rig model's, 4 a non-rig resource
+        const auto digits=[](const std::array<std::atomic<std::uint64_t>,625>& h) {std::string s;
+            for(unsigned p=0;p<625;++p) if(const auto n=h[p].load()) s+=(s.empty()?"":" ")+std::to_string(p/125)+std::to_string(p/25%5)+std::to_string(p/5%5)+std::to_string(p%5)+':'+std::to_string(n);
+            return s;};
+        const std::string patterns=digits(unpaired_patterns_);
         o<<"{\"enabled\":"<<(enabled.load()?"true":"false")<<",\"rig_motion\":{\"own\":"<<own_pairs_.load()<<",\"zero\":"<<zero_pairs_.load()
-         <<",\"unpaired\":"<<unpaired_.load()<<",\"unpaired_t0t1t2\":\""<<patterns<<"\",\"epoch\":"<<epoch_.load()
+         <<",\"unpaired\":"<<unpaired_.load()<<",\"unpaired_t0t1t2t3\":\""<<patterns<<"\",\"unpaired_pass\":"<<unpaired_pass_.load()<<",\"unpaired_targets\":"<<unpaired_targets_.load()
+         <<",\"depth_only\":"<<depth_only_.load()<<",\"depth_only_t0t1t2t3\":\""<<digits(depth_only_patterns_)<<"\",\"depth_only_pass\":"<<depth_only_pass_.load()<<",\"epoch\":"<<epoch_.load()
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"copies\":"<<history_copies_.load()<<"},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
@@ -147,8 +158,8 @@ public:
     // engine's draw, with every engine binding of that draw still in place.
     class Scope {
     public:
-        Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view) noexcept {
-            tl_rig_=false;
+        Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass=-1) noexcept {
+            tl_rig_=false;tl_pass_=pass;
             if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;
             view_draws_.fetch_add(1,std::memory_order_relaxed);
             ID3D11DepthStencilState* bound{};UINT ref{};c->OMGetDepthStencilState(&bound,&ref);
@@ -166,7 +177,7 @@ public:
         ~Scope() {restore_t0();tl_rig_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
-            c_->VSSetShaderResources(0,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
+            c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
             tl_saved_t0_=nullptr;tl_saved_set_=false;
         }
         Scope(const Scope&)=delete;Scope& operator=(const Scope&)=delete;
@@ -195,7 +206,9 @@ private:
     // v1167: rig MV draws per engine frame (own pair / not), the unpaired draws' binding pattern (t0,t1,t2: 0 none, 1 previous wrapper,
     // 2 current wrapper... encoded as the rig buffer slot kind: 0 none, 1 this model wrapper 0, 2 wrapper 1, 3 another model), the epoch
     struct FrameTally {std::atomic<std::uint32_t> frame{};std::atomic<std::uint32_t> own{},zero{};};
-    inline static std::array<FrameTally,8> tally_{};inline static std::array<std::atomic<std::uint64_t>,64> unpaired_patterns_{};
+    inline static std::array<FrameTally,8> tally_{};inline static std::array<std::atomic<std::uint64_t>,625> unpaired_patterns_{},depth_only_patterns_{};
+    inline static std::atomic<std::uint64_t> depth_only_{};inline static std::atomic<int> unpaired_pass_{-2},depth_only_pass_{-2};inline static std::atomic<unsigned> unpaired_targets_{};
+    inline static thread_local int tl_pass_{-1};inline static thread_local UINT tl_prev_slot_{},tl_saved_slot_{};
     inline static std::atomic<std::uint32_t> epoch_{1},max_frame_{};inline static thread_local unsigned tl_pattern_{};
     static void note_frame(std::uint32_t frame,bool own) noexcept {
         FrameTally& t=tally_[frame&7];std::uint32_t tag=t.frame.load(std::memory_order_acquire);
@@ -247,18 +260,21 @@ private:
     }
     static bool is_rig(ID3D11DeviceContext* c) noexcept {
         if(!published_buffers_.load(std::memory_order_relaxed)) return false;
-        ID3D11ShaderResourceView* views[3]{};c->VSGetShaderResources(0,3,views);
-        bool hit=false;int which[3]{-1,-1,-1}; // the rig buffer slot (model*2 + wrapper) each view is of
-        for(unsigned k=0;k<3;++k) if(auto* v=views[k]) {
+        constexpr unsigned scan=8; // v1168: t0..t7 (v1167 looked at t0..t2 only)
+        ID3D11ShaderResourceView* views[scan]{};c->VSGetShaderResources(0,scan,views);
+        bool hit=false;int which[scan]{-1,-1,-1,-1,-1,-1,-1,-1}; // the rig buffer slot (model*2 + wrapper) each view is of
+        for(unsigned k=0;k<scan;++k) if(auto* v=views[k]) {
             ID3D11Resource* r{};v->GetResource(&r);const auto at=reinterpret_cast<std::uintptr_t>(r);
             for(unsigned i=0;i<buffer_slots;++i) if(at && buffers_[i].load(std::memory_order_relaxed)==at) {which[k]=static_cast<int>(i);hit=true;}
             if(r) r->Release();
         }
         // v1166: the prepass binding (t0 previous, t1 current, the two wrappers of one model): keep the current view for previous_palette
-        // v1167: t0 == t1 (the engine's own history reset, 0x25da80) is the prepass form too
-        tl_prepass_=which[0]>=0 && which[1]>=0 && which[0]/2==which[1]/2;
+        // v1167: t0 == t1 (the engine's own history reset, 0x25da80) is the prepass form too. v1168: the previous palette is the slot other
+        // than t1 that holds this model's wrapper (t0 in the measured prepass); none: no previous palette to set (classified by the caller).
+        tl_prepass_=false;tl_prev_slot_=0;
+        if(which[1]>=0) for(unsigned k=0;k<scan && !tl_prepass_;++k) if(k!=1 && which[k]>=0 && which[k]/2==which[1]/2) {tl_prepass_=true;tl_prev_slot_=k;}
         tl_pattern_=0;
-        for(unsigned k=0;k<3;++k) tl_pattern_=tl_pattern_*4+(which[k]<0?0u:which[1]>=0 && which[k]/2!=which[1]/2?3u:1u+static_cast<unsigned>(which[k]%2));
+        for(unsigned k=0;k<4;++k) tl_pattern_=tl_pattern_*5+(which[k]>=0?(which[1]>=0 && which[k]/2!=which[1]/2?3u:1u+static_cast<unsigned>(which[k]%2)):views[k] || (k==1 && tl_current_)?4u:0u);
         if(tl_prepass_) {tl_model_=static_cast<unsigned>(which[1]/2);tl_current_=views[1];views[1]=nullptr;}
         for(auto* v:views) if(v) v->Release();
         return hit;

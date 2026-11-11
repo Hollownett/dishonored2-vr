@@ -200,7 +200,7 @@ assert 'stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig");' in p
 assert 'const std::uintptr_t rig_view=alternate_on() && mono && stale_eye_rig_knob?address:0;' in probe and 'd2vr::RigMask::begin_epoch();' in probe
 assert 'stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion");' in probe
 assert 'const bool rig_on=alternate_on() && stale_eye_rig_knob;' in probe and 'd2vr::RigMask::enabled=rig_on;if(game_xr) {game_xr->stale_rig_masks=rig_on;game_xr->stale_rig_motion_rules=stale_eye_rig_motion_knob;}' in probe
-assert probe.count('d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view());') == 4
+assert probe.count('d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass());') == 4
 assert probe.count('rig_mask.after({') == 4 and probe.count('&rig_mask_draw<Binding>,&rig_mask_targets<Binding>);') == 4
 assert 'game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob,fsr_taa.eye_rig_motion(static_cast<int>(motion_eye)));' in probe
 assert '\\"rig_mask\\":' in probe and '\\"rig_mask_pixels\\":' in probe

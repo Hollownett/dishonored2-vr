@@ -2848,7 +2848,7 @@ template<unsigned Binding> void rig_mask_targets(ID3D11DeviceContext* c,UINT n,I
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);d2vr::spyglass_art_probe().observe(context,count,true);
     if(skip_letterbox_draw(context,count)) return;
-    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view()); // v1162: before the note's skin swap
+    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162: before the note's skin swap
     NativeNoteDraw note(context,count,1,start,base);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
@@ -2857,7 +2857,7 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
 }
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
-    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view()); // v1162
+    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
@@ -2866,14 +2866,14 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
 }
 template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UINT count,UINT start) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_vertices",count,1,true);d2vr::spyglass_art_probe().observe(context,count,false);
-    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view()); // v1162
+    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawFn>(gpu_bindings.original(5,Binding))(context,count,start);
     rig_mask.after({2,count,1,start,0,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163
 }
 template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,UINT first) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_instanced_vertices",count,instances,true);
-    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view()); // v1162
+    d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
     rig_mask.after({3,count,instances,start,0,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163

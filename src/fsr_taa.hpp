@@ -171,6 +171,18 @@ private:
     std::mutex mutex_; // guards eyes_, depth views and config between prepare() and the job threads
     std::unique_ptr<std::array<Eye,2>> eyes_{std::make_unique<std::array<Eye,2>>()};
     Ref<ID3D11ComputeShader> copy_;Ref<ID3D11Resource> depth_resource_;Ref<ID3D11ShaderResourceView> depth_view_;
+    Ref<ID3D11Buffer> copy_cb_; // v1168: the depth copy's last render texel (edge padding)
+    static constexpr UINT edge_pad=8; // v1168: texels of edge replication right of and below the render rectangle in the upscale inputs
+    // v1168: the colour input's edge_pad texels right of / below the render rectangle = its last column / row / corner texel (from the source,
+    // so no copy within one resource). Measured v1167 sim: the engine colour holds black past the rectangle, our upscale output carried a
+    // bright fading border; the input texture past the rectangle was never written (undefined contents).
+    static void pad_render_edge(ID3D11DeviceContext* c,ID3D11Resource* dst,ID3D11Resource* src,UINT rw,UINT rh,UINT dw,UINT dh) noexcept {
+        if(!c || !dst || !src || !rw || !rh) return;
+        for(UINT k=0;k<edge_pad && rw+k<dw;++k) {const D3D11_BOX col{rw-1,0,0,rw,rh,1};c->CopySubresourceRegion(dst,0,rw+k,0,0,src,0,&col);}
+        for(UINT k=0;k<edge_pad && rh+k<dh;++k) {const D3D11_BOX row{0,rh-1,0,rw,rh,1};c->CopySubresourceRegion(dst,0,0,rh+k,0,src,0,&row);}
+        const D3D11_BOX corner{rw-1,rh-1,0,rw,rh,1};
+        for(UINT k=0;k<edge_pad && rh+k<dh;++k) for(UINT j=0;j<edge_pad && rw+j<dw;++j) c->CopySubresourceRegion(dst,0,rw+j,rh+k,0,src,0,&corner);
+    }
     Ref<ID3D11ComputeShader> rig_copy_;Ref<ID3D11Buffer> rig_cb_; // v1163: the rig mask copy/compare (rig_mask_copy_source) and its eps/rectangle
     DXGI_FORMAT depth_srv_format_{DXGI_FORMAT_UNKNOWN}; // v1163: the scene depth's read format (the compare's eps)
     UINT ready_w_{},ready_h_{},render_w_{},render_h_{},context_w_{},context_h_{};float ready_fraction_{1}; // context_*: max render size the FSR contexts/inputs were built for
@@ -713,8 +725,10 @@ public:
             // Depth copy plus a reactive mask: the first-person arms/weapons render in their own near
             // depth range (measured ~0.10-0.20 reversed-Z; nearest world surfaces < 0.01), and their motion
             // vectors do not follow the tracked arm pose, so FSR must not trust their history.
-            static const char src[]="Texture2D<float> d:register(t0);RWTexture2D<float> o:register(u0);RWTexture2D<float> r:register(u1);"
-                "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID){float z=d.Load(int3(i.xy,0));o[i.xy]=z;r[i.xy]=z>0.02?0.9:0;}"; // ponytail: 0.02 (was 0.06) also covers the full-body avatar beyond arm reach; nearest world <0.01. Unmeasured, tune in-headset.
+            // v1168: and edge_pad texels right of and below the render rectangle hold its last column/row (k.xy = its last texel), so any
+            // upscaler footprint that reaches past the rectangle reads the edge, never stale texels (the bright right/bottom eye border).
+            static const char src[]="Texture2D<float> d:register(t0);RWTexture2D<float> o:register(u0);RWTexture2D<float> r:register(u1);cbuffer C:register(b0){uint4 k;};"
+                "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID){float z=d.Load(int3(min(i.xy,k.xy),0));o[i.xy]=z;r[i.xy]=z>0.02?0.9:0;}"; // ponytail: 0.02 (was 0.06) also covers the full-body avatar beyond arm reach; nearest world <0.01. Unmeasured, tune in-headset.
             ID3DBlob* code{};
             if(FAILED(D3DCompile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr))) {++create_failures;enabled=false;return;}
             ID3D11ComputeShader* cs{};
@@ -780,6 +794,7 @@ public:
                         for(auto& s:e.rig_count_staging) {ID3D11Buffer* sb{};if(SUCCEEDED(device->CreateBuffer(&sd2,nullptr,&sb))) s.adopt(sb);}
                         e.rig_count_serial=e.rig_read_serial=0;e.rig_live=false;
                     }
+                    if(!copy_cb_.p) {D3D11_BUFFER_DESC kd{};kd.ByteWidth=16;kd.Usage=D3D11_USAGE_DEFAULT;kd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ID3D11Buffer* kb{};if(SUCCEEDED(device->CreateBuffer(&kd,nullptr,&kb))) copy_cb_.adopt(kb);}
                     if(!rig_cb_.p) {D3D11_BUFFER_DESC kd{};kd.ByteWidth=16;kd.Usage=D3D11_USAGE_DEFAULT;kd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ID3D11Buffer* kb{};if(SUCCEEDED(device->CreateBuffer(&kd,nullptr,&kb))) rig_cb_.adopt(kb);}
                     if(!rig_copy_.p) { // v1163: the rig mask copy/compare (rig_mask.hpp)
                         ID3DBlob* code{};ID3D11ComputeShader* cs{};
@@ -852,7 +867,7 @@ public:
         Fsr4EyeUpscaler::poll_retired();
         for(auto& m:motion_) m.reset();
         for(auto& p:probe_) p={};
-        selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();rig_copy_.reset();rig_cb_.reset();depth_srv_format_=DXGI_FORMAT_UNKNOWN;RigMask::reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
+        selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();rig_copy_.reset();rig_cb_.reset();copy_cb_.reset();depth_srv_format_=DXGI_FORMAT_UNKNOWN;RigMask::reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
         {std::lock_guard<std::mutex> jobs(jobs_mutex_);for(auto& r:recording_) {r.first=nullptr;r.second.reset();}queued_.clear();}
         std::lock_guard<std::mutex> lock2(candidate_mutex_);
         for(auto& c:candidates_) {if(c.resource) c.resource->Release();c={};}
@@ -1104,7 +1119,9 @@ private:
         ID3D11UnorderedAccessView* outs[2]{e.depth_uav.p,e.reactive_uav.p};
         c->CSSetShader(copy_.p,nullptr,0);c->CSSetShaderResources(0,1,&depth_view_.p);c->CSSetUnorderedAccessViews(0,2,outs,nullptr);
         const UINT depth_w=job.upscale?render_w_:w,depth_h=job.upscale?render_h_:h;
-        c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
+        if(copy_cb_.p) {const std::uint32_t k[4]{depth_w-1,depth_h-1,0,0};c->UpdateSubresource(copy_cb_.p,0,nullptr,k,0,0);c->CSSetConstantBuffers(0,1,&copy_cb_.p);}
+        c->Dispatch((depth_w+edge_pad+7)/8,(depth_h+edge_pad+7)/8,1); // v1168: the rectangle plus its edge padding (writes past the texture are dropped)
+        {ID3D11Buffer* no_cb{};c->CSSetConstantBuffers(0,1,&no_cb);}
         e.depth_w=depth_w;e.depth_h=depth_h;
         // v1163: the rig mask of this render: the rig depth (rig_mask.hpp, replayed rig draws) where it equals the final scene depth
         e.rig_valid=false;e.rig_live=false;e.rig_motion=false;
@@ -1216,7 +1233,7 @@ private:
         bool dl=false;
         bool fsr3_whole=false;
         if(dlss_fallback_.should_evaluate() && dlss_lease_) {
-            if(job.upscale) {const D3D11_BOX active{0,0,0,render_w_,render_h_,1};c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);}
+            if(job.upscale) {const D3D11_BOX active{0,0,0,render_w_,render_h_,1};c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);pad_render_edge(c,e.colour_in.p,job.colour.p,render_w_,render_h_,context_w_,context_h_);} // v1168
             if(job.upscale && dlss_desc_valid_ && dlss_desc_.width<w && e.fovea_box && e.upscaled.p) { // v1107: FSR 3 under the DLSS box
                 auto in3=in;in3.colour=e.colour_in.p;in3.output=e.upscaled.p;in3.render_w=render_w_;in3.render_h=render_h_;
                 in3.reset=e.reset || !e.fsr3_whole_last;
@@ -1238,7 +1255,7 @@ private:
         bool fov=false;
         if(!dl && job.upscale && e.fovea && fsr4_active.load(std::memory_order_relaxed) && e.fsr4.valid() && e.colour_in.p && e.upscaled.p) {
             const D3D11_BOX active{0,0,0,render_w_,render_h_,1};
-            c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);
+            c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);pad_render_edge(c,e.colour_in.p,job.colour.p,render_w_,render_h_,context_w_,context_h_); // v1168
             auto in3=in;in3.colour=e.colour_in.p;in3.output=e.upscaled.p;in3.render_w=render_w_;in3.render_h=render_h_;
             in3.reset=e.reset || (previous_generation!=3 && previous_generation!=fovea_generation);
             if(e.fsr.dispatch(c,in3)) {
@@ -1270,7 +1287,7 @@ private:
         // Materialize the smaller D3D11 source only for FSR3 or its fallback.
         if(!ml && !dl && !fov && job.upscale) {
             const D3D11_BOX active{0,0,0,render_w_,render_h_,1};
-            c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);
+            c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);pad_render_edge(c,e.colour_in.p,job.colour.p,render_w_,render_h_,context_w_,context_h_); // v1168
             in.colour=e.colour_in.p;
             in.output=e.upscaled.p;
         }
