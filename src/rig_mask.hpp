@@ -62,6 +62,10 @@ inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) 
 // (rig_ring_valid); a skipped frame (no skin copy) restarts the run. The v1166-v1170 per-eye slots keyed by the draw's classified frame,
 // and the per-frame validity tally, are gone: validity is per draw (own pair or not) and reaches the motion pass per pixel through the mask.
 inline constexpr unsigned rig_ring_run_needed=3;
+// v1185 (sim v1183: two renders whose whole rig read 40,000 px p50 with own pairs): a draw takes the ring only when its rotation for the
+// engine frame the draw belongs to is already recorded (RigMask::frame_fn at the draw == the ring's last rotation) and the run has lasted
+// rig_ring_proven frames; otherwise zero motion (254). Counted: ring_late, ring_young.
+inline constexpr unsigned rig_ring_proven=8;
 // Pure: the run length after a rotation at engine frame `frame` (last = the frame of the previous rotation, ~0u none).
 inline unsigned rig_ring_run(std::uint32_t last,unsigned run,std::uint32_t frame) noexcept {
     if(last==frame) return run;                       // same engine frame: already rotated (a second call does nothing)
@@ -77,6 +81,7 @@ public:
     // v1171: rig motion vectors (own previous palette + rows, v1166-v1169) are opt-in: dxgi_probe sets this from build/stale-eye-rig-motion.
     // Off: rig draws keep the engine's previous rows and palette (v1165), no copies, no substitution, rig pixels zeroed by the mask.
     inline static std::atomic<bool> motion{false};
+    using FrameFn=std::uint32_t(*)() noexcept;inline static std::atomic<FrameFn> frame_fn{}; // v1185: the engine frame counter (dxgi_probe)
     struct DrawArgs {unsigned kind{};UINT count{},instances{1},start{};INT base{};UINT first{};}; // 0 DrawIndexed 1 ..Instanced 2 Draw 3 DrawInstanced
     using DrawFn=void(*)(ID3D11DeviceContext*,const DrawArgs&) noexcept;               // the engine's draw, past every hook
     using TargetsFn=void(*)(ID3D11DeviceContext*,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*) noexcept; // OMSetRenderTargets, past the hooks
@@ -172,7 +177,7 @@ public:
          <<",\"cpu\":"<<foreign_cpu_.load()<<",\"srv_format\":"<<foreign_format_.load()<<",\"srv_dimension\":"<<foreign_dimension_.load()<<",\"srv_elements\":"<<foreign_elements_.load()
          <<",\"distinct\":"<<foreign_distinct_.load()<<",\"draw_count\":"<<foreign_count_.load()<<",\"mod_ring\":"<<foreign_ours_.load()<<"}"
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"ring\":{\"rotations\":"<<rotations_.load()<<",\"restarts\":"<<ring_restarts_.load()
-         <<",\"repeats\":"<<ring_repeats_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
+         <<",\"repeats\":"<<ring_repeats_.load()<<",\"late\":"<<ring_late_.load()<<",\"young\":"<<ring_young_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"held_draws\":"<<held_draws_.load()<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
         return o.str();
@@ -228,13 +233,15 @@ private:
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};};
     inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};
     inline static std::atomic<std::uint64_t> held_draws_{};
-    inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{};
+    inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{},ring_late_{},ring_young_{};
     // P's view (made like the draw's current palette view) when the model's ring holds this eye's previous render, else null
     // Held by the caller's thread until the draw's Scope ends (a reset may release the ring meanwhile). ~13 rig draws a render: the lock is cheap.
     static ID3D11ShaderResourceView* ring_view(ID3D11DeviceContext* c,unsigned model) noexcept {
         if(model>=ring_.size()) return nullptr;
         Ring& r=ring_[model];
         if(!r.ready.load(std::memory_order_acquire) || !rig_ring_valid(r.run.load(std::memory_order_acquire))) return nullptr;
+        if(r.run.load(std::memory_order_acquire)<rig_ring_proven) {ring_young_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
+        if(const auto fn=frame_fn.load(std::memory_order_relaxed);fn && fn()!=r.last.load(std::memory_order_acquire)) {ring_late_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
         std::lock_guard<std::mutex> lock(mutex_);
         if(!r.ready.load(std::memory_order_relaxed)) return nullptr;
         ID3D11Device* device{};c->GetDevice(&device);if(device) device->Release();

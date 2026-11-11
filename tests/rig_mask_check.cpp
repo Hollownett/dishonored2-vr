@@ -65,7 +65,7 @@ static void run(bool d24,int mode) {
     d2vr::RigMask::publish({reinterpret_cast<std::uintptr_t>(rig_pal.Get()),reinterpret_cast<std::uintptr_t>(rig_prev.Get()),0,0,0,0});
     const bool ring=mode==1 || mode==2; // v1183: mode 3 = a held rigid item (no rig palette, marked held: 253)
     d2vr::RigMask::motion=ring;d2vr::RigMask::begin_epoch();
-    if(ring) for(std::uint32_t f=1;f<=3;++f) { // three engine frames' skin copies: the current palette's x = frame/1000 (a tiny clip offset)
+    if(ring) for(std::uint32_t f=1;f<=8;++f) { // v1185: proven after 8 // three engine frames' skin copies: the current palette's x = frame/1000 (a tiny clip offset)
         const float v[4]{f*1e-3f,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f);
     }
     if(ring) {const float v[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);} // this render's current palette
@@ -122,7 +122,7 @@ static void run(bool d24,int mode) {
     const float far_world[8]{-1,-1,1,1,.1f,0,0,0},rig_rect[8]{-.8f,-.6f,.4f,.6f,0,0,0,0},near_world[8]{0,-1,1,1,.9f,0,0,0};
     engine_draw(vw.Get(),other_view.Get(),far_world);
     engine_draw(vs.Get(),mode==3?other_view.Get():rig_view.Get(),rig_rect,true);
-    if(ring) {CHECK(restored);CHECK(bound_x==(mode==1?1e-3f:0.f));std::printf("mode %d: t0 during the draw holds x=%g (ring P = frame 1: 0.001; current: 0)\n",mode,bound_x);}
+    if(ring) {CHECK(restored);CHECK(bound_x==(mode==1?6e-3f:0.f));std::printf("mode %d: t0 during the draw holds x=%g (ring P = frame 6: 0.006; current: 0)\n",mode,bound_x);}
     { // the engine's state after the replay is its own
         ID3D11RenderTargetView* r[8]{};ID3D11DepthStencilView* d{};c->OMGetRenderTargets(8,r,&d);
         CHECK(r[0]==rtv[0].Get() && r[1]==rtv[1].Get() && !r[2] && d==dsv.Get());

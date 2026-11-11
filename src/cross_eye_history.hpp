@@ -32,6 +32,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include "render_pass_table.hpp"
 
 namespace d2vr {
 class CrossEyeHistory {
@@ -52,7 +53,7 @@ public:
             const bool watch=census.load(std::memory_order_relaxed) || learning;
             if(!(watch || fixing)) return;
             const auto fn=frame_fn.load(std::memory_order_relaxed);if(!fn) return;
-            frame_=fn();note_frame(frame_);eye_=alternate?-1:paired_eye;
+            frame_=fn();note_frame(frame_);eye_=alternate?-1:paired_eye;pass_=pass;
             ID3D11PixelShader* ps{};c->PSGetShader(&ps,nullptr,nullptr);if(ps) ps->Release(); // identity only
             if(!ps) return;
             ID3D11ShaderResourceView* srv[16]{};ID3D11RenderTargetView* rtv[8]{};ID3D11DepthStencilView* dsv{};
@@ -76,7 +77,7 @@ public:
         Scope(const Scope&)=delete;Scope& operator=(const Scope&)=delete;
     private:
         friend class CrossEyeHistory;
-        std::uint32_t frame_{};int eye_{-1};ID3D11DeviceContext* c_{};unsigned role_{};ID3D11Resource* out_{};
+        std::uint32_t frame_{};int eye_{-1},pass_{-1};ID3D11DeviceContext* c_{};unsigned role_{};ID3D11Resource* out_{};
         void note_read(ID3D11Resource* r,ID3D11Resource* out0,int pass,ID3D11PixelShader* ps,unsigned slot) noexcept {
             Entry* e=entry(r);if(!e) return;
             const std::uint32_t written=e->written.load(std::memory_order_relaxed);const int writer=e->writer.load(std::memory_order_relaxed);
@@ -94,7 +95,7 @@ public:
                 cross_reads_.fetch_add(1,std::memory_order_relaxed);
             }
         }
-        void note_write(ID3D11Resource* r) noexcept {if(Entry* e=entry(r)) {e->written.store(frame_+1,std::memory_order_relaxed);e->writer.store(eye_,std::memory_order_relaxed);}}
+        void note_write(ID3D11Resource* r) noexcept {if(Entry* e=entry(r)) {e->written.store(frame_+1,std::memory_order_relaxed);e->writer.store(eye_,std::memory_order_relaxed);e->writer_pass.store(pass_,std::memory_order_relaxed);}}
         // the role's previous rotation was the execution just before this one in the eye sequence (alternate: one per engine frame;
         // paired: the other eye, same or previous engine frame)
         bool follows(const Role& ro) const noexcept {
@@ -132,7 +133,8 @@ public:
         for(const Entry* e:top) if(e) {
             D3D11_TEXTURE2D_DESC d{};describe(reinterpret_cast<ID3D11Resource*>(e->key.load()),d);
             o<<(first?"":",")<<"{\"texture\":\""<<std::hex<<e->key.load()<<"\",\"ps\":\""<<e->ps.load()<<std::dec<<"\",\"reads\":"<<e->cross.load()<<",\"frames\":"<<e->frames.load()
-             <<",\"pass\":"<<e->pass.load()<<",\"slot\":"<<e->slot.load()<<",\"size\":["<<d.Width<<','<<d.Height<<"],\"format\":"<<d.Format<<",\"shaped\":"<<(e->shaped.load()?"true":"false")<<'}';
+             <<",\"pass\":"<<e->pass.load()<<",\"pass_name\":\""<<(e->pass.load()>=0?render_pass_name(static_cast<unsigned>(e->pass.load())):"untagged")
+             <<"\",\"writer_pass\":"<<e->writer_pass.load()<<",\"writer_name\":\""<<(e->writer_pass.load()>=0?render_pass_name(static_cast<unsigned>(e->writer_pass.load())):"untagged")<<"\""<<",\"slot\":"<<e->slot.load()<<",\"size\":["<<d.Width<<','<<d.Height<<"],\"format\":"<<d.Format<<",\"shaped\":"<<(e->shaped.load()?"true":"false")<<'}';
             first=false;
         }
         o<<"],\"roles\":[";
@@ -147,7 +149,7 @@ public:
     }
 private:
     struct Entry {std::atomic<std::uintptr_t> key{};std::atomic<std::uint32_t> written{},flag_frame{~0u};std::atomic<int> writer{-1};std::atomic<std::uint64_t> cross{};std::atomic<unsigned> frames{},slot{};
-        std::atomic<int> pass{-1};std::atomic<std::uintptr_t> ps{};std::atomic<bool> shaped{};};
+        std::atomic<int> pass{-1},writer_pass{-1};std::atomic<std::uintptr_t> ps{};std::atomic<bool> shaped{};};
     struct Role {std::uintptr_t ps{};unsigned slot{};ID3D11Texture2D* a{};ID3D11Texture2D* b{};ID3D11Device* device{};D3D11_TEXTURE2D_DESC desc{};
         std::uint32_t last{~0u};int last_eye{-1};unsigned run{};std::uint64_t restored{};};
     static constexpr unsigned table_size=4096,max_roles=8;

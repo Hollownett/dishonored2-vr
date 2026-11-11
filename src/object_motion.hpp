@@ -87,6 +87,22 @@ public:
         if(!find(eye,frame-own_step,got,own)) return unproven;
         std::memcpy(prev,got,64);return kind;
     }
+    // v1185 rig draws in alternate mode: the rig is drawn in every render, so its raw previous rows are always the other eye's render one
+    // engine frame back, whose own raw previous rows are this eye's render two back. The chain is followed by content alone in a window of
+    // labels around `frame` (both eyes, frames frame+1 .. frame-6): a draw recorded under the wrong eye/frame label (v1183 street: one eye's
+    // rig draws all fell to own_last at the end of the run) still finds its rows. Both hops must match exactly (64 bytes).
+    Kind fix_any(unsigned eye,std::uint32_t frame,const float* cur,float* prev) noexcept {
+        insert(eye,frame,cur,prev);
+        if(!std::memcmp(cur,prev,64)) return same;
+        float got[16],own[16];
+        const auto find_window=[&](const float* key,float* out) {
+            for(int d=-1;d<=6;++d) for(unsigned e=0;e<2;++e) if(find(e,frame-static_cast<std::uint32_t>(d),key,out)) return true;
+            return false;
+        };
+        if(!find_window(prev,got)) return miss;
+        if(!find_window(got,own)) return unproven;
+        std::memcpy(prev,got,64);return other_last;
+    }
 private:
     struct Slot {std::atomic<std::uint64_t> tag{};std::atomic<std::uint32_t> ready{};float cur[16]{},prev[16]{};};
     std::array<Slot,2*gens*slots> slots_{};
@@ -726,7 +742,7 @@ private:
             if(!have_prev) return false; // no previous rows: not a motion-vector writer (the colour pass), nothing to pair
             bool rows_own=false;
             if(have_view && (affine(view.inv[0],cur) || affine(view.inv[1],cur))) {
-                const auto kind=table_.fix(view.eye,view.frame,cur,prev,2u);
+                const auto kind=table_.fix_any(view.eye,view.frame,cur,prev); // v1185: by content, label-tolerant
                 // v1179: only other_last (the chain through the other eye one frame back, both hops proven by content). The rig is drawn in
                 // every render, so its raw previous rows are always the other eye's: own_last on a rig draw means the draw was labelled with
                 // the wrong render (rows one engine frame old against a palette two frames old: the v1170 ~5000 px renders). Zero instead.

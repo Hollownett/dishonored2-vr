@@ -32,21 +32,25 @@ int main() {
         d2vr::SkinMotion::skin_copied(c.Get(),model,w[0].Get(),w[1].Get(),w[f%2].Get(),f);
     };
     const auto draw_binding=[&](std::uint32_t f) {ID3D11ShaderResourceView* pair[2]{v[(f+1)%2].Get(),v[f%2].Get()};c->VSSetShaderResources(0,2,pair);};
-    copy(10);draw_binding(10);CHECK(!d2vr::SkinMotion::bind_previous(c.Get()));   // one rotation: not valid yet
-    copy(11);draw_binding(11);CHECK(!d2vr::SkinMotion::bind_previous(c.Get()));
-    copy(12);copy(12);draw_binding(12);                                             // a second call in one frame does nothing
-    CHECK(d2vr::SkinMotion::bind_previous(c.Get()));CHECK(t0_value()==10.f);        // P = frame 10's palette (two engine frames back)
+    for(std::uint32_t f=10;f<17;++f) {copy(f);draw_binding(f);CHECK(!d2vr::SkinMotion::bind_previous(c.Get()));} // runs 1..7: not proven yet (v1185: 8)
+    copy(17);copy(17);draw_binding(17);                                             // a second call in one frame does nothing
+    CHECK(d2vr::SkinMotion::bind_previous(c.Get()));CHECK(t0_value()==15.f);        // P = frame 15's palette (two engine frames back)
     CHECK(!d2vr::SkinMotion::bind_previous(c.Get()));                              // already bound for this draw
-    d2vr::SkinMotion::restore(c.Get());CHECK(t0_value()==11.f);                     // the engine's previous wrapper again
-    copy(13);draw_binding(13);CHECK(d2vr::SkinMotion::bind_previous(c.Get()) && t0_value()==11.f);d2vr::SkinMotion::restore(c.Get());
-    copy(15);draw_binding(15);CHECK(!d2vr::SkinMotion::bind_previous(c.Get()));   // frame 14 had no copy: the run restarts
+    d2vr::SkinMotion::restore(c.Get());CHECK(t0_value()==16.f);                     // the engine's previous wrapper again
+    copy(18);draw_binding(18);CHECK(d2vr::SkinMotion::bind_previous(c.Get()) && t0_value()==16.f);d2vr::SkinMotion::restore(c.Get());
+    copy(20);draw_binding(20);CHECK(!d2vr::SkinMotion::bind_previous(c.Get()));   // frame 19 had no copy: the run restarts
     { // a draw of a model the ring does not know
         ComPtr<ID3D11Buffer> o;dev->CreateBuffer(&bd,nullptr,&o);ComPtr<ID3D11ShaderResourceView> ov;dev->CreateShaderResourceView(o.Get(),&vd,&ov);
         ID3D11ShaderResourceView* pair[2]{ov.Get(),ov.Get()};c->VSSetShaderResources(0,2,pair);CHECK(!d2vr::SkinMotion::bind_previous(c.Get()));
     }
-    for(std::uintptr_t m=1;m<=70;++m) d2vr::SkinMotion::skin_copied(c.Get(),0x2000+m*16,w[0].Get(),w[1].Get(),w[0].Get(),15); // past the cap
-    const auto j=d2vr::SkinMotion::json();std::printf("%s\n",j.c_str());
-    CHECK(j.find("\"models\":64")!=std::string::npos && j.find("\"overflow\":7")!=std::string::npos);
+    // v1185 capacity: 2100 more models in one frame: 2047 fit (2048 with the first), the rest overflow (none is old enough to evict);
+    // 3 frames later new models evict the least recently used
+    for(std::uintptr_t m=1;m<=2100;++m) d2vr::SkinMotion::skin_copied(c.Get(),0x10000+m*16,w[0].Get(),w[1].Get(),w[0].Get(),20);
+    auto j=d2vr::SkinMotion::json();std::printf("%s\n",j.c_str());
+    CHECK(j.find("\"models\":2048")!=std::string::npos && j.find("\"overflow\":53")!=std::string::npos);
+    for(std::uintptr_t m=1;m<=10;++m) d2vr::SkinMotion::skin_copied(c.Get(),0x900000+m*16,w[0].Get(),w[1].Get(),w[0].Get(),23);
+    j=d2vr::SkinMotion::json();std::printf("%s\n",j.c_str());
+    CHECK(j.find("\"evictions\":10")!=std::string::npos && j.find("\"distinct\":2058")!=std::string::npos);
     if(failures) {std::printf("skin_motion_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: skin_motion_check (own previous palette two engine frames back, restore, gaps restart, unknown models, cap)\n");
     return 0;
