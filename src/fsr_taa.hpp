@@ -109,6 +109,9 @@ public:
             rig_pixels[eye].store(n[0],std::memory_order_relaxed);rig_near_misses[eye].store(n[1],std::memory_order_relaxed);rig_own_pixels[eye].store(n[2],std::memory_order_relaxed);e.rig_read_serial=serial;
         }
     }
+    // v1186 (sim v1184: the first five renders after the mode starts read 0.17-1.16 px on still entities): no motion texture before each
+    // eye's 5th render of a history (was 3rd, v1153); the warp then keeps its no-mover path and rig pixels stay unmoved
+    static constexpr std::uint32_t motion_warmup_phase=4;
     std::atomic<std::uint64_t> motion_rig_masks{}; // v1162: motion passes that used the rig mask for the arm rule
     std::atomic<std::uint64_t> motion_rig_moving{}; // v1166: of those, rig pixels with real motion (rig_motion valid)
     bool eye_rig_motion(int eye) {std::lock_guard<std::mutex> lock(mutex_);return (eye==0 || eye==1) && (*eyes_)[static_cast<std::size_t>(eye)].rig_motion;} // v1166
@@ -1141,7 +1144,7 @@ private:
         // v1151: this render's motion texture (eye_motion_pass.hpp), from its alternate receipt; none without one
         e.motion_valid=false;
         // v1153 (sim v1152: garbage previous rows on the first renders after the mode came up): only from this eye's third render of a history
-        if(job.receipt && !job.receipt->reset && job.receipt->phase>=2 && e.motion_uav.p && e.depth_srv.p && job.motion.p) {
+        if(job.receipt && !job.receipt->reset && job.receipt->phase>=motion_warmup_phase && e.motion_uav.p && e.depth_srv.p && job.motion.p) {
             EyeMotionConstants k{};
             // v1154: the other eye's last receipt, when it is the render one Present before this one (its current = the other eye at N-1)
             const auto& other=last_receipt_[static_cast<std::size_t>(job.eye^1)];

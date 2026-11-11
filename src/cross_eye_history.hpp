@@ -26,6 +26,7 @@
 // The reprojection inside those passes uses the view's own cb_previousviewprojectionmatrix (paired: each eye view rolls its own previous;
 // alternate: the seeded per-eye previous) or this view's motion vectors, so restoring the eye's own history makes the pass consistent.
 #include <d3d11.h>
+#include <MinHook.h>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -47,7 +48,13 @@ public:
         // paired_eye: the eye whose view `pass_view` is on a paired frame (ObjectMotion::eye_of_view), else -1
         Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass,int paired_eye=-1) noexcept {
             const bool alternate=pass_view && pass_view==view.load(std::memory_order_relaxed);
-            if(!c || !pass_view || (!alternate && paired_eye<0)) return;
+            // v1186: every draw's targets are writes, in any pass (shadow views, depth-only draws without a pixel shader included); reads
+            // count only in the eye views' passes
+            if(!c) return;
+            if(!pass_view || (!alternate && paired_eye<0)) {
+                if(census.load(std::memory_order_relaxed)) if(const auto fn=frame_fn.load(std::memory_order_relaxed)) observe_targets(c,fn(),-1,pass);
+                return;
+            }
             const bool fixing=alternate?fix.load(std::memory_order_relaxed):fix_paired.load(std::memory_order_relaxed);
             const bool learning=fixing && learned_.load(std::memory_order_relaxed)<learn_frames;
             const bool watch=census.load(std::memory_order_relaxed) || learning;
@@ -55,7 +62,7 @@ public:
             const auto fn=frame_fn.load(std::memory_order_relaxed);if(!fn) return;
             frame_=fn();note_frame(frame_);eye_=alternate?-1:paired_eye;pass_=pass;
             ID3D11PixelShader* ps{};c->PSGetShader(&ps,nullptr,nullptr);if(ps) ps->Release(); // identity only
-            if(!ps) return;
+            if(!ps) {if(watch) observe_targets(c,frame_,eye_,pass);return;}
             ID3D11ShaderResourceView* srv[16]{};ID3D11RenderTargetView* rtv[8]{};ID3D11DepthStencilView* dsv{};
             const int role=fixing?find_role(ps):-1;
             if(!watch && role<0) return;
@@ -95,7 +102,7 @@ public:
                 cross_reads_.fetch_add(1,std::memory_order_relaxed);
             }
         }
-        void note_write(ID3D11Resource* r) noexcept {if(Entry* e=entry(r)) {e->written.store(frame_+1,std::memory_order_relaxed);e->writer.store(eye_,std::memory_order_relaxed);e->writer_pass.store(pass_,std::memory_order_relaxed);}}
+        void note_write(ID3D11Resource* r) noexcept {write(r,frame_,eye_,pass_);}
         // the role's previous rotation was the execution just before this one in the eye sequence (alternate: one per engine frame;
         // paired: the other eye, same or previous engine frame)
         bool follows(const Role& ro) const noexcept {
@@ -118,11 +125,30 @@ public:
             c->CopyResource(ro.b,ro.a);c->CopyResource(ro.a,out0);ro.last=frame_;ro.last_eye=eye_;
         }
     };
+    // v1186: writes the census sees outside draws (CopyResource, CopySubresourceRegion, the clears, compute UAVs at Dispatch); `eye` the
+    // writing view's paired eye or -1. Callers: this file's copy/clear hooks and taa_dispatch.hpp's depth-clear/dispatch hooks.
+    static void write(ID3D11Resource* r,std::uint32_t frame,int eye,int pass) noexcept {
+        if(Entry* e=entry(r)) {e->written.store(frame+1,std::memory_order_relaxed);e->writer.store(eye,std::memory_order_relaxed);e->writer_pass.store(pass,std::memory_order_relaxed);}
+    }
+    struct Writer {int eye{-1},pass{-1};};using WriterFn=Writer(*)() noexcept; // the current pass and its paired eye (dxgi_probe)
+    inline static std::atomic<WriterFn> writer_fn{};
+    static void note_resource(ID3D11Resource* r) noexcept {
+        if(!r || !census.load(std::memory_order_relaxed)) return;
+        const auto fn=frame_fn.load(std::memory_order_relaxed);const auto wf=writer_fn.load(std::memory_order_relaxed);if(!fn) return;
+        const Writer w=wf?wf():Writer{};write(r,fn(),w.eye,w.pass);other_writes_.fetch_add(1,std::memory_order_relaxed);
+    }
+    template<class View> static void note_view(View* v) noexcept {if(!v || !census.load(std::memory_order_relaxed)) return;ID3D11Resource* r{};v->GetResource(&r);if(r) {note_resource(r);r->Release();}}
+    static void note_dispatch(ID3D11DeviceContext* c) noexcept { // compute: the bound UAVs are writes
+        if(!c || !census.load(std::memory_order_relaxed)) return;
+        ID3D11UnorderedAccessView* u[8]{};c->CSGetUnorderedAccessViews(0,8,u);
+        for(auto* v:u) if(v) {note_view(v);v->Release();}
+    }
+    static void install(ID3D11Device* device) noexcept; // the copy and render-target/UAV clear hooks (slots 46, 47, 50, 51, 52)
     static void begin_epoch() noexcept {std::lock_guard<std::mutex> lock(mutex_);for(auto& r:roles_) {r.run=0;r.last=~0u;r.last_eye=-1;}}
     static std::string json() {
         std::ostringstream o;
         o<<"{\"census\":"<<(census.load()?"true":"false")<<",\"fix\":"<<(fix.load()?"true":"false")<<",\"fix_paired\":"<<(fix_paired.load()?"true":"false")<<",\"frames\":"<<frames_.load()<<",\"cross_reads\":"<<cross_reads_.load()
-         <<",\"restores\":"<<restores_.load()<<",\"top\":[";
+         <<",\"restores\":"<<restores_.load()<<",\"other_writes\":"<<other_writes_.load()<<",\"top\":[";
         // the 16 entries with the most cross-eye reads: texture, reads, frames, pass, pixel shader, slot, w, h, format, history-shaped
         std::array<const Entry*,16> top{};
         for(const auto& e:table_) if(e.cross.load()) {
@@ -156,7 +182,34 @@ private:
     inline static std::array<Entry,table_size> table_{};
     inline static std::array<Role,max_roles> roles_{};inline static std::atomic<unsigned> role_count_{};
     inline static std::mutex mutex_;
-    inline static std::atomic<std::uint32_t> last_frame_{~0u};inline static std::atomic<std::uint64_t> frames_{},learned_{},cross_reads_{},restores_{};
+    inline static std::atomic<std::uint32_t> last_frame_{~0u};inline static std::atomic<std::uint64_t> frames_{},learned_{},cross_reads_{},restores_{},other_writes_{};
+    static void observe_targets(ID3D11DeviceContext* c,std::uint32_t frame,int eye,int pass) noexcept {
+        ID3D11RenderTargetView* rtv[8]{};ID3D11DepthStencilView* dsv{};c->OMGetRenderTargets(8,rtv,&dsv);
+        for(auto* v:rtv) if(v) {ID3D11Resource* r{};v->GetResource(&r);if(r) {write(r,frame,eye,pass);r->Release();}v->Release();}
+        if(dsv) {ID3D11Resource* r{};dsv->GetResource(&r);if(r) {write(r,frame,eye,pass);r->Release();}dsv->Release();}
+    }
+    // the hooks (one per slot; a slot another owner already hooked stays unobserved)
+    using CopyFn=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,ID3D11Resource*);
+    using CopyRegionFn=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,UINT,UINT,UINT,ID3D11Resource*,UINT,const D3D11_BOX*);
+    using ClearRtvFn=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,const FLOAT*);
+    using ClearUavUFn=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11UnorderedAccessView*,const UINT*);
+    using ClearUavFFn=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11UnorderedAccessView*,const FLOAT*);
+    inline static std::array<CopyFn,2> copy_{};inline static std::array<CopyRegionFn,2> region_{};inline static std::array<ClearRtvFn,2> clear_rtv_{};
+    inline static std::array<ClearUavUFn,2> clear_uavu_{};inline static std::array<ClearUavFFn,2> clear_uavf_{};inline static std::array<void*,10> targets_{};
+    template<int I> static void STDMETHODCALLTYPE copy_hook(ID3D11DeviceContext* c,ID3D11Resource* d,ID3D11Resource* s) {note_resource(d);copy_[I](c,d,s);}
+    template<int I> static void STDMETHODCALLTYPE region_hook(ID3D11DeviceContext* c,ID3D11Resource* d,UINT ds,UINT x,UINT y,UINT z,ID3D11Resource* s,UINT ss,const D3D11_BOX* b) {
+        note_resource(d);region_[I](c,d,ds,x,y,z,s,ss,b);}
+    template<int I> static void STDMETHODCALLTYPE clear_rtv_hook(ID3D11DeviceContext* c,ID3D11RenderTargetView* v,const FLOAT* k) {note_view(v);clear_rtv_[I](c,v,k);}
+    template<int I> static void STDMETHODCALLTYPE clear_uavu_hook(ID3D11DeviceContext* c,ID3D11UnorderedAccessView* v,const UINT* k) {note_view(v);clear_uavu_[I](c,v,k);}
+    template<int I> static void STDMETHODCALLTYPE clear_uavf_hook(ID3D11DeviceContext* c,ID3D11UnorderedAccessView* v,const FLOAT* k) {note_view(v);clear_uavf_[I](c,v,k);}
+    template<class Fn> static bool hook_slot(ID3D11DeviceContext* context,unsigned slot,void* replacement,Fn& original) noexcept {
+        void* target=(*reinterpret_cast<void***>(context))[slot];
+        for(auto* t:targets_) if(t==target) return true; // already hooked by this class (shared implementation)
+        if(MH_CreateHook(target,replacement,reinterpret_cast<void**>(&original))!=MH_OK) {original=nullptr;return false;}
+        if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);original=nullptr;return false;}
+        for(auto& t:targets_) if(!t) {t=target;break;}
+        return true;
+    }
     static void note_frame(std::uint32_t f) noexcept {
         if(last_frame_.exchange(f,std::memory_order_relaxed)!=f) {frames_.fetch_add(1,std::memory_order_relaxed);learned_.fetch_add(1,std::memory_order_relaxed);}
     }
@@ -207,4 +260,24 @@ private:
         ro.device=device;return true;
     }
 };
+inline void CrossEyeHistory::install(ID3D11Device* device) noexcept {
+    if(!device || targets_[0]) return;
+    ID3D11DeviceContext* deferred{};ID3D11DeviceContext* immediate{};
+    if(FAILED(device->CreateDeferredContext(0,&deferred))) return;
+    device->GetImmediateContext(&immediate);
+    void** dv=*reinterpret_cast<void***>(deferred);void** iv=immediate?*reinterpret_cast<void***>(immediate):nullptr;
+    hook_slot(deferred,47,reinterpret_cast<void*>(&copy_hook<0>),copy_[0]);hook_slot(deferred,46,reinterpret_cast<void*>(&region_hook<0>),region_[0]);
+    hook_slot(deferred,50,reinterpret_cast<void*>(&clear_rtv_hook<0>),clear_rtv_[0]);hook_slot(deferred,51,reinterpret_cast<void*>(&clear_uavu_hook<0>),clear_uavu_[0]);
+    hook_slot(deferred,52,reinterpret_cast<void*>(&clear_uavf_hook<0>),clear_uavf_[0]);
+    if(immediate) {
+        // the same code on both context kinds: the deferred hook (trampoline copy_[0] etc.) serves the immediate one as well
+        if(iv[47]==dv[47]) copy_[1]=copy_[0];else hook_slot(immediate,47,reinterpret_cast<void*>(&copy_hook<1>),copy_[1]);
+        if(iv[46]==dv[46]) region_[1]=region_[0];else hook_slot(immediate,46,reinterpret_cast<void*>(&region_hook<1>),region_[1]);
+        if(iv[50]==dv[50]) clear_rtv_[1]=clear_rtv_[0];else hook_slot(immediate,50,reinterpret_cast<void*>(&clear_rtv_hook<1>),clear_rtv_[1]);
+        if(iv[51]==dv[51]) clear_uavu_[1]=clear_uavu_[0];else hook_slot(immediate,51,reinterpret_cast<void*>(&clear_uavu_hook<1>),clear_uavu_[1]);
+        if(iv[52]==dv[52]) clear_uavf_[1]=clear_uavf_[0];else hook_slot(immediate,52,reinterpret_cast<void*>(&clear_uavf_hook<1>),clear_uavf_[1]);
+        immediate->Release();
+    }
+    deferred->Release();
+}
 } // namespace d2vr

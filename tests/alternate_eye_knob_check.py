@@ -188,7 +188,7 @@ assert 'd2vr::ObjectMotion::note_alternate_view(alternate_on() && mono && stale_
 assert 'stale_eye_motion_knob?receipt:std::nullopt' in probe
 assert '\\"stale_motion\\":' in probe and '\\"motion_passes\\":' in probe and '\\"motion_refusals\\":' in probe
 assert 'stale_layers_[eye]->motion_rules=stale_motion_rules;' in xr and 'const StaleMotion kept_motion=stale_motion(eye),fresh_motion=fresh_now?stale_motion(fresh_eye):StaleMotion{};' in xr
-assert 'if(job.receipt && !job.receipt->reset && job.receipt->phase>=2 && e.motion_uav.p && e.depth_srv.p && job.motion.p) {' in fsr
+assert 'if(job.receipt && !job.receipt->reset && job.receipt->phase>=motion_warmup_phase && e.motion_uav.p && e.depth_srv.p && job.motion.p) {' in fsr and 'motion_warmup_phase=4;' in fsr  # v1186 warm-up
 print('PASS: v1151 mover routing (knob, motion textures per eye, parts and rules, receipt-gated pass, status)')
 
 # v1162/v1163 rig mask: knob, rig draws of the alternate one-view replayed into the rig depth (right after the engine's draw), the

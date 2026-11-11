@@ -11531,6 +11531,7 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
                         (!paired_binds_per_eye || paired_buffer_binds!=paired_binds_per_eye*2)))) return;
                     ComPtr<ID3D11Device> device;chain->GetDevice(IID_PPV_ARGS(&device));
                     install_glyph_hook(device.Get());
+                    if(d2vr::CrossEyeHistory::census.load()) d2vr::CrossEyeHistory::install(device.Get()); // v1186: copy/clear writes (census knob only)
                     if(taa_history_installed && !d2vr::TaaDispatchHook::installed() && d2vr::TaaDispatchHook::install(device.Get())) {
                         d2vr::TaaDispatchHook::handler=&taa_dispatch_handler;
                         d2vr::TaaDispatchHook::depth_observer=[](ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT f,FLOAT d,UINT8 stencil) {fsr_taa.observe_depth(v,c,f,d,stencil);};
@@ -16076,6 +16077,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::ObjectMotion::held_mask=fs::exists(root/L"build"/L"stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames
         d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {std::uint32_t v{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&v,4);return v;};
         d2vr::RigMask::frame_fn=d2vr::CrossEyeHistory::frame_fn.load(); // v1185: the rig ring gate
+        // v1186: the census sees copies, clears and compute writes too (hooks installed with the device, census_hooks_device)
+        d2vr::CrossEyeHistory::writer_fn=+[]() noexcept {return d2vr::CrossEyeHistory::Writer{d2vr::ObjectMotion::eye_of_view(d2vr::RenderPassMap::current_view()),d2vr::RenderPassMap::current_pass()};};
+        d2vr::TaaDispatchHook::census_clear=+[](ID3D11DepthStencilView* v) noexcept {d2vr::CrossEyeHistory::note_view(v);};
+        d2vr::TaaDispatchHook::census_dispatch=+[](ID3D11DeviceContext* c) noexcept {d2vr::CrossEyeHistory::note_dispatch(c);};
         alt_mv_jittered=!fs::exists(root/L"build"/L"legacy-alt-mv-jitter");d2vr::eye_motion_mv_jittered=alt_mv_jittered.load(); // v1178
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
         wheel_step_realtime_enabled=!fs::exists(root/L"build"/L"wheel-slow-steps");

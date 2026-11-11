@@ -60,6 +60,8 @@ public:
     inline static std::atomic<Handler> handler{};
     using DiagnosticDispatch=void (*)(ID3D11DeviceContext*,UINT,UINT,UINT) noexcept;
     inline static std::atomic<DiagnosticDispatch> diagnostic_dispatch{};
+    // v1186 cross-eye census (cross_eye_history.hpp): a depth clear and a compute dispatch are writes of what they target
+    inline static std::atomic<void (*)(ID3D11DepthStencilView*) noexcept> census_clear{};inline static std::atomic<void (*)(ID3D11DeviceContext*) noexcept> census_dispatch{};
     inline static std::atomic<UINT64> marked{},replaced{};
     inline static thread_local int pass_eye=-1;
     inline static thread_local std::uint64_t pass_display=0; // v790 trace: the display frame of the alternate receipt behind pass_eye (0 = none)
@@ -110,6 +112,7 @@ private:
     inline static std::array<ClearFn,2> clear_original_{};inline static std::array<void*,2> clear_target_{};
     template<int I> static void STDMETHODCALLTYPE clear_hook(ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT f,FLOAT d,UINT8 s) {
         if(const auto o=depth_observer.load()) o(c,v,f,d,s);
+        if(const auto o=census_clear.load(std::memory_order_relaxed)) o(v);
         clear_original_[I](c,v,f,d,s);
     }
     static void hook_clear(ID3D11DeviceContext* context,int i,void* replacement) noexcept {
@@ -122,6 +125,7 @@ private:
     inline static Fn original_{};inline static void* target_{};inline static std::atomic<int> depth_{};
     static void STDMETHODCALLTYPE hook(ID3D11DeviceContext* c,UINT x,UINT y,UINT z) {
         if(const auto observer=diagnostic_dispatch.load(std::memory_order_relaxed))observer(c,x,y,z);
+        if(const auto o=census_dispatch.load(std::memory_order_relaxed)) o(c);
         const int eye=pass_eye;
         if(eye<0) {original_(c,x,y,z);return;}
         ++depth_;++marked;
