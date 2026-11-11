@@ -416,6 +416,9 @@ private:
     std::array<bool,2> kept_camera_valid_{};
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_depth_{};
     std::array<UINT,2> stale_depth_width_{},stale_depth_height_{};
+    // v1151: each eye's motion texture (FsrTaa::eye_motion of its last render, like stale_depth_) and the Present it was handed in
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_motion_{};std::array<UINT,2> stale_motion_width_{},stale_motion_height_{};
+    std::array<std::uint64_t,2> stale_motion_frame_{};
     std::array<std::optional<StaleLayers>,2> stale_layers_{}; // v797: scene, player and hand layers of each eye's last warp
     bool stale_warped_(UINT eye) const noexcept {return eye<2 && alternate_frame && stale_warped_frame_[eye]==alternate_frame;}
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
@@ -1931,6 +1934,8 @@ public:
     double stale_near_range{near_range_default};
     std::uint64_t stale_fresh_passes() const noexcept {return stale_warp_?stale_warp_->fresh_passes:0;}
     std::uint64_t stale_fresh_refusals() const noexcept {return stale_warp_?stale_warp_->fresh_refusals:0;}
+    std::uint64_t stale_motion_passes() const noexcept {return stale_warp_?stale_warp_->motion_passes:0;}   // v1151
+    std::uint64_t stale_motion_refusals() const noexcept {return stale_warp_?stale_warp_->motion_refusals:0;}
     // v984: how the paired cadence moved (frame_pacer.hpp). k=2 means half rate; locks/unlocks should track scene changes, not a
     // probe timer. Read from the status thread while the render thread writes: telemetry only.
     std::string pacer_status_json() const {
@@ -1942,6 +1947,16 @@ public:
     }
     void record_rendered_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {rendered_cameras_[eye]=camera;rendered_camera_frame_[eye]=frame;}}
     void stale_eye_target_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {stale_target_cameras_[eye]=camera;stale_target_camera_frame_[eye]=frame;}}
+    // v1151 movers (design 2026-11-11 section 3): the eye's motion texture for this Present (FsrTaa::eye_motion; null clears it), the
+    // two frame-time parts and the rules switch (build/no-stale-eye-motion), copied into the layers of each warp.
+    void stale_eye_motion(UINT eye,ID3D11Texture2D* motion,UINT width,UINT height,std::uint64_t frame) noexcept {
+        if(eye<2) {stale_motion_[eye]=motion;stale_motion_width_[eye]=width;stale_motion_height_[eye]=height;stale_motion_frame_[eye]=motion?frame:0;}
+    }
+    StaleMotion stale_motion(UINT eye) const noexcept { // this Present's, else none
+        if(eye>1 || stale_motion_frame_[eye]!=alternate_frame || !stale_motion_[eye]) return {};
+        return {stale_motion_[eye].Get(),stale_motion_width_[eye],stale_motion_height_[eye]};
+    }
+    double stale_fresh_part=.5,stale_kept_part=.5;bool stale_motion_rules=true;
     void stale_eye_depth(UINT eye,ID3D11Texture2D* depth,UINT width,UINT height,std::uint64_t frame) noexcept {
         if(eye<2) {stale_depth_[eye]=depth;stale_depth_width_[eye]=width;stale_depth_height_[eye]=height;stale_depth_frame_[eye]=frame;}
     }
@@ -2804,6 +2819,8 @@ public:
                                 stale_layers_[eye]->near_from_kept=stale_hands_still(kept_cameras_[eye],stale_target_cameras_[eye]);
                                 stale_layers_[eye]->hands_motion=stale_hands_motion(kept_cameras_[eye],stale_target_cameras_[eye]);
                                 stale_layers_[eye]->frame=alternate_frame;stale_layers_[eye]->eye=eye; // v811: the hand-fit read-backs' tags
+                                stale_layers_[eye]->fresh_part=stale_fresh_part;stale_layers_[eye]->kept_part=stale_kept_part; // v1151
+                                stale_layers_[eye]->motion_rules=stale_motion_rules;
                             }
                             if(!stale_layers_[eye]) ++stale_eye_parallax_misses;
                         }
@@ -2811,7 +2828,9 @@ public:
                         const StaleDepth kept_depth{stale_depth_[eye].Get(),stale_depth_width_[eye],stale_depth_height_[eye]};
                         const StaleDepth fresh_depth{fresh_now?stale_depth_[fresh_eye].Get():nullptr,stale_depth_width_[fresh_eye],stale_depth_height_[fresh_eye]};
                         ID3D11Texture2D* const fresh_image=fresh_now?alt_kept_[fresh_eye].Get():nullptr;
-                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth):stale_warp_->apply(processed,*h);
+                        // v1151: the kept frame's motion and the fresh frame's (both, or the mover rules stay off)
+                        const StaleMotion kept_motion=stale_motion(eye),fresh_motion=fresh_now?stale_motion(fresh_eye):StaleMotion{};
+                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion):stale_warp_->apply(processed,*h);
                         if(stale_warp_->parallax_passes==parallax_before) stale_layers_[eye].reset(); // depth refused: rotation only, the reticle too
                         if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
                         stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;

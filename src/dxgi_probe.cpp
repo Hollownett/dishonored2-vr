@@ -1380,6 +1380,25 @@ static void read_pass_view_jitter(d2vr::TaaJitterCheck::Used& used) noexcept {
 // The Present thread arms a burst (alt_motion_probe_arm); the TAA job thread takes one dispatch per armed slot. Offline: tools/alt_motion_probe.py.
 // Knob content (optional): bursts, dispatches per burst, seconds between bursts (default 6 8 10).
 static std::atomic<bool> alt_motion_probe_knob{false};
+// v1151: QPC at each alternate Present that refreshed an eye (its render's tick, closely), for the warp's two parts (design section 3):
+// fresh_part=(tN-tN-1)/(tN-tN-2), kept_part=(tN-tN-1)/(tN-1-tN-3); 0.5 when the Presents are not consecutive, times are missing or a part
+// falls outside 0.25..0.75 (a hitch). Status motion_textures = [passes, refused, engine MV view cache misses, passes with the other-eye still test].
+static struct AltMotionTimes {
+    std::array<std::pair<UINT64,LONGLONG>,4> ring{};
+    void note(UINT64 number,int fresh) noexcept {if(fresh<0) return;LARGE_INTEGER t{};QueryPerformanceCounter(&t);ring[number&3]={number,t.QuadPart};}
+    bool at(UINT64 number,UINT64 back,double& t) const noexcept {
+        if(number<back) return false;const auto& r=ring[(number-back)&3];if(r.first!=number-back || !r.second) return false;t=static_cast<double>(r.second);return true;
+    }
+    double part(UINT64 number,unsigned a,unsigned b,unsigned c,unsigned d) const noexcept {
+        double ta,tb,tc,td;
+        if(!at(number,a,ta) || !at(number,b,tb) || !at(number,c,tc) || !at(number,d,td) || !(tc-td>0)) return .5;
+        // v1153: Present times stand in for game time; a hitch makes them disagree, so only a plausible band is taken
+        const double p=(ta-tb)/(tc-td);return std::isfinite(p) && p>=.25 && p<=.75?p:.5;
+    }
+    double fresh_part(UINT64 n) const noexcept {return part(n,0,1,0,2);}
+    double kept_part(UINT64 n) const noexcept {return part(n,0,1,1,3);}
+} alt_motion_times;
+static bool stale_eye_motion_knob=true; // v1151: build/no-stale-eye-motion = no motion textures, no mover rules, no alternate object-motion fix
 static std::atomic<unsigned> alt_motion_left{0},alt_motion_burst{0},alt_motion_index{0};
 static unsigned alt_motion_bursts=6,alt_motion_size=8,alt_motion_interval_s=10;static UINT64 alt_motion_next_tick=0;
 static void alt_motion_snapshot_json(std::ostream& o,const d2vr::alternate_taa::Snapshot& s) {
@@ -1389,13 +1408,22 @@ static void alt_motion_snapshot_json(std::ostream& o,const d2vr::alternate_taa::
     o<<",\"position\":["<<s.position[0]<<','<<s.position[1]<<','<<s.position[2]<<"],\"jitter\":["<<s.jitter[0]<<','<<s.jitter[1]<<"]}";
 }
 // Job thread, the FSR/DLSS TAA dispatch of `eye` (before replace()). Empty unless a burst is armed and this pass has an admitted receipt.
-static d2vr::FsrTaa::MotionProbe alt_motion_probe_take(ID3D11DeviceContext* c,int eye,const d2vr::TaaBindings& b) noexcept {
-    d2vr::FsrTaa::MotionProbe probe;
-    if(!alt_motion_left.load(std::memory_order_relaxed) || !d2vr::diag::on() || eye<0 || eye>1 ||
-       !d2vr::TaaDispatchHook::pass_display || !d2vr::TaaDispatchHook::pass_view) return probe;
+// v1151: the alternate receipt of this TAA dispatch's render (the motion texture's cameras), when it names `eye`.
+// Only alternate-eye one-view frames (pass_display set, the pass view is the alternate single view): paired mode never reads or counts here.
+static bool alternate_on() noexcept;
+static std::optional<d2vr::alternate_taa::Receipt> alt_pass_receipt(int eye) noexcept {
+    if(eye<0 || eye>1 || !alternate_on() || !d2vr::TaaDispatchHook::pass_display || !d2vr::TaaDispatchHook::pass_view ||
+       d2vr::TaaDispatchHook::pass_view!=alternate_taa_runtime.single_view.load()) return std::nullopt;
     try {
-        const auto receipt=alternate_taa_runtime.resolve(d2vr::TaaDispatchHook::pass_view);
-        if(!receipt || receipt->key.eye!=eye) return probe;
+        auto receipt=alternate_taa_runtime.resolve(d2vr::TaaDispatchHook::pass_view,false);
+        if(receipt && receipt->key.eye==eye) return receipt;
+    } catch(...) {}
+    return std::nullopt;
+}
+static d2vr::FsrTaa::MotionProbe alt_motion_probe_take(ID3D11DeviceContext* c,int eye,const d2vr::TaaBindings& b,const std::optional<d2vr::alternate_taa::Receipt>& receipt) noexcept {
+    d2vr::FsrTaa::MotionProbe probe;
+    if(!alt_motion_left.load(std::memory_order_relaxed) || !d2vr::diag::on() || !receipt) return probe;
+    try {
         unsigned left=alt_motion_left.load();
         do {if(!left) return probe;} while(!alt_motion_left.compare_exchange_weak(left,left-1));
         const unsigned index=alt_motion_index++,burst=alt_motion_burst.load();
@@ -1471,8 +1499,10 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
             fsr_taa.last_jitter_x[static_cast<std::size_t>(eye)]=fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0];fsr_taa.last_jitter_y[static_cast<std::size_t>(eye)]=fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1];
             fsr_taa.last_vfov[static_cast<std::size_t>(eye)]=fsr_vfov[static_cast<std::size_t>(eye)].load();
         }
+        // v1151: the render's receipt gives the motion texture its cameras (alternate one-view frames; not with build/no-stale-eye-motion)
+        const auto receipt=stale_eye_motion_knob || alt_motion_left.load(std::memory_order_relaxed)?alt_pass_receipt(eye):std::nullopt;
         try {if(fsr_taa.replace(c,eye,b,fsr_vfov[static_cast<std::size_t>(eye)].load(),fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0],fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1],
-                                alt_motion_probe_take(c,eye,b))) return true;}
+                                alt_motion_probe_take(c,eye,b,receipt),stale_eye_motion_knob?receipt:std::nullopt)) return true;}
         catch(...) {}
         // No native shared-history dispatch while an eye's own upscaler is
         // unprepared, resizing, or cannot split its deferred command list.
@@ -6010,6 +6040,8 @@ void observe_eye_setup(void* view) noexcept {
             if(taa_history_installed && !mono) taa_history.publish_eye_view(static_cast<unsigned>(eye),address);
             d2vr::PostTonemapPass::eye_views[static_cast<std::size_t>(eye)]=address;
             d2vr::ObjectMotion::note_eye_view(static_cast<unsigned>(eye),mono || alternate_on()?0:address); // paired eyes only
+            if(mono || alternate_on()) d2vr::ObjectMotion::note_eye_view(static_cast<unsigned>(eye)^1u,0); // v1153: no stale paired view of the other slot
+            d2vr::ObjectMotion::note_alternate_view(alternate_on() && mono && stale_eye_motion_knob?address:0); // v1151: alternate one-view frames
             if(mono) d2vr::PostTonemapPass::eye_views[1]=0; // no second view: nothing may name eye 1
         }
         std::lock_guard<std::mutex> lock(log_mutex);
@@ -10277,6 +10309,11 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"stale_parallax\":" << (stale_eye_parallax_knob?"true":"false") << ",\"stale_parallax_warps\":" << (game_xr?game_xr->stale_parallax_passes():0)
                << ",\"stale_parallax_misses\":" << (game_xr?game_xr->stale_eye_parallax_misses:0) << ",\"stale_near_range\":" << stale_near_range << ",\"stale_fresh_warps\":" << (game_xr?game_xr->stale_fresh_passes():0)
                << ",\"stale_fresh_refusals\":" << (game_xr?game_xr->stale_fresh_refusals():0)
+               << ",\"stale_motion\":" << (stale_eye_motion_knob?"true":"false") << ",\"motion_passes\":" << (game_xr?game_xr->stale_motion_passes():0) // v1151
+               << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ']'
+               << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
+               << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
+               << ",\"object_motion\":" << d2vr::ObjectMotion::alternate_status_json()
                << ",\"taa_plan_cancels\":" << alternate_taa_plan_cancels.load() << ",\"taa_failure_site\":" << alternate_taa_runtime.failure_site.load()
                << ",\"locate_periods\":" << (legacy_locate_horizon?1:2) << '}'
                << ",\"fingers\":" << finger_touch_status_json(game_xr && game_xr->touch_status().bound,game_xr && game_xr->touch_status().create_failed)
@@ -10669,7 +10706,9 @@ static void capture_alt_band(unsigned eye,ID3D11Texture2D* texture,UINT64 now) n
 // wrong"): up to 8 stale-eye warps that took near content from the fresh eye, one per 6 s at most. 896 px square crops of the lower
 // middle of the view (where hands and what they hold are) from the kept image, its warp and the fresh eye's image, both depths under
 // the same crop, and the layers as JSON, so the pass can be replayed offline. A dump waits for the GPU (a short hitch).
-static std::vector<std::byte> readback_box4(ID3D11Texture2D* texture,UINT x,UINT y,UINT w,UINT h) {
+static std::vector<std::byte> readback_box(ID3D11Texture2D* texture,UINT x,UINT y,UINT w,UINT h,UINT bpp);
+static std::vector<std::byte> readback_box4(ID3D11Texture2D* texture,UINT x,UINT y,UINT w,UINT h) {return readback_box(texture,x,y,w,h,4);}
+static std::vector<std::byte> readback_box(ID3D11Texture2D* texture,UINT x,UINT y,UINT w,UINT h,UINT bpp) { // bpp: bytes per texel (v1151: 8 for RGBA16F)
     D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
     if(!d2vr::diag::on() || !w || !h || x+w>desc.Width || y+h>desc.Height || desc.SampleDesc.Count!=1) return {};
     desc.Width=w;desc.Height=h;desc.MipLevels=1;desc.ArraySize=1;desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
@@ -10678,8 +10717,8 @@ static std::vector<std::byte> readback_box4(ID3D11Texture2D* texture,UINT x,UINT
     if(FAILED(device->CreateTexture2D(&desc,nullptr,&staging))) return {};
     const D3D11_BOX box{x,y,0,x+w,y+h,1};context->CopySubresourceRegion(staging.Get(),0,0,0,0,texture,0,&box);
     D3D11_MAPPED_SUBRESOURCE mapped{};if(FAILED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped))) return {};
-    std::vector<std::byte> out(static_cast<std::size_t>(w)*h*4);
-    for(UINT row=0;row<h;++row) std::memcpy(out.data()+static_cast<std::size_t>(row)*w*4,static_cast<const std::byte*>(mapped.pData)+static_cast<std::size_t>(row)*mapped.RowPitch,static_cast<std::size_t>(w)*4);
+    std::vector<std::byte> out(static_cast<std::size_t>(w)*h*bpp);
+    for(UINT row=0;row<h;++row) std::memcpy(out.data()+static_cast<std::size_t>(row)*w*bpp,static_cast<const std::byte*>(mapped.pData)+static_cast<std::size_t>(row)*mapped.RowPitch,static_cast<std::size_t>(w)*bpp);
     context->Unmap(staging.Get(),0);return out;
 }
 // v802: the eye's own frame right after a dump (-next.rgba, same box): the warped frame sits between the kept and this one, so offline
@@ -10725,6 +10764,10 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
             const UINT dx=std::min(d.width-1,static_cast<UINT>(bx*sx)),dy=std::min(d.height-1,static_cast<UINT>(by*sy));
             boxes[n]={dx,dy,std::max(1u,std::min(d.width-dx,static_cast<UINT>(std::ceil(bw*sx)))),std::max(1u,std::min(d.height-dy,static_cast<UINT>(std::ceil(bh*sy))))};
             save(n?L"-fresh-depth.r32":L"-kept-depth.r32",readback_box4(d.texture,boxes[n][0],boxes[n][1],boxes[n][2],boxes[n][3]));
+            // v1151: that eye's motion texture under the same box (same render rectangle as its depth), when the warp had both
+            const auto m=game_xr->stale_motion(n?static_cast<UINT>(game_xr->alternate_fresh_eye):eye);
+            if(m.texture && m.width==d.width && m.height==d.height)
+                save(n?L"-fresh-motion.rgba16f":L"-kept-motion.rgba16f",readback_box(m.texture,boxes[n][0],boxes[n][1],boxes[n][2],boxes[n][3],8));
         }
         std::ofstream meta(stem+L"-meta.json",std::ios::trunc);meta.precision(9);
         const auto parallax=[&](const d2vr::StaleParallax& p) {
@@ -10742,6 +10785,7 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
         // v810: the motion layers and where their searches start
         if(layers.carried) {meta<<",\"carried\":";parallax(*layers.carried);}
         for(unsigned side=0;side<2;++side) if(layers.hand[side]) {meta<<",\"hand"<<side<<"\":";parallax(*layers.hand[side]);}
+        meta<<",\"fresh_part\":"<<layers.fresh_part<<",\"kept_part\":"<<layers.kept_part<<",\"motion_rules\":"<<(layers.motion_rules?"true":"false"); // v1151
         meta<<",\"start\":["<<layers.start[0]<<','<<layers.start[1]<<','<<layers.start[2]<<']';
         meta<<",\"palms\":["; // v811: each drawn palm in the kept camera and the reach it owns
         for(unsigned side=0;side<2;++side) {const auto& p=layers.palms[side];meta<<(side?",":"")<<'['<<p[0]<<','<<p[1]<<','<<p[2]<<','<<p[3]<<']';}
@@ -11647,6 +11691,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(stale_eye_parallax_knob) if(const auto depth=fsr_taa.eye_depth(static_cast<int>(other),depth_w,depth_h)) game_xr->stale_eye_depth(other,depth.Get(),depth_w,depth_h,number);
                             if(stale_eye_parallax_knob) if(const auto depth=fsr_taa.eye_depth(alt_fresh,depth_w,depth_h)) // v798: and the fresh eye's, for near content
                                 game_xr->stale_eye_depth(static_cast<UINT>(alt_fresh),depth.Get(),depth_w,depth_h,number);
+                            // v1151 movers: both eyes' motion textures (each its last render's, which the kept image is for the stale eye), the parts
+                            for(const UINT motion_eye:{other,static_cast<UINT>(alt_fresh)}) {
+                                UINT motion_w{},motion_h{};const auto motion=stale_eye_motion_knob?fsr_taa.eye_motion(static_cast<int>(motion_eye),motion_w,motion_h):nullptr;
+                                game_xr->stale_eye_motion(motion_eye,motion.Get(),motion_w,motion_h,number);
+                            }
+                            game_xr->stale_motion_rules=stale_eye_motion_knob;
+                            alt_motion_times.note(number,alt_fresh);
+                            game_xr->stale_fresh_part=alt_motion_times.fresh_part(number);game_xr->stale_kept_part=alt_motion_times.kept_part(number);
                         }
                         // G2 VR cutscenes (cutscene_policy.hpp): classify this Present. Immersive = exact 32 with a complete native pair of two distinct
                         // eyes (two textures, two eye poses, both layer views recorded), the player camera read, no fault since the cutscene began. Any
@@ -11721,6 +11773,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                         }
                         alt_motion_probe_arm(gameplay); // diagnostic (build/alt-motion-probe): perf-mode motion Phase 0 bursts
+                        if(!alternate_on() || !stale_eye_motion_knob) d2vr::ObjectMotion::note_alternate_view(0); // v1153: Setup's early returns cannot leave it set
                         if(!cached_output_frame_ready) {completed_left.Reset();completed_right.Reset();}
                         // Do not hold the GPU-observer lock across OpenXR calls.
                         // VDXR dispatches D3D11 work on its own thread and waits
@@ -15084,6 +15137,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (every eye mode)
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose
+            stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion"); // v1151: motion textures + mover rules (design 2026-11-11)
             stale_eye_parallax_knob=!fs::exists(root/L"build"/L"no-stale-eye-parallax"); // v796: and its world pixels with parallax (walking)
             stale_near_range=d2vr::near_range_default; // v798: near content from the fresh eye within this many metres (0: off)
             {std::ifstream knob(root/L"build"/L"stale-near-range");double metres{};if(knob>>metres && metres>=0 && metres<=20) stale_near_range=metres;}
@@ -15552,6 +15606,18 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // map install leaves the source returning -1/0, which keeps the v931 certificate path as the fallback.
         d2vr::ObjectMotion::set_pass_source(+[]() noexcept -> d2vr::ObjectMotion::DrawPass {
             return {d2vr::RenderPassMap::current_pass(),d2vr::RenderPassMap::current_view()};
+        });
+        d2vr::ObjectMotion::set_alternate_eye(+[](std::uintptr_t view,std::uint32_t frame) noexcept -> int { // v1151: the receipt names the eye
+            // Resolved once per (view, frame): classify calls this for every per-view constant write. Packed: frame | eye+1 | view bits.
+            static std::atomic<std::uint64_t> cache{0};
+            const std::uint64_t tag=(static_cast<std::uint64_t>(view>>4)&0x3fffffffull)<<34,c=cache.load(std::memory_order_acquire);
+            // eye code: 1 = left, 2 = right. A miss is not cached: the receipt may be admitted later in the same frame.
+            if(const auto code=(c>>32)&3;code && (c&~(0x3ull<<32))==(tag|frame)) return static_cast<int>(code)-1;
+            if(!alternate_native_taa_allowed() || view!=alternate_taa_runtime.single_view.load()) return -1;
+            const auto receipt=alternate_taa_runtime.resolve(view,false);
+            const int eye=receipt && receipt->key.native_counter==frame?receipt->key.eye:-1;
+            if(eye>=0) cache.store(tag|static_cast<std::uint64_t>(eye+1)<<32|frame,std::memory_order_release);
+            return eye;
         });
         d2vr::ObjectMotion::set_pass_name(+[](unsigned id) noexcept {return d2vr::render_pass_name(id);});
         // FSR 4 is created next to FSR 3 whenever its provider ships, so the VR menu can switch at runtime.

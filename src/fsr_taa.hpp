@@ -24,6 +24,7 @@
 #include "temporal_eye_job.hpp"
 #include "gpu_pass_timer.hpp"
 #include "mod_gpu_timer.hpp"
+#include "eye_motion_pass.hpp"
 
 namespace d2vr {
 // Replaces the native TAA dispatch of each eye with its own FSR 3.1 context (Luma's D2 map:
@@ -66,6 +67,18 @@ public:
         width=e.depth_w;height=e.depth_h;
         return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.depth.p);
     }
+    // v1151: the motion texture of `eye`'s last render (eye_motion_pass.hpp: RGBA16F, its render rectangle width x height at the top left,
+    // like eye_depth). Empty when that render had no alternate receipt (paired mode, a reset, build/no-stale-eye-motion) or FSR/DLSS is off.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_motion(int eye,UINT& width,UINT& height) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        width=height=0;
+        if((eye!=0 && eye!=1) || !enabled.load() || !ready.load()) return {};
+        const auto& e=(*eyes_)[static_cast<std::size_t>(eye)];
+        if(!e.motion_valid || !e.motion.p) return {};
+        width=e.motion_w;height=e.motion_h;
+        return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.motion.p);
+    }
+    std::atomic<std::uint64_t> motion_passes{},motion_refused{},motion_srv_misses{},motion_other_tests{}; // v1154: passes with the other-eye still test // v1151: motion textures written; renders with a receipt that made none
     // Perf-mode motion Phase 0 (dxgi_probe knob build/alt-motion-probe, diagnostics only): handed to replace() by the TAA dispatch it
     // belongs to; that eye's next FSR/DLSS dispatch writes <stem>-mv.rg16f (raw engine motion vectors), <stem>-depth.r32 (the Eye::depth
     // copy), optionally <stem>-colour.raw, each the render rectangle at the top left as u32 width,height,DXGI format,bytes per row then
@@ -82,6 +95,9 @@ private:
         Fsr3EyeUpscaler fsr;Fsr4EyeUpscaler fsr4;Ref<ID3D11Texture2D> depth,reactive,colour_in,upscaled;Ref<ID3D11UnorderedAccessView> depth_uav,reactive_uav;
         LARGE_INTEGER last{};bool reset=true;GpuPassTimer timer;
         UINT depth_w{},depth_h{}; // v796: the render rectangle of the last depth copy (eye_depth)
+        // v1151: the motion texture (eye_motion), the depth copy's read view, the engine MV's read view (and the resource it is of)
+        Ref<ID3D11Texture2D> motion;Ref<ID3D11UnorderedAccessView> motion_uav;Ref<ID3D11ShaderResourceView> depth_srv,mv_srv;ID3D11Resource* mv_key{};
+        UINT motion_w{},motion_h{};bool motion_valid{};
         // v1107: FSR 4 runs on this display box only (fsr4 created at the box size); FSR 3 upscales the whole eye underneath.
         bool fovea=false;fovea::Axis fovea_x,fovea_y;
         bool fovea_box=false;          // v1107: a box exists for this eye (FSR 4 or DLSS)
@@ -120,6 +136,9 @@ private:
     UINT ready_w_{},ready_h_{},render_w_{},render_h_{},context_w_{},context_h_{};float ready_fraction_{1}; // context_*: max render size the FSR contexts/inputs were built for
     DXGI_FORMAT ready_native_format_{DXGI_FORMAT_UNKNOWN};
     std::array<Ref<ID3D11Resource>,2> motion_{}; // upscale mode: this frame's motion vectors per eye (from the TAA dispatch)
+    std::array<std::optional<alternate_taa::Receipt>,2> receipt_{};
+    std::array<std::optional<alternate_taa::Receipt>,2> last_receipt_{}; // v1154: each eye's latest dispatched receipt (immediate context, under mutex_) // v1151 upscale mode: that TAA dispatch's alternate receipt
+    EyeMotionPass motion_pass_;
     std::array<MotionProbe,2> probe_{}; // upscale mode: the alt-motion-probe request of that TAA dispatch, until post_tonemap_end makes its job
     static thread_local Ref<ID3D11Resource> pass_source_,pass_target_; // upscale draw seen in this post-tonemap pass; defined after the class: clang-cl needs Ref's member initializers complete
     static thread_local InputDiagnostics pass_input_;
@@ -532,7 +551,8 @@ public:
         job->eye=eye;job->upscale=true;job->vfov=last_vfov[static_cast<std::size_t>(eye)].load();
         job->jitter_x=last_jitter_x[static_cast<std::size_t>(eye)].load();job->jitter_y=last_jitter_y[static_cast<std::size_t>(eye)].load();
         job->colour.reset(source.p);job->output.reset(target.p);
-        {std::lock_guard<std::mutex> lock(mutex_);job->motion.reset(motion_[static_cast<std::size_t>(eye)].p);job->probe=std::move(probe_[static_cast<std::size_t>(eye)]);probe_[static_cast<std::size_t>(eye)]={};}
+        {std::lock_guard<std::mutex> lock(mutex_);job->motion.reset(motion_[static_cast<std::size_t>(eye)].p);job->probe=std::move(probe_[static_cast<std::size_t>(eye)]);probe_[static_cast<std::size_t>(eye)]={};
+            job->receipt=receipt_[static_cast<std::size_t>(eye)];receipt_[static_cast<std::size_t>(eye)].reset();}
         if(!job->motion.p) {++upscale_skipped;return;}
         if(c->GetType()!=D3D11_DEVICE_CONTEXT_DEFERRED) {dispatch(c,*job);return;} // already on the immediate context
         std::lock_guard<std::mutex> lock(jobs_mutex_);
@@ -681,7 +701,9 @@ public:
             ++context_builds;const auto rebuild_start=std::chrono::steady_clock::now();const auto fsr4_failures_before=fsr4_create_failures.load();
             for(auto& e:*eyes_) {
                 e.timer.clear();
-                e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
+                e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();
+                e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.motion_valid=false;e.motion_w=e.motion_h=0; // v1153
+                e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
                 D3D11_TEXTURE2D_DESC d{};d.Width=cw;d.Height=ch;d.MipLevels=1;d.ArraySize=1;d.Format=DXGI_FORMAT_R32_FLOAT;d.SampleDesc.Count=1;
                 d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
                 ID3D11Texture2D* t{};ID3D11UnorderedAccessView* u{};
@@ -694,6 +716,12 @@ public:
                 e.reactive.adopt(t);
                 if(FAILED(device->CreateUnorderedAccessView(t,nullptr,&u))) {++create_failures;return;}
                 e.reactive_uav.adopt(u);
+                { // v1151: the motion texture and the depth copy's read view (failures leave the eye without motion, never without FSR)
+                    D3D11_TEXTURE2D_DESC m=d;m.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;ID3D11Texture2D* mt{};ID3D11UnorderedAccessView* mu{};ID3D11ShaderResourceView* ds{};
+                    if(SUCCEEDED(device->CreateTexture2D(&m,nullptr,&mt))) {e.motion.adopt(mt);if(SUCCEEDED(device->CreateUnorderedAccessView(mt,nullptr,&mu))) e.motion_uav.adopt(mu);}
+                    if(SUCCEEDED(device->CreateShaderResourceView(e.depth.p,nullptr,&ds))) e.depth_srv.adopt(ds);
+                    motion_pass_.prepare(device);
+                }
                 Fsr3EyeUpscaler::Desc fd{};fd.render_w=cw;fd.render_h=ch;fd.display_w=w;fd.display_h=h;
                 // The game's motion vectors carry the frame-to-frame jitter delta (measured: a still head gives a
                 // uniform MV equal to the engine pattern step, e.g. (2,-4)/16 px), so FSR must cancel it itself.
@@ -749,7 +777,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ready=false;++reset_epoch_;
         dlss_session_end_locked();
-        for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();}
+        for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();
+            e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.mv_srv.reset();e.mv_key=nullptr;e.motion_valid=false;}
+        for(auto& r:receipt_) r.reset();
+        for(auto& r:last_receipt_) r.reset();
         Fsr4EyeUpscaler::poll_retired();
         for(auto& m:motion_) m.reset();
         for(auto& p:probe_) p={};
@@ -761,7 +792,8 @@ public:
     // Job thread, inside the TAA dispatch hook. Seals everything recorded before the TAA dispatch
     // into its own command list and skips the dispatch; FSR then runs on the immediate context
     // between that prefix and the remainder (execute()). True when the dispatch was taken over.
-    bool replace(ID3D11DeviceContext* c,int eye,const TaaBindings& b,float vfov,float jitter_x,float jitter_y,MotionProbe probe={}) {
+    bool replace(ID3D11DeviceContext* c,int eye,const TaaBindings& b,float vfov,float jitter_x,float jitter_y,MotionProbe probe={},
+                 std::optional<alternate_taa::Receipt> receipt={}) {
         if(!enabled.load() || !c || eye<0 || eye>1 || !b.taa() || c->GetType()!=D3D11_DEVICE_CONTEXT_DEFERRED) return false;
         const UINT w=b.tex[5].Width,h=b.tex[5].Height;
         wanted_w_=w;wanted_h_=h;
@@ -773,7 +805,7 @@ public:
         if(fraction.load()<.999f) {
             // Upscale mode: FSR accumulates at the end (post-tonemap); the native TAA becomes a copy so
             // there is no second temporal filter, and its motion vectors are kept for FSR.
-            {std::lock_guard<std::mutex> lock(mutex_);motion_[static_cast<std::size_t>(eye)].reset(b.res[1]);probe_[static_cast<std::size_t>(eye)]=std::move(probe);
+            {std::lock_guard<std::mutex> lock(mutex_);motion_[static_cast<std::size_t>(eye)].reset(b.res[1]);probe_[static_cast<std::size_t>(eye)]=std::move(probe);receipt_[static_cast<std::size_t>(eye)]=receipt;
                 if(!ready.load() || ready_w_!=w || ready_h_!=h || ready_fraction_!=fraction.load()) {++not_ready;return false;}}
             c->CopyResource(b.res[5],b.res[2]);++taa_copies;
             return true;
@@ -783,7 +815,7 @@ public:
         auto job=std::make_unique<Job>();
         job->fraction=fraction.load();job->epoch=reset_epoch_.load();job->width=w;job->height=h;
         job->eye=eye;job->vfov=vfov;job->jitter_x=jitter_x;job->jitter_y=jitter_y;
-        job->colour.reset(b.res[2]);job->motion.reset(b.res[1]);job->output.reset(b.res[5]);job->probe=std::move(probe);
+        job->colour.reset(b.res[2]);job->motion.reset(b.res[1]);job->output.reset(b.res[5]);job->probe=std::move(probe);job->receipt=receipt;
         // Claim this context's slot first: a context already split (a second TAA dispatch before its
         // Finish) or no free slot leaves the native dispatch in place rather than dropping a prefix.
         std::lock_guard<std::mutex> lock(jobs_mutex_);
@@ -828,7 +860,7 @@ private:
     }
     struct Job {
         int eye{};float vfov{},jitter_x{},jitter_y{},fraction=1;bool upscale{};UINT width{},height{};std::uint64_t epoch{};
-        Ref<ID3D11Resource> colour,motion,output;Ref<ID3D11CommandList> prefix,remainder;MotionProbe probe;
+        Ref<ID3D11Resource> colour,motion,output;Ref<ID3D11CommandList> prefix,remainder;MotionProbe probe;std::optional<alternate_taa::Receipt> receipt; // v1151: the render's alternate receipt (motion texture)
         std::unique_ptr<Job> next; // a later split of the same context (commands since this one)
     };
     std::mutex jobs_mutex_;
@@ -930,6 +962,9 @@ private:
                 c->Unmap(s.Get(),0);
             };
             save(job.motion.p,L"-mv.rg16f","motion");save(depth,L"-depth.r32","depth");
+            const auto& me=(*eyes_)[static_cast<std::size_t>(job.eye)];
+            sizes+=std::string(",\"eye_motion_valid\":")+(me.motion_valid?"true":"false");
+            if(me.motion_valid) save(me.motion.p,L"-motion.rgba16f","eye_motion"); // v1151: the motion pass's output of this render
             if(p.colour) save(job.colour.p,L"-colour.raw","colour");
             // b1 = CBPerViewGlobals (0x320 bytes) as the TAA dispatch read it, copied on the game's context before the split
             std::string b1;
@@ -948,7 +983,7 @@ private:
                 }
             }
             char text[512]{};
-            std::snprintf(text,sizeof text,",\"render\":[%u,%u],\"display\":[%u,%u],\"upscale\":%s,\"fraction\":%.9g,\"fsr_jitter_px\":[%.9g,%.9g],\"vfov\":%.9g,\"reset\":%s",
+            std::snprintf(text,sizeof text,",\"render\":[%u,%u],\"display_size\":[%u,%u],\"upscale\":%s,\"fraction\":%.9g,\"fsr_jitter_px\":[%.9g,%.9g],\"vfov\":%.9g,\"reset\":%s",
                 rw,rh,job.width,job.height,job.upscale?"true":"false",job.fraction,job.jitter_x,job.jitter_y,job.vfov,(*eyes_)[static_cast<std::size_t>(job.eye)].reset?"true":"false");
             FILE* out{};
             if(!_wfopen_s(&out,(p.stem+L".json").c_str(),L"wb") && out) {
@@ -959,14 +994,16 @@ private:
     void dispatch(ID3D11DeviceContext* c,Job& job) {
         std::lock_guard<std::mutex> lock(mutex_);
         // A split native TAA list still needs a result if settings/resize invalidated FSR before execution.
-        const auto fallback=[&]() {if(!job.upscale && job.colour.p && job.output.p) {c->CopyResource(job.output.p,job.colour.p);++fallback_copies;} else ++upscale_skipped;};
+        // v1153: a render that makes no motion texture leaves none marked current for its eye
+        const auto fallback=[&]() {if(job.eye==0 || job.eye==1) (*eyes_)[static_cast<std::size_t>(job.eye)].motion_valid=false;
+            if(!job.upscale && job.colour.p && job.output.p) {c->CopyResource(job.output.p,job.colour.p);++fallback_copies;} else ++upscale_skipped;};
         if(!enabled.load() || !ready.load() || !depth_view_.p) {fallback();return;}
         if(job.epoch!=reset_epoch_.load() || job.fraction!=ready_fraction_ || job.width!=ready_w_ || job.height!=ready_h_) {
             ++stale_jobs;fallback();return;
         }
         auto& e=(*eyes_)[static_cast<std::size_t>(job.eye)];
         const UINT w=ready_w_,h=ready_h_;
-        if(job.upscale && (!e.colour_in.p || !e.upscaled.p)) {++failures;return;}
+        if(job.upscale && (!e.colour_in.p || !e.upscaled.p)) {e.motion_valid=false;++failures;return;}
         LARGE_INTEGER cpu_start{},cpu_end{},cpu_freq{};QueryPerformanceCounter(&cpu_start);QueryPerformanceFrequency(&cpu_freq);
         const int ticket=timing_enabled.load()?e.timer.begin(c):-1;
         ModGpuScope mod_scope(c,job.eye==0?ModSpan::fsr_eye0:ModSpan::fsr_eye1); // task 3b: the mod's FSR GPU time per eye
@@ -980,6 +1017,27 @@ private:
         c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
         e.depth_w=depth_w;e.depth_h=depth_h;
         c->CSSetShaderResources(0,1,null_srv);c->CSSetUnorderedAccessViews(0,2,null_uav,nullptr);
+        // v1151: this render's motion texture (eye_motion_pass.hpp), from its alternate receipt; none without one
+        e.motion_valid=false;
+        // v1153 (sim v1152: garbage previous rows on the first renders after the mode came up): only from this eye's third render of a history
+        if(job.receipt && !job.receipt->reset && job.receipt->phase>=2 && e.motion_uav.p && e.depth_srv.p && job.motion.p) {
+            EyeMotionConstants k{};
+            // v1154: the other eye's last receipt, when it is the render one Present before this one (its current = the other eye at N-1)
+            const auto& other=last_receipt_[static_cast<std::size_t>(job.eye^1)];
+            const bool other_ok=other && other->key.eye==(job.eye^1) && other->key.display+1==job.receipt->key.display;
+            if(eye_motion_constants(job.receipt->current,job.receipt->previous,depth_w,depth_h,k,other_ok?&other->current:nullptr)) {
+                if(other_ok && k.other_step[3]>0) ++motion_other_tests;
+                if(e.mv_key!=job.motion.p) {
+                    ++motion_srv_misses; // v1153 status: whether the engine rotates its motion-vector texture
+                    e.mv_srv.reset();e.mv_key=nullptr;ID3D11Device* dev{};c->GetDevice(&dev);ID3D11ShaderResourceView* v{};
+                    if(dev && SUCCEEDED(dev->CreateShaderResourceView(job.motion.p,nullptr,&v))) {e.mv_srv.adopt(v);e.mv_key=job.motion.p;}
+                    if(dev) dev->Release();
+                }
+                if(e.mv_srv.p && motion_pass_.dispatch(c,e.mv_srv.p,e.depth_srv.p,e.motion_uav.p,k)) {e.motion_valid=true;e.motion_w=depth_w;e.motion_h=depth_h;++motion_passes;}
+            }
+            if(!e.motion_valid) ++motion_refused;
+        }
+        if(job.receipt) last_receipt_[static_cast<std::size_t>(job.eye)]=job.receipt;
         LARGE_INTEGER now{},freq{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&freq);
         float dt=e.last.QuadPart?static_cast<float>(double(now.QuadPart-e.last.QuadPart)*1000.0/double(freq.QuadPart)):11.1f;
         e.last=now;if(!(dt>0 && dt<100)) dt=11.1f;

@@ -72,14 +72,17 @@ public:
         return false;
     }
     // Records this draw, then rewrites `prev` to this eye's own previous MVP when the chain proves it.
-    Kind fix(unsigned eye,std::uint32_t frame,const float* cur,float* prev) noexcept {
+    // v1151: own_step = the engine frames back to this eye's own last render: 1 paired, 2 alternate-eye (one view per frame, eyes
+    // alternating). In alternate mode the engine's previous rows are the OTHER eye's render one frame ago (Phase 0 H1, measured), and
+    // that draw's own raw previous rows are this eye's of two frames ago: the same chain, other_last, own one frame further back.
+    Kind fix(unsigned eye,std::uint32_t frame,const float* cur,float* prev,unsigned own_step=1) noexcept {
         insert(eye,frame,cur,prev);
         if(!std::memcmp(cur,prev,64)) return same; // an object's first frame: the engine reports no motion
         float got[16],own[16];
-        if(find(eye,frame-1,prev,own)) return own_last; // already this eye's own (culled in the other eye's last view)
+        if(find(eye,frame-own_step,prev,own)) return own_last; // already this eye's own (culled in the other eye's last view)
         const Kind kind=find(eye^1u,frame,prev,got)?other_now:find(eye^1u,frame-1,prev,got)?other_last:miss;
         if(kind==miss) return miss;
-        if(!find(eye,frame-1,got,own)) return unproven;
+        if(!find(eye,frame-own_step,got,own)) return unproven;
         std::memcpy(prev,got,64);return kind;
     }
 private:
@@ -199,6 +202,20 @@ public:
         if(!(cur[15]>.01f && prev[15]>.01f)) return 1e30;
         return 1000.0*std::hypot(double(cur[3]/cur[15]-prev[3]/prev[15]),double(cur[7]/cur[15]-prev[7]/prev[15]));
     }
+    // v1153: rows a and b differ only by a frustum shift: x and y rows by a small multiple of the w row (|k| <= 3e-3 NDC, a few pixels:
+    // two jitter samples), z and w rows equal. That is the same placement under another jitter, never an object motion.
+    static bool jitter_only(const float* a,const float* b) noexcept {
+        const float* w=b+12;double ww=0;for(int j=0;j<4;++j) ww+=double(w[j])*w[j];
+        if(!(ww>0)) return false;
+        const double scale=std::sqrt(ww);
+        for(int r=2;r<4;++r) for(int j=0;j<4;++j) if(std::abs(double(a[r*4+j])-b[r*4+j])>1e-5*scale+1e-7) return false;
+        for(int r=0;r<2;++r) {
+            double k=0;for(int j=0;j<4;++j) k+=(double(a[r*4+j])-b[r*4+j])*w[j];k/=ww;
+            if(std::abs(k)>3e-3) return false;
+            for(int j=0;j<4;++j) if(std::abs(double(a[r*4+j])-b[r*4+j]-k*w[j])>1e-5*(scale+std::abs(double(b[r*4+j])))+1e-7) return false;
+        }
+        return true;
+    }
     static bool affine(const float* r,const float* block) noexcept {
         for(int j=0;j<4;++j) {
             double x=0,scale=0;
@@ -212,11 +229,23 @@ public:
         if(view) for(unsigned e=0;e<2;++e) if(eye_views_[e].load(std::memory_order_relaxed)==view) return static_cast<int>(e);
         return -1;
     }
+    // v1151 alternate-eye (one engine view renders the eyes in turn): that view (0 = not alternate or a paired frame), and the logical eye
+    // of the engine frame it holds now (the alternate_taa receipt: -1 unknown). Its records go to that eye; own previous = two frames back.
+    using AlternateEye=int (*)(std::uintptr_t view,std::uint32_t frame) noexcept;
+    static void note_alternate_view(std::uintptr_t view) noexcept {alt_view_.store(view,std::memory_order_relaxed);}
+    static void set_alternate_eye(AlternateEye f) noexcept {alt_eye_.store(f,std::memory_order_relaxed);}
+    static bool alternate() noexcept {return alt_view_.load(std::memory_order_relaxed)!=0;}
     // From the engine's view Setup (entry: the view still holds its last frame's matrices). 0 = not a paired eye.
     static void note_eye_view(unsigned eye,std::uintptr_t view) noexcept {
         if(eye>1) return;
         eye_views_[eye].store(view,std::memory_order_relaxed);
         if(view && on()) {std::lock_guard<std::mutex> lock(views_mutex_);snapshot(eye,view);}
+    }
+    // v1151 status: the alternate-mode draws by kind (same,own_last,other_now,other_last,unproven,miss), camera-only fallbacks, untagged.
+    static std::string alternate_status_json() {
+        std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
+        for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
+        return s+"],\"jitter_snapped\":"+std::to_string(alt_jitter_snapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -314,7 +343,8 @@ private:
     using SetCb1=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext1*,UINT,UINT,ID3D11Buffer* const*,const UINT*,const UINT*);
     // Inverse last rows of the eye's VP (both storage orders), its z row, and the view correction for unproven draws.
     struct View {std::uint32_t frame{};unsigned eye{};float inv[2][4]{};float z[4]{};float corr[16]{},camera[16]{};bool corr_ok{},camera_ok{};};
-    struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{};}; // view, view^T, VP, VP^T
+    struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{};float prev_vp[16]{};bool prev_ok{};}; // view, view^T, VP, VP^T;
+    // v1153: and the view's previous VP (+0x7590) as the engine holds it for this frame (alternate: the receipt-seeded own previous)
     struct Shadow {const void* buffer{};UINT size{};float data[max_floats]{};};
     struct ContextState { // a context is used by one thread at a time: no locks
         unsigned type{}; // 0 deferred, 1 immediate: whose original methods this context takes
@@ -342,6 +372,10 @@ private:
     inline static std::atomic<std::uint32_t> newest_frame_{};
     inline static std::mutex views_mutex_;
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views_{};
+    inline static std::uint32_t alt_snapped_frame_{~0u}; // v1153: under views_mutex_
+    inline static std::atomic<std::uint64_t> alt_jitter_snapped_{};
+    inline static std::atomic<std::uintptr_t> alt_view_{};inline static std::atomic<AlternateEye> alt_eye_{}; // v1151
+    inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{};
     inline static std::array<std::array<EyeView,4>,2> eye_records_{};
     inline static std::array<std::atomic<std::uint32_t>,2> newest_eye_frame_{}; // the frame of that eye's newest recorded view (lock-free for the draw hooks)
     inline static std::array<std::array<std::atomic<float>,4>,2> eye_z_{};       // that view's VP z row (0,0,0,near), for a layout without a z row
@@ -385,7 +419,8 @@ private:
     inline static std::uint64_t poll_frames_{},last_poll_qpc_{},last_poll_ticks_{};
 
     static bool on() noexcept {
-        return mode_.load(std::memory_order_relaxed)>=0 && eye_views_[0].load(std::memory_order_relaxed) && eye_views_[1].load(std::memory_order_relaxed);
+        return mode_.load(std::memory_order_relaxed)>=0 && ((eye_views_[0].load(std::memory_order_relaxed) && eye_views_[1].load(std::memory_order_relaxed)) ||
+            alt_view_.load(std::memory_order_relaxed));
     }
     static void count(Counter c,std::uint64_t n=1) noexcept {local_[c]+=n;if(!(++local_n_&255)) flush();}
     static void flush() noexcept {for(unsigned i=0;i<counters;++i) if(local_[i]) {stats_[i].fetch_add(local_[i],std::memory_order_relaxed);local_[i]=0;}}
@@ -452,6 +487,7 @@ private:
         if(!read_) return;
         EyeView v{};
         if(!read_(view+0x77b4,&v.frame,4) || !read_(view+0x7450,v.m[0],64) || !read_(view+0x7510,v.m[2],64)) return;
+        v.prev_ok=read_(view+0x7590,v.prev_vp,64);
         for(int r=0;r<4;++r) for(int c=0;c<4;++c) {v.m[1][c*4+r]=v.m[0][r*4+c];v.m[3][c*4+r]=v.m[2][r*4+c];}
         if(!inverse_last_row(v.m[2],false,v.inv[0]) || !inverse_last_row(v.m[2],true,v.inv[1])) return;
         v.valid=true;
@@ -473,6 +509,14 @@ private:
     static bool classify(const float* f,UINT size,View& out) noexcept {
         std::lock_guard<std::mutex> lock(views_mutex_);
         for(unsigned eye=0;eye<2;++eye) if(const auto view=eye_views_[eye].load(std::memory_order_relaxed)) snapshot(eye,view);
+        const auto alt_view=alt_view_.load(std::memory_order_relaxed);
+        if(alt_view && read_) if(const auto resolve=alt_eye_.load(std::memory_order_relaxed)) { // v1151: the frame it holds, under its logical eye
+            std::uint32_t frame{};
+            // v1153: once per engine frame (classify runs for every per-view constant write)
+            if(read_(alt_view+0x77b4,&frame,4) && frame!=alt_snapped_frame_)
+                if(const int eye=resolve(alt_view,frame);eye==0 || eye==1) {snapshot(static_cast<unsigned>(eye),alt_view);alt_snapped_frame_=frame;}
+        }
+        const unsigned own_step=alt_view?2u:1u;
         int best_eye=-1,best_rank=-1;const EyeView* best=nullptr;UINT best_at=0;
         const auto scan=[&](UINT o,int first) {
             for(unsigned eye=0;eye<2;++eye) for(const auto& r:eye_records_[eye]) if(r.valid) for(int m=first;m<4;++m) {
@@ -493,8 +537,8 @@ private:
         std::memcpy(out.inv,best->inv,32);std::memcpy(out.z,best->m[2]+8,16);
         // Draws the chain cannot prove (rival's PrevCorrection idea): a previous MVP cached from the other eye's view (case A:
         // R(n-1) for the left eye, L(n) for the right) moved into this eye's last view, VP_own(n-1) * inverse(VP_source).
-        const EyeView* own=nullptr;const EyeView* source=nullptr;const std::uint32_t source_frame=out.eye?out.frame:out.frame-1;
-        for(const auto& r:eye_records_[out.eye]) if(r.valid && r.frame==out.frame-1) own=&r;
+        const EyeView* own=nullptr;const EyeView* source=nullptr;const std::uint32_t source_frame=out.eye && own_step==1?out.frame:out.frame-1;
+        for(const auto& r:eye_records_[out.eye]) if(r.valid && r.frame==out.frame-own_step) own=&r;
         for(const auto& r:eye_records_[out.eye^1u]) if(r.valid && r.frame==source_frame) source=&r;
         float inverse_source[16];
         out.corr_ok=own && source && inverse(source->m[2],inverse_source);
@@ -502,8 +546,11 @@ private:
         // And the camera-only previous, VP_own(n-1) * inverse(VP_own(n)) * current: exact for static objects (the left eye's
         // unmatched draws are not from the other eye's view, v871: their cache was last written by an unrecorded view).
         float inverse_own[16];
-        out.camera_ok=own && inverse(best->m[2],inverse_own);
-        if(out.camera_ok) mul(own->m[2],inverse_own,out.camera);
+        // v1153 alternate: the camera-only previous from the view's own previous VP of this frame, the very matrix the static world's
+        // vectors are built from (sim v1152: the n-2 record and the seeded previous can carry different jitters)
+        const float* previous_vp=own_step==2?(best->prev_ok?best->prev_vp:nullptr):own?own->m[2]:nullptr;
+        out.camera_ok=previous_vp && inverse(best->m[2],inverse_own);
+        if(out.camera_ok) mul(previous_vp,inverse_own,out.camera);
         if(Latest& l=latest_[out.eye];out.frame>=l.view.frame) { // one writer: under views_mutex_
             l.seq.fetch_add(1,std::memory_order_acq_rel);l.view=out;l.seq.fetch_add(1,std::memory_order_release);
         }
@@ -630,7 +677,8 @@ private:
         count(motion);if(have_prev) std::memcpy(engine,prev,64);
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool near_draw=cur[15]>0.01f && cur[15]<near_w;
-        if(near_draw && weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
+        const bool alt=alternate(); // v1151: the held-weapon placement is a paired-mode binder; alternate draws take the general path
+        if(near_draw && !alt && weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);
             const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;
             weapon_pass_near_[pass_index].fetch_add(1,std::memory_order_relaxed);
@@ -672,17 +720,29 @@ private:
         }
         // Not a placed weapon draw: the general per-eye previous-row correction (unchanged), which needs a classified view and this
         // draw's own previous rows.
-        if(!have_view) {count(untagged);return false;}
+        if(!have_view) {count(untagged);if(alt) alt_untagged_.fetch_add(1,std::memory_order_relaxed);return false;}
         if(!have_prev) {count(no_rows);return false;}
         // The current rows must be this view's: a stale shadow or another view's constants never are.
         if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);return false;}
-        const auto kind=table_.fix(view.eye,view.frame,cur,prev);
+        const auto kind=table_.fix(view.eye,view.frame,cur,prev,alt?2u:1u);
         count(static_cast<Counter>((view.eye?kind_r:kind_l)+kind));
+        if(alt) alt_kinds_[kind].fetch_add(1,std::memory_order_relaxed);
         // Which draws stay unmatched (headset v832: ~20% per eye, sim ~5%): near ones (model origin closer than 1.5 m: hands,
         // held items, weapons) per kind, and the cb2 size of misses and unproven draws.
         if(cur[15]<1.5f) count(static_cast<Counter>((view.eye?near_r:near_l)+kind));
         if(kind==PrevMvpTable::miss || kind==PrevMvpTable::unproven) unmatched_size_[view.eye][sh->size/16<63?sh->size/16:63].fetch_add(1,std::memory_order_relaxed);
         bool apply=mode_.load(std::memory_order_relaxed)>=1 && (kind==PrevMvpTable::other_now || kind==PrevMvpTable::other_last);
+        // v1151 alternate: an unproven or unmatched draw takes the camera-only previous (static assumption, design section 1), never
+        // the other eye's rows (their parallax is not motion).
+        if(alt && !apply && mode_.load(std::memory_order_relaxed)>=1 && (kind==PrevMvpTable::miss || kind==PrevMvpTable::unproven) && view.camera_ok) {
+            mul(view.camera,cur,prev);apply=true;count(view.eye?camera_r:camera_l);alt_camera_.fetch_add(1,std::memory_order_relaxed);
+        }
+        // v1153 alternate (sim v1152: still props carried a uniform 0.44-1.1 px per render): own rows that differ from the camera-only
+        // previous by a frustum shift alone are that previous under another jitter; the camera-only rows carry the static world's jitter.
+        if(alt && mode_.load(std::memory_order_relaxed)>=1 && view.camera_ok && (apply || kind==PrevMvpTable::own_last)) {
+            float still[16];mul(view.camera,cur,still);
+            if(std::memcmp(still,prev,64) && jitter_only(prev,still)) {std::memcpy(prev,still,64);apply=true;alt_jitter_snapped_.fetch_add(1,std::memory_order_relaxed);}
+        }
         // Unproven or unmatched (headset ~20% per eye): the view correction, kept only when it shrinks the apparent motion.
         if(!apply && mode_.load(std::memory_order_relaxed)>=1 && (kind==PrevMvpTable::miss || kind==PrevMvpTable::unproven)) {
             float moved[16],still[16];double best_motion=origin_motion(cur,engine);const float* pick=nullptr;
@@ -894,7 +954,7 @@ private:
         json<<"\",\"vs_b1_sampled\":\"";
         for(const auto& e:b1_seen_) if(const void* b=e.buffer.load()) json<<std::hex<<reinterpret_cast<std::uintptr_t>(b)<<std::dec<<':'<<e.n[0].load()<<'/'<<e.n[1].load()<<'/'<<e.n[2].load()<<' ';
         json<<'"';
-        json<<",\"kinds\":\"same,own_last,other_now,other_last,unproven,miss\"";
+        json<<",\"kinds\":\"same,own_last,other_now,other_last,unproven,miss\",\"alternate\":"<<alternate_status_json();
         for(unsigned eye=0;eye<2;++eye) {
             json<<(eye?",\"right\":[":",\"left\":[");
             for(unsigned k=0;k<PrevMvpTable::kinds;++k) json<<(k?",":"")<<stats_[(eye?kind_r:kind_l)+k].load();

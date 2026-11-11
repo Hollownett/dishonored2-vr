@@ -14,7 +14,9 @@ Reads the alt-motion-<burst>-<index>-* dumps the v1150 probe writes (knob build/
 import argparse, glob, itertools, json, os, re, struct, sys, tempfile, zlib
 import numpy as np
 
-R16G16_FLOAT, R32_FLOAT = 34, 41
+R16G16_FLOAT, R32_FLOAT, R16G16B16A16_FLOAT = 34, 41, 10
+OTHER_STILL_PX = 0.25  # src/eye_motion_pass.hpp eye_motion_other_still_px (v1154)
+ARM_REACH = 0.5  # metres; src/eye_motion_pass.hpp eye_motion_arm_reach: nearer pixels carry w = 0 (first-person arms)
 
 
 # ---------- files ----------
@@ -29,6 +31,12 @@ def load_mv(path):
     w, h, fmt, row, data = read_raw(path)
     if fmt != R16G16_FLOAT: raise ValueError(f'{path}: format {fmt}, expected R16G16_FLOAT')
     return np.frombuffer(data, np.float16).reshape(h, row // 4, 2)[:, :w].astype(np.float64)
+
+
+def load_motion(path):  # v1151 motion pass output: RGBA16F (xyz world metres, w object motion px)
+    w, h, fmt, row, data = read_raw(path)
+    if fmt != R16G16B16A16_FLOAT: raise ValueError(f'{path}: format {fmt}, expected R16G16B16A16_FLOAT')
+    return np.frombuffer(data, np.float16).reshape(h, row // 8, 4)[:, :w].astype(np.float64)
 
 
 def load_depth(path):
@@ -58,6 +66,7 @@ def load_dumps(directory):
         if not (os.path.exists(stem + '-mv.rg16f') and os.path.exists(stem + '-depth.r32')): continue
         with open(js) as f: meta = json.load(f)
         d = dict(meta=meta, stem=stem, mv=load_mv(stem + '-mv.rg16f'), depth=load_depth(stem + '-depth.r32'))
+        if os.path.exists(stem + '-motion.rgba16f'): d['motion'] = load_motion(stem + '-motion.rgba16f')
         bursts.setdefault(int(m.group(1)), []).append(d)
     for b in bursts.values(): b.sort(key=lambda d: d['meta']['index'])
     return dict(sorted(bursts.items()))
@@ -116,7 +125,8 @@ def mv_scales(d):
 
 
 def conventions(d):
-    return list(itertools.product((False, True), (True, False), (1, -1), (0, 1, -1), (False, True), ('vp', 'pv'), mv_scales(d)))
+    # camera_relative stays False (Phase 0: the receipts are world space; on a still head True tied and broke the H1 test)
+    return list(itertools.product((False, True), (True, False), (1, -1), (0, 1, -1), (False,), ('vp', 'pv'), mv_scales(d)))
 
 
 def pick_convention(burst, max_samples=20000):
@@ -176,6 +186,25 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
                     if b1: log('      b1 step vs other-eye step %s' % np.round(jitter_step(meta['current'], other['current']), 6).tolist())
             elif i:
                 log('      H1: previous dispatch is not the other eye one tick earlier; skipped')
+            # v1151: pixels the motion pass covers (not sky, not within arm reach) and, when dumped, the pass's own w against this residual
+            proj = meta['current']['projection']
+            ahead = proj[11] / (dep + proj[10])
+            covered = ahead >= ARM_REACH
+            r['movers_covered'] = float((own[covered] > threshold).mean()) if covered.any() else 0.0
+            msg = f'      covered (beyond {ARM_REACH} m) {covered.mean() * 100:.1f}%: movers {r["movers_covered"] * 100:.3f}%'
+            if 'motion' in d:
+                m = d['motion'][ys, xs]
+                pw = m[:, 3]
+                both = covered & np.isfinite(own)
+                diff = np.abs(pw[both] - own[both])
+                r['pass_w_diff_p99'] = float(np.percentile(diff, 99)) if len(diff) else None
+                r['pass_movers'] = float((pw[covered] >= threshold).mean()) if covered.any() else 0.0
+                r['pass_netted'] = float((covered & (own > threshold) & (pw == 0)).mean())  # v1154: own movers the pass wrote as still
+                r['pass_w_zero_outside'] = bool(np.all(pw[~covered] == 0))
+                agree = ((pw[both] >= threshold) == (own[both] > threshold)).mean() if len(diff) else 1.0
+                msg += (f'; pass w vs script: |diff| {pct(diff)}, mover agreement {agree * 100:.2f}%, pass movers {r["pass_movers"] * 100:.3f}%,'
+                        f' w=0 outside cover: {r["pass_w_zero_outside"]}, own movers written still {r["pass_netted"] * 100:.3f}%')
+            log(msg)
             per.append(r)
             if out:
                 os.makedirs(out, exist_ok=True)
@@ -259,7 +288,7 @@ def _synth(directory, scenario, W=320, H=240):
         mv = (uv - prev_uv).astype(np.float16)
         stem = os.path.join(directory, f'alt-motion-1-{i}')
         strip = lambda c: {k: v for k, v in c.items() if not k.startswith('_')}
-        meta = dict(burst=1, index=i, eye=t % 2, display=100 + t, current=strip(cur), previous=strip(own_prev),
+        meta = dict(burst=1, index=i, eye=t % 2, display=100 + t, present=100 + t, current=strip(cur), previous=strip(own_prev),
                     render=[W, H], motion_texture=[W, H, R16G16_FLOAT])
         with open(stem + '.json', 'w') as f: json.dump(meta, f)
         for suffix, arr, fmt in (('-mv.rg16f', mv, R16G16_FLOAT), ('-depth.r32', depth.astype(np.float32), R32_FLOAT)):
@@ -293,14 +322,89 @@ def selftest():
     print('selftest: all passed')
 
 
+# ---------- v1151 motion pass check (tests/eye_motion_pass_check.cpp on WARP) ----------
+MEASURED = (False, True, 1, -1, False, 'vp', 1.0)  # Phase 0 winner, the convention src/eye_motion_pass.hpp implements
+
+
+def reference_motion(cur, prev, uv, depth, mv, size):
+    """numpy reference of the pass: (xyz world displacement, w px) per sample, arms/sky not masked."""
+    mc, mp = matrix(cur, False, 'vp'), matrix(prev, False, 'vp')
+    ndc = np.stack([uv[:, 0] * 2 - 1, 1 - uv[:, 1] * 2, depth, np.ones(len(uv))], 1)
+    now = ndc @ np.linalg.inv(mc).T; now = now[:, :3] / now[:, 3:4]
+    clip = np.concatenate([now, np.ones((len(uv), 1))], 1) @ mp.T
+    puv = uv - mv - jitter_step(cur, prev)
+    pn = np.stack([puv[:, 0] * 2 - 1, 1 - puv[:, 1] * 2, clip[:, 2] / clip[:, 3], np.ones(len(uv))], 1)
+    then = pn @ np.linalg.inv(mp).T; then = then[:, :3] / then[:, 3:4]
+    return now - then, residual_px(cur, prev, MEASURED, uv, depth, mv, size)
+
+
+def check_pass(stem, exe, work):
+    """Runs the pass on WARP on one dump (stem without suffix) and asserts it matches the reference."""
+    import subprocess
+    with open(stem + '.json') as f: meta = json.load(f)
+    os.makedirs(work, exist_ok=True)
+    cams = os.path.join(work, 'cameras.txt')
+    # v1154: the other eye's render one Present earlier (the previous dispatch of the burst), when the dump has it
+    m = re.search(r'alt-motion-(\d+)-(\d+)$', stem)
+    other = None
+    if m and int(m.group(2)) > 0:
+        o = f'{stem[:m.start()]}alt-motion-{m.group(1)}-{int(m.group(2)) - 1}.json'
+        if os.path.exists(o):
+            with open(o) as f: om = json.load(f)
+            if om['eye'] != meta['eye'] and om['present'] + 1 == meta['present']: other = om['current']
+    with open(cams, 'w') as f:
+        for snap in (meta['current'], meta['previous']) + ((other,) if other else ()):
+            f.write(' '.join(repr(float(v)) for v in snap['projection'] + snap['view_projection'] + snap['position'] + snap['jitter']) + '\n')
+    out = os.path.join(work, 'motion.rgba16f')
+    subprocess.run([exe, cams, stem + '-depth.r32', stem + '-mv.rg16f', out], check=True)
+    d = dict(meta=meta, depth=load_depth(stem + '-depth.r32'), mv=load_mv(stem + '-mv.rg16f'))
+    got = load_motion(out)
+    ys, xs, uv, dep, mv, size = samples(d)
+    proj = meta['current']['projection']
+    ahead = proj[11] / (dep + proj[10])
+    covered = ahead >= ARM_REACH + 1e-3  # float32 vs float64 at the boundary itself: a texel either way
+    outside = ahead < ARM_REACH - 1e-3
+    xyz, w = reference_motion(meta['current'], meta['previous'], uv, dep, mv, size)
+    g = got[ys, xs]
+    if other:  # the net: movers the other eye's render explains come out 0; boundary cases (within 0.01 px) are not compared
+        h1 = residual_px(meta['current'], other, MEASURED, uv, dep, mv, size)
+        still = covered & (w >= 0.75) & (h1 < OTHER_STILL_PX)
+        edge = (np.abs(w - 0.75) < 0.01) | (np.abs(h1 - OTHER_STILL_PX) < 0.01)
+        assert np.all(g[still & ~edge] == 0), 'other-eye still pixels must be 0'
+        covered = covered & ~still & ~edge
+        print(f'check-pass: other-eye net on, {still.mean() * 100:.3f}% of samples still by it (0 in the pass)')
+    else: print('check-pass: no other-eye snapshot one Present earlier: net off')
+    zero = got[d['depth'] <= 0]
+    dw = np.abs(g[covered, 3] - w[covered])
+    dxyz = np.linalg.norm(g[covered, :3] - xyz[covered], axis=1)
+    rel = dw / np.maximum(1.0, w[covered])
+    print(f'check-pass {os.path.basename(stem)}: {covered.sum()} covered px; |w - ref| {pct(dw)}; relative p99.9 {np.percentile(rel, 99.9):.4f};'
+          f' |xyz - ref| m {pct(dxyz)}; sky/arm zeros {np.all(zero == 0) and np.all(g[outside] == 0)}')
+    assert np.all(zero == 0) and np.all(g[outside] == 0), 'sky and arm-reach pixels must be 0'
+    assert np.percentile(dw, 99) < 0.05 and np.percentile(rel, 99.9) < 0.02, 'pass w differs from the reference'
+    movers = w[covered] > 0.75
+    assert ((g[covered, 3] >= 0.75) == movers).mean() > 0.999, 'pass and reference disagree on movers'
+    print(f'check-pass: movers after the net {(g[:, 3] >= 0.75).mean() * 100:.3f}% of samples')
+    assert np.percentile(dxyz, 99) < 0.01 + 0.0, 'pass xyz differs from the reference'
+    print('check-pass: ok')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('directory', nargs='?')
     ap.add_argument('--out', help='PNG directory (default: <directory>/alt-motion-analysis)')
     ap.add_argument('--threshold', type=float, default=.75, help='mover threshold in render px (design: mover_px 0.75)')
     ap.add_argument('--selftest', action='store_true')
+    ap.add_argument('--check-pass', metavar='STEM', help='run tests/eye_motion_pass_check on this dump (or "synthetic") and compare')
+    ap.add_argument('--exe', default=os.path.join(os.path.dirname(__file__), '..', 'build', 'eye_motion_pass_check.exe'))
+    ap.add_argument('--work', default=os.path.join(tempfile.gettempdir(), 'eye_motion_pass_check'))
     a = ap.parse_args()
     if a.selftest: return selftest()
+    if a.check_pass:
+        stem = a.check_pass
+        if stem == 'synthetic':
+            os.makedirs(a.work, exist_ok=True); _synth(a.work, 'own_mover'); stem = os.path.join(a.work, 'alt-motion-1-3')
+        return check_pass(stem, a.exe, a.work)
     if not a.directory: ap.error('directory required')
     bursts = load_dumps(a.directory)
     if not bursts: sys.exit('no alt-motion-*-*.json dumps with -mv.rg16f and -depth.r32 in ' + a.directory)

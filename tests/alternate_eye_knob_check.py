@@ -40,7 +40,7 @@ assert xr.count('rendered_mask_==3') == 2                           # the helper
 assert 'return alternate_enabled?build_layer_views(alt_effective_(),alternate_frame,pose_epoch()).views[eye]:rendered_views_[eye];' in xr
 assert 'const bool alt_stale=alternate_enabled && alternate_fresh_eye>=0' in xr
 assert 'if(alternate_enabled && !alt_stale && gameplay) {' in xr
-assert '&& !alt_stale?antialiasing_->apply(sources[eye])' in xr and 'if(sharpness>0 && !alt_stale)' in xr
+assert '&& !alt_stale?antialiasing_->apply(processed)' in xr and 'if(sharpness>0 && !alt_stale)' in xr
 assert 'if(!alternate_enabled || alternate_fresh_eye<0) return true;' in xr
 # a stale eye is drawn from the kept copy of ITS OWN image and its layer view is its own record
 assert 'if(alt_stale) sources[eye]=alt_kept_[eye].Get();' in xr
@@ -135,9 +135,9 @@ assert 'alt_pending.record_companion(alt_display,static_cast<int>(other),*compan
 assert 'if(alt_slot->companion_mask&(1u<<other)) game_xr->stale_eye_target(other,alt_slot->companion[other],number);' in probe
 assert 'game_xr->stale_eye_warp_enabled=stale_eye_warp_knob;' in probe
 assert 'stale_warp_->apply(processed,*h);' in xr
-assert xr.index('stale_warp_->apply(processed,*h);') < xr.index('} else context_->CopyResource(images_[eye].at(index).texture,submitted);}')
+assert xr.index('stale_warp_->apply(processed,*h);') < xr.index('} else context_->CopyResource(images_[eye].at(index).texture,eye_image);}')
 # v808: a canted eye is resampled into its own located view between the warp and the copy, and submitted with that view
-assert xr.index('stale_warp_->apply(processed,*h);') < xr.index('submitted=uncant_->apply(processed,*h);') < xr.index('} else context_->CopyResource(images_[eye].at(index).texture,submitted);}')
+assert xr.index('stale_warp_->apply(processed,*h);') < xr.index('eye_image=uncant_->apply(processed,*h);') < xr.index('} else context_->CopyResource(images_[eye].at(index).texture,eye_image);}')
 assert 'layers[eye].pose=uncanted_[eye]?straight_pose:' in xr and 'warp_point(uncant_back_[eye],' in xr
 assert 'else if(stale_warped_(static_cast<UINT>(eye))) out[static_cast<std::size_t>(eye)].view=stale_target_[static_cast<std::size_t>(eye)];' in xr
 assert 'warp_point(stale_back_[eye],ru,rv);' in xr
@@ -172,9 +172,21 @@ print('PASS: v796 parallax routing (knob, cameras recorded and handed over, kept
 # v798 fresh layer: the fresh eye goes first, its depth and kept image reach the stale eye's warp with its camera, knob and status
 assert 'const UINT eye=alternate_enabled && alternate_fresh_eye==1?1u-pass:pass;' in xr
 assert 'fresh_now?&rendered_cameras_[fresh_eye]:nullptr,f(alt_records_[fresh_eye].view.fov),stale_near_range);' in xr
-assert 'stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth)' in xr
+assert 'stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion)' in xr
 assert 'fsr_taa.eye_depth(alt_fresh,depth_w,depth_h)' in probe
 assert '{std::ifstream knob(root/L"build"/L"stale-near-range");' in probe
 assert 'game_xr->stale_near_range=stale_near_range;' in probe
 assert 'stale_fresh_warps' in probe and 'warp_hands' not in probe
 print('PASS: v798 fresh-layer routing (fresh eye first, its camera, depth and image to the stale warp, knob, status)')
+
+# v1151 movers: knob, both eyes' motion textures handed over per Present (each its last render's), parts and rules into the layers,
+# the alternate object-motion fix only with the knob, status
+fsr = (root / 'src' / 'fsr_taa.hpp').read_text(encoding='utf-8')
+assert 'stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion");' in probe
+assert 'fsr_taa.eye_motion(static_cast<int>(motion_eye),motion_w,motion_h)' in probe and 'game_xr->stale_motion_rules=stale_eye_motion_knob;' in probe
+assert 'd2vr::ObjectMotion::note_alternate_view(alternate_on() && mono && stale_eye_motion_knob?address:0);' in probe
+assert 'stale_eye_motion_knob?receipt:std::nullopt' in probe
+assert '\\"stale_motion\\":' in probe and '\\"motion_passes\\":' in probe and '\\"motion_refusals\\":' in probe
+assert 'stale_layers_[eye]->motion_rules=stale_motion_rules;' in xr and 'const StaleMotion kept_motion=stale_motion(eye),fresh_motion=fresh_now?stale_motion(fresh_eye):StaleMotion{};' in xr
+assert 'if(job.receipt && !job.receipt->reset && job.receipt->phase>=2 && e.motion_uav.p && e.depth_srv.p && job.motion.p) {' in fsr
+print('PASS: v1151 mover routing (knob, motion textures per eye, parts and rules, receipt-gated pass, status)')

@@ -146,15 +146,16 @@ public:
         if(generation==invalidation_.load() && book_.admit(view,stamp,display,pose,reference)) {++admitted;return true;}
         ++rejected;return false;
     }
-    std::optional<Receipt> resolve(std::uintptr_t view) {
+    // count=false (v1151 motion diagnostics and per-eye motion): a miss is not counted in `rejected`.
+    std::optional<Receipt> resolve(std::uintptr_t view,bool count=true) {
         const auto generation=invalidation_.load();std::uint32_t before{},after{};Snapshot current{};
         if(failed || !read_ || !read_(view+stamp_offset,&before,4) || !read_snapshot(read_,view,current) ||
             !read_(view+stamp_offset,&after,4) || before!=after) return std::nullopt;
         std::lock_guard<std::mutex> lock(book_mutex_);
-        if(generation!=invalidation_.load()) {++rejected;return std::nullopt;}
+        if(generation!=invalidation_.load()) {if(count) ++rejected;return std::nullopt;}
         const auto receipt=book_.resolve(view,before);
         if(receipt && same_snapshot(receipt->current,current)) return receipt;
-        ++rejected;return std::nullopt;
+        if(count) ++rejected;return std::nullopt;
     }
 };
 } // namespace d2vr::alternate_taa
