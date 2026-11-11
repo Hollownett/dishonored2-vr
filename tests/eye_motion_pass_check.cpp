@@ -2,6 +2,7 @@
 // one render's inputs. Driven by tools/alt_motion_probe.py --check-pass, which writes the inputs from an alt-motion probe dump (or a
 // synthetic scene) and compares the output with its own numpy reference.
 //   eye_motion_pass_check <cameras.txt> <depth.r32> <mv.rg16f> <out.rgba16f>
+//   eye_motion_pass_check ... <out.rgba16f> legacy   (v1178: MVs of a dump made before v1178, without the jitter step)
 // cameras.txt: current then previous snapshot, each 16 projection, 16 view-projection, 3 position, 2 jitter floats (whitespace separated).
 // Raw files: u32 width, height, DXGI format, bytes per row, then rows (the probe's format). Output: the same header, RGBA16F rows.
 #include <windows.h>
@@ -68,7 +69,9 @@ int main(int argc,char** argv) {
         if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context))) return 1;
         const int r=edge_case(device.Get(),context.Get());std::printf(r?"edge: FAIL\n":"edge: ok\n");return r;
     }
-    if(argc!=5) {std::fprintf(stderr,"usage: eye_motion_pass_check cameras.txt depth.r32 mv.rg16f out.rgba16f\n");return 2;}
+    // v1178: optional 5th argument "legacy": the dump's MVs predate v1178 (jitter step not in the vectors)
+    if(argc!=5 && !(argc==6 && !std::strcmp(argv[5],"legacy"))) {std::fprintf(stderr,"usage: eye_motion_pass_check cameras.txt depth.r32 mv.rg16f out.rgba16f [legacy]\n");return 2;}
+    d2vr::eye_motion_mv_jittered=argc!=6;
     d2vr::alternate_taa::Snapshot snap[3]{};bool other=false; // v1154: an optional third line, the other eye's render one Present earlier
     {
         std::ifstream f(argv[1]);

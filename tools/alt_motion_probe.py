@@ -303,7 +303,7 @@ def _synth(directory, scenario, W=320, H=240):
         stem = os.path.join(directory, f'alt-motion-1-{i}')
         strip = lambda c: {k: v for k, v in c.items() if not k.startswith('_')}
         meta = dict(burst=1, index=i, eye=t % 2, display=100 + t, present=100 + t, current=strip(cur), previous=strip(own_prev),
-                    render=[W, H], motion_texture=[W, H, R16G16_FLOAT])
+                    render=[W, H], motion_texture=[W, H, R16G16_FLOAT], mv_jittered=True)
         with open(stem + '.json', 'w') as f: json.dump(meta, f)
         for suffix, arr, fmt in (('-mv.rg16f', mv, R16G16_FLOAT), ('-depth.r32', depth.astype(np.float32), R32_FLOAT)):
             with open(stem + suffix, 'wb') as f:
@@ -337,19 +337,24 @@ def selftest():
 
 
 # ---------- v1151 motion pass check (tests/eye_motion_pass_check.cpp on WARP) ----------
-MEASURED = (False, True, 1, -1, False, 'vp', 1.0)  # Phase 0 winner, the convention src/eye_motion_pass.hpp implements
+MEASURED = (False, True, 1, -1, False, 'vp', 1.0)  # Phase 0 winner (dumps before v1178: the MV had no jitter step)
+MEASURED_JITTERED = (False, True, 1, 0, False, 'vp', 1.0)  # v1178+: +0x7858 = +0x7850 at upload, the MV carries the jitter step
 
 
-def reference_motion(cur, prev, uv, depth, mv, size):
+def measured(meta):  # the convention src/eye_motion_pass.hpp implements for this dump
+    return MEASURED_JITTERED if meta.get('mv_jittered') else MEASURED
+
+
+def reference_motion(cur, prev, uv, depth, mv, size, conv=MEASURED):
     """numpy reference of the pass: (xyz world displacement, w px) per sample, arms/sky not masked."""
     mc, mp = matrix(cur, False, 'vp'), matrix(prev, False, 'vp')
     ndc = np.stack([uv[:, 0] * 2 - 1, 1 - uv[:, 1] * 2, depth, np.ones(len(uv))], 1)
     now = ndc @ np.linalg.inv(mc).T; now = now[:, :3] / now[:, 3:4]
     clip = np.concatenate([now, np.ones((len(uv), 1))], 1) @ mp.T
-    puv = uv - mv - jitter_step(cur, prev)
+    puv = uv - mv + conv[3] * jitter_step(cur, prev)
     pn = np.stack([puv[:, 0] * 2 - 1, 1 - puv[:, 1] * 2, clip[:, 2] / clip[:, 3], np.ones(len(uv))], 1)
     then = pn @ np.linalg.inv(mp).T; then = then[:, :3] / then[:, 3:4]
-    return now - then, residual_px(cur, prev, MEASURED, uv, depth, mv, size)
+    return now - then, residual_px(cur, prev, conv, uv, depth, mv, size)
 
 
 def check_pass(stem, exe, work):
@@ -370,7 +375,8 @@ def check_pass(stem, exe, work):
         for snap in (meta['current'], meta['previous']) + ((other,) if other else ()):
             f.write(' '.join(repr(float(v)) for v in snap['projection'] + snap['view_projection'] + snap['position'] + snap['jitter']) + '\n')
     out = os.path.join(work, 'motion.rgba16f')
-    subprocess.run([exe, cams, stem + '-depth.r32', stem + '-mv.rg16f', out], check=True)
+    conv = measured(meta)
+    subprocess.run([exe, cams, stem + '-depth.r32', stem + '-mv.rg16f', out] + ([] if meta.get('mv_jittered') else ['legacy']), check=True)
     d = dict(meta=meta, depth=load_depth(stem + '-depth.r32'), mv=load_mv(stem + '-mv.rg16f'))
     got = load_motion(out)
     ys, xs, uv, dep, mv, size = samples(d)
@@ -378,10 +384,10 @@ def check_pass(stem, exe, work):
     ahead = proj[11] / (dep + proj[10])
     covered = ahead >= ARM_REACH + 1e-3  # float32 vs float64 at the boundary itself: a texel either way
     outside = ahead < ARM_REACH - 1e-3
-    xyz, w = reference_motion(meta['current'], meta['previous'], uv, dep, mv, size)
+    xyz, w = reference_motion(meta['current'], meta['previous'], uv, dep, mv, size, conv)
     g = got[ys, xs]
     if other:  # the net: movers the other eye's render explains come out 0; boundary cases (within 0.01 px) are not compared
-        h1 = residual_px(meta['current'], other, MEASURED, uv, dep, mv, size)
+        h1 = residual_px(meta['current'], other, conv, uv, dep, mv, size)
         still = covered & (w >= 0.75) & (h1 < OTHER_STILL_PX)
         edge = (np.abs(w - 0.75) < 0.01) | (np.abs(h1 - OTHER_STILL_PX) < 0.01)
         assert np.all(g[still & ~edge] == 0), 'other-eye still pixels must be 0'

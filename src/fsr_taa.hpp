@@ -1068,10 +1068,14 @@ private:
                     const auto* f=static_cast<const float*>(m.pData);
                     FILE* out{};
                     if(!_wfopen_s(&out,(p.stem+L"-b1.bin").c_str(),L"wb") && out) {fwrite(m.pData,1,bd.ByteWidth,out);fclose(out);}
-                    char text[512]{};
-                    // taa_mv_dejitter.hpp: the step the MVs carry = (r[25].x-r[13].x, r[13].y-r[25].y)*0.5 in UV; cb_jittervectors at 0x1d0
-                    std::snprintf(text,sizeof text,",\"b1_bytes\":%u,\"b1_r13\":[%.9g,%.9g],\"b1_r25\":[%.9g,%.9g],\"b1_step_uv\":[%.9g,%.9g],\"b1_jittervectors\":[%.9g,%.9g,%.9g,%.9g]",
-                        bd.ByteWidth,f[13*4],f[13*4+1],f[25*4],f[25*4+1],(f[25*4]-f[13*4])*.5f,(f[13*4+1]-f[25*4+1])*.5f,f[0x1d0/4],f[0x1d0/4+1],f[0x1d0/4+2],f[0x1d0/4+3]);
+                    char text[640]{};
+                    // taa_mv_dejitter.hpp: the step the MVs carry = (r[25].x-r[13].x, r[13].y-r[25].y)*0.5 in UV; cb_jittervectors at 0x1d0.
+                    // v1178: cb_jitterrelativetopreviousframe (0x2f0) = 2(prev - cur) of cb_jittervectors, subtracted by the MV pass; 0 (prev == cur)
+                    // means the MVs carry the step (mv_jittered, the convention tools/alt_motion_probe.py --check-pass applies).
+                    const bool jittered=bd.ByteWidth>=0x300 && f[0x1d0/4]==f[0x1d0/4+2] && f[0x1d0/4+1]==f[0x1d0/4+3];
+                    std::snprintf(text,sizeof text,",\"b1_bytes\":%u,\"b1_r13\":[%.9g,%.9g],\"b1_r25\":[%.9g,%.9g],\"b1_step_uv\":[%.9g,%.9g],\"b1_jittervectors\":[%.9g,%.9g,%.9g,%.9g],\"b1_jitter_relative\":[%.9g,%.9g],\"mv_jittered\":%s",
+                        bd.ByteWidth,f[13*4],f[13*4+1],f[25*4],f[25*4+1],(f[25*4]-f[13*4])*.5f,(f[13*4+1]-f[25*4+1])*.5f,f[0x1d0/4],f[0x1d0/4+1],f[0x1d0/4+2],f[0x1d0/4+3],
+                        bd.ByteWidth>=0x300?f[0x2f0/4]:0.f,bd.ByteWidth>=0x300?f[0x2f0/4+1]:0.f,jittered?"true":"false");
                     b1=text;c->Unmap(p.b1.Get(),0);
                 }
             }

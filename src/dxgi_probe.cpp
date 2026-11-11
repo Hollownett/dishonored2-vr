@@ -1934,6 +1934,9 @@ void restore_head_view() noexcept;
 // (d2vr::engine_taa_jitter): Setup's cur->prev copy and the forced-projection branch that skips the write.
 static std::atomic<bool> dlss_view_metadata_abi{false};
 static bool view_jitter_abi=false;static std::atomic<UINT64> view_jitter_writes{};
+// v1178: alternate one-view Setups set +0x7858 = +0x7850 after the receipt (MVs carry the jitter step, as in paired mode); knob
+// build/legacy-alt-mv-jitter keeps the seeded previous jitter (v1177). Status alt_mv_jitter_writes.
+static std::atomic<bool> alt_mv_jittered{true};static std::atomic<UINT64> alt_mv_jitter_writes{};
 static std::atomic<UINT64> alternate_taa_plan_cancels{}; // v794: alternate temporal plans cancelled because their Setup returned early
 std::optional<temporal_eye::SetupObservation> begin_dlss_setup_observation(void* view) noexcept;
 void complete_dlss_setup_observation(const std::optional<temporal_eye::SetupObservation>& input,bool jitter_written) noexcept;
@@ -1974,6 +1977,15 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
             if(claimed && alternate_taa_setup_ready) {
                 alternate_taa_runtime.finish(reinterpret_cast<std::uintptr_t>(view));
                 if(alternate_taa_runtime.failed.load()) native_cvars.set(d2vr::NativeCvars::skip_temporal_aa,1);
+                // v1178: the receipt is taken (finish verified +0x7858 = this eye's previous jitter). The MV pixel shader subtracts
+                // cb_jitterrelativetopreviousframe = 2(+0x7858 - +0x7850) (0x3586a0); with the seeded value that cancelled the step for the
+                // static world only. +0x7858 = +0x7850 makes it 0, as in paired frames: every MV is then the jittered displacement against
+                // the rows its draw used, which is what FSR/DLSS (MV jittered) and the native TAA dejitter expect. Nothing else reads +0x7858
+                // (exe scan: 0x3586a0 only; shaders read cb_jittervectors.xy only); the next Setup rolls it from the seeded +0x7850 again.
+                else if(alt_mv_jittered.load(std::memory_order_relaxed)) { // the roll at 0x375a98 is pinned by alternate_taa::verified_abi
+                    auto* jitter=reinterpret_cast<d2vr::TaaJitter*>(static_cast<std::byte*>(view)+0x7850);
+                    jitter[1]=jitter[0];++alt_mv_jitter_writes;
+                }
             }
             if(claimed) complete_dlss_setup_observation(dlss_setup_input,dlss_jitter_written);
         } else setup_hook(view,window_rect,render_rect);
@@ -15979,6 +15991,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::GameXr::vignette_color_scale_requested=fs::exists(root/L"build"/L"vignette-color-scale");
         }
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
+        alt_mv_jittered=!fs::exists(root/L"build"/L"legacy-alt-mv-jitter");d2vr::eye_motion_mv_jittered=alt_mv_jittered.load(); // v1178
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
         wheel_step_realtime_enabled=!fs::exists(root/L"build"/L"wheel-slow-steps");
         dual_wield_enabled=fs::exists(root/L"build"/L"dual-wield");arm_set.reset();arms_plan_published={};arm_pack=d2vr::arm::pack_default;melee_hand=1;extra_kinds=0;extra_owns={};
@@ -16345,7 +16358,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"input_gate\":" << fsr_taa.dlss_input_gate.load() << ",\"setup_receipts\":" << fsr_taa.dlss_setup_receipts.load() << ",\"setup_rejected\":" << fsr_taa.dlss_setup_rejected.load()
                << ",\"cpu_projection_matches\":" << fsr_taa.dlss_cpu_projection_matches.load() << ",\"cpu_projection_mismatches\":" << fsr_taa.dlss_cpu_projection_mismatches.load() << ",\"pass_receipts\":" << fsr_taa.dlss_pass_receipts.load() << ",\"pass_rejected\":" << fsr_taa.dlss_pass_rejected.load() << ",\"mv_view_matches\":" << fsr_taa.dlss_mv_matches.load()
                << ",\"mv_capture_sequence\":" << fsr_taa.dlss_mv_capture_sequence.load() << ",\"mv_view_missing\":" << fsr_taa.dlss_mv_missing.load() << ",\"clear_events\":" << fsr_taa.dlss_clear_events.load() << ",\"depth_selection_generation\":" << fsr_taa.dlss_depth_selection_generation.load() << '}'
-               << ",\"fsr_replaced\":" << fsr_taa.replaced.load() << ",\"fsr_taa_copies\":" << fsr_taa.taa_copies.load() << ",\"fsr_upscaled\":" << fsr_taa.upscaled.load() << ",\"fsr_upscale_skipped\":" << fsr_taa.upscale_skipped.load() << ",\"fsr_eye_dispatches\":[" << fsr_taa.eye_dispatches[0].load() << ',' << fsr_taa.eye_dispatches[1].load() << ']' << ",\"fsr_eye_resets\":[" << fsr_taa.eye_resets[0].load() << ',' << fsr_taa.eye_resets[1].load() << ']' << ",\"fsr_fallback_copies\":" << fsr_taa.fallback_copies.load() << ",\"fsr_stale_jobs\":" << fsr_taa.stale_jobs.load() << ",\"upscale_active\":" << (upscale_active?"true":"false") << ",\"taa_jitter_scale\":[" << taa_jitter_scale[0] << ',' << taa_jitter_scale[1] << ',' << taa_jitter_scale[2] << ',' << taa_jitter_scale[3] << ']' << ",\"jitter_same\":" << jitter_same.load() << ",\"jitter_differ\":" << jitter_differ.load() << ",\"projection_jitter\":" << (projection_jitter?"true":"false") << ",\"view_jitter_abi\":" << (view_jitter_abi?"true":"false") << ",\"view_jitter_writes\":" << view_jitter_writes.load() << ",\"fsr_not_ready\":" << fsr_taa.not_ready.load() << ",\"device_flags\":" << device_creation_flags.load() << ",\"fsr_failures\":" << fsr_taa.failures.load() << ",\"fsr_create_failures\":" << fsr_taa.create_failures.load() << ",\"taa_dispatch_marked\":" << d2vr::TaaDispatchHook::marked.load() << ",\"taa_mv_dejitter\":[" << taa_mv_dejitter.applied.load() << ',' << taa_mv_dejitter.skipped.load() << ',' << taa_mv_dejitter.failures.load() << ']' << ",\"taa_dispatch_matches\":" << taa_dispatch_matches.load()
+               << ",\"fsr_replaced\":" << fsr_taa.replaced.load() << ",\"fsr_taa_copies\":" << fsr_taa.taa_copies.load() << ",\"fsr_upscaled\":" << fsr_taa.upscaled.load() << ",\"fsr_upscale_skipped\":" << fsr_taa.upscale_skipped.load() << ",\"fsr_eye_dispatches\":[" << fsr_taa.eye_dispatches[0].load() << ',' << fsr_taa.eye_dispatches[1].load() << ']' << ",\"fsr_eye_resets\":[" << fsr_taa.eye_resets[0].load() << ',' << fsr_taa.eye_resets[1].load() << ']' << ",\"fsr_fallback_copies\":" << fsr_taa.fallback_copies.load() << ",\"fsr_stale_jobs\":" << fsr_taa.stale_jobs.load() << ",\"upscale_active\":" << (upscale_active?"true":"false") << ",\"taa_jitter_scale\":[" << taa_jitter_scale[0] << ',' << taa_jitter_scale[1] << ',' << taa_jitter_scale[2] << ',' << taa_jitter_scale[3] << ']' << ",\"jitter_same\":" << jitter_same.load() << ",\"jitter_differ\":" << jitter_differ.load() << ",\"projection_jitter\":" << (projection_jitter?"true":"false") << ",\"view_jitter_abi\":" << (view_jitter_abi?"true":"false") << ",\"view_jitter_writes\":" << view_jitter_writes.load() << ",\"alt_mv_jitter_writes\":" << alt_mv_jitter_writes.load() << ",\"fsr_not_ready\":" << fsr_taa.not_ready.load() << ",\"device_flags\":" << device_creation_flags.load() << ",\"fsr_failures\":" << fsr_taa.failures.load() << ",\"fsr_create_failures\":" << fsr_taa.create_failures.load() << ",\"taa_dispatch_marked\":" << d2vr::TaaDispatchHook::marked.load() << ",\"taa_mv_dejitter\":[" << taa_mv_dejitter.applied.load() << ',' << taa_mv_dejitter.skipped.load() << ',' << taa_mv_dejitter.failures.load() << ']' << ",\"taa_dispatch_matches\":" << taa_dispatch_matches.load()
                << ",\"taa_history_installed\":" << (taa_history_installed?"true":"false") << ",\"taa_passes\":" << taa_history.passes()
                << ",\"alternate_native_taa_abi\":" << (alternate_native_taa_abi?"true":"false")
                << ",\"alternate_native_taa_failed\":" << (alternate_taa_runtime.failed.load()?"true":"false")

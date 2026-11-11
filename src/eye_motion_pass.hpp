@@ -17,6 +17,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include "alternate_taa_state.hpp"
@@ -42,6 +43,13 @@ inline constexpr double eye_motion_other_still_px=3.; // v1158 (was 0.25): the o
 // stays < 2.83 px, the walking guard's other-eye fit >= 15 px
 inline constexpr double eye_motion_mover_px=.75; // stale_eye_warp.hpp mover_px
 inline constexpr double eye_motion_arm_reach=.5; // metres; Phase 0: every arm/weapon pixel lies nearer, no world pixel between 0.5 and 1 m
+// v1178: the engine MV pass subtracts cb_jitterrelativetopreviousframe = 2(view+0x7858 - view+0x7850) (0x3586a0). Alternate mode seeds +0x7858
+// with this eye's previous jitter, so that term cancelled the jitter step of static draws only (MV = unjittered displacement) while FSR, DLSS
+// and the native TAA dejitter were told the step is in the vectors. Since v1178 the Setup hook sets +0x7858 = +0x7850 after the receipt is
+// taken (as paired mode already has it: the term is 0), so every MV is the jittered displacement against the rows its draw used, and
+// the previous UV of a pixel through a jittered previous matrix is simply uv - mv: no step here. False = the v1177 convention
+// (knob build/legacy-alt-mv-jitter).
+inline std::atomic<bool> eye_motion_mv_jittered{true};
 namespace eye_motion {
 using M4=std::array<double,16>;
 inline M4 widen(const std::array<float,16>& m) {M4 o{};for(int i=0;i<16;++i) o[i]=m[i];return o;}
@@ -64,21 +72,22 @@ inline void narrow(const M4& m,float* out) {for(int i=0;i<16;++i) out[i]=static_
 // From the eye's receipt snapshots (current render, this eye's previous render). False: no motion (singular or non-finite).
 // other: the other eye's render one Present before `cur` (its receipt's current snapshot), or null to skip that test.
 inline bool eye_motion_constants(const alternate_taa::Snapshot& cur,const alternate_taa::Snapshot& prev,unsigned width,unsigned height,EyeMotionConstants& out,
-                                 const alternate_taa::Snapshot* other=nullptr) {
+                                 const alternate_taa::Snapshot* other=nullptr,bool mv_jittered=eye_motion_mv_jittered.load(std::memory_order_relaxed)) {
     using namespace eye_motion;
     out={};
+    const float keep=mv_jittered?0.f:1.f; // v1178: jittered MVs carry the step already
     const M4 vc=widen(cur.matrices[2]),vp=widen(prev.matrices[2]);
     M4 ic{},ip{};
     if(!width || !height || !inverse(vc,ic) || !inverse(vp,ip)) return false;
     M4 t{1,0,0,-double(cur.position[0]),0,1,0,-double(cur.position[1]),0,0,1,-double(cur.position[2]),0,0,0,1};
     narrow(mul(vp,ic),out.r);narrow(mul(t,ic),out.now);narrow(mul(t,ip),out.then);
     out.size_step[0]=static_cast<float>(width);out.size_step[1]=static_cast<float>(height);
-    out.size_step[2]=prev.jitter[0]-cur.jitter[0];out.size_step[3]=cur.jitter[1]-prev.jitter[1];
+    out.size_step[2]=keep*(prev.jitter[0]-cur.jitter[0]);out.size_step[3]=keep*(cur.jitter[1]-prev.jitter[1]);
     out.proj[0]=cur.matrices[0][10];out.proj[1]=cur.matrices[0][11];out.proj[2]=static_cast<float>(eye_motion_arm_reach);out.proj[3]=1;
     out.mv_scale[0]=out.mv_scale[1]=1;
     if(other) {
         narrow(mul(widen(other->matrices[2]),ic),out.other);
-        out.other_step[0]=other->jitter[0]-cur.jitter[0];out.other_step[1]=cur.jitter[1]-other->jitter[1];
+        out.other_step[0]=keep*(other->jitter[0]-cur.jitter[0]);out.other_step[1]=keep*(cur.jitter[1]-other->jitter[1]);
         out.other_step[2]=static_cast<float>(eye_motion_other_still_px);out.other_step[3]=static_cast<float>(eye_motion_mover_px);
         bool ok=std::isfinite(out.other_step[0]) && std::isfinite(out.other_step[1]);
         for(float v:out.other) ok=ok && std::isfinite(v);
