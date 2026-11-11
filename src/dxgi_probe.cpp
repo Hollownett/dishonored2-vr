@@ -11719,6 +11719,7 @@ ID3D11Device* device_for_log(IDXGISwapChain* chain) noexcept { // borrowed: the 
     return cached.Get();
 }
 HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
+    d2vr::CrossEyeHistory::present(); // v1187: the census labels GPU-ordered events with the render they execute in
     d2vr::CrashOperation operation("native Present/OpenXR");
     if(xr_graphics_active) return original_present(chain,interval,flags);
     auto selected=game_chain.load(std::memory_order_acquire);
@@ -16079,7 +16080,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::RigMask::frame_fn=d2vr::CrossEyeHistory::frame_fn.load(); // v1185: the rig ring gate
         // v1186: the census sees copies, clears and compute writes too (hooks installed with the device, census_hooks_device)
         d2vr::CrossEyeHistory::writer_fn=+[]() noexcept {return d2vr::CrossEyeHistory::Writer{d2vr::ObjectMotion::eye_of_view(d2vr::RenderPassMap::current_view()),d2vr::RenderPassMap::current_pass()};};
-        d2vr::TaaDispatchHook::census_clear=+[](ID3D11DepthStencilView* v) noexcept {d2vr::CrossEyeHistory::note_view(v);};
+        d2vr::TaaDispatchHook::census_clear=+[](ID3D11DeviceContext* c,ID3D11DepthStencilView* v) noexcept {d2vr::CrossEyeHistory::note_view(c,v);};
+        d2vr::TaaDispatchHook::census_finish=+[](ID3D11DeviceContext* c,ID3D11CommandList* l) noexcept {d2vr::CrossEyeHistory::finished(c,l);}; // v1187: GPU-order census
+        d2vr::TaaDispatchHook::census_execute=+[](ID3D11CommandList* l) noexcept {d2vr::CrossEyeHistory::executing(l);};
         d2vr::TaaDispatchHook::census_dispatch=+[](ID3D11DeviceContext* c) noexcept {d2vr::CrossEyeHistory::note_dispatch(c);};
         alt_mv_jittered=!fs::exists(root/L"build"/L"legacy-alt-mv-jitter");d2vr::eye_motion_mv_jittered=alt_mv_jittered.load(); // v1178
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();

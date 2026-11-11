@@ -61,7 +61,9 @@ public:
     using DiagnosticDispatch=void (*)(ID3D11DeviceContext*,UINT,UINT,UINT) noexcept;
     inline static std::atomic<DiagnosticDispatch> diagnostic_dispatch{};
     // v1186 cross-eye census (cross_eye_history.hpp): a depth clear and a compute dispatch are writes of what they target
-    inline static std::atomic<void (*)(ID3D11DepthStencilView*) noexcept> census_clear{};inline static std::atomic<void (*)(ID3D11DeviceContext*) noexcept> census_dispatch{};
+    inline static std::atomic<void (*)(ID3D11DeviceContext*,ID3D11DepthStencilView*) noexcept> census_clear{};inline static std::atomic<void (*)(ID3D11DeviceContext*) noexcept> census_dispatch{};
+    // v1187: the census moves a deferred context's events to its list at FinishCommandList and applies them at ExecuteCommandList (GPU order)
+    inline static std::atomic<void (*)(ID3D11DeviceContext*,ID3D11CommandList*) noexcept> census_finish{};inline static std::atomic<void (*)(ID3D11CommandList*) noexcept> census_execute{};
     inline static std::atomic<UINT64> marked{},replaced{};
     inline static thread_local int pass_eye=-1;
     inline static thread_local std::uint64_t pass_display=0; // v790 trace: the display frame of the alternate receipt behind pass_eye (0 = none)
@@ -92,11 +94,13 @@ private:
         const HRESULT hr=finish_original(c,restore,list);
         if(const auto b=finish_barrier.load(std::memory_order_relaxed)) b(c);
         if(SUCCEEDED(hr) && list && *list) if(const auto o=finish_observer.load()) o(c,*list);
+        if(SUCCEEDED(hr) && list && *list) if(const auto o=census_finish.load(std::memory_order_relaxed)) o(c,*list);
         return hr;
     }
     static void STDMETHODCALLTYPE execute_hook(ID3D11DeviceContext* c,ID3D11CommandList* list,BOOL restore) {
         const auto barrier=execute_barrier.load(std::memory_order_relaxed);
         if(barrier) barrier(c);
+        if(const auto o=census_execute.load(std::memory_order_relaxed)) o(list);
         bool handled=false;
         if(const auto h=execute_handler.load()) handled=h(c,list,restore,execute_original);
         if(!handled) execute_original(c,list,restore);
@@ -112,7 +116,7 @@ private:
     inline static std::array<ClearFn,2> clear_original_{};inline static std::array<void*,2> clear_target_{};
     template<int I> static void STDMETHODCALLTYPE clear_hook(ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT f,FLOAT d,UINT8 s) {
         if(const auto o=depth_observer.load()) o(c,v,f,d,s);
-        if(const auto o=census_clear.load(std::memory_order_relaxed)) o(v);
+        if(const auto o=census_clear.load(std::memory_order_relaxed)) o(c,v);
         clear_original_[I](c,v,f,d,s);
     }
     static void hook_clear(ID3D11DeviceContext* context,int i,void* replacement) noexcept {

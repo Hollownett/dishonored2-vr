@@ -41,7 +41,7 @@ int main() {
     unsigned execution=0;bool paired=false;
     const auto frame=[&](bool skip=false) {
         // alternate: one execution per engine frame (eye = frame parity); paired (v1181): two per engine frame, eye 0 then eye 1
-        if(!paired || execution%2==0) ++frame_now;
+        if(!paired || execution%2==0) {++frame_now;d2vr::CrossEyeHistory::present();} // v1187: renders are counted at Present
         if(skip) return;
         const unsigned eye=paired?execution%2:frame_now%2,in=paired?execution%2:frame_now%2,out=in^1u;++execution;
         const float v[4]{eye?1.f:100.f,0,0,0};c->UpdateSubresource(cb.Get(),0,nullptr,v,0,0);
@@ -78,6 +78,25 @@ int main() {
     for(int i=0;i<60;++i) frame();
     std::printf("paired, fix: eye 0 %.3f, eye 1 %.3f (own 200.0 / 2.0)\n",last[0],last[1]);
     CHECK(std::abs(last[0]-200.f)<.01f && std::abs(last[1]-2.f)<.01f);
+    // 5. v1187 (sim v1186 paired crash): the status never touches a resource. A flagged texture is released (the engine frees transient
+    // targets); json() must still report its recorded size and format (the v1186 json described the dead address: access violation)
+    {
+        d2vr::CrossEyeHistory::census=true;d2vr::CrossEyeHistory::fix_paired=false;paired=false;
+        D3D11_TEXTURE2D_DESC td=t;td.Width=td.Height=8;ComPtr<ID3D11Texture2D> gone;ComPtr<ID3D11RenderTargetView> gone_rtv;ComPtr<ID3D11ShaderResourceView> gone_srv;
+        dev->CreateTexture2D(&td,nullptr,&gone);dev->CreateRenderTargetView(gone.Get(),nullptr,&gone_rtv);dev->CreateShaderResourceView(gone.Get(),nullptr,&gone_srv);
+        ++frame_now;d2vr::CrossEyeHistory::present();
+        c->OMSetRenderTargets(1,gone_rtv.GetAddressOf(),nullptr);{d2vr::CrossEyeHistory::Scope s(c.Get(),1,9);c->Draw(3,0);s.after();} // written this render
+        c->OMSetRenderTargets(1,rtv[0].GetAddressOf(),nullptr);c->PSSetShaderResources(1,1,gone_srv.GetAddressOf());
+        {d2vr::CrossEyeHistory::Scope s(c.Get(),1,9);c->Draw(3,0);s.after();}   // a read in the SAME render is not cross-eye
+        ++frame_now;d2vr::CrossEyeHistory::present();
+        c->PSSetShaderResources(1,1,gone_srv.GetAddressOf());{d2vr::CrossEyeHistory::Scope s(c.Get(),1,11);c->Draw(3,0);s.after();} // next render: cross-eye
+        ID3D11ShaderResourceView* none{};c->PSSetShaderResources(1,1,&none);c->OMSetRenderTargets(0,nullptr,nullptr);
+        gone_srv.Reset();gone_rtv.Reset();gone.Reset();c->ClearState();c->Flush();          // the texture is gone now
+        const auto jr=d2vr::CrossEyeHistory::json();
+        CHECK(jr.find("\"size\":[8,8]")!=std::string::npos && jr.find("\"pass_name\":\"ARK_RENDERPASS_TEXTURE_STREAMER\"")==std::string::npos);
+        CHECK(jr.find("\"pass\":11")!=std::string::npos && jr.find("\"pass\":9,")==std::string::npos);
+        std::printf("released texture reported from its recorded description: %s\n",jr.find("\"size\":[8,8]")!=std::string::npos?"yes":"NO");
+    }
     d2vr::CrossEyeHistory::reset();
     if(failures) {std::printf("cross_eye_history_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: cross_eye_history_check (census flags the history read; per-eye ring restores each eye's own previous output)\n");
