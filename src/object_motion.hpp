@@ -202,19 +202,6 @@ public:
         if(!(cur[15]>.01f && prev[15]>.01f)) return 1e30;
         return 1000.0*std::hypot(double(cur[3]/cur[15]-prev[3]/prev[15]),double(cur[7]/cur[15]-prev[7]/prev[15]));
     }
-    // v1156 (sim v1155, tools/alt_motion_probe.py on 16 still-head renders, exact to 1/64 px): in alternate mode a still entity's engine
-    // vector, with this eye's own previous rows installed, differs from the static world's by r = st(n) - st(n-3) (UV), st(k) = s(J_k) -
-    // s(J_k-2) the jitter step of the render at engine frame k, s(J) = (-J.x, J.y): the entity path still takes the jitter step of the
-    // OTHER eye's render before its last one, the static world this render's. (A second class, ~3 % of those draws, takes this eye's
-    // step at n-2; it is not separable here.) The installed previous rows are moved by -r in UV so the two agree: NDC x by -2 r.x,
-    // y by +2 r.y. jc, jp: this render's and this eye's previous render's jitter; o3, o5: the other eye's at n-3 and n-5.
-    static void alternate_jitter_shift(const float* jc,const float* jp,const float* o3,const float* o5,float* shift) noexcept {
-        const double rx=(-double(jc[0])+jp[0])-(-double(o3[0])+o5[0]),ry=(double(jc[1])-jp[1])-(double(o3[1])-o5[1]);
-        shift[0]=static_cast<float>(-2*rx);shift[1]=static_cast<float>(2*ry);
-    }
-    static void shift_rows(float* m,const float* shift) noexcept { // clip x += shift.x * w, clip y += shift.y * w (an NDC shift)
-        for(int j=0;j<4;++j) {m[j]+=shift[0]*m[12+j];m[4+j]+=shift[1]*m[12+j];}
-    }
     // v1153: rows a and b differ only by a frustum shift: x and y rows by a small multiple of the w row (|k| <= 3e-3 NDC, a few pixels:
     // two jitter samples), z and w rows equal. That is the same placement under another jitter, never an object motion.
     static bool jitter_only(const float* a,const float* b) noexcept {
@@ -258,8 +245,7 @@ public:
     static std::string alternate_status_json() {
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
-        return s+"],\"jitter_snapped\":"+std::to_string(alt_jitter_snapped_.load())+",\"jitter_shifted\":"+std::to_string(alt_shifted_.load())+
-            ",\"jitter_unshifted\":"+std::to_string(alt_unshifted_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
+        return s+"],\"jitter_snapped\":"+std::to_string(alt_jitter_snapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -356,9 +342,8 @@ private:
     using SetCb=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*);
     using SetCb1=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext1*,UINT,UINT,ID3D11Buffer* const*,const UINT*,const UINT*);
     // Inverse last rows of the eye's VP (both storage orders), its z row, and the view correction for unproven draws.
-    struct View {std::uint32_t frame{};unsigned eye{};float inv[2][4]{};float z[4]{};float corr[16]{},camera[16]{};bool corr_ok{},camera_ok{};
-        float shift[2]{};bool shift_ok{};}; // v1156 alternate: NDC shift of the installed previous rows (alternate_jitter_shift)
-    struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{};float prev_vp[16]{};bool prev_ok{};float jitter[2]{};bool jitter_ok{};}; // view, view^T, VP, VP^T;
+    struct View {std::uint32_t frame{};unsigned eye{};float inv[2][4]{};float z[4]{};float corr[16]{},camera[16]{};bool corr_ok{},camera_ok{};};
+    struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{};float prev_vp[16]{};bool prev_ok{};}; // view, view^T, VP, VP^T;
     // v1153: and the view's previous VP (+0x7590) as the engine holds it for this frame (alternate: the receipt-seeded own previous)
     struct Shadow {const void* buffer{};UINT size{};float data[max_floats]{};};
     struct ContextState { // a context is used by one thread at a time: no locks
@@ -388,7 +373,7 @@ private:
     inline static std::mutex views_mutex_;
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views_{};
     inline static std::uint32_t alt_snapped_frame_{~0u}; // v1153: under views_mutex_
-    inline static std::atomic<std::uint64_t> alt_jitter_snapped_{},alt_shifted_{},alt_unshifted_{};
+    inline static std::atomic<std::uint64_t> alt_jitter_snapped_{};
     inline static std::atomic<std::uintptr_t> alt_view_{};inline static std::atomic<AlternateEye> alt_eye_{}; // v1151
     inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{};
     inline static std::array<std::array<EyeView,4>,2> eye_records_{};
@@ -503,7 +488,6 @@ private:
         EyeView v{};
         if(!read_(view+0x77b4,&v.frame,4) || !read_(view+0x7450,v.m[0],64) || !read_(view+0x7510,v.m[2],64)) return;
         v.prev_ok=read_(view+0x7590,v.prev_vp,64);
-        v.jitter_ok=read_(view+0x7850,v.jitter,8); // v1156: this render's jitter (UV, engine sign)
         for(int r=0;r<4;++r) for(int c=0;c<4;++c) {v.m[1][c*4+r]=v.m[0][r*4+c];v.m[3][c*4+r]=v.m[2][r*4+c];}
         if(!inverse_last_row(v.m[2],false,v.inv[0]) || !inverse_last_row(v.m[2],true,v.inv[1])) return;
         v.valid=true;
@@ -567,12 +551,6 @@ private:
         const float* previous_vp=own_step==2?(best->prev_ok?best->prev_vp:nullptr):own?own->m[2]:nullptr;
         out.camera_ok=previous_vp && inverse(best->m[2],inverse_own);
         if(out.camera_ok) mul(previous_vp,inverse_own,out.camera);
-        if(own_step==2) { // v1156: the jitter relation (alternate_jitter_shift) from this eye's records n, n-2 and the other eye's n-3, n-5
-            const auto find=[&](unsigned e,std::uint32_t f) -> const EyeView* {for(const auto& r:eye_records_[e]) if(r.valid && r.frame==f && r.jitter_ok) return &r;return nullptr;};
-            const EyeView *a=best->jitter_ok?best:nullptr,*b=find(out.eye,out.frame-2),*c=find(out.eye^1u,out.frame-3),*d=find(out.eye^1u,out.frame-5);
-            out.shift_ok=a && b && c && d;
-            if(out.shift_ok) alternate_jitter_shift(a->jitter,b->jitter,c->jitter,d->jitter,out.shift);
-        }
         if(Latest& l=latest_[out.eye];out.frame>=l.view.frame) { // one writer: under views_mutex_
             l.seq.fetch_add(1,std::memory_order_acq_rel);l.view=out;l.seq.fetch_add(1,std::memory_order_release);
         }
@@ -764,13 +742,6 @@ private:
         if(alt && mode_.load(std::memory_order_relaxed)>=1 && view.camera_ok && (apply || kind==PrevMvpTable::own_last)) {
             float still[16];mul(view.camera,cur,still);
             if(std::memcmp(still,prev,64) && jitter_only(prev,still)) {std::memcpy(prev,still,64);apply=true;alt_jitter_snapped_.fetch_add(1,std::memory_order_relaxed);}
-        }
-        // v1156: and every installed alternate previous takes the jitter relation (alternate_jitter_shift); none without the four records.
-        // Own rows the engine already had (own_last) take it too: the mismatch is in the entity vector path, not in whose rows they are.
-        if(alt && !apply && kind==PrevMvpTable::own_last && mode_.load(std::memory_order_relaxed)>=1) apply=true;
-        if(alt && apply) {
-            if(view.shift_ok) {shift_rows(prev,view.shift);alt_shifted_.fetch_add(1,std::memory_order_relaxed);}
-            else alt_unshifted_.fetch_add(1,std::memory_order_relaxed);
         }
         // Unproven or unmatched (headset ~20% per eye): the view correction, kept only when it shrinks the apparent motion.
         if(!apply && mode_.load(std::memory_order_relaxed)>=1 && (kind==PrevMvpTable::miss || kind==PrevMvpTable::unproven)) {
