@@ -230,3 +230,8 @@ assert 'stale_layers_[eye]->afw2=stale_afw2; // v1184: knob build/afw2' in xr
 assert '\\"afw2\\":{\\"on\\":' in probe and 'meta<<",\\"afw2\\":"<<(layers.afw2?"true":"false");' in probe
 assert 'alt_play.record(alt_display,logical_eye,*play,game_xr->pose_epoch(),0,0);' in probe and 'game_xr->stale_eye_target_play(other,plays->companion[other]);' in probe
 print('PASS: v1184 AFW v2 knob (layers, status, meta) and play spaces with the cameras')
+
+# v1189: one-view frames never share shadows (each eye render draws its own); knob build/alt-shadow-share restores the paired order
+assert 'const int share_order=alternate_on() && !alt_shadow_share_knob?0:begin_order;' in probe and 'shadow_share.on_eye_begin(share_order,address,gate,' in probe
+assert 'alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share");' in probe
+print('PASS: v1189 no shadow sharing on one-view frames (knob alt-shadow-share)')

@@ -1880,6 +1880,7 @@ static std::ofstream eye_boundary_csv;
 static UINT eye_boundary_rows{};
 void observe_eye_setup(void* view) noexcept;
 void observe_eye_begin(void* view) noexcept;
+static bool alt_shadow_share_knob=false; // v1189: build/alt-shadow-share (one-view frames share shadows like a paired second view)
 void cinematic_probe_setup(void* view) noexcept;void cinematic_probe_offset(void* view) noexcept;void cinematic_probe_begin(void* view) noexcept; // G2 spike, build/cinematic-probe
 void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
     d2vr::CrashOperation operation("native eye begin");
@@ -1899,7 +1900,11 @@ void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
         const auto address=reinterpret_cast<std::uintptr_t>(view);
         const bool valid=address!=0 && read_self(address+0x3a20,&gate,sizeof gate) &&
             read_self(address+0x3a34,&flags_a,sizeof flags_a) && read_self(address+0x3a37,&flags_b,sizeof flags_b);
-        shadow_share.on_eye_begin(begin_order,address,gate,
+        // v1189: one view per frame never shares (each eye render draws its own shadows; sim v1188: frames_shared 2 in 10066 renders, at the
+        // mode switch). A one-view frame always begins as a first view, so a second begin in it starts a new frame instead of reusing the
+        // first one's shadows; knob build/alt-shadow-share restores the order (diagnostics).
+        const int share_order=alternate_on() && !alt_shadow_share_knob?0:begin_order;
+        shadow_share.on_eye_begin(share_order,address,gate,
             static_cast<std::uint32_t>(flags_a)|(static_cast<std::uint32_t>(flags_b)<<8),valid);
     }
     letterbox_gate.begin_pass();
@@ -16075,6 +16080,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::CrossEyeHistory::fix_paired=fs::exists(root/L"build"/L"eye-history");
         d2vr::SkinMotion::enabled=fs::exists(root/L"build"/L"stale-eye-skin-motion"); // v1182
         stale_afw2_knob=fs::exists(root/L"build"/L"afw2"); // v1184: AFW v2 warp path (src/afw2.hpp), opt-in
+        alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share"); // v1189
         d2vr::ObjectMotion::held_mask=fs::exists(root/L"build"/L"stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames
         d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {std::uint32_t v{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&v,4);return v;};
         d2vr::RigMask::frame_fn=d2vr::CrossEyeHistory::frame_fn.load(); // v1185: the rig ring gate
