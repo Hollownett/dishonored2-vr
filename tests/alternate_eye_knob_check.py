@@ -223,3 +223,10 @@ assert 'const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed
 assert 'inline static std::atomic<bool> motion{false};' in rig
 assert 'pad_render_edge' not in fsr and 'edge_pad' not in fsr  # v1171: the v1168 FSR input edge replication is reverted
 print('PASS: v1171 rig motion opt-in (knob, off = v1165 rig draws), FSR input edge replication reverted')
+
+# v1184: AFW v2 opt-in (build/afw2 -> StaleLayers::afw2 after stale_eye_layers), status and dump meta; play spaces recorded with the cameras
+assert 'stale_afw2_knob=fs::exists(root/L"build"/L"afw2");' in probe and 'game_xr->stale_afw2=stale_afw2_knob;' in probe
+assert 'stale_layers_[eye]->afw2=stale_afw2; // v1184: knob build/afw2' in xr
+assert '\\"afw2\\":{\\"on\\":' in probe and 'meta<<",\\"afw2\\":"<<(layers.afw2?"true":"false");' in probe
+assert 'alt_play.record(alt_display,logical_eye,*play,game_xr->pose_epoch(),0,0);' in probe and 'game_xr->stale_eye_target_play(other,plays->companion[other]);' in probe
+print('PASS: v1184 AFW v2 knob (layers, status, meta) and play spaces with the cameras')

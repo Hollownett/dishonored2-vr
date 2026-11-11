@@ -9,6 +9,7 @@
 #include "alternate_eye.hpp"
 #include "frame_pacer.hpp"
 #include "stale_eye_warp.hpp"
+#include "warp_play_space.hpp"
 #include "context_state.hpp"
 #include "mod_gpu_timer.hpp"
 #include "controller_input.hpp"
@@ -412,6 +413,7 @@ private:
     // v796: the game camera of each eye's image shown by a Present (and of each kept image), each eye's target game camera and kept depth
     // handed over for the Present in the *_frame_ stamps, and the parallax of each eye's last warp (the reticle follows it).
     std::array<WarpCamera,2> rendered_cameras_{},kept_cameras_{},stale_target_cameras_{};
+    std::array<WarpPlaySpace,2> rendered_play_{},kept_play_{},stale_target_play_{}; // v1184: each camera's play space (warp_play_space.hpp)
     std::array<std::uint64_t,2> rendered_camera_frame_{},stale_target_camera_frame_{},stale_depth_frame_{};
     std::array<bool,2> kept_camera_valid_{};
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_depth_{};
@@ -1952,6 +1954,13 @@ public:
     }
     void record_rendered_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {rendered_cameras_[eye]=camera;rendered_camera_frame_[eye]=frame;}}
     void stale_eye_target_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {stale_target_cameras_[eye]=camera;stale_target_camera_frame_[eye]=frame;}}
+    // v1184: the play spaces recorded with those cameras (same frames); kept follows the kept camera. play_space(eye) = {kept, target} of the
+    // eye's last rebuild (the warp engineer's input; the dump meta writes it)
+    void record_rendered_play(UINT eye,const WarpPlaySpace& play) noexcept {if(eye<2) rendered_play_[eye]=play;}
+    void stale_eye_target_play(UINT eye,const WarpPlaySpace& play) noexcept {if(eye<2) stale_target_play_[eye]=play;}
+    std::array<WarpPlaySpace,2> play_space(UINT eye) const noexcept {return eye<2?std::array<WarpPlaySpace,2>{kept_play_[eye],stale_target_play_[eye]}:std::array<WarpPlaySpace,2>{};}
+    bool stale_afw2=false; // v1184: knob build/afw2 (src/afw2.hpp, opt-in): StaleLayers::afw2
+    std::uint64_t stale_afw2_passes() const noexcept {return stale_warp_ && stale_warp_->afw2?stale_warp_->afw2->passes:0;}
     // v1151 movers (design 2026-11-11 section 3): the eye's motion texture for this Present (FsrTaa::eye_motion; null clears it), the
     // two frame-time parts and the rules switch (build/no-stale-eye-motion), copied into the layers of each warp.
     void stale_eye_motion(UINT eye,ID3D11Texture2D* motion,UINT width,UINT height,std::uint64_t frame) noexcept {
@@ -2318,6 +2327,7 @@ public:
         alt_processing_[eye]=transfer_processing_[eye];
         record={rendered_views_[eye],alternate_frame,pose_epoch(),true,rendered_display_times_[eye],rendered_locate_cpu_times_[eye]};
         kept_cameras_[eye]=rendered_cameras_[eye];kept_camera_valid_[eye]=rendered_camera_frame_[eye]==alternate_frame; // v796
+        kept_play_[eye]=rendered_play_[eye];kept_play_[eye].valid=kept_play_[eye].valid && kept_camera_valid_[eye]; // v1184
     }
     // perf-mono-view diagnostic: the one engine view sits at the midpoint of the two eye poses, faces their mean orientation and
     // covers both eyes' FOV (the union), so the one image is valid for both projection layers (flat, no stereo depth).
@@ -2849,6 +2859,7 @@ public:
                                 stale_layers_[eye]->motion_rules=stale_motion_rules;
                                 stale_layers_[eye]->rig_motion_rules=stale_rig_motion_rules; // v1167: rig pixels by their own motion (knob no-stale-eye-rig-motion)
                                 stale_layers_[eye]->rig_motion={stale_rig_motion(eye),fresh_now && stale_rig_motion(fresh_eye)};
+                                stale_layers_[eye]->afw2=stale_afw2; // v1184: knob build/afw2
                             }
                             if(!stale_layers_[eye]) ++stale_eye_parallax_misses;
                         }
