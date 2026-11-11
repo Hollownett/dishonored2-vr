@@ -911,13 +911,13 @@ static void gpu_rig() {
     };
     // r1. a still striped prop 10 cm beside the palm stays where the world layer puts it
     {
-        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.prop = fresh.prop = now.prop = 0.10; fresh.lift = 30;
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.prop = fresh.prop = now.prop = 0.10; fresh.lift = 0;  // v1175: near scenery under hand motion comes from the fresh eye; this case tests placement
         both("r1. still prop 10 cm from a moving palm", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), prop_kind,
              [](double) {return true;});
     }
     // r2. a hand sliding along a wall 10 cm behind it leaves the wall still (beside the hand, within 22 cm of the palm)
     {
-        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.wall = fresh.wall = now.wall = 0.6; fresh.lift = 30;
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.wall = fresh.wall = now.wall = 0.6; fresh.lift = 0;  // v1175: as r1
         both("r2. wall 10 cm behind a sliding hand", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), wall_kind,
              [](double x) {return (x > 0.09 && x < 0.2) || (x > -0.25 && x < -0.14);});
     }
@@ -978,7 +978,7 @@ static void gpu_rig() {
     // r10. (v1173, headset v1172: a halo around moving hands) the drawn hand moved 2.5 cm, its recorded grip 5 cm, beside a still prop over a
     // textured wall: the hand where the fresh eye has it, nothing of it at the over-moved place, prop and wall as they are
     {
-        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = -0.025; kept.prop = fresh.prop = now.prop = 0.10; fresh.lift = 30;
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = -0.025; kept.prop = fresh.prop = now.prop = 0.10; fresh.lift = 0;  // v1175: as r1
         const Frame k = render(0.032, kept), f = render(-0.032, fresh), truth = render(0.032, now);
         const auto out = row(k, f, layers_for(-0.05, 0.0), true);
         int over = 0, n_over = 0, hand_missing = 0, n_hand = 0, scenery = 0, n_scenery = 0;
@@ -1004,6 +1004,24 @@ static void gpu_rig() {
         for (int x = W - 60; x < static_cast<int>(W) - 2; ++x) if (k.kind[(H / 2) * W + x] == hand_kind) {++n; moved += std::abs(out[x] - k.row[x]) > 2;}
         std::printf("r11. moving hand outside the fresh view: %d of %d kept hand columns not shown in place\n", moved, n);
         CHECK(n > 10 && moved == 0);
+    }
+    // r12. (v1175, headset v1174: artifacts on near objects while the camera moves) the camera stepped 1 cm since the kept tick, the hands
+    // still; a near prop 0.5 m away: every prop column from the fresh eye (30 levels brighter) at the prop's true place, none mixed in
+    {
+        Scene kept{}, fresh{}, now{}; kept.prop = fresh.prop = now.prop = 0.10; fresh.lift = 30; now.lift = 30;
+        const Frame k = render(0.022, kept), f = render(-0.032, fresh), lifted = render(0.032, now);
+        WarpCamera kc = camera({}, {0.022, 0, 0}), tc = camera({}, {0.032, 0, 0}), fc = camera({}, {-0.032, 0, 0});
+        const auto l = *stale_eye_layers(kc, square, tc, square, &fc, square, 2.0);
+        CHECK(l.camera_moving);
+        const auto image = read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &l, {k.depth.Get(), W, H}, f.image.Get(), {f.depth.Get(), W, H}, {}, {},
+                                                                           StaleRig{k.rig.Get(), W, H}, StaleRig{f.rig.Get(), W, H}));
+        std::vector<int> out(W); for (UINT x = 0; x < W; ++x) out[x] = image[((H / 2) * W + x) * 4];
+        int n = 0, bad = 0;
+        for (int x = 2; x < static_cast<int>(W) - 2; ++x) if (lifted.kind[(H / 2) * W + x] == prop_kind && lifted.kind[(H / 2) * W + x - 2] == prop_kind && lifted.kind[(H / 2) * W + x + 2] == prop_kind) {
+            ++n; bad += !near_truth(out, lifted, x);
+        }
+        std::printf("r12. camera stepped 1 cm, near prop: %d of %d prop columns not the fresh eye's prop at its place\n", bad, n);
+        CHECK(n > 8 && bad == 0);
     }
     // r7. the view corner (canted eyes turned 14 degrees apart each way): the right hand and its stick at the right edge of the rebuilt
     // eye, 3 cm further out now, where the fresh eye has no view. No black or white there, and this eye's own rig where it was.

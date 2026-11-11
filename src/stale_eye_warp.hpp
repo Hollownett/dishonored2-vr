@@ -185,6 +185,9 @@ struct StaleLayers {
     // false keeps the hand layers
     bool rig_from_fresh{true};
     std::array<bool,2> hand_moving{};
+    // v1175 (headset v1174: "artifacts on objects close to the player" while hands and camera move): the camera moved since the kept tick
+    // (camera_still_m, camera_still_deg); with a hand moving too, near scenery comes from the fresh eye as a whole (with the masks)
+    bool camera_moving{};
     bool motion_rules{true};
     WarpMatrix kept_axes{};
 };
@@ -196,6 +199,8 @@ inline constexpr double hand_own_radius=.22;
 // cut_turn_deg (a head does not jump 10 cm while swinging its view 20 degrees in one tick; the two dumps: 0.3 m and 43 degrees). A snap turn
 // (yaw only, the eyes move 2-3 cm) and a sprint (0.3 m, little turn) are no cut: their rules stand.
 inline constexpr double cut_step=.5,cut_turn_step=.1,cut_turn_deg=20;
+// v1175: the camera holds still between the kept and the target tick within these (a head at rest jitters below a millimetre)
+inline constexpr double camera_still_m=.003,camera_still_deg=.25;
 // v1150: a pixel whose object motion (motion texture w, render pixels over the eye's two ticks) reaches this is a mover.
 // v1157: 3 px. The engine's entity vectors can carry another frame's jitter step than the static world's (measured 2026-11-11: still
 // props at 0.4-1.3 px). A step's components are within +-1 px, so mixing two steps stays under 2.83 px: no jitter error can make a
@@ -230,6 +235,7 @@ inline std::optional<StaleLayers> stale_eye_layers(const WarpCamera& kept,const 
     if(!world) return std::nullopt;
     StaleLayers layers{*world,std::nullopt,kept_fov,near_range};
     layers.cut=cut;
+    layers.camera_moving=!(step<=camera_still_m && turn<=camera_still_deg);
     for(unsigned side=0;side<2;++side) { // v1173: each drawn hand moved (stale_hands_still per hand; drawn in only one frame counts as moved)
         WarpCamera a=kept,b=target;a.hand_bits=kept.hand_bits&(1u<<side);b.hand_bits=target.hand_bits&(1u<<side);
         layers.hand_moving[side]=(a.hand_bits|b.hand_bits)!=0 && !stale_hands_still(a,b);
@@ -892,9 +898,12 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     // (its old place, with its 2 px fringe), the fresh eye's surface on the ray; only where the fresh eye cannot see the spot, today's rules.
     // Where the fresh eye sees scenery on the ray, a moving hand's layer (its recorded grip) places nothing either (fresh_scenery).
     bool fresh_scenery=false;
-    if(frameMap.y>0 || frameMap.z>0) {
+    if(frameMap.y>0 || frameMap.z>0 || frameMap.w>0) {
         float2 p,edge;float k;
         const int nh=NearHit(t,p,k,edge);
+        // v1175: under motion, near scenery (not rig) the fresh eye sees on the ray is taken from it as a whole: one source and one
+        // registration per near object (v1174 dumps: the kept candidates a tick behind, 7.5-11.5 levels off the next frame, the fresh 2.7)
+        if(frameMap.w>0 && nh>0 && k<reach && InFresh(p) && !FreshRig(p)) return Smooth(freshTex,p);
         if(nh>0 && InFresh(p) && FreshRig(p) &&
            MovingHandAt(KeptFrom(k*float3(dot(scene[0].xyz,t),dot(scene[1].xyz,t),dot(scene[2].xyz,t))+scene[3].xyz))!=0) return Smooth(freshTex,p);
         float2 f=float2(-1,-1);
@@ -1112,7 +1121,9 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         if(layers) {const double u=1-std::clamp(layers->border[0],0.,.25),v=1-std::clamp(layers->border[1],0.,.25);put(u,v,u,v);} else put(1,1,1,1); // v1167
         const bool cut=fresh_read && layers->cut; // v1171: the fresh eye alone (needs it)
         const bool fresh_hands=kept_rig_read && !cut && layers->rig_from_fresh; // v1173
-        put(cut?1:0,fresh_hands && layers->hand_moving[0]?1:0,fresh_hands && layers->hand_moving[1]?1:0,0);
+        // v1175: w: near scenery from the fresh eye (masks live, the camera or a hand moving)
+        const bool near_fresh=fresh_hands && (layers->camera_moving || layers->hand_moving[0] || layers->hand_moving[1]);
+        put(cut?1:0,fresh_hands && layers->hand_moving[0]?1:0,fresh_hands && layers->hand_moving[1]?1:0,near_fresh?1:0);
         if(cut) {fit_on=false;++cut_passes;}
         if(depth_read) ++parallax_passes;
         if(fresh_read) ++fresh_passes;
