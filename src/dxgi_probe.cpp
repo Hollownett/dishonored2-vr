@@ -10834,15 +10834,19 @@ static void capture_stale_next(UINT eye,ID3D11Texture2D* image,std::uint64_t fra
 // (all boxes = whole image/rectangle, so tools/stale_warp_replay.cpp reads them unchanged), else the v804 crop alternation.
 // v1165: optional token `moving[=<mm>]` (default 3): dump only rebuilt frames whose hands moved >= mm or turned >= 1 degree between the kept
 // and the target tick (layers.hands_motion, known before any readback); the delay is ignored, the interval is the minimum spacing.
-static struct StaleWarpDumpKnob {bool on{};double delay{},interval{};unsigned count{};bool full{};double moving_mm{-1};} stale_warp_dump_knob{};
+// v1177: and `camera[=<mm>]` (default 3: the rebuilt eye's camera moved that far between the kept and the target tick), `turn[=<deg>]`
+// (default 0.5: it turned that much); any given trigger qualifies; all known before any readback.
+static struct StaleWarpDumpKnob {bool on{};double delay{},interval{};unsigned count{};bool full{};double moving_mm{-1},camera_mm{-1},turn_deg{-1};} stale_warp_dump_knob{};
 static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* warped,ID3D11Texture2D* fresh,const d2vr::StaleDepth& kept_depth,
                                const d2vr::StaleDepth& fresh_depth,const d2vr::StaleLayers& layers) noexcept {
     static unsigned dumps{};static UINT64 next{};
     const auto& knob=stale_warp_dump_knob;
     if(!d2vr::diag::on() || !(knob.on || alt_pose_trace_on()) || dumps>=(knob.on?knob.count:12u) || game_logic_mask()!=2 || !kept || !warped || !fresh || !layers.fresh || !kept_depth.texture || !fresh_depth.texture) return;
     const auto now=GetTickCount64();
-    const bool moving=knob.on && knob.moving_mm>=0;
-    if(moving && !(layers.hands_motion[0]*1000>=knob.moving_mm || layers.hands_motion[1]>=1)) return; // v1165: not moving, nothing read back
+    const bool moving=knob.on && (knob.moving_mm>=0 || knob.camera_mm>=0 || knob.turn_deg>=0); // v1165/v1177: triggered dumps
+    const auto camera_motion=game_xr?game_xr->stale_camera_motion(eye):std::array<double,2>{};
+    if(moving && !((knob.moving_mm>=0 && (layers.hands_motion[0]*1000>=knob.moving_mm || layers.hands_motion[1]>=1)) ||
+                   (knob.camera_mm>=0 && camera_motion[0]*1000>=knob.camera_mm) || (knob.turn_deg>=0 && camera_motion[1]>=knob.turn_deg))) return; // nothing read back
     if(knob.on && !moving && !next) {next=now+static_cast<UINT64>(knob.delay*1000);return;}
     if(now<next) return;
     next=now+(knob.on?static_cast<UINT64>(knob.interval*1000):dumps<4?6000:30000); // v807 (headset v806: "in the last minutes the hands jumped"): 4 early, then one every 30 s, to 12
@@ -10900,7 +10904,8 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
         for(unsigned side=0;side<2;++side) if(layers.hand[side]) {meta<<",\"hand"<<side<<"\":";parallax(*layers.hand[side]);}
         { // v1159: the render behind the images: render vs display size, the fovea box, shadow sharing and cascade time slicing
             const auto e=static_cast<std::size_t>(eye<2?eye:0);
-            meta<<",\"full\":"<<(full?"true":"false")<<",\"moving_mm\":"<<knob.moving_mm<<",\"render_size\":["<<fsr_taa.eye_render_width[e].load()<<','<<fsr_taa.eye_render_height[e].load()
+            meta<<",\"full\":"<<(full?"true":"false")<<",\"moving_mm\":"<<knob.moving_mm<<",\"camera_mm\":"<<knob.camera_mm<<",\"turn_deg\":"<<knob.turn_deg
+                <<",\"camera_step_m\":"<<camera_motion[0]<<",\"camera_turn_deg\":"<<camera_motion[1]<<",\"render_size\":["<<fsr_taa.eye_render_width[e].load()<<','<<fsr_taa.eye_render_height[e].load()
                 <<"],\"display_size\":["<<fsr_taa.eye_display_width[e].load()<<','<<fsr_taa.eye_display_height[e].load()<<"],\"fovea_box\":["
                 <<d2vr::fovea::box_x[e].load()<<','<<d2vr::fovea::box_y[e].load()<<','<<d2vr::fovea::box_w[e].load()<<','<<d2vr::fovea::box_h[e].load()
                 <<"],\"shadow_share\":"<<(shadow_share.enabled()?"true":"false")<<",\"shadow_slicing_cvars\":"<<(shadow_slicing_cvars?"true":"false");
@@ -15366,6 +15371,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                      if(mode=="full") stale_warp_dump_knob.full=true;
                      else if(mode.rfind("moving",0)==0) {double mm=3;if(mode.size()>7 && mode[6]=='=') try {mm=std::stod(mode.substr(7));} catch(...) {}
                          stale_warp_dump_knob.moving_mm=mm>=0 && mm<=1000?mm:3;}
+                     else if(mode.rfind("camera",0)==0) {double mm=3;if(mode.size()>7 && mode[6]=='=') try {mm=std::stod(mode.substr(7));} catch(...) {}
+                         stale_warp_dump_knob.camera_mm=mm>=0 && mm<=1000?mm:3;} // v1177
+                     else if(mode.rfind("turn",0)==0) {double deg=.5;if(mode.size()>5 && mode[4]=='=') try {deg=std::stod(mode.substr(5));} catch(...) {}
+                         stale_warp_dump_knob.turn_deg=deg>=0 && deg<=180?deg:.5;} // v1177
                  }}}
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose

@@ -423,6 +423,7 @@ private:
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_rig_{};std::array<UINT,2> stale_rig_width_{},stale_rig_height_{};
     std::array<std::uint64_t,2> stale_rig_frame_{};std::array<bool,2> stale_rig_live_{},stale_rig_motion_{}; // v1162: a rig mask of a one-view render (rig_mask.hpp)
     std::array<std::optional<StaleLayers>,2> stale_layers_{}; // v797: scene, player and hand layers of each eye's last warp
+    std::array<std::array<double,2>,2> stale_camera_motion_{}; // v1177: per eye, the kept -> target camera step (m) and turn (deg) of its last layers
     bool stale_warped_(UINT eye) const noexcept {return eye<2 && alternate_frame && stale_warped_frame_[eye]==alternate_frame;}
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
     XrActionSet action_set_{XR_NULL_HANDLE};
@@ -1657,6 +1658,7 @@ public:
     // v798 diagnostic: each layered stale-eye warp, with what it read (kept image and depth, layers, cameras) and the fresh eye's image.
     using StaleWarpObserver=void (*)(UINT,ID3D11Texture2D*,ID3D11Texture2D*,ID3D11Texture2D*,const StaleDepth&,const StaleDepth&,const StaleLayers&);
     StaleWarpObserver observe_stale_warp{};
+    std::array<double,2> stale_camera_motion(UINT eye) const noexcept {return eye<2?stale_camera_motion_[eye]:std::array<double,2>{};} // v1177
     void (*observe_fresh_eye)(UINT eye,ID3D11Texture2D* image,std::uint64_t frame){}; // v802 diagnostic: each fresh eye image as it is kept
     using NoteCompositionObserver=void (*)(unsigned,ID3D11Texture2D*,const XrCompositionLayerProjectionView&,const NotePanelReceipt&);
     NoteCompositionObserver observe_note_composition{};
@@ -2837,6 +2839,11 @@ public:
                             if(stale_layers_[eye]) { // v802: the hands held still; v803: and how much they moved (diagnostic)
                                 stale_layers_[eye]->near_from_kept=stale_hands_still(kept_cameras_[eye],stale_target_cameras_[eye]);
                                 stale_layers_[eye]->hands_motion=stale_hands_motion(kept_cameras_[eye],stale_target_cameras_[eye]);
+                                { // v1177 diagnostic: how far the rebuilt eye's camera moved (m) and turned (deg) from the kept to the target tick
+                                    const auto& a=kept_cameras_[eye].pose;const auto& b=stale_target_cameras_[eye].pose;
+                                    const double turn=std::acos(std::clamp(std::min(dot(a.basis[0],b.basis[0]),dot(a.basis[2],b.basis[2])),-1.,1.))*180/3.14159265358979;
+                                    stale_camera_motion_[eye]={length(a.position-b.position),turn};
+                                }
                                 stale_layers_[eye]->frame=alternate_frame;stale_layers_[eye]->eye=eye; // v811: the hand-fit read-backs' tags
                                 stale_layers_[eye]->fresh_part=stale_fresh_part;stale_layers_[eye]->kept_part=stale_kept_part; // v1151
                                 stale_layers_[eye]->motion_rules=stale_motion_rules;
