@@ -39,14 +39,14 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
         if(in.native && in.physical && std::isfinite(in.physical->distance) && in.physical->distance>=0 && std::isfinite(in.physical->cost)) {
             const auto& f=*in.physical;
             if(f.kind==PalmKind::prop && f.entity==in.native->id && f.distance<=limb_reach_m) return GripAloneChoice::grab;
-            if((f.kind==PalmKind::prop && f.distance<=grab_acquire_distance) || (f.kind==PalmKind::bone && f.distance<=tuning.grip_alone_gate_m)) return GripAloneChoice::grab;
+            if((f.kind==PalmKind::prop && f.distance<=grab_acquire_distance) || (f.kind==PalmKind::bone && f.distance<=tuning.body_gate_m)) return GripAloneChoice::grab;
         }
         const std::uint64_t waited=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
         return tuning.grab_buffer_ms>0 && static_cast<double>(waited)<tuning.grab_buffer_ms?GripAloneChoice::pending:GripAloneChoice::none;
     }
     if(in.occupied || in.choke_owns || in.takedown_offered || in.fast_native) return GripAloneChoice::use;
     const bool physical=in.physical && (in.physical->kind==PalmKind::prop || in.physical->kind==PalmKind::bone || in.physical->kind==PalmKind::living) &&
-        std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=(in.physical->kind==PalmKind::prop?grab_acquire_distance:tuning.grip_alone_gate_m) && std::isfinite(in.physical->cost);
+        std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=(in.physical->kind==PalmKind::prop?grab_acquire_distance:in.physical->kind==PalmKind::bone?tuning.body_gate_m:tuning.grip_alone_gate_m)   /* v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): a lying body's bone reaches body_gate_m (living keeps the hand-on-him gate) */ && std::isfinite(in.physical->cost);
     // A corpse's native carry target must not swallow a nearer prop. All grip-only
     // props use the hand sphere; bones keep their contact gate; shoulder carry still needs its torso hold.
     if(in.native_corpse) {
@@ -65,11 +65,10 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
     // A corpse whose OWN native Use (the game's carry) is the native target: its whole-body box holds the palm, so it would always win on
     // cost; the user's decision is that grip alone grabs corpses, so the physical hold of that same entity wins (sim, Track G acceptance).
     // Only a corpse (PalmKind::bone): a living NPC's native target (choke, talk, knock-out) is Use (I1).
-    if(physical && in.native && in.native->kind!=PalmKind::loot && in.physical->kind==PalmKind::bone && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
-    // v674: a body that is currently offering its native Loot action is looted, not carried. Its own bone must never
-    // steal that press, even when the body's model bounds are momentarily outside the palm's cost gate (the offer is
-    // the game's own action receipt, so it is stronger than the bounds estimate).
-    if(physical && in.native && in.native->kind==PalmKind::loot && in.physical->kind==PalmKind::bone && in.physical->entity==in.native->id) return GripAloneChoice::use;
+    // v1141 (user feedback 2026-11-11): also when that native target is the body's Loot - the trigger loots, the grip grabs.
+    if(physical && in.native && in.physical->kind==PalmKind::bone && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::grab;
+    // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): the v674 rule (a body offering Loot is looted by the grip) is gone:
+    // the TRIGGER owns a body's Loot like Pickpocket (NpcOffer::loot), the grip always grabs the body.
     if(physical && in.native && in.physical->kind==PalmKind::living && in.physical->entity && in.native->id==in.physical->entity) return GripAloneChoice::use;
     // v1086 (user: "severed limbs and other props should follow the same pattern as bottles: in my hand, not floating like normal game use"):
     // a prop the physical grab can hold that is ALSO the game's Use target (a severed limb: its HoldObject drives a jointed body softly) is

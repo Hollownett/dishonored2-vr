@@ -11,6 +11,22 @@ static void require(bool condition,const char* what) {
     ++failures;std::printf("FAIL: %s\n",what);
 }
 int main() {
+    { // v1141 OfferHold: a takedown offer survives sensor drop-outs on the same victim, not a dead one, a new epoch or the grace
+        d2vr::OfferHold h;bool alive=true;const auto still=[&](std::uint32_t){return alive;};
+        require(h.update(7,1000,1,still)==7,"offer passes");
+        require(h.update(0,1200,1,still)==7,"drop-out held");
+        require(h.update(0,1000+d2vr::OfferHold::grace_ms+1,1,still)==0,"grace ends");
+        require(h.update(7,2000,1,still)==7 && h.update(9,2050,1,still)==9,"new victim replaces");
+        alive=false;require(h.update(0,2100,1,still)==0,"dead victim not held");
+        alive=true;h.update(5,3000,1,still);require(h.update(0,3010,2,still)==0,"new epoch clears");
+        // regression: the choke grip fed the held offer keeps RB through a one-frame drop-out
+        d2vr::OfferHold c;d2vr::OfferedChokeGrip g;
+        g.update(false,false,false,true,1,0,0,false);
+        bool rb=true;
+        for(std::uint64_t t=0;t<500;t+=11) {const std::uint32_t raw=(t/11)%5==2?0u:4u;const auto v=c.update(raw,t,1,still);
+            const auto r=g.update(true,t==0,true,true,1,v,0,false);rb=rb && r.rb;}
+        require(rb,"choke held through flicker");
+    }
     {
         for(int previous=0;previous<2;++previous) {
             const auto next=static_cast<unsigned>(previous)^1u;
@@ -998,6 +1014,10 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         r=run(true,true,1350,other,d2vr::NpcAction::talk);assert(!r.owned); // a replaced target cancels the claim
         r=run(false,true,1360,other,d2vr::NpcAction::talk);assert(!r.owned);
         r=run(true,true,1370,other,d2vr::NpcAction::none);assert(!r.owned); // no offer: nothing claimed
+        r=run(false,true,1380,other,d2vr::NpcAction::loot);assert(!r.owned);
+        r=run(true,true,1390,other,d2vr::NpcAction::loot);assert(r.owned && r.interact && r.consume_trigger);   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot offer + trigger = the game's Use
+        r=run(true,true,1700,other,d2vr::NpcAction::loot);assert(r.owned && !r.interact);   // one 220 ms press, then only consumed
+        assert(d2vr::npc_trigger_owns_hand(true,false,false,false,true) && !d2vr::npc_trigger_owns_hand(true,false,false,true,true));   // a body's loot offer owns the trigger, never a weapon hand's
     }
     return 0;
 }

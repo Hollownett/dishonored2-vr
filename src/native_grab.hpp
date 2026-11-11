@@ -469,7 +469,7 @@ private:
         if(!legacy_palm_select_ && p.palm.valid) {
             std::vector<PalmTarget> living_targets;std::vector<LivingBone> living_bones;std::optional<std::size_t> living_pick;
             if(living_enabled_) living_candidates(side,now,living_targets,living_bones);
-            lane.focus=grab_focus_candidate(list,p.palm,lane.selection,tuning_,excluded,excluded_handle,grab_acquire_distance,false,now,&pick,
+            lane.focus=grab_focus_candidate(list,p.palm,lane.selection,tuning_,excluded,excluded_handle,std::max(grab_acquire_distance,tuning_.body_gate_m),false,now,&pick,   // v1141 (user feedback 2026-11-11: "body grabbing doesn't work much"): bones acquire at body_gate_m, props keep .25 (their own list)
                 living_targets.empty()?nullptr:&living_targets,&living_pick);
             if(living_pick) {
                 const auto& target=living_targets[*living_pick];lane.living_focus=living_bones[*living_pick];
@@ -480,7 +480,7 @@ private:
             }
             if(lane.focus) {
                 const auto target=palm_body_target(*lane.focus,tuning_);
-                if(const auto s=palm_cost(p.palm,target,tuning_.hover_radius_m,grab_retain_distance)) {
+                if(const auto s=palm_cost(p.palm,target,tuning_.hover_radius_m,std::max(grab_retain_distance,tuning_.body_gate_m))) {   // v1141: bone retain at body_gate_m
                     lane.score=FocusScore{target.id,target.kind,s->cost,std::isfinite(pick.runner_up)?pick.runner_up:0.,s->distance,lane.focus->entity};
                     const auto to=s->point-palm_point(p.palm);lane.palm_dot=length(to)>1e-9?dot(p.palm.direction,to*(1/length(to))):1.;
                 }
@@ -1075,7 +1075,7 @@ private:
                 seated=s.pose;natural=s.natural;if(s.natural) {++natural_seats_;pinch_seats_+=s.pinch;}
                 if(body->limb>=0) seated=rig::surface_onto_skin(*body,seated,p.palm.palm,p.palm.direction);   // v1088: its real surface on the palm skin
             }
-            if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,body->limb>=0?limb_reach_m:grab_acquire_distance)) {
+            if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,body->limb>=0?limb_reach_m:body->bone>=0?std::max(grab_acquire_distance,tuning_.body_gate_m):grab_acquire_distance)) {
                 if(body->limb>=0) {   // v1088 status severed_limb.holds / seat, and severed-limb-hold.csv "seat"
                     ++limb_holds_;const auto s=p.palm.valid?rig::seat_stats(*body,seated,p.palm.palm,p.palm.direction):rig::SeatStats{};
                     limb_seat_=LimbSeat{s.reach_mm,s.gap_mm,s.slide_mm,s.turn_deg,natural};
@@ -1513,6 +1513,7 @@ public:
         if(!usable) {revoke_owner_locked(lane);lane.obstruction.reset();}
         bool eligible=false;
         const double gate=grip_alone?tuning_.grip_alone_gate_m:grab_acquire_distance;
+        const double bone_gate=grip_alone?std::max(gate,tuning_.body_gate_m):gate;   // v1141 (user feedback 2026-11-11: "body grabbing doesn't work much"): a lying body's bone reaches body_gate_m for a grip alone
         // G3 (Task 5): a buffered press looks again each frame. A candidate inside the gate is caught: the press is decided again below, on
         // this frame, as a normal press. The window's end resolves it native (the squeeze then passes as today), counted once.
         if(lane.owner.pending() && usable && !lane.pending_release && focused && std::isfinite(raw) && raw>=.35f) {
@@ -1534,7 +1535,7 @@ public:
         if(deciding && usable && !lane.pending_release) {
             // Use the same bounded surface target as the hover cue.
             ++queries_;auto candidate=focus_body(side,now,true);
-            if(candidate) {const auto gap=focus_gap(lane,*candidate);const auto candidate_gate=candidate->bone<0?(candidate->limb>=0?limb_reach_m:grab_acquire_distance):gate;if(!gap || *gap>candidate_gate) candidate.reset();}   // v1088: a severed limb at its reach
+            if(candidate) {const auto gap=focus_gap(lane,*candidate);const auto candidate_gate=candidate->bone<0?(candidate->limb>=0?limb_reach_m:grab_acquire_distance):bone_gate;if(!gap || *gap>candidate_gate) candidate.reset();}   // v1088: a severed limb at its reach
             lane.candidates.clear();lane.living_candidate.reset();
             // G6 (Task 14): only a grip-alone press holds a living NPC (the fist keeps today's yank); his bone within the grip-alone gate
             if(!candidate && grip_alone && living_enabled_ && lane.living_focus && lane.score && lane.score->kind==PalmKind::living &&
@@ -1553,7 +1554,7 @@ public:
         // grab_buffer_ms 0 keep today's single-frame decision.
         const bool buffer=deciding && usable && !lane.pending_release && !eligible && !lane.buffer_used && !legacy_palm_select_ && !no_buffer && tuning_.grab_buffer_ms>0;
         const auto role_before=lane.owner.role();float native=0;
-        if(buffer) {lane.owner.begin_pending();lane.buffer.start(now,static_cast<std::uint64_t>(tuning_.grab_buffer_ms),gate);lane.buffer_used=true;}
+        if(buffer) {lane.owner.begin_pending();lane.buffer.start(now,static_cast<std::uint64_t>(tuning_.grab_buffer_ms),bone_gate);lane.buffer_used=true;}
         else native=lane.owner.filter(raw,focused,eligible);
         note_role_change_locked(role_before,lane);
         if(!lane.owner.pending()) lane.buffer.cancel();   // released, unfocused, occupied or resolved: the buffer ends with the pending role
@@ -1633,7 +1634,7 @@ public:
             const auto contact=acquisition_contact(lane,*after,GetTickCount64());
             if(*verdict && contact && lane.owner.physical() && hold_bone_allowed(after->bone,p.grip) && !(after->bone>=0 && lockout_.locked(after->entity_id,seconds_from_ms(GetTickCount64()))) && (!other || other->entity!=after->entity || other->handle!=after->handle || (two_hand_ && after->bone<0)) &&
                lane.grab.sample(p.hand,p.grip,true,p.epoch,p.tick,p.at_s) &&
-               lane.grab.bind(after->pose,*contact,grab_acquire_distance)) {
+               lane.grab.bind(after->pose,*contact,after->bone>=0?std::max(grab_acquire_distance,tuning_.body_gate_m):grab_acquire_distance)) {
                 lane.held=after;lane.acquired=true;lane.pending_release=false;lane.reset_tow();
                 lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
                 lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;

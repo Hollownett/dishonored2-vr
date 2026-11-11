@@ -37,7 +37,7 @@ struct GrabTuning {double axial_n=300,lateral_n=90,torque_nm=30,strength_scale=k
     catch_up_ramp_mps2=4.;   // ... and the cap rises by this per second, so recovery ends without a step (when the cap reaches the normal limit: 10 m/s linear, 4 m/s tow) or the lag is under 5 cm
     // The angular closure is capped at half the linear cap (the normal limits are 5 rad/s and 10 m/s), so it also ramps up to its normal limit with no jump.
     // Palm selection (Task 2, G2): grab buffer, grip-alone gate, hover sphere radius and the per-kind cost priorities (lower wins).
-    double grab_buffer_ms=150,grip_alone_gate_m=.10,hover_radius_m=.25,priority_loot=.8,priority_usable=1,priority_prop=1,priority_limb=1,priority_torso=1.1,priority_living=1;
+    double grab_buffer_ms=150,grip_alone_gate_m=.10,body_gate_m=.28,hover_radius_m=.25,priority_loot=.8,priority_usable=1,priority_prop=1,priority_limb=1,priority_torso=1.1,priority_living=1;
     double priority(PalmKind kind,int bone=-1) const noexcept {
         switch(kind) {case PalmKind::loot: return priority_loot; case PalmKind::usable: return priority_usable; case PalmKind::prop: return priority_prop;
             case PalmKind::bone: return bone==0||bone==1?priority_torso:priority_limb; case PalmKind::living: return priority_living;}
@@ -109,6 +109,7 @@ inline TuningLoad load_grab_tuning(const std::filesystem::path& file) noexcept {
             else if(key=="catch_up_mps") ok=ranged(t.catch_up_mps,.2,10);
             else if(key=="catch_up_ramp_mps2") ok=ranged(t.catch_up_ramp_mps2,.5,100);
             else if(key=="grab_buffer_ms") ok=ranged(t.grab_buffer_ms,0,300);
+            else if(key=="body_gate_m") ok=ranged(t.body_gate_m,.10,.35);   // v1141 (user feedback 2026-11-11: "body grabbing doesn't work much"): a lying body's reach, forgiving like the choke
             else if(key=="grip_alone_gate_m") ok=ranged(t.grip_alone_gate_m,.05,.25);
             else if(key=="hover_radius_m") ok=ranged(t.hover_radius_m,.1,.45);
             else if(key=="priority_loot") ok=ranged(t.priority_loot,.5,2);

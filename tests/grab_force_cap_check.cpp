@@ -171,7 +171,7 @@ int main() {
         expect_defaults_with_error("d2vr_gt_big.cfg",std::string(5000,'#'));
         {   // palm-selection keys: defaults, a good file, a mixed good+bad file falls back to ALL defaults
             const GrabTuning d;
-            CHECK(d.grab_buffer_ms==150 && d.grip_alone_gate_m==.10 && d.hover_radius_m==.25 && d.priority_loot==.8 && d.priority_usable==1 &&
+            CHECK(d.grab_buffer_ms==150 && d.grip_alone_gate_m==.10 && d.body_gate_m==.28 && d.hover_radius_m==.25 && d.priority_loot==.8 && d.priority_usable==1 &&
                   d.priority_prop==1 && d.priority_limb==1 && d.priority_torso==1.1 && d.priority_living==1);
             CHECK(d.priority(PalmKind::loot)==.8 && d.priority(PalmKind::bone,0)==1.1 && d.priority(PalmKind::bone,1)==1.1 &&
                   d.priority(PalmKind::bone,2)==1 && d.priority(PalmKind::bone)==1 && d.priority(PalmKind::living)==1);
@@ -184,7 +184,8 @@ int main() {
         const B bounds[]={{"axial_n",50,600},{"lateral_n",20,300},{"torque_nm",5,60},{"strength_scale",.5,25},{"prop_strength_scale",.5,25},
                           {"lift_fraction",0,1},{"mass_floor_kg",.1,5},{"mass_ceiling_kg",10,200},{"hand_kg",.1,20},{"dt_max",.005,.1},
                           {"stale_dt_s",.034,1},{"catch_up_mps",.2,10},{"catch_up_ramp_mps2",.5,100},
-                          {"grab_buffer_ms",0,300},{"grip_alone_gate_m",.05,.25},{"hover_radius_m",.1,.45},{"priority_loot",.5,2},{"priority_usable",.5,2},
+                          {"grab_buffer_ms",0,300},{"grip_alone_gate_m",.05,.25},{"body_gate_m",.10,.35},   // v1141 (user feedback 2026-11-11: "body grabbing doesn't work much")
+                          {"hover_radius_m",.1,.45},{"priority_loot",.5,2},{"priority_usable",.5,2},
                           {"priority_prop",.5,2},{"priority_limb",.5,2},{"priority_torso",.5,2},{"priority_living",.5,2}};
         for(auto& b:bounds) {
             for(double v:{b.lo-(b.hi-b.lo)*.01-1e-6,b.hi+(b.hi-b.lo)*.01+1e-6}) {
