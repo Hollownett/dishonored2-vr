@@ -40,9 +40,9 @@ Grip is the side button under your middle finger, trigger the one under your ind
 
 ## Your hands
 <!-- vr-figure:enemy_grab|Palm on the guard: grip to hold, then pull hard away from him. -->
-- **Trigger on a person's Talk or Pickpocket prompt** — talk or take from their pocket with that hand. The grip no longer does either, so it will not become a choke by accident.
+- **Trigger on a person's prompt** — Talk, Pickpocket, or Loot on a lying body: the trigger does what the game's prompt says. The grip never does, so it will not become a choke by accident.
 - **Grip a door or keyhole and keep holding** — peek through; let go to stop.
 - **Palm on a guard + grip, pull hard** — throw him down.
 - **Grip a guard's neck from behind** — choke him out.
-- **Grip a limb or the head of a body** — drag it; lift it to a shoulder and let go to put it on your shoulder. From there it is the game's own body carry (walk, climb, open doors with the free hand), so a place that expects a carried body (Sokolov out of the Jindosh mansion) sees one. Squeeze at the shoulder and move that hand away to put it down; a throwing motion throws it. A body whose items you have not looted yet is not carried: loot it with a plain grip, then put it on the shoulder again.
+- **Grip a lying body (dead or unconscious), no exact touch needed** — your palm within about a hand's width of any part takes hold of it; drag it; lift it to a shoulder and let go to put it on your shoulder. From there it is the game's own body carry (walk, climb, open doors with the free hand), so a place that expects a carried body (Sokolov out of the Jindosh mansion) sees one. Squeeze at the shoulder and move that hand away to put it down; a throwing motion throws it. A body you have not looted yet is looted as it goes onto the shoulder, then carried (or loot it on the floor with the trigger).
 - **Grenade or mine: make a fist** — open it mid-throw; palm on a wall to place it.

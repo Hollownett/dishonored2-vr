@@ -1739,6 +1739,10 @@ private:
         std::uint64_t shot_seen{},reload_seen{};int side{-1};};
     inline static std::array<CopyUpgrades,10> ups_{};inline static std::uint64_t ups_looked_{};
     inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{},upgrade_skips{},upgrade_rebinds{};
+    inline static std::atomic<std::uint64_t> upgrade_rollbacks{};inline static std::array<std::uintptr_t,8> upgrade_failed_{};inline static unsigned upgrade_failed_next_{};   // v1145
+public:
+    static std::uint64_t rollbacks() noexcept {return upgrade_rollbacks.load();}
+private:
     template<class Read> static void upgrades_drop(std::uintptr_t base,Read& read,CopyUpgrades& u) {
         for(unsigned i=0;i<u.n;++i) for(unsigned k=0;k<2;++k) if(alive_entity(base,read,u.att[i][k],u.att_id[i][k])) remove_entity(base,u.att[i][k]);
         u={};
@@ -2395,10 +2399,25 @@ private:
         return id && id->generation!=-1 && (id->flags&3u)==2u;
     }
     struct ItemList {const std::uintptr_t* data;std::uint32_t count,capacity;}; // an idList<const arkInventoryItem*> as 0x61a750 reads it (+0 data, +8 count)
+    // v1145 (headset v1144 fatal crash at a load: game 0x884a48 via the equipment component's upgrade loop 0x61ae10 -> 0x61b317 on the COPY's component):
+    // 0x61a750 grows m_upgrades (+0x58 count, low 24 bits) BEFORE it calls AttachUpgrade for the new entry, so an attach that faults leaves a counted,
+    // half-built entry; every later pass re-faulted on it (124 caught) and the game's own load teardown walked it and died. A fault while the list grew
+    // now takes that last entry back out (count - 1, the 0x28-byte entry zeroed) - the entries before it were complete when it was counted.
     static bool set_upgrades(std::uintptr_t comp,const ItemList* add,const ItemList* remove) {
+        std::uint32_t before=0;
+        __try {before=*reinterpret_cast<const std::uint32_t*>(comp+0x58);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
         __try {const auto vt=*reinterpret_cast<const std::uintptr_t*>(comp);
             reinterpret_cast<void (__fastcall*)(std::uintptr_t,const ItemList*,const ItemList*)>(*reinterpret_cast<const std::uintptr_t*>(vt+0xd8))(comp,add,remove);return true;}
-        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+        __try {
+            auto* count=reinterpret_cast<std::uint32_t*>(comp+0x58);const std::uint32_t now=*count,n=now&0xffffffu,was=before&0xffffffu;
+            if(n>was && n<=64) {
+                const auto data=*reinterpret_cast<const std::uintptr_t*>(comp+0x50);
+                if(data) std::memset(reinterpret_cast<void*>(data+(n-1)*0x28ull),0,0x28);
+                *count=(now&~0xffffffu)|(n-1);++upgrade_rollbacks;
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        return false;
     }
     // The game's own upgrade change on the copy's component (vslot 0xd8 = 0x638020: unload, 0x61a750 detach the removed / grow m_upgrades
     // and AttachUpgrade each added item, vslot 0x100 refresh (modifiers, bolt), vslot 0x148 reload): the player weapon's items, shared.
@@ -2411,8 +2430,13 @@ private:
         for(unsigned i=0;i<wn;++i) if(std::find(have.begin(),have.begin()+hn,want[i])==have.begin()+hn) add[an++]=want[i];
         for(unsigned i=0;i<hn;++i) if(std::find(want.begin(),want.begin()+wn,have[i])==want.begin()+wn) remove[rn++]=have[i];
         if(!an && !rn) {try {real_parts_audit(base,read,comp);} catch(...) {++upgrade_faults;}return;}   // v1111: wired already: prove the parts, repair the far ones
+        // v1145: a component whose upgrade change faulted is never asked again (v1144: 124 retries, each re-faulting); a rebuilt copy is a new component.
+        for(const auto f:upgrade_failed_) if(f==comp) return;
+        for(unsigned i=0;i<an;++i) {   // every added item must be readable: its vtable and the vtable's first slot (the attach faulted on an unreadable item)
+            const auto vt=rig::value<std::uintptr_t>(read,add[i]);if(!vt || !rig::pointer(*vt) || !rig::value<std::uintptr_t>(read,*vt)) {++upgrade_faults;return;}
+        }
         const ItemList a{add.data(),an,an<<8},r{remove.data(),rn,rn<<8};
-        if(set_upgrades(comp,&a,&r)) ++real_upgrade_sets;else ++upgrade_faults;
+        if(set_upgrades(comp,&a,&r)) ++real_upgrade_sets;else {++upgrade_faults;upgrade_failed_[upgrade_failed_next_++%upgrade_failed_.size()]=comp;}
     }
     // v1111 (user, headset v1100/v1110: the second-hand copy and the dropped weapon showed the BASE model although set_upgrades had run once per
     // copy and the copy's list matched the player's; nothing ever looked at the parts): every part in the copy's m_upgrades (+0x50, stride 0x28,

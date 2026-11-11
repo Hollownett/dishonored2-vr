@@ -889,7 +889,12 @@ class NativeInteractionAim {
                         camera->camera_identity==scope->camera.camera_identity && !camera->authored_view();
                 };
                 if(!valid() || !grab_pose_valid(obstruction_request.hand))return {};
-                const auto point=obstruction_request.body.contact(obstruction_request.hand.position);
+                auto point=obstruction_request.body.contact(obstruction_request.hand.position);
+                // v1141 (user feedback 2026-11-11, body reach 0.28 m): the ray stops los_skin_m short of the bone, so the body's own other limbs and
+                // the floor it lies on (sim v1141: obstruction_blocked on every press 18 cm above a wrist) are not walls; a wall between hand and body still is.
+                {constexpr double los_skin_m=.10;const auto d=point-obstruction_request.hand.position;const double n=length(d);
+                 if(n<=los_skin_m) return true;
+                 point=obstruction_request.hand.position+d*((n-los_skin_m)/n);}
                 std::array<float,3> origin{static_cast<float>(obstruction_request.hand.position.x),static_cast<float>(obstruction_request.hand.position.y),static_cast<float>(obstruction_request.hand.position.z)},
                     target{static_cast<float>(point.x),static_cast<float>(point.y),static_cast<float>(point.z)};
                 std::array<float,9> axis{};
@@ -2353,7 +2358,7 @@ public:
     // v966: the raw native primary action for this hand (declaration+offset), independent of the strict Talk/Loot receipt.
     // The headset's Talk prompt is often drawn from this offer while native_talk_offer_current rejects the receipt, which left
     // Talk/pickpocket on the grip and its X hint. +0xe8/+0x110 are Talk, +0xc0 Pickpocket.
-    enum class NpcOfferKind {none,talk,pickpocket};
+    enum class NpcOfferKind {none,talk,pickpocket,loot};   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot = a body's Loot (+0x98), owned by the trigger like Pickpocket
     struct NpcOffer {
         NpcOfferKind kind{};std::uintptr_t component{},owner{};unsigned spawn{};int generation{-1};
         explicit operator bool() const noexcept {return kind!=NpcOfferKind::none && component && generation>=0 && spawn;}
@@ -2370,6 +2375,7 @@ public:
             return NpcOfferKind::none;};
         auto kind=kind_of(loot_primary_offset_[at]);
         if(kind==NpcOfferKind::none) kind=kind_of(loot_secondary_offset_[at]);   // Talk is the secondary offer on some NPCs
+        if(kind==NpcOfferKind::none && live_loot_offer(at,now)) kind=NpcOfferKind::loot;   // v1141: the validated Loot receipt (NPC interaction, player-owned sensor), never an item pickup
         if(kind==NpcOfferKind::none) return {};
         return {kind,target_object_[at],target_owner_[at],target_spawn_[at],target_generation_[at]};
     }

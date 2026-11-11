@@ -56,11 +56,18 @@ float4 PS(V v):SV_TARGET{return art.Sample(linearClamp,v.uv);}
 // v776 hand wheel ring: the movie's bytes through 4x4 taps over the pixel's footprint (as NativeEyeArt PS), its dim full-screen layer un-composited
 // (NativeEyeArt PSUnback: premultiplied colour about (.046,.050,.056) at alpha .502 out to .85 of the half-diagonal, a vignette to 1 in the corners),
 // premultiplied out. PSRingSrgb: into an sRGB eye the bytes are decoded as the compositor decodes the quad's, so the blend is the quad's.
+// v1144 (user, 2026-11-11: "a lot of people complain about the black frame in the weapon wheel"): the game's fade toward the image edges is a rounded
+// RECTANGLE with a smoky texture, not the radial model above (headset capture world-ui-1, 2496x2688: mid-left edge alpha .80 vs .60 modelled), so a
+// dark half-transparent band stayed round the wheel. Toward the edges (a rounded-rectangle metric) a pixel whose un-composited colour is near black is
+// that leftover and goes; the ring in the centre keeps its dark discs (a key everywhere made them pale, v762). Lab: unback_lab.py on world-ui-1.
+// v1145's ring-only cut was taken back in v1146 (user, headset v1145: the potions and the corner items belong on the wheel).
+float4 Unframe(float2 uv,float4 r){const float2 q=abs(uv-.5)*2;const float m=pow(pow(q.x,4)+pow(q.y,4),.25);
+    const float lit=max(r.r,max(r.g,r.b))/max(r.a,1e-3);return r*(1-smoothstep(.50,.80,m)*(1-smoothstep(.05,.14,lit)));}
 float4 Ring(V v){float2 dx=ddx(v.uv),dy=ddy(v.uv);float4 c=0;
     [unroll]for(int i=0;i<4;++i)[unroll]for(int j=0;j<4;++j){float2 o=(float2(i,j)+.5)/4-.5;c+=art.SampleLevel(linearClamp,v.uv+o.x*dx+o.y*dy,0);}
     c/=16;const float edge=smoothstep(.85,1.38,length((v.uv-.5)*2));
     const float bgA=.502+.498*edge,a=saturate((c.a-bgA)/max(1-bgA,1e-3));
-    return float4(min(max(c.rgb-float3(.046,.050,.056)*lerp(1.,.6,edge)*(1-a),0),a),a);}
+    return Unframe(v.uv,float4(min(max(c.rgb-float3(.046,.050,.056)*lerp(1.,.6,edge)*(1-a),0),a),a));}
 float3 Lin(float3 c){return lerp(c/12.92,pow(max((c+.055)/1.055,0),2.4),step(.04045,c));}
 float4 PSRing(V v):SV_TARGET{return Ring(v);}
 float4 PSRingSrgb(V v):SV_TARGET{const float4 c=Ring(v);return float4(Lin(c.rgb),c.a);}

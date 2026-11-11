@@ -25,7 +25,11 @@ int main() {
         in.physical=FocusScore{42,PalmKind::prop,.20,0.,.20,0x1234};
         assert(decide_grip_alone(in,tuning,.25)==GripAloneChoice::grab);
         in.physical->distance=.26;in.now_ms=1000;assert(decide_grip_alone(in,tuning,.25)!=GripAloneChoice::grab);
-        in.physical->distance=.20;in.physical->kind=PalmKind::bone;
+        // v1141 (user feedback 2026-11-11: "body grabbing doesn't work much"): a lying body's bone reaches body_gate_m (0.28 m), not the 10 cm contact gate.
+        in.physical->distance=.25;in.physical->kind=PalmKind::bone;
+        assert(decide_grip_alone(in,tuning,.25)==GripAloneChoice::grab);
+        in.physical->distance=.29;assert(decide_grip_alone(in,tuning,.25)!=GripAloneChoice::grab);
+        in.physical->kind=PalmKind::living;in.physical->distance=.20;in.native_fresh=true;   // a living NPC keeps the hand-on-him gate
         assert(decide_grip_alone(in,tuning,.25)!=GripAloneChoice::grab);
     }
 
@@ -114,20 +118,19 @@ int main() {
         assert(palm_cost(probe(),body,hover,grab_acquire_distance)->cost<bone.cost);
         bone.entity=0x9000;assert(decide_grip_alone(input(body,bone),t,hover)==GripAloneChoice::grab);
         bone.entity=0x9001;assert(decide_grip_alone(input(body,bone),t,hover)==GripAloneChoice::use);
-        auto far_bone=bone;far_bone.entity=0x9000;far_bone.distance=.2;assert(decide_grip_alone(input(body,far_bone,1200),t,hover)==GripAloneChoice::use);   // not on it
+        auto far_bone=bone;far_bone.entity=0x9000;far_bone.distance=.3;assert(decide_grip_alone(input(body,far_bone,1200),t,hover)==GripAloneChoice::use);   // not on it
         auto in=input(body,bone);bone.entity=0x9000;in.physical=bone;in.choke_owns=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
     }
-    {   // The game's selected loot action on a corpse wins over a bone of that same corpse.
+    {   // v1141 (user feedback 2026-11-11): the grip grabs a body even while it offers Loot (the trigger loots it).
         const auto loot=box(0x9000,PalmKind::loot,{.07,0,.015},.3,t);
         auto bone=physical(box(15,PalmKind::bone,{.07,0,.015},.05,t));bone.entity=0x9000;
-        assert(decide_grip_alone(input(loot,bone),t,hover)==GripAloneChoice::use);
+        assert(decide_grip_alone(input(loot,bone),t,hover)==GripAloneChoice::grab);
         auto corpse=loot;corpse.kind=PalmKind::usable;
         assert(decide_grip_alone(input(corpse,bone),t,hover)==GripAloneChoice::grab);
-        // v674: the live Loot offer wins even when the body's bounds are outside the palm's cost gate (a thin note on a
-        // belt, a stale model box): its own bone still must not steal the press. A bone of another body keeps the grab.
+        // v1141: also when the body's bounds are outside the palm's cost gate; with no bone the loot target stays Use (a coin, a loose note).
         const auto far_loot=box(0x9000,PalmKind::loot,{2,0,0},.3,t);
         assert(!palm_cost(probe(),far_loot,hover,grab_acquire_distance));
-        assert(decide_grip_alone(input(far_loot,bone),t,hover)==GripAloneChoice::use);
+        assert(decide_grip_alone(input(far_loot,bone),t,hover)==GripAloneChoice::grab);
         assert(decide_grip_alone(input(far_loot,std::nullopt),t,hover)==GripAloneChoice::use);
         auto other_bone=bone;other_bone.entity=0x9001;other_bone.distance=.05;
         assert(decide_grip_alone(input(far_loot,other_bone),t,hover)==GripAloneChoice::grab);
@@ -145,6 +148,14 @@ int main() {
     {   // I2: the left hand at the hip or with a gun out is Use at the edge (no 150 ms buffer), even for a prop on the palm or nothing in reach
         auto in=input(std::nullopt,std::nullopt,1000);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
         in=input(std::nullopt,on_palm);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+        {   // v1145: a corpse bone in reach is grabbed even with the gun drawn (fast_native) or a held takedown offer; the choke and a full hand still win
+            FocusScore bone{77,PalmKind::bone,.05,0.,.24,0x7777};
+            auto b=input(std::nullopt,bone,1000);b.fast_native=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::grab);
+            b.fast_native=false;b.takedown_offered=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::grab);
+            b.choke_owns=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::use);
+            b.choke_owns=false;b.occupied=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::use);
+            b.occupied=false;b.physical->distance=.30;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::use);   // out of reach: the old rule
+        }
         in=input(std::nullopt,std::nullopt,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // without it the H1 buffer still runs
     }
     {   // a corpse let go at a shoulder stays there (the physical dock); a fresh squeeze there takes it back; the other hand or any release ends it
@@ -195,13 +206,14 @@ int main() {
         const auto body=box(0x9300,PalmKind::usable,{.07,0,.015},.3,t);
         auto bone=physical(box(1,PalmKind::bone,{.07,0,.015},.05,t));bone.entity=0x9300;
         auto in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);
-        bone.distance=.09;in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // all grip-only targets share the 10 cm contact gate
-        bone.distance=.11;in=input(body,bone,1200);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);
+        bone.distance=.09;in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // all grip-only targets share the contact gate (v1141: a bone's is body_gate_m)
+        bone.distance=.25;in=input(body,bone,1200);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // v1141: a bone at 0.25 m grabs (body_gate_m 0.28)
+        bone.distance=.29;in=input(body,bone,1200);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // v1146: no part in reach -> the physical request, as the fist
         auto prop=bone;prop.kind=PalmKind::prop;prop.distance=.05;in=input(body,prop);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab); // nearer prop wins beside a corpse
         in.takedown_offered=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use); // a real stealth offer keeps priority
         bone.distance=.5;in=input(body,bone,1000);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // not in reach yet: the buffer runs
-        in.now_ms=1000+static_cast<std::uint64_t>(t.grab_buffer_ms)+1;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);     // then nothing, never Use
-        in=input(body,std::nullopt,1000);in.native_corpse=true;in.now_ms=1200;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::none);
+        in.now_ms=1000+static_cast<std::uint64_t>(t.grab_buffer_ms)+1;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // v1146: then the physical request, as the fist
+        in=input(body,std::nullopt,1000);in.native_corpse=true;in.now_ms=1200;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // v1146
         in=input(body,std::nullopt,1000);in.native_corpse=false;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);           // doors/levers/loot unchanged
         in=input(body,bone);in.native_corpse=true;in.occupied=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);         // an occupied hand keeps today's path
     }

@@ -130,6 +130,9 @@ int main() {
     // v1101: the placement gate of build/no-weapon-draw-place (weapon_mode 0) and of object-motion-mode 0 (diagnostic only).
     CHECK(d2vr::ObjectMotion::weapon_draw_on(1,1) && !d2vr::ObjectMotion::weapon_draw_on(0,1) &&
           !d2vr::ObjectMotion::weapon_draw_on(1,0) && !d2vr::ObjectMotion::weapon_draw_on(0,-1));
+    // v1140: a held prop is placed with weapons opt-out (weapon_mode 0); neither = no placement; object-motion-mode 0 still wins.
+    CHECK(d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(0,true),1) && !d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(0,false),1) &&
+          d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(1,false),1) && !d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(0,true),0));
     // v1101: the publisher's frame and per-hand counters (the weapon lab drives place() itself).
     {
         static const float frame[15]={0,0,0, 1,0,0, 0,1,0, 0,0,1, 1,1,1};

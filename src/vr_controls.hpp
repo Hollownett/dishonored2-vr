@@ -262,6 +262,25 @@ inline bool released_gaze_yields(int locked_hand,int gaze_hand,bool gaze_live,
     const auto previous=static_cast<unsigned>(locked_hand),next=previous^1u;
     return grips[previous]<=.35f && uses[previous]<=.35f && grips[next]>=.45f && fresh_use[next] && claimants[next];
 }
+// v1141: a takedown sensor offer (an NPC spawn id) held through brief drop-outs: the game's kill/choke sensors follow the camera cone and flicker
+// while the player points or swings at the victim. A new victim replaces the held one at once; a held one ends after grace_ms, on a new
+// pose epoch (load, XR restart), or when `still(spawn)` says the NPC is no longer a takedown target (dead, gone).
+class OfferHold {
+    std::uint32_t spawn_{};std::uint64_t tick_{},epoch_{};
+public:
+    static constexpr std::uint64_t grace_ms=500;   // sim loiter v1141: head nods dip the sensor ~400 ms; 300 ms halved the flips (71 -> 32), 500 rides them out
+    // v1146 (user, headset v1145: "still flickering while I just look at the guard from behind"): update() keeps a spawn up to long_grace_ms, but past
+    // grace_ms only while still(spawn,age) says the player is behind him and in reach - the caller's own geometry, not the camera cone.
+    static constexpr std::uint64_t long_grace_ms=1200;
+    std::uint32_t held(std::uint64_t now,std::uint64_t grace=grace_ms) const noexcept {return spawn_ && now>=tick_ && now-tick_<=grace?spawn_:0u;}
+    template<class Still> std::uint32_t update(std::uint32_t offered,std::uint64_t now,std::uint64_t epoch,Still&& still) noexcept {
+        if(epoch!=epoch_) {spawn_=0;epoch_=epoch;}
+        if(offered) {spawn_=offered;tick_=now;return offered;}
+        const auto h=held(now,long_grace_ms);
+        if(h && still(h,now-tick_)) return h;   // still(spawn, ms since the sensor last offered it)
+        spawn_=0;return 0;
+    }
+};
 class OfferedChokeGrip {
     enum class Role {ready,other,choke,drain};
     Role role_=Role::drain;
@@ -328,7 +347,7 @@ public:
 // the game's Talk (+0xe8) and Pickpocket (+0xc0) offers. The grip keeps doors, keyholes, loot and the deliberate neck choke; the
 // trigger press becomes a short native Use (220 ms), exactly as the grip's own Use press was, and is consumed so it never fires
 // or casts. A change of target, or letting go of the feature/hand, cancels the claim.
-enum class NpcAction {none,talk,pickpocket};
+enum class NpcAction {none,talk,pickpocket,loot};   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot = a lying body's Loot, on the trigger like Pickpocket
 class NpcTriggerOwner {
 public:
     using Target=TalkYOwner::Target;
@@ -355,8 +374,8 @@ public:
 };
 // The trigger, not the grip, owns an NPC's Talk/Pickpocket offer: suppress the grip's native Use for that hand. A hand that
 // holds anything (sword, gun, gadget, copy) keeps its trigger: those are its weapon's trigger.
-inline bool npc_trigger_owns_hand(bool enabled,bool talk_offer,bool pickpocket_offer,bool weapon_owns) noexcept {
-    return enabled && !weapon_owns && (talk_offer || pickpocket_offer);
+inline bool npc_trigger_owns_hand(bool enabled,bool talk_offer,bool pickpocket_offer,bool weapon_owns,bool loot_offer=false) noexcept {
+    return enabled && !weapon_owns && (talk_offer || pickpocket_offer || loot_offer);   // v1141: a body's Loot too
 }
 // A held grip on a native door keeps Use down: that is the keyhole peek. A held Use on anything else stays the v691 200 ms
 // press (a held pad X is the game's holster/draw toggle on non-door items).

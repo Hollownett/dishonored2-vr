@@ -22,6 +22,14 @@ inline constexpr std::uint64_t shoulder_carry_min_hold_ms=700;  // once a hold s
                                                                 // reads empty (the engine's carry is the held Use; v613 measured
                                                                 // ~0.55 s, so a 200 ms episode is far too short for it)
 inline constexpr unsigned shoulder_carry_max_presses=3;         // episodes per placement (a flickering target cannot chatter)
+// v1142 (user, 2026-11-11: "grabbing an enemy and a body are different controls"; v1141 moved Loot to the trigger and dropped v674's grip
+// loot, so an unlooted body put on the shoulder never reached the carry: loot_blocked, silently). A body still offering Loot is looted by a
+// TAP of Use first (the engine's primary action on a press), then carried by the held Use once the offer clears: on the shoulder = carried.
+inline constexpr std::uint64_t shoulder_loot_tap_ms=150;        // a tap, well under the ~0.55 s held Use that is the carry
+inline constexpr std::uint64_t shoulder_loot_settle_ms=400;     // after a tap, the offer is given this long to clear before another
+inline constexpr unsigned shoulder_loot_max_taps=2;
+// the whole handoff the input side keeps the query and the press for: the loot taps and their settle, then the carry's own window
+inline constexpr std::uint64_t shoulder_handoff_ms=shoulder_carry_window_ms+shoulder_loot_max_taps*(shoulder_loot_tap_ms+shoulder_loot_settle_ms);
 // armed: the physical lane holds a placed body at the shoulder (ShoulderDock anchored). target: the placing hand's live native
 // Use target entity now (0: the hand answers nothing). loot: the engine offers that body's Loot action now. carrying: the game
 // carries a body now. armed_ms: the placement's tick (a new placement restarts the attempt).
@@ -46,14 +54,23 @@ public:
             if(presses_) {started_=true;out.started=true;}
             return out;
         }
-        if(in.loot) {   // never a press that would loot the body instead of carrying it
-            holding_=false;
-            if(!loot_reported_) {loot_reported_=true;out.loot_blocked=true;}
-            return out;
-        }
-        const bool before_window=in.now>=armed_ && in.now-armed_<shoulder_carry_window_ms;
         const bool target_now=in.target==body_;
         if(target_now) last_target_=in.now;
+        if(tap_until_) {   // a loot tap in progress: held for its length, then released whatever the offer says
+            if(in.now<tap_until_) {out.press=true;return out;}
+            tap_until_=0;tap_done_=in.now;
+        }
+        if(in.loot) {   // never a HELD press while Loot is offered (it would loot, not carry): tap it out first
+            holding_=false;
+            const bool settled=!tap_done_ || in.now-tap_done_>=shoulder_loot_settle_ms;
+            if(target_now && settled && loot_taps_<shoulder_loot_max_taps && in.now>=armed_ && in.now-armed_<shoulder_carry_window_ms) {
+                ++loot_taps_;tap_until_=in.now+shoulder_loot_tap_ms;out.press=true;return out;
+            }
+            if(loot_taps_>=shoulder_loot_max_taps && settled && !loot_reported_) {loot_reported_=true;out.loot_blocked=true;}
+            return out;
+        }
+        if(tap_done_ && !looted_) {looted_=true;window_=in.now;}   // the loot went: the carry gets its whole window from here
+        const auto from=looted_?window_:armed_;const bool before_window=in.now>=from && in.now-from<shoulder_carry_window_ms;
         // A lost target keeps the hold for a round trip: taking the game's interaction query for this hand invalidates the selection,
         // so the hand's own target reads empty for a frame or two after the press (a different, non-zero target ends it at once).
         const bool target_ok=target_now || (in.target==0 && last_target_ && in.now>=last_target_ && in.now-last_target_<=shoulder_carry_target_grace_ms);
@@ -72,9 +89,10 @@ public:
         if(!before_window && !gave_up_) {gave_up_=true;out.gave_up=true;}
         return out;
     }
-    void reset() noexcept {body_=armed_=next_=last_target_=episode_=0;presses_=0;loot_reported_=gave_up_=started_=holding_=false;}
+    void reset() noexcept {body_=armed_=next_=last_target_=episode_=tap_until_=tap_done_=window_=0;presses_=loot_taps_=0;loot_reported_=gave_up_=started_=holding_=looted_=false;}
+    unsigned loot_taps() const noexcept {return loot_taps_;}
 private:
-    std::uintptr_t body_{};std::uint64_t armed_{},next_{},last_target_{},episode_{};unsigned presses_{};bool loot_reported_{},gave_up_{},started_{},holding_{};
+    std::uintptr_t body_{};std::uint64_t armed_{},next_{},last_target_{},episode_{},tap_until_{},tap_done_{},window_{};unsigned presses_{},loot_taps_{};bool loot_reported_{},gave_up_{},started_{},holding_{},looted_{};
 };
 
 // v1038 (user, headset v1037: "carrying a corpse on my shoulder, my hands are disabled: no powers, no weapons"). The game's own cause:

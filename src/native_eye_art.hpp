@@ -116,9 +116,16 @@ float4 PSKey(V v):SV_TARGET{float4 c=PS(v);const float lit=max(c.r,max(c.g,c.b))
 // premultiplied colour about (.046,.050,.056) at alpha .502 out to .85 of the half-diagonal, then a vignette to alpha 1 in the corners
 // (measured on world-ui-1). Un-composite it: the art's own coverage a=(alpha-bgA)/(1-bgA), its colour the premultiplied colour minus the
 // layer under it. The ring keeps its full brightness and opacity; only the layer goes.
+// v1144 (user, 2026-11-11: "a lot of people complain about the black frame in the weapon wheel"): the game's fade toward the image edges is a rounded
+// RECTANGLE with a smoky texture, not the radial model above (headset capture world-ui-1, 2496x2688: mid-left edge alpha .80 vs .60 modelled), so a
+// dark half-transparent band stayed round the wheel. Toward the edges (a rounded-rectangle metric) a pixel whose un-composited colour is near black is
+// that leftover and goes; the ring in the centre keeps its dark discs (a key everywhere made them pale, v762). Lab: unback_lab.py on world-ui-1.
+// v1145's ring-only cut was taken back in v1146 (user, headset v1145: the potions and the corner items belong on the wheel).
+float4 Unframe(float2 uv,float4 r){const float2 q=abs(uv-.5)*2;const float m=pow(pow(q.x,4)+pow(q.y,4),.25);
+    const float lit=max(r.r,max(r.g,r.b))/max(r.a,1e-3);return r*(1-smoothstep(.50,.80,m)*(1-smoothstep(.05,.14,lit)));}
 float4 PSUnback(V v):SV_TARGET{float4 c=PS(v);const float edge=smoothstep(.85,1.38,length((v.uv-.5)*2));
     const float bgA=.502+.498*edge,a=saturate((c.a-bgA)/max(1-bgA,1e-3));
-    return float4(min(max(c.rgb-float3(.046,.050,.056)*lerp(1.,.6,edge)*(1-a),0),a),a);}
+    return Unframe(v.uv,float4(min(max(c.rgb-float3(.046,.050,.056)*lerp(1.,.6,edge)*(1-a),0),a),a));}
 )HLSL";
         Ptr<ID3DBlob> vs,ps,errors;checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"VS","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&vs,&errors));
         checked(D3DCompile(source,sizeof(source)-1,nullptr,nullptr,nullptr,"PS","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors));
