@@ -34,6 +34,7 @@
 #include <string>
 #include "weapon_draw_place.hpp"
 #include "rig_mask.hpp"
+#include "skin_motion.hpp"
 
 namespace d2vr {
 // Draws of the recent eye views keyed by their exact current rows -> the engine's original previous rows.
@@ -782,6 +783,8 @@ private:
         }
         measure(view.eye,cur,engine,apply?prev:engine);
         if(!apply || !bind_pool(c,s,*sh,nullptr,prev)) return false;
+        // v1182 (knob stale-eye-skin-motion): a skinned draw on this eye's own rows also gets this eye's own previous palette (skin_motion.hpp)
+        if(alt && kind==PrevMvpTable::other_last) SkinMotion::bind_previous(c);
         count(view.eye?fixed_r:fixed_l);
         return true;
     }
@@ -1003,6 +1006,7 @@ public:
     public:
         explicit DrawScope(ID3D11DeviceContext* c) noexcept:c_(c),s_(installed_?before(c):nullptr) {}
         ~DrawScope() {
+            SkinMotion::restore(c_); // v1182: the engine's previous palette at t0 again
             if(!s_) return;
             if(const auto observe=wide_direct_cb_observer.load(std::memory_order_relaxed)) observe(c_,2,1,&s_->cb[1]);
             set_cb_[s_->type](c_,2,1,&s_->cb[1]);

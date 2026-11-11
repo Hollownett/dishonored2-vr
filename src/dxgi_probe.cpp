@@ -3752,6 +3752,16 @@ static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) 
             break;
         }
     } catch(...) {}
+    // v1182 (skin_motion.hpp, knob stale-eye-skin-motion): every other skinned model's palette ring, the same rotation
+    if(context && d2vr::SkinMotion::enabled.load(std::memory_order_relaxed) && d2vr::ObjectMotion::alternate()) try {
+        const auto m=reinterpret_cast<std::uintptr_t>(model);bool rig=false;
+        for(unsigned i=0;i<3;++i) rig=rig || image_skin_slots[i].model.load(std::memory_order_relaxed)==m;
+        signed char index{};std::uintptr_t w[2]{};std::uint32_t frame{};
+        ID3D11DeviceContext* d3d=*static_cast<ID3D11DeviceContext**>(context);
+        if(!rig && d3d && read_self(m+0x1fb2,&index,1) && (index==0 || index==1) && read_self(m+0x2008,&w[0],8) && read_self(m+0x2040,&w[1],8) &&
+           d2vr::rig::pointer(w[0]) && d2vr::rig::pointer(w[1]) && read_self(image_base+d2vr::taa_history::frame_counter_rva,&frame,4))
+            d2vr::SkinMotion::skin_copied(d3d,m,reinterpret_cast<ID3D11Buffer*>(w[0]),reinterpret_cast<ID3D11Buffer*>(w[1]),reinterpret_cast<ID3D11Buffer*>(w[index]),frame);
+    } catch(...) {}
     if(copied && tracing) if(const auto b=arm_binding_cache.load()) {
         const auto m=reinterpret_cast<std::uintptr_t>(model);
         if(m==b->arms[0].model || m==b->arms[1].model || m==image_skin_slots[2].model.load()) {   // v864: the body's copies too (a 2)
@@ -6141,7 +6151,7 @@ void observe_eye_setup(void* view) noexcept {
             {const std::uintptr_t rig_view=alternate_on() && mono && stale_eye_rig_knob?address:0;if(rig_view && !d2vr::RigMask::view.load()) d2vr::RigMask::begin_epoch(); // v1167: a fresh palette history
              d2vr::RigMask::view=rig_view;} // v1162/v1163: the rig draws of this view's passes are replayed
             {const std::uintptr_t history_view=alternate_on() && mono?address:0; // v1180: census / per-eye engine history on one-view frames
-             if(history_view && !d2vr::CrossEyeHistory::view.load()) d2vr::CrossEyeHistory::begin_epoch();
+             if(history_view && !d2vr::CrossEyeHistory::view.load()) {d2vr::CrossEyeHistory::begin_epoch();d2vr::SkinMotion::begin_epoch();} // v1182: and the skin rings
              d2vr::CrossEyeHistory::view=history_view;}
             if(mono) d2vr::PostTonemapPass::eye_views[1]=0; // no second view: nothing may name eye 1
         }
@@ -10448,7 +10458,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
-               << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
+               << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
                << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
@@ -16023,7 +16033,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         }
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         d2vr::CrossEyeHistory::census=fs::exists(root/L"build"/L"cross-eye-census");d2vr::CrossEyeHistory::fix=fs::exists(root/L"build"/L"alt-eye-history"); // v1180
-        d2vr::CrossEyeHistory::fix_paired=fs::exists(root/L"build"/L"eye-history"); // v1181: the same fix on paired stereo frames
+        d2vr::CrossEyeHistory::fix_paired=fs::exists(root/L"build"/L"eye-history");
+        d2vr::SkinMotion::enabled=fs::exists(root/L"build"/L"stale-eye-skin-motion"); // v1182 // v1181: the same fix on paired stereo frames
         d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {std::uint32_t v{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&v,4);return v;};
         alt_mv_jittered=!fs::exists(root/L"build"/L"legacy-alt-mv-jitter");d2vr::eye_motion_mv_jittered=alt_mv_jittered.load(); // v1178
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
