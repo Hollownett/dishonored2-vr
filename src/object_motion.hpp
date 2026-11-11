@@ -687,14 +687,17 @@ private:
         if(alt && RigMask::draw_is_rig()) {
             alt_rig_.fetch_add(1,std::memory_order_relaxed);
             if(mode_.load(std::memory_order_relaxed)<1) return false;
+            if(!have_prev) return false; // no previous rows: not a motion-vector writer (the colour pass), nothing to pair
             bool rows_own=false;
-            if(have_view && have_prev && (affine(view.inv[0],cur) || affine(view.inv[1],cur))) {
+            if(have_view && (affine(view.inv[0],cur) || affine(view.inv[1],cur))) {
                 const auto kind=table_.fix(view.eye,view.frame,cur,prev,2u);
-                rows_own=kind==PrevMvpTable::own_last || kind==PrevMvpTable::other_now || kind==PrevMvpTable::other_last;
+                // v1167: only this eye's render two frames back (own_last: already its rows; other_last: the chain through the other eye
+                // one frame back). other_now (the other eye in the same frame) cannot exist with one view per frame: never "own".
+                rows_own=kind==PrevMvpTable::own_last || kind==PrevMvpTable::other_last;
             }
-            const bool own=RigMask::previous_palette(c,have_view?static_cast<int>(view.eye):-1,have_view?view.frame:0u,rows_own && have_prev);
+            const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);
+            if(!have_view) RigMask::previous_palette(c,-1,newest_frame_.load(std::memory_order_relaxed),false); // zero palette; its render is not valid
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
-            if(!have_prev) return false; // no previous rows in this layout (not a prepass variant)
             if(!own) std::memcpy(prev,cur,64);
             return bind_pool(c,s,*sh,nullptr,prev);
         }

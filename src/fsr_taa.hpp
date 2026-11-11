@@ -1000,6 +1000,25 @@ private:
         return true;
     }
     std::array<std::array<UINT,4>,2> fovea_key_{}; // v1107: the fovea boxes the contexts were built for (zeros = off)
+    // v1167 diagnostic (immediate context, waits for the GPU): a whole texture as u32 width,height,format,row bytes then rows.
+    static void write_probe_image(ID3D11DeviceContext* c,ID3D11Resource* r,const std::wstring& path) noexcept {
+        try {
+            Microsoft::WRL::ComPtr<ID3D11Device> dev;c->GetDevice(&dev);Microsoft::WRL::ComPtr<ID3D11Texture2D> t;
+            if(!dev || !r || FAILED(r->QueryInterface(IID_PPV_ARGS(&t)))) return;
+            D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);if(d.SampleDesc.Count!=1) return;
+            d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.MipLevels=1;d.ArraySize=1;
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> s;if(FAILED(dev->CreateTexture2D(&d,nullptr,&s))) return;
+            c->CopySubresourceRegion(s.Get(),0,0,0,0,t.Get(),0,nullptr);D3D11_MAPPED_SUBRESOURCE m{};
+            if(FAILED(c->Map(s.Get(),0,D3D11_MAP_READ,0,&m))) return;
+            FILE* out{};
+            if(!_wfopen_s(&out,path.c_str(),L"wb") && out) {
+                const UINT row=std::min<UINT>(d.Width*4,m.RowPitch),header[4]{d.Width,d.Height,static_cast<UINT>(d.Format),row};fwrite(header,4,4,out);
+                for(UINT y=0;y<d.Height;++y) fwrite(static_cast<const char*>(m.pData)+static_cast<std::size_t>(y)*m.RowPitch,1,row,out);
+                fclose(out);
+            }
+            c->Unmap(s.Get(),0);
+        } catch(...) {}
+    }
     // Immediate context, under mutex_, after this job's prefix ran and the depth copy was recorded (see MotionProbe). Diagnostics only.
     void write_motion_probe(ID3D11DeviceContext* c,const Job& job,ID3D11Texture2D* depth,UINT rw,UINT rh) noexcept {
         try {
@@ -1007,12 +1026,12 @@ private:
             if(!dev) return;
             const auto& p=job.probe;
             std::string sizes;
-            const auto save=[&](ID3D11Resource* r,const wchar_t* suffix,const char* name) {
+            const auto save=[&](ID3D11Resource* r,const wchar_t* suffix,const char* name,UINT box_w=0,UINT box_h=0) {
                 Microsoft::WRL::ComPtr<ID3D11Texture2D> t;
                 if(!r || FAILED(r->QueryInterface(IID_PPV_ARGS(&t)))) return;
                 D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);
                 sizes+=std::string(",\"")+name+"_texture\":["+std::to_string(d.Width)+','+std::to_string(d.Height)+','+std::to_string(static_cast<UINT>(d.Format))+']';
-                const UINT w=std::min(rw,d.Width),h=std::min(rh,d.Height);
+                const UINT w=std::min(box_w?box_w:rw,d.Width),h=std::min(box_h?box_h:rh,d.Height);
                 const DXGI_FORMAT f=d.Format;
                 const UINT bpp=f==DXGI_FORMAT_R32G32B32A32_FLOAT?16u:(f==DXGI_FORMAT_R16G16B16A16_FLOAT || f==DXGI_FORMAT_R16G16B16A16_UNORM || f==DXGI_FORMAT_R32G32_FLOAT)?8u:4u;
                 d.Width=w;d.Height=h;d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.MipLevels=1;d.ArraySize=1;
@@ -1035,6 +1054,8 @@ private:
             if(me.motion_valid) save(me.motion.p,L"-motion.rgba16f","eye_motion"); // v1151: the motion pass's output of this render
             if(me.rig_valid) save(me.rig.p,L"-rig.r8","rig"); // v1163: the rig mask of this render (0/255)
             if(p.colour) save(job.colour.p,L"-colour.raw","colour");
+            // v1167 edge-band diagnostic: the upscale input with 64 texels beyond the render rectangle (what lies right of and below it)
+            if(p.colour) save(job.colour.p,L"-colour-edge.raw","colour_edge",rw+64,rh+64);
             // b1 = CBPerViewGlobals (0x320 bytes) as the TAA dispatch read it, copied on the game's context before the split
             std::string b1;
             if(p.b1) {
@@ -1089,7 +1110,8 @@ private:
         e.rig_valid=false;e.rig_live=false;e.rig_motion=false;
         {
             const bool view_render=RigMask::take_view_draws()>0;
-            const bool rig_motion_now=RigMask::take_rig_motion(); // v1166: once a render, copied or not
+            // v1166/v1167: this exact render's rig MV draws (its receipt names its engine frame), all with the eye's own pair
+            const bool rig_motion_now=job.receipt && !job.receipt->reset && RigMask::take_rig_motion(job.receipt->key.native_counter);
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rig_depth;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rig_target;
             if(view_render && rig_copy_.p && rig_cb_.p && e.rig_uav.p && e.rig_count_uav.p && e.rig_count_staging[0].p && RigMask::target(depth_resource_.p,rig_depth,rig_target)) {
                 float k[4]{0,0,static_cast<float>(depth_w),static_cast<float>(depth_h)};rig_mask_eps(depth_srv_format_,k[0],k[1]);
@@ -1259,6 +1281,8 @@ private:
         eye_upscaler_generation[static_cast<std::size_t>(job.eye)]=dl?dlss_mode::generation:fov?fovea_generation:ml?4u:3u;
         eye_fsr4_version[static_cast<std::size_t>(job.eye)]=ml?e.fsr4.version_id():0;
         if(job.upscale) {if(!ml && !fov) c->CopyResource(job.output.p,e.upscaled.p);++upscaled;} // over the game's bilinear upscale
+        // v1167 edge-band diagnostic: this probe dispatch's eye image as the upscale leaves it (compare with the end-of-frame eye image)
+        if(job.upscale && !job.probe.stem.empty() && job.probe.colour) write_probe_image(c,job.output.p,job.probe.stem+L"-upscaled.rgba");
         e.timer.end(c,ticket);
         const auto timing=e.timer.stats();const auto side=static_cast<std::size_t>(job.eye);
         eye_gpu_ms[side]=static_cast<float>(timing.last_ms);eye_gpu_samples[side]=timing.samples;

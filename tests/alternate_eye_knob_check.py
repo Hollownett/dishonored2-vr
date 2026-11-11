@@ -197,18 +197,19 @@ rig = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 mp = (root / 'src' / 'eye_motion_pass.hpp').read_text(encoding='utf-8')
 assert 'stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig");' in probe
-assert 'd2vr::RigMask::view=alternate_on() && mono && stale_eye_rig_knob?address:0;' in probe
-assert 'const bool rig_on=alternate_on() && stale_eye_rig_knob;' in probe and 'd2vr::RigMask::enabled=rig_on;if(game_xr) game_xr->stale_rig_masks=rig_on;' in probe
+assert 'const std::uintptr_t rig_view=alternate_on() && mono && stale_eye_rig_knob?address:0;' in probe and 'd2vr::RigMask::begin_epoch();' in probe
+assert 'stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion");' in probe
+assert 'const bool rig_on=alternate_on() && stale_eye_rig_knob;' in probe and 'd2vr::RigMask::enabled=rig_on;if(game_xr) {game_xr->stale_rig_masks=rig_on;game_xr->stale_rig_motion_rules=stale_eye_rig_motion_knob;}' in probe
 assert probe.count('d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view());') == 4
 assert probe.count('rig_mask.after({') == 4 and probe.count('&rig_mask_draw<Binding>,&rig_mask_targets<Binding>);') == 4
-assert 'game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob);' in probe
+assert 'game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob,fsr_taa.eye_rig_motion(static_cast<int>(motion_eye)));' in probe
 assert '\\"rig_mask\\":' in probe and '\\"rig_mask_pixels\\":' in probe
 assert 'if(!stale_rig_masks || eye>1 || !stale_rig_live_[eye] || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};' in xr
 assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fresh_rig.texture) ++stale_rig_one_sided;kept_rig={};fresh_rig={};}' in xr
 assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
 assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
 assert '(mvScale.z>0?rigTex.Load(int3(i.xy,0))==0:proj.y/(d+proj.x)>=proj.z)' in mp
-assert 'const bool own=RigMask::previous_palette(c,have_view?static_cast<int>(view.eye):-1,have_view?view.frame:0u,rows_own && have_prev);' in om and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
+assert 'const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);' in om and 'rows_own=kind==PrevMvpTable::own_last || kind==PrevMvpTable::other_last;' in om and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
 assert 'restore_t0(); // v1166' in rig and 'if(e.rig_motion) {k.proj[2]=0;++motion_rig_moving;} else k.mv_scale[2]=1;' in fsr
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
 assert 'ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;' in rig and 'targets(c,rtv_count,rtvs.data(),dsv);' in rig

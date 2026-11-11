@@ -1399,6 +1399,7 @@ static struct AltMotionTimes {
     double kept_part(UINT64 n) const noexcept {return part(n,0,1,1,3);}
 } alt_motion_times;
 static bool stale_eye_motion_knob=true; // v1151: build/no-stale-eye-motion = no motion textures, no mover rules, no alternate object-motion fix
+static bool stale_eye_rig_motion_knob=true; // v1167: build/no-stale-eye-rig-motion = the warp's rig motion rules off (StaleLayers::rig_motion_rules)
 static bool stale_eye_rig_knob=true; // v1162/v1163: build/no-stale-eye-rig = no rig detection, no replays, no masks
 static std::atomic<unsigned> alt_motion_left{0},alt_motion_burst{0},alt_motion_index{0};
 static unsigned alt_motion_bursts=6,alt_motion_size=8,alt_motion_interval_s=10;static UINT64 alt_motion_next_tick=0;
@@ -6090,7 +6091,8 @@ void observe_eye_setup(void* view) noexcept {
             d2vr::ObjectMotion::note_eye_view(static_cast<unsigned>(eye),mono || alternate_on()?0:address); // paired eyes only
             if(mono || alternate_on()) d2vr::ObjectMotion::note_eye_view(static_cast<unsigned>(eye)^1u,0); // v1153: no stale paired view of the other slot
             d2vr::ObjectMotion::note_alternate_view(alternate_on() && mono && stale_eye_motion_knob?address:0); // v1151: alternate one-view frames
-            d2vr::RigMask::view=alternate_on() && mono && stale_eye_rig_knob?address:0; // v1162/v1163: the rig draws of this view's passes are replayed
+            {const std::uintptr_t rig_view=alternate_on() && mono && stale_eye_rig_knob?address:0;if(rig_view && !d2vr::RigMask::view.load()) d2vr::RigMask::begin_epoch(); // v1167: a fresh palette history
+             d2vr::RigMask::view=rig_view;} // v1162/v1163: the rig draws of this view's passes are replayed
             if(mono) d2vr::PostTonemapPass::eye_views[1]=0; // no second view: nothing may name eye 1
         }
         std::lock_guard<std::mutex> lock(log_mutex);
@@ -11838,7 +11840,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 UINT motion_w{},motion_h{};const auto motion=stale_eye_motion_knob?fsr_taa.eye_motion(static_cast<int>(motion_eye),motion_w,motion_h):nullptr;
                                 game_xr->stale_eye_motion(motion_eye,motion.Get(),motion_w,motion_h,number);
                                 UINT rig_w{},rig_h{};bool rig_live{};const auto rig=fsr_taa.eye_rig(static_cast<int>(motion_eye),rig_w,rig_h,&rig_live); // v1160: the stencil plane
-                                game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob); // v1162: a marked mask
+                                game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob,fsr_taa.eye_rig_motion(static_cast<int>(motion_eye))); // v1162 mask; v1167 its rig motion flag
                             }
                             game_xr->stale_motion_rules=stale_eye_motion_knob;
                             alt_motion_times.note(number,alt_fresh);
@@ -11921,7 +11923,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         { // v1162: the rig stencil mask (performance mode only; build/no-stale-eye-rig: inert)
                             const bool rig_on=alternate_on() && stale_eye_rig_knob;
                             if(!rig_on) d2vr::RigMask::view=0;
-                            d2vr::RigMask::enabled=rig_on;if(game_xr) game_xr->stale_rig_masks=rig_on;
+                            d2vr::RigMask::enabled=rig_on;if(game_xr) {game_xr->stale_rig_masks=rig_on;game_xr->stale_rig_motion_rules=stale_eye_rig_motion_knob;}
                             if(rig_on) publish_rig_buffers();
                             d2vr::RigMask::present();
                             if(rig_on) if(auto* rig_device=gpu_game_device.load()) {ComPtr<ID3D11DeviceContext> immediate;rig_device->GetImmediateContext(&immediate);fsr_taa.poll_rig_pixels(immediate.Get());}
@@ -15304,7 +15306,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose
             stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion"); // v1151: motion textures + mover rules (design 2026-11-11)
-            stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig"); // v1162/v1163: the player-rig mask (rig_mask.hpp)
+            stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig");
+            stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion"); // v1167 // v1162/v1163: the player-rig mask (rig_mask.hpp)
             stale_eye_parallax_knob=!fs::exists(root/L"build"/L"no-stale-eye-parallax"); // v796: and its world pixels with parallax (walking)
             stale_near_range=d2vr::near_range_default; // v798: near content from the fresh eye within this many metres (0: off)
             {std::ifstream knob(root/L"build"/L"stale-near-range");double metres{};if(knob>>metres && metres>=0 && metres<=20) stale_near_range=metres;}

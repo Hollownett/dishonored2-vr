@@ -54,9 +54,12 @@ inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) 
 // t0 together with the eye's own previous rows; either missing, both become the current ones (zero motion), counted.
 // Pure: the history slots for `frame` from the two slots' frames (stored +1, 0 = empty): read = the slot holding frame - step (-1 none),
 // write = the other one (done: this frame was copied already).
+// v1167: keys carry an epoch (high 32 bits): a new epoch at each start of the one-view mode and when the engine frame counter goes back
+// (a load restarts it), so a slot written in an earlier session can never pass for this eye's previous render.
 struct RigHistorySlots {int read{-1};unsigned write{};bool done{};};
-inline RigHistorySlots rig_history_slots(std::uint32_t key0,std::uint32_t key1,std::uint32_t frame,unsigned step) noexcept {
-    RigHistorySlots s{};const std::uint32_t want=frame-step+1,now=frame+1;
+inline std::uint64_t rig_history_key(std::uint32_t epoch,std::uint32_t frame) noexcept {return std::uint64_t{epoch}<<32|std::uint32_t(frame+1);}
+inline RigHistorySlots rig_history_slots(std::uint64_t key0,std::uint64_t key1,std::uint32_t epoch,std::uint32_t frame,unsigned step) noexcept {
+    RigHistorySlots s{};const std::uint64_t want=frame>=step?rig_history_key(epoch,frame-step):~std::uint64_t{0},now=rig_history_key(epoch,frame);
     s.read=key0==want?0:key1==want?1:-1;
     if(key0==now) {s.write=0;s.done=true;} else if(key1==now) {s.write=1;s.done=true;} else s.write=s.read==0?1u:0u;
     return s;
@@ -83,14 +86,23 @@ public:
     // v1166, ObjectMotion at a rig draw (alternate): binds at VS t0 this eye's own previous palette when `rows_own` (the draw gets the eye's
     // own previous rows) and that palette exists (this eye's render `frame - 2`), else the current palette (zero motion; the caller then
     // uses the current rows too). Records the current palette for this eye's next render. True: the own pair is in place. Restored in after().
+    // v1167: called for every rig draw that has previous rows (a motion-vector writer). One whose palette bindings are not the prepass
+    // form (t0/t1 the model's wrappers; t0 == t1 when the engine itself reset the history) cannot be zeroed: its render is not valid.
     static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own) noexcept {
-        if(!tl_rig_ || !tl_prepass_ || !tl_current_ || !c) return false;
+        if(!tl_rig_ || !c) return false;
+        if(!tl_prepass_ || !tl_current_) {
+            note_frame(frame,false);unpaired_.fetch_add(1,std::memory_order_relaxed);
+            const unsigned p=tl_pattern_%64;unpaired_patterns_[p].fetch_add(1,std::memory_order_relaxed);
+            return false;
+        }
+        const std::uint32_t epoch=epoch_for(frame);
         ID3D11ShaderResourceView* bind=tl_current_;bool own=false;
         if(eye==0 || eye==1) if(History* h=history(c,static_cast<unsigned>(eye),tl_model_)) {
-            const auto pick=rig_history_slots(h->key[0].load(std::memory_order_acquire),h->key[1].load(std::memory_order_acquire),frame,2);
+            const auto pick=rig_history_slots(h->key[0].load(std::memory_order_acquire),h->key[1].load(std::memory_order_acquire),epoch,frame,2);
             if(!pick.done) {
-                std::uint32_t old=h->key[pick.write].load(std::memory_order_relaxed);
-                if(old!=frame+1 && h->key[pick.write].compare_exchange_strong(old,frame+1,std::memory_order_acq_rel)) {
+                const auto now=rig_history_key(epoch,frame);
+                std::uint64_t old=h->key[pick.write].load(std::memory_order_relaxed);
+                if(old!=now && h->key[pick.write].compare_exchange_strong(old,now,std::memory_order_acq_rel)) {
                     ID3D11Resource* current{};tl_current_->GetResource(&current);
                     if(current) {c->CopyResource(h->buffer[pick.write].Get(),current);current->Release();history_copies_.fetch_add(1,std::memory_order_relaxed);}
                 }
@@ -100,14 +112,18 @@ public:
         }
         if(!tl_saved_set_) {c->VSGetShaderResources(0,1,&tl_saved_t0_);tl_saved_set_=true;}
         c->VSSetShaderResources(0,1,&bind);
-        (own?own_pairs_:zero_pairs_).fetch_add(1,std::memory_order_relaxed);(own?own_since_:zero_since_).fetch_add(1,std::memory_order_relaxed);
+        (own?own_pairs_:zero_pairs_).fetch_add(1,std::memory_order_relaxed);note_frame(frame,own);
         return own;
     }
-    // FsrTaa's motion pass, once a render: every rig prepass draw since the last call had its own pair (and there was one)
-    static bool take_rig_motion() noexcept {
-        const auto own=own_since_.exchange(0,std::memory_order_relaxed),zero=zero_since_.exchange(0,std::memory_order_relaxed);
-        return own>0 && zero==0;
+    // FsrTaa's motion pass, once a render (`frame` = its receipt's engine frame): every rig motion-vector draw of exactly that render had
+    // its own pair, and there was at least one. v1167: per engine frame (was: since the last call, which a pipelined next render could feed).
+    static bool take_rig_motion(std::uint32_t frame) noexcept {
+        FrameTally& t=tally_[frame&7];
+        if(t.frame.load(std::memory_order_acquire)!=frame+1) return false;
+        return t.own.load(std::memory_order_relaxed)>0 && t.zero.load(std::memory_order_relaxed)==0;
     }
+    // dxgi_probe: the one-view mode (re)starts (the alternate view appears after paired frames or a mode change): a new history epoch.
+    static void begin_epoch() noexcept {epoch_.fetch_add(1,std::memory_order_relaxed);max_frame_.store(0,std::memory_order_relaxed);}
     // FsrTaa's copy: draws of the alternate view seen since the last call (0: no one-view render, the mask is not live), and the rig target
     // of this scene depth (empty: none yet / another depth).
     static std::uint64_t take_view_draws() noexcept {return view_draws_.exchange(0,std::memory_order_relaxed);}
@@ -119,7 +135,9 @@ public:
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);target_={};ps_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
     static std::string json() {
         std::ostringstream o;
+        std::string patterns;for(unsigned p=0;p<64;++p) if(const auto n=unpaired_patterns_[p].load()) patterns+=(patterns.empty()?"":" ")+std::to_string(p/16)+std::to_string(p/4%4)+std::to_string(p%4)+':'+std::to_string(n);
         o<<"{\"enabled\":"<<(enabled.load()?"true":"false")<<",\"rig_motion\":{\"own\":"<<own_pairs_.load()<<",\"zero\":"<<zero_pairs_.load()
+         <<",\"unpaired\":"<<unpaired_.load()<<",\"unpaired_t0t1t2\":\""<<patterns<<"\",\"epoch\":"<<epoch_.load()
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"copies\":"<<history_copies_.load()<<"},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
@@ -170,10 +188,26 @@ private:
     // v1166: this draw's rig model (0, 1 arms, 2 body), its current palette view (t1, held), whether t0/t1 are that model's previous/current
     inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
     inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
-    struct History {std::atomic<std::uint32_t> key[2]{};Microsoft::WRL::ComPtr<ID3D11Buffer> buffer[2];Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view[2];
+    struct History {std::atomic<std::uint64_t> key[2]{};Microsoft::WRL::ComPtr<ID3D11Buffer> buffer[2];Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view[2];
         std::uintptr_t source{};UINT bytes{};std::atomic<bool> ready{};};
     inline static std::array<std::array<History,3>,2> history_{};
-    inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},own_since_{},zero_since_{},no_history_{},history_copies_{};
+    inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},history_copies_{},unpaired_{};
+    // v1167: rig MV draws per engine frame (own pair / not), the unpaired draws' binding pattern (t0,t1,t2: 0 none, 1 previous wrapper,
+    // 2 current wrapper... encoded as the rig buffer slot kind: 0 none, 1 this model wrapper 0, 2 wrapper 1, 3 another model), the epoch
+    struct FrameTally {std::atomic<std::uint32_t> frame{};std::atomic<std::uint32_t> own{},zero{};};
+    inline static std::array<FrameTally,8> tally_{};inline static std::array<std::atomic<std::uint64_t>,64> unpaired_patterns_{};
+    inline static std::atomic<std::uint32_t> epoch_{1},max_frame_{};inline static thread_local unsigned tl_pattern_{};
+    static void note_frame(std::uint32_t frame,bool own) noexcept {
+        FrameTally& t=tally_[frame&7];std::uint32_t tag=t.frame.load(std::memory_order_acquire);
+        if(tag!=frame+1 && t.frame.compare_exchange_strong(tag,frame+1,std::memory_order_acq_rel)) {t.own.store(0,std::memory_order_relaxed);t.zero.store(0,std::memory_order_relaxed);}
+        (own?t.own:t.zero).fetch_add(1,std::memory_order_relaxed);
+    }
+    static std::uint32_t epoch_for(std::uint32_t frame) noexcept { // the engine counter went back (a load): a new epoch
+        std::uint32_t seen=max_frame_.load(std::memory_order_relaxed);
+        if(seen>frame+16) {if(max_frame_.compare_exchange_strong(seen,frame,std::memory_order_relaxed)) epoch_.fetch_add(1,std::memory_order_relaxed);}
+        else while(frame>seen && !max_frame_.compare_exchange_weak(seen,frame,std::memory_order_relaxed)) {}
+        return epoch_.load(std::memory_order_relaxed);
+    }
     // The eye's two palette slots of `model`, made like the current palette buffer and view (recreated when the model's buffers change).
     static History* history(ID3D11DeviceContext* c,unsigned eye,unsigned model) noexcept {
         History& h=history_[eye][model];
@@ -221,7 +255,10 @@ private:
             if(r) r->Release();
         }
         // v1166: the prepass binding (t0 previous, t1 current, the two wrappers of one model): keep the current view for previous_palette
-        tl_prepass_=which[0]>=0 && which[1]>=0 && which[0]/2==which[1]/2 && which[0]!=which[1];
+        // v1167: t0 == t1 (the engine's own history reset, 0x25da80) is the prepass form too
+        tl_prepass_=which[0]>=0 && which[1]>=0 && which[0]/2==which[1]/2;
+        tl_pattern_=0;
+        for(unsigned k=0;k<3;++k) tl_pattern_=tl_pattern_*4+(which[k]<0?0u:which[1]>=0 && which[k]/2!=which[1]/2?3u:1u+static_cast<unsigned>(which[k]%2));
         if(tl_prepass_) {tl_model_=static_cast<unsigned>(which[1]/2);tl_current_=views[1];views[1]=nullptr;}
         for(auto* v:views) if(v) v->Release();
         return hit;

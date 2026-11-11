@@ -421,7 +421,7 @@ private:
     std::array<std::uint64_t,2> stale_motion_frame_{};
     // v1160: each eye's rig mask of its last render (FsrTaa::eye_rig, v1163), handed in like the motion textures
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_rig_{};std::array<UINT,2> stale_rig_width_{},stale_rig_height_{};
-    std::array<std::uint64_t,2> stale_rig_frame_{};std::array<bool,2> stale_rig_live_{}; // v1162: a rig mask of a one-view render (rig_mask.hpp)
+    std::array<std::uint64_t,2> stale_rig_frame_{};std::array<bool,2> stale_rig_live_{},stale_rig_motion_{}; // v1162: a rig mask of a one-view render (rig_mask.hpp)
     std::array<std::optional<StaleLayers>,2> stale_layers_{}; // v797: scene, player and hand layers of each eye's last warp
     bool stale_warped_(UINT eye) const noexcept {return eye<2 && alternate_frame && stale_warped_frame_[eye]==alternate_frame;}
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
@@ -1955,9 +1955,12 @@ public:
     void stale_eye_motion(UINT eye,ID3D11Texture2D* motion,UINT width,UINT height,std::uint64_t frame) noexcept {
         if(eye<2) {stale_motion_[eye]=motion;stale_motion_width_[eye]=width;stale_motion_height_[eye]=height;stale_motion_frame_[eye]=motion?frame:0;}
     }
-    void stale_eye_rig(UINT eye,ID3D11Texture2D* rig,UINT width,UINT height,std::uint64_t frame,bool live=false) noexcept { // v1160; v1162 live
-        if(eye<2) {stale_rig_[eye]=rig;stale_rig_width_[eye]=width;stale_rig_height_[eye]=height;stale_rig_frame_[eye]=rig?frame:0;stale_rig_live_[eye]=rig && live;}
+    void stale_eye_rig(UINT eye,ID3D11Texture2D* rig,UINT width,UINT height,std::uint64_t frame,bool live=false,bool motion=false) noexcept { // v1160; v1162 live; v1167 motion
+        if(eye<2) {stale_rig_[eye]=rig;stale_rig_width_[eye]=width;stale_rig_height_[eye]=height;stale_rig_frame_[eye]=rig?frame:0;stale_rig_live_[eye]=rig && live;stale_rig_motion_[eye]=rig && live && motion;}
     }
+    // v1167: that eye's last render's rig pixels carry its own-eye motion (FsrTaa rig_motion), for this Present only
+    bool stale_rig_motion(UINT eye) const noexcept {return eye<2 && stale_rig_motion_[eye] && stale_rig_frame_[eye]==alternate_frame;}
+    bool stale_rig_motion_rules=true; // v1167: build/no-stale-eye-rig-motion = false
     // v1162: the warp takes the rig masks only when both renders' masks are marked ones of this Present (knob build/no-stale-eye-rig: never)
     StaleRig stale_rig_mask(UINT eye) const noexcept {
         if(!stale_rig_masks || eye>1 || !stale_rig_live_[eye] || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};
