@@ -242,6 +242,7 @@ int main(int argc, char** argv) {
         // STALE_REPLAY_AB=rig: compare without the rig masks (off: v1158's palm spheres) and with them (on), the mover rules on in both
         const char* ab = std::getenv("STALE_REPLAY_AB");
         const bool ab_rig = rig && ab && std::string(ab) == "rig";
+        const bool rig_live = rig && meta.has("rig_mask") && meta["rig_mask"].a.size() == 2 && meta["rig_mask"].a[0].b && meta["rig_mask"].a[1].b;
         const auto kd = load(stem + "kept-depth.r32"), fd = load(stem + "fresh-depth.r32");
         std::vector<unsigned char> km, fm;
         const bool motion = std::ifstream(stem + "kept-motion.rgba16f").good() && std::ifstream(stem + "fresh-motion.rgba16f").good();
@@ -348,7 +349,7 @@ int main(int argc, char** argv) {
         const StaleRig kept_rig = rig ? StaleRig{kr_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
         const StaleRig fresh_rig = rig ? StaleRig{fr_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleRig{};
         const auto run = [&](bool variant) {
-            const bool rules = ab_rig ? true : variant, masks = ab_rig && variant;  // v1160: the dumped stencil is not the rig: masks only on request
+            const bool rules = ab_rig ? true : variant, masks = ab_rig ? variant : rig_live;  // v1160 stencils were not the rig: masks where the meta says rig_mask
             layers.motion_rules = rules;
             const auto t0 = std::chrono::steady_clock::now();
             auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
@@ -359,6 +360,11 @@ int main(int argc, char** argv) {
             return c;
         };
         const auto on = run(true), off = run(false);
+        if (std::getenv("STALE_REPLAY_FITS")) {  // the hand fit of each replay (target pixels; fraction of the hand's samples the fresh eye sees)
+            context->Flush(); for (int i = 0; i < 50 && warp.hand_fits.size() < 2; ++i) warp.poll_hand_fits();
+            for (const auto& f : warp.hand_fits) std::printf("      fit: L %+.1f %+.1f (%.2f/%.2f) R %+.1f %+.1f (%.2f/%.2f)\n", f.hands[0][0], f.hands[0][1], f.hands[0][2], f.hands[0][3], f.hands[1][0], f.hands[1][1], f.hands[1][2], f.hands[1][3]);
+            warp.hand_fits.clear();
+        }
         for (const auto& [suffix, bytes] : {std::pair<const char*, const std::vector<unsigned char>*>{"-replay-on.rgba", &on}, {"-replay-off.rgba", &off}})
             std::ofstream(out + "/stale-warp-" + std::to_string(n) + suffix, std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()), static_cast<std::streamsize>(bytes->size()));
         if (std::getenv("STALE_REPLAY_EXITS")) {

@@ -825,7 +825,7 @@ static void gpu_rig() {
     // hand, hand2: a 12 cm square 0.5 m ahead centred at x (NaN: none; a bright line at its centre); forearm: a rig bar from the hand's right
     // edge to 40 cm right of its centre; stick: a held rig stick from its left edge to 38 cm left; prop: a still striped object (not rig),
     // 6 cm wide, 0.5 m ahead, from x; wall: the wall's distance; yaw: the camera turned about +Y (canted eyes)
-    struct Scene {double hand = std::nan(""), hand2 = std::nan(""); bool forearm = false, stick = false; double prop = std::nan(""), wall = 1.8, yaw = 0; int lift = 0;};
+    struct Scene {double hand = std::nan(""), hand2 = std::nan(""); bool forearm = false, stick = false, hood = false; double prop = std::nan(""), wall = 1.8, yaw = 0; int lift = 0;};
     const auto render = [&](double eye_x, const Scene& s) {
         Frame f; f.row.resize(W); f.kind.resize(W * H);
         std::vector<unsigned char> pixels(W * H * 4), mask(W * H); std::vector<float> d(W * H);
@@ -843,6 +843,9 @@ static void gpu_rig() {
                 if (s.forearm && h == s.hand && px > h + 0.06 && px <= h + 0.40 && std::abs(py) < 0.03) {a = pa; c = stripes(px - h, 0.03, 80, 110); kind = arm_kind;}
                 if (std::abs(px - h) <= 0.06 && std::abs(py) < 0.06) {a = pa; c = std::abs(px - h) < pa * 2 / W ? 255 : 120; kind = hand_kind;}
             }
+            // hood: the player's own hood or collar (rig, head-attached) 0.1 m before the eye at the left edge of the view, striped
+            double hx, hy; const double ha = plane(0.1, hx, hy);
+            if (s.hood && hx < -0.028) {a = ha; c = stripes(hx, 0.004, 50, 90); kind = arm_kind;}
             c = std::min(255, c + s.lift);
             auto* p = &pixels[(y * W + x) * 4]; p[0] = p[1] = p[2] = static_cast<unsigned char>(c); p[3] = 255;
             d[y * W + x] = static_cast<float>(0.01 / a); f.kind[y * W + x] = kind; mask[y * W + x] = kind == wall_kind || kind == prop_kind ? 0 : 255;
@@ -928,6 +931,17 @@ static void gpu_rig() {
         for (int x = 0; x < static_cast<int>(W); ++x) if (std::abs(plane_x(x) + 0.3) < 0.055) {++n; with += std::abs(on[x] - k.row[x]) > 1; sphere += std::abs(off[x] - k.row[x]) > 1;}
         std::printf("r5. still hand beside a moving one: %d of %d columns off its kept pixels with the masks, %d with the sphere\n", with, n, sphere);
         CHECK(n > 10 && with == 0);
+    }
+    // r6. (v1163 dumps 1-3) the hood 10 cm before the eye, 41 cm from a palm that moved 5 cm: the head's, not the hand's; it stays
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.hood = fresh.hood = now.hood = true; fresh.lift = 30;
+        const Frame k = render(0.032, kept), f = render(-0.032, fresh);
+        const auto l = layers_for(-0.05, 0.0);
+        const auto on = row(k, f, l, true);
+        int n = 0, moved = 0;
+        for (int x = 1; x < static_cast<int>(W) - 1; ++x) if (k.kind[(H / 2) * W + x] == arm_kind && plane_x(x) < -0.2) {++n; moved += std::abs(on[x] - k.row[x]) > 8; if (n % 10 == 1) std::printf("   hood column %d: %d (kept %d, fresh %d)%c", x, on[x], k.row[x], f.row[x], 10);}
+        std::printf("r6. hood 10 cm before the eye: %d of %d columns off its kept pixels with the masks\n", moved, n);
+        CHECK(n > 20 && moved == 0);
     }
     // r7. the view corner (canted eyes turned 14 degrees apart each way): the right hand and its stick at the right edge of the rebuilt
     // eye, 3 cm further out now, where the fresh eye has no view. No black or white there, and this eye's own rig where it was.

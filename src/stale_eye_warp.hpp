@@ -575,7 +575,9 @@ int Owner(float2 q) {
         if(!KeptRig(q)) return 0;
         const float3 p=KeptPoint(q);
         const float dl=palmL.w>0 && p.z>0?distance(p,palmL.xyz):1e9,dr=palmR.w>0 && p.z>0?distance(p,palmR.xyz):1e9;
-        if(min(dl,dr)>=rigMap.y) return 1;
+        // v1164 (v1163 dumps 1-3: the hood 8 cm before the eye lay within 45 cm of the left palm and followed that hand's 0.05 mm recorded
+        // motion, ~0.7 px at that distance: its dithered edge shimmered): a rig pixel nearer to the eye than to the palm is the head's
+        if(min(dl,dr)>=min(rigMap.y,length(p))) return 1;
         return dl<=dr?2:3;
     }
     return OwnerAt(KeptPoint(q));
