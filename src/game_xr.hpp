@@ -419,9 +419,9 @@ private:
     // v1151: each eye's motion texture (FsrTaa::eye_motion of its last render, like stale_depth_) and the Present it was handed in
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_motion_{};std::array<UINT,2> stale_motion_width_{},stale_motion_height_{};
     std::array<std::uint64_t,2> stale_motion_frame_{};
-    // v1160: each eye's stencil plane of its last render (FsrTaa::eye_rig), handed in like the motion textures; not yet read by the warp
+    // v1160: each eye's rig mask of its last render (FsrTaa::eye_rig, v1163), handed in like the motion textures
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_rig_{};std::array<UINT,2> stale_rig_width_{},stale_rig_height_{};
-    std::array<std::uint64_t,2> stale_rig_frame_{};std::array<bool,2> stale_rig_live_{}; // v1162: the texture is a marked rig mask (rig_stencil.hpp)
+    std::array<std::uint64_t,2> stale_rig_frame_{};std::array<bool,2> stale_rig_live_{}; // v1162: a rig mask of a one-view render (rig_mask.hpp)
     std::array<std::optional<StaleLayers>,2> stale_layers_{}; // v797: scene, player and hand layers of each eye's last warp
     bool stale_warped_(UINT eye) const noexcept {return eye<2 && alternate_frame && stale_warped_frame_[eye]==alternate_frame;}
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
@@ -1964,7 +1964,7 @@ public:
         return {stale_rig_[eye].Get(),stale_rig_width_[eye],stale_rig_height_[eye]};
     }
     bool stale_rig_masks=true;std::uint64_t stale_rig_warps=0,stale_rig_one_sided=0; // v1162: warps given both masks; warps with only one live
-    StaleDepth stale_rig(UINT eye) const noexcept { // v1160: this Present's (R8_UINT raw stencil), else none
+    StaleDepth stale_rig(UINT eye) const noexcept { // v1160: this Present's (R8, 0/255), else none
         if(eye>1 || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};
         return {stale_rig_[eye].Get(),stale_rig_width_[eye],stale_rig_height_[eye]};
     }

@@ -33,7 +33,7 @@
 #include <sstream>
 #include <string>
 #include "weapon_draw_place.hpp"
-#include "rig_stencil.hpp"
+#include "rig_mask.hpp"
 
 namespace d2vr {
 // Draws of the recent eye views keyed by their exact current rows -> the engine's original previous rows.
@@ -680,9 +680,9 @@ private:
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool near_draw=cur[15]>0.01f && cur[15]<near_w;
         const bool alt=alternate(); // v1151: the held-weapon placement is a paired-mode binder; alternate draws take the general path
-        // v1162: a rig draw (rig_stencil.hpp: binds an arm/body skin buffer) keeps the engine's own rows in alternate mode: the mod re-poses
+        // v1162: a rig draw (rig_mask.hpp: binds an arm/body skin buffer) keeps the engine's own rows in alternate mode: the mod re-poses
         // those models per render (image skin), so no table row of them is this eye's true previous; the warp's hand layers own their pixels.
-        if(alt && RigStencil::draw_is_rig()) {alt_rig_.fetch_add(1,std::memory_order_relaxed);return false;}
+        if(alt && RigMask::draw_is_rig()) {alt_rig_.fetch_add(1,std::memory_order_relaxed);return false;}
         if(near_draw && !alt && weapon_draw_on(weapon_mode_.load(std::memory_order_relaxed),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);
             const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;

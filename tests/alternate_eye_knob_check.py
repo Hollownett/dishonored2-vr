@@ -191,22 +191,24 @@ assert 'stale_layers_[eye]->motion_rules=stale_motion_rules;' in xr and 'const S
 assert 'if(job.receipt && !job.receipt->reset && job.receipt->phase>=2 && e.motion_uav.p && e.depth_srv.p && job.motion.p) {' in fsr
 print('PASS: v1151 mover routing (knob, motion textures per eye, parts and rules, receipt-gated pass, status)')
 
-# v1162 rig mask: knob, marking only in the alternate one-view's passes, both masks or none to the warp, the mask as the motion pass's arm rule,
-# rig draws on the engine's rows in object_motion, status
-rig = (root / 'src' / 'rig_stencil.hpp').read_text(encoding='utf-8')
+# v1162/v1163 rig mask: knob, rig draws of the alternate one-view replayed into the rig depth (right after the engine's draw), the
+# mask resolved at the copy, both-or-none masks, the mask as the motion pass's arm rule, rig draws on the engine's rows, status
+rig = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 mp = (root / 'src' / 'eye_motion_pass.hpp').read_text(encoding='utf-8')
 assert 'stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig");' in probe
-assert 'd2vr::RigStencil::view=alternate_on() && mono && stale_eye_rig_knob?address:0;' in probe
-assert 'const bool rig_on=alternate_on() && stale_eye_rig_knob;' in probe and 'd2vr::RigStencil::enabled=rig_on;if(game_xr) game_xr->stale_rig_masks=rig_on;' in probe
-assert probe.count('const d2vr::RigStencil::Scope rig_stencil(context,d2vr::RenderPassMap::current_view());') == 4
+assert 'd2vr::RigMask::view=alternate_on() && mono && stale_eye_rig_knob?address:0;' in probe
+assert 'const bool rig_on=alternate_on() && stale_eye_rig_knob;' in probe and 'd2vr::RigMask::enabled=rig_on;if(game_xr) game_xr->stale_rig_masks=rig_on;' in probe
+assert probe.count('d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view());') == 4
+assert probe.count('rig_mask.after({') == 4 and probe.count('&rig_mask_draw<Binding>,&rig_mask_targets<Binding>);') == 4
 assert 'game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob);' in probe
 assert '\\"rig_mask\\":' in probe and '\\"rig_mask_pixels\\":' in probe
 assert 'if(!stale_rig_masks || eye>1 || !stale_rig_live_[eye] || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};' in xr
 assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fresh_rig.texture) ++stale_rig_one_sided;kept_rig={};fresh_rig={};}' in xr
-assert 'const bool live=marks && RigStencil::live() && e.rig_count_uav.p && e.rig_count_staging[0].p;' in fsr
+assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
 assert 'if(e.rig_live && e.rig_srv.p) {k.mv_scale[2]=1;++motion_rig_masks;}' in fsr
 assert '(mvScale.z>0?rigTex.Load(int3(i.xy,0))==0:proj.y/(d+proj.x)>=proj.z)' in mp
-assert 'if(alt && RigStencil::draw_is_rig()) {alt_rig_.fetch_add(1,std::memory_order_relaxed);return false;}' in om
+assert 'if(alt && RigMask::draw_is_rig()) {alt_rig_.fetch_add(1,std::memory_order_relaxed);return false;}' in om
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
-print('PASS: v1162 rig mask routing (knob, alternate-view marking, both-or-none masks, motion arm rule, raw rig rows, status)')
+assert 'ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;' in rig and 'targets(c,rtv_count,rtvs.data(),dsv);' in rig
+print('PASS: v1163 rig mask routing (knob, one-view rig draws replayed, mask at the copy, both-or-none masks, motion arm rule, raw rig rows, status)')
