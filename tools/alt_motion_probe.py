@@ -150,7 +150,7 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
     for b, burst in bursts.items():
         ranked = pick_convention(burst)
         conv, med = ranked[0]
-        log(f'burst {b}: {len(burst)} dispatches, eyes {[d["meta"]["eye"] for d in burst]}, displays {[d["meta"]["display"] for d in burst]}')
+        log(f'burst {b}: {len(burst)} dispatches, eyes {[d["meta"]["eye"] for d in burst]}, presents {[d["meta"]["present"] for d in burst]}')
         log('  convention: ' + ', '.join(f'{n}={v}' for n, v in zip(CONV_NAMES, conv)) + f'  -> median {med:.4f} px')
         for c, m in ranked[1:4]: log('    runner-up: ' + ', '.join(f'{n}={v}' for n, v in zip(CONV_NAMES, c)) + f' -> {m:.4f} px')
         if med > 0.25: log('  WARNING: no convention reaches a 0.25 px median; the matrix/receipt assumptions do not hold for this burst')
@@ -167,7 +167,7 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
             r = dict(index=meta['index'], eye=meta['eye'], own_median=float(np.median(own)) if len(own) else None, movers=float(movers.mean()) if len(own) else 0.0)
             h1 = None
             other = burst[i - 1]['meta'] if i else None
-            if other and other['eye'] != meta['eye'] and other['display'] + 1 == meta['display']:
+            if other and other['eye'] != meta['eye'] and other['present'] + 1 == meta['present']:
                 h1 = residual_px(meta['current'], other['current'], conv, uv, dep, mv, size)
                 if movers.any():
                     better = (h1[movers] < own[movers]) & (h1[movers] <= threshold)
