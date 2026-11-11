@@ -120,8 +120,13 @@ float4 PSKey(V v):SV_TARGET{float4 c=PS(v);const float lit=max(c.r,max(c.g,c.b))
 // RECTANGLE with a smoky texture, not the radial model above (headset capture world-ui-1, 2496x2688: mid-left edge alpha .80 vs .60 modelled), so a
 // dark half-transparent band stayed round the wheel. Toward the edges (a rounded-rectangle metric) a pixel whose un-composited colour is near black is
 // that leftover and goes; the ring in the centre keeps its dark discs (a key everywhere made them pale, v762). Lab: unback_lab.py on world-ui-1.
+// v1145 (user, headset v1144: "only the main weapon wheel elements, rendered like inside the game"): the movie's other pieces (the potion and
+// shortcut corners, the Hide/Show hint, the d-pad) go too. The ring, its centre art and the item name sit within .245 of the image WIDTH from the
+// wheel's centre (the stage is fitted by width; centre (-.005,+.0205) width units off the texture centre); a soft cut to .275 (world-ui-1 lab).
 float4 Unframe(float2 uv,float4 r){const float2 q=abs(uv-.5)*2;const float m=pow(pow(q.x,4)+pow(q.y,4),.25);
-    const float lit=max(r.r,max(r.g,r.b))/max(r.a,1e-3);return r*(1-smoothstep(.50,.80,m)*(1-smoothstep(.05,.14,lit)));}
+    const float lit=max(r.r,max(r.g,r.b))/max(r.a,1e-3);float w,h;nativeArt.GetDimensions(w,h);
+    const float d=length(float2(uv.x-.5+.005,(uv.y-.5)*h/max(w,1)-.0205));
+    return r*(1-smoothstep(.50,.80,m)*(1-smoothstep(.05,.14,lit)))*(1-smoothstep(.245,.275,d));}
 float4 PSUnback(V v):SV_TARGET{float4 c=PS(v);const float edge=smoothstep(.85,1.38,length((v.uv-.5)*2));
     const float bgA=.502+.498*edge,a=saturate((c.a-bgA)/max(1-bgA,1e-3));
     return Unframe(v.uv,float4(min(max(c.rgb-float3(.046,.050,.056)*lerp(1.,.6,edge)*(1-a),0),a),a));}

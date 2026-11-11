@@ -1270,6 +1270,7 @@ public:
     }
     // Size of what this hand holds (the diagonal of its drawn bounds; a limb's sphere box), for fingers that close around it.
     std::optional<NativeRigidBody> held(unsigned side) {std::lock_guard<std::mutex> lock(mutex_);return side<2?lanes_[side].held:std::nullopt;}
+    bool near_player(const NativeRigidBody& body) const {return body_near_player(body);}   // v1145: the corpse collision's release test
     // v1074: a held prop's exact draw binding: its hold (the body in the sampled grip's frame, PhysicalGrab::relative) and the body + model frame of
     // its bind. Not for corpses, a second hand on a prop, or a two-handed hold (the goal turns toward the other hand: no fixed hold).
     struct HeldDraw {bool valid{};std::uintptr_t entity{};WorldTrackedPose relative{},body{};std::array<float,15> frame{};std::uint64_t serial{};};

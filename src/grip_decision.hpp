@@ -44,6 +44,12 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
         const std::uint64_t waited=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
         return tuning.grab_buffer_ms>0 && static_cast<double>(waited)<tuning.grab_buffer_ms?GripAloneChoice::pending:GripAloneChoice::none;
     }
+    // v1145 (user, headset v1144: "bodies can still only be grabbed with grip + trigger"; 35 grip-alone presses chose Use with a corpse bone 22-25 cm
+    // from the palm - the left hand's fast_native (a gun drawn / the hip) or a held takedown offer; the Use on a body is then blocked (v637), so the grip
+    // did nothing while the fist, which skips this decision, grabbed): a corpse bone in reach is grabbed whatever the gun or a takedown offer says.
+    // An occupied hand and the choke that owns this squeeze still win.
+    if(!in.occupied && !in.choke_owns && (in.takedown_offered || in.fast_native) && in.physical && in.physical->kind==PalmKind::bone &&
+       std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=tuning.body_gate_m && std::isfinite(in.physical->cost)) return GripAloneChoice::grab;
     if(in.occupied || in.choke_owns || in.takedown_offered || in.fast_native) return GripAloneChoice::use;
     const bool physical=in.physical && (in.physical->kind==PalmKind::prop || in.physical->kind==PalmKind::bone || in.physical->kind==PalmKind::living) &&
         std::isfinite(in.physical->distance) && in.physical->distance>=0 && in.physical->distance<=(in.physical->kind==PalmKind::prop?grab_acquire_distance:in.physical->kind==PalmKind::bone?tuning.body_gate_m:tuning.grip_alone_gate_m)   /* v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): a lying body's bone reaches body_gate_m (living keeps the hand-on-him gate) */ && std::isfinite(in.physical->cost);

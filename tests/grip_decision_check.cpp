@@ -148,6 +148,14 @@ int main() {
     {   // I2: the left hand at the hip or with a gun out is Use at the edge (no 150 ms buffer), even for a prop on the palm or nothing in reach
         auto in=input(std::nullopt,std::nullopt,1000);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
         in=input(std::nullopt,on_palm);in.fast_native=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);
+        {   // v1145: a corpse bone in reach is grabbed even with the gun drawn (fast_native) or a held takedown offer; the choke and a full hand still win
+            FocusScore bone{77,PalmKind::bone,.05,0.,.24,0x7777};
+            auto b=input(std::nullopt,bone,1000);b.fast_native=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::grab);
+            b.fast_native=false;b.takedown_offered=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::grab);
+            b.choke_owns=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::use);
+            b.choke_owns=false;b.occupied=true;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::use);
+            b.occupied=false;b.physical->distance=.30;assert(decide_grip_alone(b,t,hover)==GripAloneChoice::use);   // out of reach: the old rule
+        }
         in=input(std::nullopt,std::nullopt,1000);assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // without it the H1 buffer still runs
     }
     {   // a corpse let go at a shoulder stays there (the physical dock); a fresh squeeze there takes it back; the other hand or any release ends it
