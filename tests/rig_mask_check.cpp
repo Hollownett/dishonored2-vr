@@ -63,11 +63,12 @@ static void run(bool d24,int mode) {
     ComPtr<ID3D11ShaderResourceView> rig_view,other_view;dev->CreateShaderResourceView(rig_pal.Get(),&bv,&rig_view);dev->CreateShaderResourceView(other_pal.Get(),&bv,&other_view);
     ComPtr<ID3D11Buffer> rig_prev;dev->CreateBuffer(&bd,&init,&rig_prev);ComPtr<ID3D11ShaderResourceView> prev_view;dev->CreateShaderResourceView(rig_prev.Get(),&bv,&prev_view);
     d2vr::RigMask::publish({reinterpret_cast<std::uintptr_t>(rig_pal.Get()),reinterpret_cast<std::uintptr_t>(rig_prev.Get()),0,0,0,0});
-    d2vr::RigMask::motion=mode!=0;d2vr::RigMask::begin_epoch();
-    if(mode) for(std::uint32_t f=1;f<=3;++f) { // three engine frames' skin copies: the current palette's x = frame/1000 (a tiny clip offset)
+    const bool ring=mode==1 || mode==2; // v1183: mode 3 = a held rigid item (no rig palette, marked held: 253)
+    d2vr::RigMask::motion=ring;d2vr::RigMask::begin_epoch();
+    if(ring) for(std::uint32_t f=1;f<=3;++f) { // three engine frames' skin copies: the current palette's x = frame/1000 (a tiny clip offset)
         const float v[4]{f*1e-3f,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f);
     }
-    if(mode) {const float v[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);} // this render's current palette
+    if(ring) {const float v[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);} // this render's current palette
     // the engine's shaders: SV_Position after a TEXCOORD output; depth sloped across x; the PS writes two targets
     static const char vs_src[]="Buffer<float4> skin:register(t0);cbuffer C:register(b0){float4 r;};"
         "struct O{float4 c:TEXCOORD0;float4 p:SV_Position;};"
@@ -101,9 +102,10 @@ static void run(bool d24,int mode) {
     float bound_x=-1;bool restored=true;
     const auto engine_draw=[&](ID3D11VertexShader* v,ID3D11ShaderResourceView* skin,const float* k,bool rig=false) {
         c->UpdateSubresource(cb.Get(),0,nullptr,k,0,0);c->VSSetShader(v,nullptr,0);
-        ID3D11ShaderResourceView* pair[2]{rig && mode?prev_view.Get():skin,rig && mode?rig_view.Get():nullptr};c->VSSetShaderResources(0,2,pair);
+        ID3D11ShaderResourceView* pair[2]{rig && ring?prev_view.Get():skin,rig && ring?rig_view.Get():nullptr};c->VSSetShaderResources(0,2,pair);
         d2vr::RigMask::Scope scope(c.Get(),1);
-        if(rig && mode) {
+        if(rig && mode==3) {CHECK(!d2vr::RigMask::draw_is_rig());d2vr::RigMask::mark_held();}
+        if(rig && ring) {
             CHECK(d2vr::RigMask::draw_is_rig());
             const bool own=d2vr::RigMask::previous_palette(c.Get(),0,3,mode==1);CHECK(own==(mode==1));
             ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0); // what the draw reads as its previous palette
@@ -114,13 +116,13 @@ static void run(bool d24,int mode) {
                 t0->Release();}
         }
         c->Draw(6,0);scope.after({2,6,1,0,0,0},draw,targets);
-        if(rig && mode) {ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0);restored=t0==prev_view.Get();if(t0) t0->Release();}
+        if(rig && ring) {ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0);restored=t0==prev_view.Get();if(t0) t0->Release();}
     };
     // world far everywhere; the rig (rect x -0.8..0.4, y -0.6..0.6 NDC, at 1.7x clip scale); a nearer world surface over x > 0
     const float far_world[8]{-1,-1,1,1,.1f,0,0,0},rig_rect[8]{-.8f,-.6f,.4f,.6f,0,0,0,0},near_world[8]{0,-1,1,1,.9f,0,0,0};
     engine_draw(vw.Get(),other_view.Get(),far_world);
-    engine_draw(vs.Get(),rig_view.Get(),rig_rect,true);
-    if(mode) {CHECK(restored);CHECK(bound_x==(mode==1?1e-3f:0.f));std::printf("mode %d: t0 during the draw holds x=%g (ring P = frame 1: 0.001; current: 0)\n",mode,bound_x);}
+    engine_draw(vs.Get(),mode==3?other_view.Get():rig_view.Get(),rig_rect,true);
+    if(ring) {CHECK(restored);CHECK(bound_x==(mode==1?1e-3f:0.f));std::printf("mode %d: t0 during the draw holds x=%g (ring P = frame 1: 0.001; current: 0)\n",mode,bound_x);}
     { // the engine's state after the replay is its own
         ID3D11RenderTargetView* r[8]{};ID3D11DepthStencilView* d{};c->OMGetRenderTargets(8,r,&d);
         CHECK(r[0]==rtv[0].Get() && r[1]==rtv[1].Get() && !r[2] && d==dsv.Get());
@@ -157,7 +159,7 @@ static void run(bool d24,int mode) {
     for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) {
         const double nx=(x+.5)/N*2-1,ny=1-(y+.5)/N*2;
         const bool inside=nx>-.8 && nx<.4 && ny>-.6 && ny<.6,want=inside && nx<0;
-        const bool got=m[y*N+x]>=254;CHECK(m[y*N+x]==0 || m[y*N+x]==(mode==1?255:254));
+        const bool got=m[y*N+x]>=253;CHECK(m[y*N+x]==0 || m[y*N+x]==(mode==1?255:mode==3?253:254));
         if(got!=want && std::abs(nx+.8)>.04 && std::abs(nx-.4)>.04 && std::abs(nx)>.04 && std::abs(std::abs(ny)-.6)>.04) ++wrong; // edges: rasterization rule
         if(got) {
             ++rig_px;std::uint32_t raw;std::memcpy(&raw,&zb[(y*N+x)*4],4);float rv;std::memcpy(&rv,&rb[(y*N+x)*8],4);
@@ -170,7 +172,7 @@ static void run(bool d24,int mode) {
     std::printf("%s: rig pixels %u, max |rig - scene| %.3g (%.2f %s)\n",d24?"D24":"D32",rig_px,worst,worst_steps,d24?"D24 steps":"ulp");
 }
 int main() {
-    for(int mode=0;mode<3;++mode) {run(true,mode);run(false,mode);}
+    for(int mode=0;mode<4;++mode) {run(true,mode);run(false,mode);}
     if(failures) {std::printf("rig_mask_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: rig_mask_check (replay through RigMask::Scope, SV_Position-only PS on a VS with SV_Position second, engine state restored, copy/compare)\n");
     return 0;

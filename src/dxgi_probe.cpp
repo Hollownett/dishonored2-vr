@@ -3520,6 +3520,22 @@ static std::uint64_t weapon_copy_write(unsigned side,std::uintptr_t entity,std::
         return d2vr::weapon_draw::WriteLog::note(side,entity,-1,kind,read15,frames.load(),d2vr::weapon_draw::read_grip);
     } catch(...) {return 0;}
 }
+// v1183 (knob build/stale-eye-held-mask, one-view frames): the engine frames of what the hands hold for ObjectMotion's held match (rig mask 253):
+// each hand's weapon render model, a dual-wield copy's drawn frame, a held prop (native grab, else the game's Use hold). No placement here.
+static void publish_held_mask() noexcept {
+    try {
+        d2vr::ObjectMotion::HeldFrames h{};
+        const auto add=[&](const float* raw,double reach) {if(h.n<h.f.size()) {const auto m=d2vr::weapon_draw::model_of(raw);if(d2vr::weapon_draw::finite(m)) {h.f[h.n]=m;h.reach[h.n]=reach;++h.n;}}};
+        std::array<float,15> raw{};
+        for(const auto model:weapon_models()) if(model && read_self(model+0x1860,raw.data(),sizeof raw)) add(raw.data(),.8);
+        for(unsigned side=0;side<2;++side) if(const auto copy=d2vr::NativeWeaponHands::copy_draw(side);copy.valid) add(copy.read.data(),.8);
+        std::array<std::uintptr_t,2> thing{};
+        if(physical_grab_requested) for(unsigned hand=0;hand<2;++hand) if(native_grab.holding(hand)) if(const auto held=native_grab.held(hand);held && held->bone<0) thing[hand]=held->entity;
+        {std::lock_guard<std::mutex> l(hand_state_mutex);const unsigned s=held_entity_side&1u;if(held_entity && !thing[s]) thing[s]=held_entity;}
+        for(const auto t:thing) if(t) {std::uintptr_t model{};if(read_self(t+0xf0,&model,sizeof model) && model && read_self(model+0x1860,raw.data(),sizeof raw)) add(raw.data(),.5);}
+        d2vr::ObjectMotion::publish_held_frames(h);
+    } catch(...) {}
+}
 static void publish_weapon_draw(std::uintptr_t view) noexcept {
     // v1140: weapons stay opt-in (v1019, build/weapon-draw-place); held props are placed by default (ObjectMotion::held_wanted).
     const bool weapons=d2vr::ObjectMotion::weapon_wanted();
@@ -6255,6 +6271,7 @@ void observe_eye_begin(void* view) noexcept {
                 }
             }
         }
+        if(d2vr::ObjectMotion::held_mask.load(std::memory_order_relaxed) && d2vr::ObjectMotion::alternate()) publish_held_mask(); // v1183
         if(eye==0 && image_skin_enabled && full_body_requested && tracked_arms_requested) {full_body.begin_image(frames.load());   // v861: the image this render draws
             publish_weapon_draw(address);   // v930: its held weapons, placed at their draws
             if(weapon_place_enabled) place_weapons();
@@ -10458,7 +10475,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
-               << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
+               << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
                << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
@@ -16034,7 +16051,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         d2vr::CrossEyeHistory::census=fs::exists(root/L"build"/L"cross-eye-census");d2vr::CrossEyeHistory::fix=fs::exists(root/L"build"/L"alt-eye-history"); // v1180
         d2vr::CrossEyeHistory::fix_paired=fs::exists(root/L"build"/L"eye-history");
-        d2vr::SkinMotion::enabled=fs::exists(root/L"build"/L"stale-eye-skin-motion"); // v1182 // v1181: the same fix on paired stereo frames
+        d2vr::SkinMotion::enabled=fs::exists(root/L"build"/L"stale-eye-skin-motion"); // v1182
+        d2vr::ObjectMotion::held_mask=fs::exists(root/L"build"/L"stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames
         d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {std::uint32_t v{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&v,4);return v;};
         alt_mv_jittered=!fs::exists(root/L"build"/L"legacy-alt-mv-jitter");d2vr::eye_motion_mv_jittered=alt_mv_jittered.load(); // v1178
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();

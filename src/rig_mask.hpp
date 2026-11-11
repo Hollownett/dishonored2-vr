@@ -27,7 +27,8 @@
 namespace d2vr {
 // The copy/compare: t0 scene depth (float view), t1 rig target (x rig depth, y 1 = that draw had this eye's own previous palette and rows);
 // u0 Eye::rig (R8_UINT): 255 a visible rig pixel whose engine MV is this eye's own motion (v1179), 254 a visible rig pixel without (the
-// engine's vectors), 0 not rig (consumers that test > 0 see both as rig); u1 counters: [0] mask pixels, [1] near misses (rig depth present,
+// engine's vectors), 253 (v1183) a visible held weapon / held prop pixel (rigid, attached to a hand, no own motion), 0 not rig (consumers
+// that test > 0 see all three as rig); u1 counters: [0] mask pixels, [1] near misses (rig depth present,
 // eps < |difference| <= 64 eps: an eps too tight shows here), [2] own-motion pixels. k.xy eps = x + y * depth, k.zw the render rectangle.
 inline constexpr char rig_mask_copy_source[]=
     "Texture2D<float> z:register(t0);Texture2D<float2> r:register(t1);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
@@ -35,8 +36,8 @@ inline constexpr char rig_mask_copy_source[]=
     "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID,uint t:SV_GroupIndex){"
     "if(t<3) g[t]=0;GroupMemoryBarrierWithGroupSync();"
     "const bool inside=all(float2(i.xy)<k.zw);const float d=z.Load(int3(i.xy,0));const float2 rq=r.Load(int3(i.xy,0));const float q=rq.x;"
-    "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e,own=rig && rq.y>0.5;"
-    "o[i.xy]=own?255:rig?254:0;"
+    "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e,held=rig && rq.y>1.5,own=rig && !held && rq.y>0.5;"
+    "o[i.xy]=held?253:own?255:rig?254:0;"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
     "if(own) InterlockedAdd(g[2],1);"
     "GroupMemoryBarrierWithGroupSync();if(t<3 && g[t]) n.InterlockedAdd(t*4,g[t]);}";
@@ -89,6 +90,9 @@ public:
         replays_last_.store(replays_frame_.exchange(0,std::memory_order_relaxed),std::memory_order_relaxed);
     }
     static bool draw_is_rig() noexcept {return tl_rig_;} // the draw now in a Scope binds a rig skin buffer (ObjectMotion)
+    // v1183, ObjectMotion: this depth-writing one-view draw is a held weapon / held prop (its model frame is a held thing's): replayed into
+    // the rig target with the held flag (mask 253). Not for rig draws (they keep their own class).
+    static void mark_held() noexcept {if(tl_depth_ && !tl_rig_) {tl_held_=true;held_draws_.fetch_add(1,std::memory_order_relaxed);}}
     // v1166, ObjectMotion at a rig draw (alternate): binds at the previous-palette slot (t0 in the prepass) this eye's own previous palette
     // (v1179: the model's ring P, see rig_ring_valid) when `rows_own` (the draw gets the eye's own previous rows) and the ring is valid, else
     // the current palette (zero motion; the caller then uses the current rows too). True: the own pair is in place; the mask replay of this
@@ -152,7 +156,7 @@ public:
     }
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);
         for(auto& r:ring_) {r.ready.store(false);r.view.Reset();r.p.Reset();r.a.Reset();r.b.Reset();r.device=nullptr;r.bytes=0;r.run.store(0);r.last.store(~0u);}
-        target_={};ps_.Reset();ps_own_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
+        target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
     static std::string json() {
         std::ostringstream o;
         // v1168: t0..t3 per digit: 0 none, 1 this model's wrapper 0, 2 its wrapper 1, 3 another rig model's, 4 a non-rig resource
@@ -169,7 +173,7 @@ public:
          <<",\"distinct\":"<<foreign_distinct_.load()<<",\"draw_count\":"<<foreign_count_.load()<<",\"mod_ring\":"<<foreign_ours_.load()<<"}"
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"ring\":{\"rotations\":"<<rotations_.load()<<",\"restarts\":"<<ring_restarts_.load()
          <<",\"repeats\":"<<ring_repeats_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
-         <<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
+         <<",\"held_draws\":"<<held_draws_.load()<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
         return o.str();
     }
@@ -178,23 +182,23 @@ public:
     class Scope {
     public:
         Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass=-1) noexcept {
-            tl_rig_=false;tl_own_=false;tl_pass_=pass;
+            tl_rig_=false;tl_own_=false;tl_held_=false;tl_depth_=false;tl_pass_=pass;
             if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;
             view_draws_.fetch_add(1,std::memory_order_relaxed);
             ID3D11DepthStencilState* bound{};UINT ref{};c->OMGetDepthStencilState(&bound,&ref);
             const int writes=writes_depth(bound);
             if(bound) bound->Release(); // the cache keeps its own reference
             if(writes<=0) return;
-            tl_rig_=is_rig(c);
-            if(tl_rig_) {rig_draws_.fetch_add(1,std::memory_order_relaxed);rig_draws_frame_.fetch_add(1,std::memory_order_relaxed);c_=c;}
+            tl_rig_=is_rig(c);tl_depth_=true;c_=c; // v1183: every depth-writing one-view draw may be replayed (rig, or held when ObjectMotion marks it)
+            if(tl_rig_) {rig_draws_.fetch_add(1,std::memory_order_relaxed);rig_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
         }
         void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {
             if(tl_foreign_t0_) foreign_count_.store(args.count,std::memory_order_relaxed); // v1169 diagnostic: the draw's index/vertex count
             restore_t0(); // v1166: the engine's previous palette again before the replay (it sees the engine's bindings)
-            if(c_ && draw && targets) replay(c_,args,draw,targets);
+            if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets);
             c_=nullptr;
         }
-        ~Scope() {restore_t0();tl_held_.Reset();tl_rig_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        ~Scope() {restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
             c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
@@ -210,7 +214,7 @@ private:
     static constexpr unsigned slots=1024;
     inline static std::array<Entry,slots> table_{};inline static std::atomic<int> default_writes_{1}; // a null state is the default: depth written
     inline static std::mutex mutex_;inline static Target target_{};
-    inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_,ps_own_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal_;
+    inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_,ps_own_,ps_held_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal_;
     inline static Microsoft::WRL::ComPtr<ID3D11BlendState> blend_;inline static bool made_{},make_failed_{};inline static ID3D11Device* device_{}; // identity: whose objects these are
     inline static std::array<std::atomic<std::uintptr_t>,buffer_slots> buffers_{};inline static std::atomic<unsigned> published_buffers_{};
     inline static std::atomic<std::uint64_t> rig_draws_{},rig_draws_frame_{},rig_draws_last_{},replays_{},replays_frame_{},replays_last_{},view_draws_{},
@@ -222,7 +226,8 @@ private:
     // v1179: per rig model, the ring the GPU skin copy rotates (P bound at draws; A, B the last two renders' palettes) and P's view
     struct Ring {Microsoft::WRL::ComPtr<ID3D11Buffer> p,a,b;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;UINT bytes{};
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};};
-    inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_;
+    inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};
+    inline static std::atomic<std::uint64_t> held_draws_{};
     inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{};
     // P's view (made like the draw's current palette view) when the model's ring holds this eye's previous render, else null
     // Held by the caller's thread until the draw's Scope ends (a reset may release the ring meanwhile). ~13 rig draws a render: the lock is cheap.
@@ -238,7 +243,7 @@ private:
             D3D11_SHADER_RESOURCE_VIEW_DESC vd{};tl_current_->GetDesc(&vd);
             if(FAILED(device->CreateShaderResourceView(r.p.Get(),&vd,&r.view))) failures_.fetch_add(1,std::memory_order_relaxed);
         }
-        tl_held_=r.view;return tl_held_.Get();
+        tl_held_view_=r.view;return tl_held_view_.Get();
     }
     // the unpaired draws' binding pattern (t0..t3: 0 none, 1 this model wrapper 0, 2 wrapper 1, 3 another rig model's, 4 another resource)
     inline static std::array<std::atomic<std::uint64_t>,625> unpaired_patterns_{},depth_only_patterns_{};
@@ -315,18 +320,21 @@ private:
     // Under mutex_: the shader and states (once), and the rig target for this depth resource (recreated on a new depth/size).
     static bool prepare(ID3D11Device* device,ID3D11Resource* depth,const D3D11_TEXTURE2D_DESC& dd,bool& created) {
         created=false;
-        if(device_!=device) {target_={};ps_.Reset();ps_own_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;} // a new device
+        if(device_!=device) {target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;} // a new device
         if(!made_ && !make_failed_) {
             // v1179: y = 1 when the draw had this eye's own previous palette and rows (its MV pixels are own motion), else 0
             static const char src[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,0);}";
             static const char src_own[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,1);}";
-            Microsoft::WRL::ComPtr<ID3DBlob> code,code_own;
+            static const char src_held[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,2);}"; // v1183: a held rigid item
+            Microsoft::WRL::ComPtr<ID3DBlob> code,code_own,code_held;
             D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=TRUE;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;
             D3D11_BLEND_DESC bs{};bs.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL; // no blending, every channel
             make_failed_=FAILED(D3DCompile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr)) ||
                 FAILED(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&ps_)) ||
                 FAILED(D3DCompile(src_own,sizeof src_own-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code_own,nullptr)) ||
                 FAILED(device->CreatePixelShader(code_own->GetBufferPointer(),code_own->GetBufferSize(),nullptr,&ps_own_)) ||
+                FAILED(D3DCompile(src_held,sizeof src_held-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code_held,nullptr)) ||
+                FAILED(device->CreatePixelShader(code_held->GetBufferPointer(),code_held->GetBufferSize(),nullptr,&ps_held_)) ||
                 FAILED(device->CreateDepthStencilState(&ds,&equal_)) || FAILED(device->CreateBlendState(&bs,&blend_));
             made_=!make_failed_;
         }
@@ -356,7 +364,7 @@ private:
                 ID3D11Device* device{};c->GetDevice(&device);bool created=false;
                 try {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if(device && dd.Width && prepare(device,depth,dd,created)) {rig=target_.rtv.Get();rig->AddRef();ps=tl_own_?ps_own_:ps_;equal=equal_;opaque=blend_;}
+                    if(device && dd.Width && prepare(device,depth,dd,created)) {rig=target_.rtv.Get();rig->AddRef();ps=tl_held_?ps_held_:tl_own_?ps_own_:ps_;equal=equal_;opaque=blend_;}
                 } catch(...) {}
                 if(device) device->Release();
                 if(rig && created) {const float zero[4]{};c->ClearRenderTargetView(rig,zero);}

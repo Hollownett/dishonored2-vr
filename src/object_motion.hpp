@@ -337,7 +337,7 @@ private:
     using SetCb=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*);
     using SetCb1=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext1*,UINT,UINT,ID3D11Buffer* const*,const UINT*,const UINT*);
     // Inverse last rows of the eye's VP (both storage orders), its z row, and the view correction for unproven draws.
-    struct View {std::uint32_t frame{};unsigned eye{};float inv[2][4]{};float z[4]{};float corr[16]{},camera[16]{};bool corr_ok{},camera_ok{};};
+    struct View {std::uint32_t frame{};unsigned eye{};float inv[2][4]{};float z[4]{};float corr[16]{},camera[16]{};bool corr_ok{},camera_ok{};float vp[16]{};}; // v1183: vp (held mask)
     struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{};}; // view, view^T, VP, VP^T
     struct Shadow {const void* buffer{};UINT size{};float data[max_floats]{};};
     struct ContextState { // a context is used by one thread at a time: no locks
@@ -480,6 +480,30 @@ private:
         }
     }
 
+    // v1183 held mask: the engine frames (render model +0x1860, 15 floats as weapon_draw::model_of reads them) of what the hands hold now
+    // (weapons, dual-wield copies, held props), published at each one-view render's eye begin with the previous publish kept (the engine
+    // composes some per-instance constants from the previous read, weapon_draw_place.hpp v1072), and a reach per frame (0.8 m weapons:
+    // their parts sit at offsets with the same orientation; 0.5 m held things). Matched like the placement does: the draw's model rows
+    // (inverse(VP) * rows) have the frame's orientation within Place::axes_tol and its origin within the reach.
+public:
+    struct HeldFrames {std::array<weapon_draw::Mat,6> f{};std::array<double,6> reach{};unsigned n{};};
+    inline static std::atomic<bool> held_mask{false};
+    static void publish_held_frames(const HeldFrames& now) noexcept {std::lock_guard<std::mutex> lock(held_mutex_);held_[1]=held_[0];held_[0]=now;}
+    static std::uint64_t held_matches() noexcept {return held_matches_.load(std::memory_order_relaxed);}
+private:
+    inline static std::mutex held_mutex_;inline static std::array<HeldFrames,2> held_{};inline static std::atomic<std::uint64_t> held_matches_{};
+    static bool held_match(const View& view,const float* cur) noexcept {
+        weapon_draw::Mat vp{},inv{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
+        if(!weapon_draw::inverse(vp,inv)) return false;
+        const auto rows=weapon_draw::Place::model_rows(inv.data(),cur);
+        const double tol=weapon_draw::Place::axes_tol.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(held_mutex_);
+        for(const auto& g:held_) for(unsigned i=0;i<g.n;++i)
+            if(weapon_draw::Place::same_orientation(rows,g.f[i],tol) && weapon_draw::Place::origin_distance(rows,g.f[i])<=g.reach[i]) {
+                held_matches_.fetch_add(1,std::memory_order_relaxed);return true;
+            }
+        return false;
+    }
     // Eye views: snapshots of view (+0x7450) and view-projection (+0x7510) at engine frame +0x77B4.
     static void snapshot(unsigned eye,std::uintptr_t view) noexcept {
         if(!read_) return;
@@ -544,7 +568,7 @@ private:
         count(best_rank==1?view_vp:best_rank==0?view_v:view_none);
         if(!best) return false;
         out.eye=static_cast<unsigned>(best_eye);out.frame=best->frame;
-        std::memcpy(out.inv,best->inv,32);std::memcpy(out.z,best->m[2]+8,16);
+        std::memcpy(out.inv,best->inv,32);std::memcpy(out.z,best->m[2]+8,16);std::memcpy(out.vp,best->m[2],64);
         // Draws the chain cannot prove (rival's PrevCorrection idea): a previous MVP cached from the other eye's view (case A:
         // R(n-1) for the left eye, L(n) for the right) moved into this eye's last view, VP_own(n-1) * inverse(VP_source).
         const EyeView* own=nullptr;const EyeView* source=nullptr;const std::uint32_t source_frame=out.eye && own_step==1?out.frame:out.frame-1;
@@ -684,6 +708,9 @@ private:
         }
         float cur[16],prev[16],engine[16];
         if(!gather_current(s.layout,sh->data,sh->size,z,cur)) {count(no_rows);return false;}
+        // v1183 (knob stale-eye-held-mask): a near draw whose model frame is a held weapon's / held thing's engine frame joins the rig mask (253)
+        if(have_view && alternate() && held_mask.load(std::memory_order_relaxed) && cur[15]>0.01f && cur[15]<weapon_draw::Place::near_w.load(std::memory_order_relaxed) &&
+           held_match(view,cur)) RigMask::mark_held();
         bool have_prev=gather_previous(s.layout,sh->data,sh->size,z,prev);
         count(motion);if(have_prev) std::memcpy(engine,prev,64);
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
