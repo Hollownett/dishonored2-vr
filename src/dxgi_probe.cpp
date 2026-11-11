@@ -5522,6 +5522,7 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
 // a new game start begins from the engine's own defaults, so a bad line cannot persist. Status: "engine_cvars".
 static std::uintptr_t find_cvar(const std::string& name) noexcept; // defined below; the startup preset uses it
 static std::string engine_cvars_applied;
+static bool shadow_slicing_cvars=false; // v1159/v1160 meta: a slicing cvar was applied as 1 (apply_engine_cvars)
 static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
     try {
         // v1109: with no file, the engine's own sun-cascade time slicing (slice 0 every frame, far slices in turn, no dynamic
@@ -5529,19 +5530,31 @@ static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
         std::ifstream file{root/L"build"/L"engine-cvars"};
         std::istringstream defaults{"r_shadowParallelPartialSliceUpdate 1\nr_shadowParallelPartialDynaUpdate 1\n"};
         std::istream& in=file ? static_cast<std::istream&>(file) : defaults;
+        // v1160 (headset v1158: "shadows completely out of place, depending on the head movement"): performance mode renders one eye per
+        // frame, so time-sliced far cascades are refreshed for whichever eye renders and the other eye samples slices fitted to its view or
+        // an older pose. With build/alternate-eye both slicing cvars are forced to 0 (file or default) for the whole session, paired frames
+        // (menus, cutscenes) included; build/alt-shadow-slicing keeps the file/default values (A/B).
+        const bool no_slicing=alt_eye_state.load()==1 && !fs::exists(root/L"build"/L"alt-shadow-slicing"); // performance mode on at the first gameplay frame
+        const auto slicing=[](const std::string& name) {return name=="r_shadowParallelPartialSliceUpdate" || name=="r_shadowParallelPartialDynaUpdate";};
+        const auto write=[&](const std::string& name,int value,const char* why) {
+            const auto at=find_cvar(name);
+            const float f=static_cast<float>(value);SIZE_T written{};
+            if(at && WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x28),&value,4,&written) && written==4 &&
+               WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x2c),&f,4,&written) && written==4)
+                engine_cvars_applied+=name+'='+std::to_string(value)+why+' ';
+                if((name=="r_shadowParallelPartialSliceUpdate" || name=="r_shadowParallelPartialDynaUpdate") && value) shadow_slicing_cvars=true;
+            else engine_cvars_applied+='!'+name+' ';
+        };
         std::string line;
         while(std::getline(in,line)) {
             const auto start=line.find_first_not_of(" \t");if(start==std::string::npos) continue;
             if(line[start]=='#') continue; // a comment is not a cvar name
             std::istringstream row{line.substr(start)};std::string name;int value{};
             if(!(row>>name>>value)) continue;
-            const auto at=find_cvar(name);
-            const float f=static_cast<float>(value);SIZE_T written{};
-            if(at && WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x28),&value,4,&written) && written==4 &&
-               WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x2c),&f,4,&written) && written==4)
-                engine_cvars_applied+=name+'='+std::to_string(value)+' ';
-            else engine_cvars_applied+='!'+name+' ';
+            if(no_slicing && slicing(name)) continue;
+            write(name,value,"");
         }
+        if(no_slicing) {write("r_shadowParallelPartialSliceUpdate",0,"(alternate)");write("r_shadowParallelPartialDynaUpdate",0,"(alternate)");}
         if(engine_cvars_applied.empty()) engine_cvars_applied="none";
     } catch(...) {engine_cvars_applied="failed";}
 }static std::uintptr_t find_cvar(const std::string& name) noexcept {
@@ -10312,6 +10325,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"stale_motion\":" << (stale_eye_motion_knob?"true":"false") << ",\"motion_passes\":" << (game_xr?game_xr->stale_motion_passes():0) // v1151
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
+               << ",\"stencil_plane\":[" << fsr_taa.stencil_format.load() << ',' << fsr_taa.rig_copies.load() << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
                << ",\"object_motion\":" << d2vr::ObjectMotion::alternate_status_json()
                << ",\"taa_plan_cancels\":" << alternate_taa_plan_cancels.load() << ",\"taa_failure_site\":" << alternate_taa_runtime.failure_site.load()
@@ -10732,19 +10746,27 @@ static void capture_stale_next(UINT eye,ID3D11Texture2D* image,std::uint64_t fra
     } catch(...) {}
     if(frame>stale_next.frame) stale_next.stem.clear(); // taken, or the next frame of that eye was not its own
 }
+// v1159 knob build/stale-warp-dump (diagnostics on; replaces the alt-pose-trace schedule below): "<start delay s> <interval s> <count> [full]"
+// - the first dump that many seconds after the first eligible warp, then every interval, up to count (<= 200); `full` = the whole eye images
+// (all boxes = whole image/rectangle, so tools/stale_warp_replay.cpp reads them unchanged), else the v804 crop alternation.
+static struct StaleWarpDumpKnob {bool on{};double delay{},interval{};unsigned count{};bool full{};} stale_warp_dump_knob{};
 static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* warped,ID3D11Texture2D* fresh,const d2vr::StaleDepth& kept_depth,
                                const d2vr::StaleDepth& fresh_depth,const d2vr::StaleLayers& layers) noexcept {
     static unsigned dumps{};static UINT64 next{};
-    if(!d2vr::diag::on() || !alt_pose_trace_on() || dumps>=12 || game_logic_mask()!=2 || !kept || !warped || !fresh || !layers.fresh || !kept_depth.texture || !fresh_depth.texture) return;
-    const auto now=GetTickCount64();if(now<next) return;
-    next=now+(dumps<4?6000:30000); // v807 (headset v806: "in the last minutes the hands jumped"): 4 early, then one every 30 s, to 12
+    const auto& knob=stale_warp_dump_knob;
+    if(!d2vr::diag::on() || !(knob.on || alt_pose_trace_on()) || dumps>=(knob.on?knob.count:12u) || game_logic_mask()!=2 || !kept || !warped || !fresh || !layers.fresh || !kept_depth.texture || !fresh_depth.texture) return;
+    const auto now=GetTickCount64();
+    if(knob.on && !next) {next=now+static_cast<UINT64>(knob.delay*1000);return;}
+    if(now<next) return;
+    next=now+(knob.on?static_cast<UINT64>(knob.interval*1000):dumps<4?6000:30000); // v807 (headset v806: "in the last minutes the hands jumped"): 4 early, then one every 30 s, to 12
     try {
         D3D11_TEXTURE2D_DESC desc{};kept->GetDesc(&desc);
         constexpr UINT side=896;
-        const UINT w=std::min(side,desc.Width),hgt=std::min(side,desc.Height);
+        const bool full=knob.on && knob.full;
+        const UINT w=full?desc.Width:std::min(side,desc.Width),hgt=full?desc.Height:std::min(side,desc.Height);
         // v804 (headset v803: "guards in the distance twitch and hop"): every other dump is the view centre, where they walk
         const double middle=dumps%2?.5:.68;
-        const UINT x=(desc.Width-w)/2,y=static_cast<UINT>(std::clamp(desc.Height*middle-hgt*.5,0.,static_cast<double>(desc.Height-hgt)));
+        const UINT x=full?0:(desc.Width-w)/2,y=full?0:static_cast<UINT>(std::clamp(desc.Height*middle-hgt*.5,0.,static_cast<double>(desc.Height-hgt)));
         const auto stem=(output_directory/(L"stale-warp-"+std::to_wstring(++dumps))).wstring();
         const auto save=[&](const wchar_t* suffix,const std::vector<std::byte>& bytes) {
             if(!bytes.empty()) std::ofstream(stem+suffix,std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
@@ -10754,7 +10776,7 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
         stale_next={stem,eye,x,y,w,hgt,game_xr->alternate_frame}; // v802: and this eye's own frame after it
         // the fresh eye sees near things up to ~300 px aside; v810: canted eyes turn 13 degrees apart (~260 px more) and the motion layers
         // check the fresh view above and below too: a wider and taller box
-        const UINT fx=x>700?x-700:0,fw=std::min(desc.Width-fx,w+1400),fy=y>200?y-200:0,fh=std::min(desc.Height-fy,hgt+400);
+        const UINT fx=full?0:x>700?x-700:0,fw=full?desc.Width:std::min(desc.Width-fx,w+1400),fy=full?0:y>200?y-200:0,fh=full?desc.Height:std::min(desc.Height-fy,hgt+400);
         save(L"-fresh.rgba",readback_box4(fresh,fx,fy,fw,fh));
         std::array<std::array<UINT,4>,2> boxes{};
         for(std::size_t n=0;n<2;++n) { // the same uv box in each depth's render rectangle
@@ -10768,6 +10790,10 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
             const auto m=game_xr->stale_motion(n?static_cast<UINT>(game_xr->alternate_fresh_eye):eye);
             if(m.texture && m.width==d.width && m.height==d.height)
                 save(n?L"-fresh-motion.rgba16f":L"-kept-motion.rgba16f",readback_box(m.texture,boxes[n][0],boxes[n][1],boxes[n][2],boxes[n][3],8));
+            // v1160: and its stencil plane (R8_UINT raw), same box
+            const auto rg=game_xr->stale_rig(n?static_cast<UINT>(game_xr->alternate_fresh_eye):eye);
+            if(rg.texture && rg.width==d.width && rg.height==d.height)
+                save(n?L"-fresh-rig.r8":L"-kept-rig.r8",readback_box(rg.texture,boxes[n][0],boxes[n][1],boxes[n][2],boxes[n][3],1));
         }
         std::ofstream meta(stem+L"-meta.json",std::ios::trunc);meta.precision(9);
         const auto parallax=[&](const d2vr::StaleParallax& p) {
@@ -10785,6 +10811,13 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
         // v810: the motion layers and where their searches start
         if(layers.carried) {meta<<",\"carried\":";parallax(*layers.carried);}
         for(unsigned side=0;side<2;++side) if(layers.hand[side]) {meta<<",\"hand"<<side<<"\":";parallax(*layers.hand[side]);}
+        { // v1159: the render behind the images: render vs display size, the fovea box, shadow sharing and cascade time slicing
+            const auto e=static_cast<std::size_t>(eye<2?eye:0);
+            meta<<",\"full\":"<<(full?"true":"false")<<",\"render_size\":["<<fsr_taa.eye_render_width[e].load()<<','<<fsr_taa.eye_render_height[e].load()
+                <<"],\"display_size\":["<<fsr_taa.eye_display_width[e].load()<<','<<fsr_taa.eye_display_height[e].load()<<"],\"fovea_box\":["
+                <<d2vr::fovea::box_x[e].load()<<','<<d2vr::fovea::box_y[e].load()<<','<<d2vr::fovea::box_w[e].load()<<','<<d2vr::fovea::box_h[e].load()
+                <<"],\"shadow_share\":"<<(shadow_share.enabled()?"true":"false")<<",\"shadow_slicing_cvars\":"<<(shadow_slicing_cvars?"true":"false");
+        }
         meta<<",\"fresh_part\":"<<layers.fresh_part<<",\"kept_part\":"<<layers.kept_part<<",\"motion_rules\":"<<(layers.motion_rules?"true":"false"); // v1151
         meta<<",\"start\":["<<layers.start[0]<<','<<layers.start[1]<<','<<layers.start[2]<<']';
         meta<<",\"palms\":["; // v811: each drawn palm in the kept camera and the reach it owns
@@ -11695,6 +11728,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             for(const UINT motion_eye:{other,static_cast<UINT>(alt_fresh)}) {
                                 UINT motion_w{},motion_h{};const auto motion=stale_eye_motion_knob?fsr_taa.eye_motion(static_cast<int>(motion_eye),motion_w,motion_h):nullptr;
                                 game_xr->stale_eye_motion(motion_eye,motion.Get(),motion_w,motion_h,number);
+                                UINT rig_w{},rig_h{};const auto rig=fsr_taa.eye_rig(static_cast<int>(motion_eye),rig_w,rig_h); // v1160: the stencil plane
+                                game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number);
                             }
                             game_xr->stale_motion_rules=stale_eye_motion_knob;
                             alt_motion_times.note(number,alt_fresh);
@@ -15135,6 +15170,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             alt_eye_state=0;alt_alternated=0;alt_paired=0;alt_fallbacks=0;alt_mismatch_run.reset();alt_pending.reset();alt_plan_stamp=0;alt_planned_single[0]=0;alt_planned_single[1]=0;alt_epoch_seen=0;alt_per_frame_done=0;alt_descriptor_paired=false;alt_plan.reset();
             alt_pose_trace_rows=0;{std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);if(alt_pose_trace_csv.is_open()) alt_pose_trace_csv.close();}
             alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (every eye mode)
+            stale_warp_dump_knob={}; // v1159 diagnostic (see capture_stale_warp)
+            {std::ifstream knob(root/L"build"/L"stale-warp-dump");double delay{},interval{};unsigned count{};std::string mode;
+             if(knob>>delay>>interval>>count && delay>=0 && delay<=3600 && interval>=.5 && interval<=3600 && count>=1 && count<=200) {
+                 knob>>mode;stale_warp_dump_knob={true,delay,interval,count,mode=="full"};}}
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose
             stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion"); // v1151: motion textures + mover rules (design 2026-11-11)

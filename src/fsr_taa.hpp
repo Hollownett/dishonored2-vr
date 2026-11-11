@@ -78,6 +78,17 @@ public:
         width=e.motion_w;height=e.motion_h;
         return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.motion.p);
     }
+    std::atomic<std::uint64_t> rig_copies{};std::atomic<UINT> stencil_format{}; // v1160: stencil plane copies; the stencil view format (0 = none)
+    // v1160: the stencil plane of `eye`'s last render (R8_UINT raw stencil, its render rectangle at the top left, like eye_depth); empty without one
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> eye_rig(int eye,UINT& width,UINT& height) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        width=height=0;
+        if((eye!=0 && eye!=1) || !enabled.load() || !ready.load()) return {};
+        const auto& e=(*eyes_)[static_cast<std::size_t>(eye)];
+        if(!e.rig_valid || !e.rig.p) return {};
+        width=e.depth_w;height=e.depth_h;
+        return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.rig.p);
+    }
     std::atomic<std::uint64_t> motion_passes{},motion_refused{},motion_srv_misses{},motion_other_tests{},motion_no_other{}; // v1154: passes with the other-eye still test; v1158: renders without it (no texture) // v1151: motion textures written; renders with a receipt that made none
     // Perf-mode motion Phase 0 (dxgi_probe knob build/alt-motion-probe, diagnostics only): handed to replace() by the TAA dispatch it
     // belongs to; that eye's next FSR/DLSS dispatch writes <stem>-mv.rg16f (raw engine motion vectors), <stem>-depth.r32 (the Eye::depth
@@ -97,6 +108,8 @@ private:
         UINT depth_w{},depth_h{}; // v796: the render rectangle of the last depth copy (eye_depth)
         // v1151: the motion texture (eye_motion), the depth copy's read view, the engine MV's read view (and the resource it is of)
         Ref<ID3D11Texture2D> motion;Ref<ID3D11UnorderedAccessView> motion_uav;Ref<ID3D11ShaderResourceView> depth_srv,mv_srv;ID3D11Resource* mv_key{};
+        // v1160: the scene depth's stencil plane of this render (R8_UINT, render rectangle, raw values; eye_rig), when the depth is typeless
+        Ref<ID3D11Texture2D> rig;Ref<ID3D11UnorderedAccessView> rig_uav;bool rig_valid{};
         UINT motion_w{},motion_h{};bool motion_valid{};
         // v1107: FSR 4 runs on this display box only (fsr4 created at the box size); FSR 3 upscales the whole eye underneath.
         bool fovea=false;fovea::Axis fovea_x,fovea_y;
@@ -133,6 +146,7 @@ private:
     std::mutex mutex_; // guards eyes_, depth views and config between prepare() and the job threads
     std::unique_ptr<std::array<Eye,2>> eyes_{std::make_unique<std::array<Eye,2>>()};
     Ref<ID3D11ComputeShader> copy_;Ref<ID3D11Resource> depth_resource_;Ref<ID3D11ShaderResourceView> depth_view_;
+    Ref<ID3D11ComputeShader> stencil_copy_;Ref<ID3D11ShaderResourceView> stencil_view_; // v1160: the depth's G8 stencil view (none: no stencil plane readable)
     UINT ready_w_{},ready_h_{},render_w_{},render_h_{},context_w_{},context_h_{};float ready_fraction_{1}; // context_*: max render size the FSR contexts/inputs were built for
     DXGI_FORMAT ready_native_format_{DXGI_FORMAT_UNKNOWN};
     std::array<Ref<ID3D11Resource>,2> motion_{}; // upscale mode: this frame's motion vectors per eye (from the TAA dispatch)
@@ -688,6 +702,14 @@ public:
             ID3D11ShaderResourceView* view{};
             if(FAILED(device->CreateShaderResourceView(best.resource,&sd,&view))) {++create_failures;return;}
             depth_view_.adopt(view);depth_resource_.reset(best.resource);
+            { // v1160: its stencil plane, when the resource is typeless (X24_TYPELESS_G8_UINT / X32_TYPELESS_G8X24_UINT)
+                stencil_view_.reset();
+                D3D11_SHADER_RESOURCE_VIEW_DESC st=sd;
+                st.Format=best.srv==DXGI_FORMAT_R24_UNORM_X8_TYPELESS?DXGI_FORMAT_X24_TYPELESS_G8_UINT:best.srv==DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS?DXGI_FORMAT_X32_TYPELESS_G8X24_UINT:DXGI_FORMAT_UNKNOWN;
+                ID3D11ShaderResourceView* sv{};
+                if(st.Format!=DXGI_FORMAT_UNKNOWN && SUCCEEDED(device->CreateShaderResourceView(best.resource,&st,&sv))) stencil_view_.adopt(sv);
+                stencil_format=static_cast<UINT>(stencil_view_.p?st.Format:DXGI_FORMAT_UNKNOWN);
+            }
             if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) {selected_clear_=best.clear;dlss_depth_selection_generation=++depth_selection_generation_;}
         }
         const bool upscale=f<.999f;
@@ -703,6 +725,7 @@ public:
                 e.timer.clear();
                 e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();
                 e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.motion_valid=false;e.motion_w=e.motion_h=0; // v1153
+                e.rig.reset();e.rig_uav.reset();e.rig_valid=false; // v1160
                 e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
                 D3D11_TEXTURE2D_DESC d{};d.Width=cw;d.Height=ch;d.MipLevels=1;d.ArraySize=1;d.Format=DXGI_FORMAT_R32_FLOAT;d.SampleDesc.Count=1;
                 d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
@@ -720,6 +743,17 @@ public:
                     D3D11_TEXTURE2D_DESC m=d;m.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;ID3D11Texture2D* mt{};ID3D11UnorderedAccessView* mu{};ID3D11ShaderResourceView* ds{};
                     if(SUCCEEDED(device->CreateTexture2D(&m,nullptr,&mt))) {e.motion.adopt(mt);if(SUCCEEDED(device->CreateUnorderedAccessView(mt,nullptr,&mu))) e.motion_uav.adopt(mu);}
                     if(SUCCEEDED(device->CreateShaderResourceView(e.depth.p,nullptr,&ds))) e.depth_srv.adopt(ds);
+                    D3D11_TEXTURE2D_DESC r8=d;r8.Format=DXGI_FORMAT_R8_UINT;ID3D11Texture2D* rt{};ID3D11UnorderedAccessView* ru{}; // v1160: Eye::rig
+                    if(SUCCEEDED(device->CreateTexture2D(&r8,nullptr,&rt))) {e.rig.adopt(rt);if(SUCCEEDED(device->CreateUnorderedAccessView(rt,nullptr,&ru))) e.rig_uav.adopt(ru);}
+                    if(!stencil_copy_.p) {
+                        static const char src[]="Texture2D<uint2> s:register(t0);RWTexture2D<uint> o:register(u0);"
+                            "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID){o[i.xy]=s.Load(int3(i.xy,0)).g;}";
+                        ID3DBlob* code{};ID3D11ComputeShader* cs{};
+                        if(SUCCEEDED(D3DCompile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr))) {
+                            if(SUCCEEDED(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs))) stencil_copy_.adopt(cs);
+                            code->Release();
+                        }
+                    }
                     motion_pass_.prepare(device);
                 }
                 Fsr3EyeUpscaler::Desc fd{};fd.render_w=cw;fd.render_h=ch;fd.display_w=w;fd.display_h=h;
@@ -778,13 +812,13 @@ public:
         ready=false;++reset_epoch_;
         dlss_session_end_locked();
         for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();
-            e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.mv_srv.reset();e.mv_key=nullptr;e.motion_valid=false;}
+            e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.mv_srv.reset();e.mv_key=nullptr;e.motion_valid=false;e.rig.reset();e.rig_uav.reset();e.rig_valid=false;}
         for(auto& r:receipt_) r.reset();
         for(auto& r:last_receipt_) r.reset();
         Fsr4EyeUpscaler::poll_retired();
         for(auto& m:motion_) m.reset();
         for(auto& p:probe_) p={};
-        selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
+        selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();stencil_view_.reset();stencil_copy_.reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
         {std::lock_guard<std::mutex> jobs(jobs_mutex_);for(auto& r:recording_) {r.first=nullptr;r.second.reset();}queued_.clear();}
         std::lock_guard<std::mutex> lock2(candidate_mutex_);
         for(auto& c:candidates_) {if(c.resource) c.resource->Release();c={};}
@@ -965,6 +999,7 @@ private:
             const auto& me=(*eyes_)[static_cast<std::size_t>(job.eye)];
             sizes+=std::string(",\"eye_motion_valid\":")+(me.motion_valid?"true":"false");
             if(me.motion_valid) save(me.motion.p,L"-motion.rgba16f","eye_motion"); // v1151: the motion pass's output of this render
+            if(me.rig_valid) save(me.rig.p,L"-stencil.r8","stencil"); // v1160: the depth's stencil plane of this render (raw)
             if(p.colour) save(job.colour.p,L"-colour.raw","colour");
             // b1 = CBPerViewGlobals (0x320 bytes) as the TAA dispatch read it, copied on the game's context before the split
             std::string b1;
@@ -1016,6 +1051,14 @@ private:
         const UINT depth_w=job.upscale?render_w_:w,depth_h=job.upscale?render_h_:h;
         c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
         e.depth_w=depth_w;e.depth_h=depth_h;
+        // v1160: and the same rectangle of the stencil plane into Eye::rig (raw stencil; whether a value marks the player rig is measured, not assumed)
+        e.rig_valid=false;
+        if(stencil_view_.p && stencil_copy_.p && e.rig_uav.p) {
+            c->CSSetShader(stencil_copy_.p,nullptr,0);c->CSSetShaderResources(0,1,&stencil_view_.p);c->CSSetUnorderedAccessViews(0,1,&e.rig_uav.p,nullptr);
+            c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
+            ID3D11ShaderResourceView* none{};ID3D11UnorderedAccessView* no_uav{};c->CSSetShaderResources(0,1,&none);c->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
+            e.rig_valid=true;++rig_copies;
+        }
         c->CSSetShaderResources(0,1,null_srv);c->CSSetUnorderedAccessViews(0,2,null_uav,nullptr);
         // v1151: this render's motion texture (eye_motion_pass.hpp), from its alternate receipt; none without one
         e.motion_valid=false;

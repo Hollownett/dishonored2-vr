@@ -231,7 +231,7 @@ public:
     static std::string alternate_status_json() {
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
-        return s+"],\"camera_only\":"+std::to_string(alt_camera_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
+        return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -359,6 +359,8 @@ private:
     inline static std::mutex views_mutex_;
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views_{};
     inline static std::uint32_t alt_snapped_frame_{~0u}; // v1153: under views_mutex_
+    inline static std::uint32_t alt_retry_frame_{~0u};inline static unsigned alt_retries_{}; // v1160: under views_mutex_
+    inline static std::atomic<std::uint64_t> alt_resnapped_{};
     inline static std::array<std::atomic<std::uint64_t>,17> oversize_kb_{}; // v1158: oversize cb2 writes by size in KB (16 = 16 KB or more)
     inline static std::atomic<std::uintptr_t> alt_view_{};inline static std::atomic<AlternateEye> alt_eye_{}; // v1151
     inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{};
@@ -516,6 +518,19 @@ private:
             for(UINT o=0;o+16<=n;o+=4) scan(o,0);
             if(best_rank==1) vp_at_.store(best_at,std::memory_order_relaxed);
         }
+        // v1160: the once-per-frame alternate snapshot can predate the view's final matrices for that frame (a write made after the
+        // first per-view constant write: canted / forced projections); a write that matches nothing re-reads the view, at most 4 times a frame.
+        if(!best && alt_view && read_) if(const auto resolve=alt_eye_.load(std::memory_order_relaxed)) {
+            std::uint32_t frame{};
+            if(read_(alt_view+0x77b4,&frame,4)) {
+                if(frame!=alt_retry_frame_) {alt_retry_frame_=frame;alt_retries_=0;}
+                if(alt_retries_<4) if(const int eye=resolve(alt_view,frame);eye==0 || eye==1) {
+                    ++alt_retries_;snapshot(static_cast<unsigned>(eye),alt_view);
+                    for(UINT o=0;o+16<=n;o+=4) scan(o,0);
+                    if(best) alt_resnapped_.fetch_add(1,std::memory_order_relaxed);
+                }
+            }
+        }
         count(best_rank==1?view_vp:best_rank==0?view_v:view_none);
         if(!best) return false;
         out.eye=static_cast<unsigned>(best_eye);out.frame=best->frame;
@@ -576,7 +591,10 @@ private:
         const int key=b1_eye(s.cb[0]);
         note_b1(s.cb[0],own,out.eye);
         count(static_cast<Counter>((own?own_b1_agree:latest_b1_agree)+(key<0?2u:static_cast<unsigned>(key)==out.eye?0u:1u)));
-        if(key<0 || static_cast<unsigned>(key)==out.eye || !b1_eye_on_.load(std::memory_order_relaxed)) return true;
+        // v1160: not in alternate mode. There one engine frame holds one eye, so the classified frame already names the eye exactly; the
+        // retag (built for paired frames, where both eyes share a frame) looks for the other eye's view of this frame, which never exists,
+        // and drops the draw as untagged (b1_lost) whenever the view's rotating b1 buffers were last seen with the other eye.
+        if(key<0 || static_cast<unsigned>(key)==out.eye || !b1_eye_on_.load(std::memory_order_relaxed) || alternate()) return true;
         ok=latest(static_cast<unsigned>(key),out) && out.frame==newest; // that eye's view of this frame, else untagged
         count(ok?b1_retagged:b1_lost);
         return ok;

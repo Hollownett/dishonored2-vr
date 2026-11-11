@@ -419,6 +419,9 @@ private:
     // v1151: each eye's motion texture (FsrTaa::eye_motion of its last render, like stale_depth_) and the Present it was handed in
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_motion_{};std::array<UINT,2> stale_motion_width_{},stale_motion_height_{};
     std::array<std::uint64_t,2> stale_motion_frame_{};
+    // v1160: each eye's stencil plane of its last render (FsrTaa::eye_rig), handed in like the motion textures; not yet read by the warp
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> stale_rig_{};std::array<UINT,2> stale_rig_width_{},stale_rig_height_{};
+    std::array<std::uint64_t,2> stale_rig_frame_{};
     std::array<std::optional<StaleLayers>,2> stale_layers_{}; // v797: scene, player and hand layers of each eye's last warp
     bool stale_warped_(UINT eye) const noexcept {return eye<2 && alternate_frame && stale_warped_frame_[eye]==alternate_frame;}
     enum InputAction : UINT {Grip,Aim,Stick,Trigger,Squeeze,FirstButton,SecondButton,StickClick,Menu,InputCount};
@@ -1951,6 +1954,13 @@ public:
     // two frame-time parts and the rules switch (build/no-stale-eye-motion), copied into the layers of each warp.
     void stale_eye_motion(UINT eye,ID3D11Texture2D* motion,UINT width,UINT height,std::uint64_t frame) noexcept {
         if(eye<2) {stale_motion_[eye]=motion;stale_motion_width_[eye]=width;stale_motion_height_[eye]=height;stale_motion_frame_[eye]=motion?frame:0;}
+    }
+    void stale_eye_rig(UINT eye,ID3D11Texture2D* rig,UINT width,UINT height,std::uint64_t frame) noexcept { // v1160
+        if(eye<2) {stale_rig_[eye]=rig;stale_rig_width_[eye]=width;stale_rig_height_[eye]=height;stale_rig_frame_[eye]=rig?frame:0;}
+    }
+    StaleDepth stale_rig(UINT eye) const noexcept { // v1160: this Present's (R8_UINT raw stencil), else none
+        if(eye>1 || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};
+        return {stale_rig_[eye].Get(),stale_rig_width_[eye],stale_rig_height_[eye]};
     }
     StaleMotion stale_motion(UINT eye) const noexcept { // this Present's, else none
         if(eye>1 || stale_motion_frame_[eye]!=alternate_frame || !stale_motion_[eye]) return {};
