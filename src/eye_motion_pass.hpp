@@ -36,7 +36,10 @@ static_assert(sizeof(EyeMotionConstants)==320,"cbuffer layout");
 // v1154: a pixel that moves by its own previous render but sits within this many render pixels of where the other eye's render one Present
 // earlier puts it is a still surface whose draw kept the engine's other-eye rows (classes object_motion cannot rewrite: cb2 over 1 KB, not
 // yet copied). Sim v1152 kept dumps: such pixels 0.002-0.042 px (p99), a walking guard >= 15 px (p1 of its movers).
-inline constexpr double eye_motion_other_still_px=.25;
+// v1158: without that snapshot the pass makes no texture at all (FsrTaa): a still prop on the other eye's rows can never pass as a mover.
+inline constexpr double eye_motion_other_still_px=3.; // v1158 (was 0.25): the other-eye fit of those props carries the entity jitter-step
+// error (docs/.../perf-mode-motion-design.md "Open: entity jitter step"), measured 0.39-0.91 px in v1157 dumps 2-2, 3-0, 3-4; a jitter mix-up
+// stays < 2.83 px, the walking guard's other-eye fit >= 15 px
 inline constexpr double eye_motion_mover_px=.75; // stale_eye_warp.hpp mover_px
 inline constexpr double eye_motion_arm_reach=.5; // metres; Phase 0: every arm/weapon pixel lies nearer, no world pixel between 0.5 and 1 m
 namespace eye_motion {

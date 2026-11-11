@@ -1382,7 +1382,7 @@ static void read_pass_view_jitter(d2vr::TaaJitterCheck::Used& used) noexcept {
 static std::atomic<bool> alt_motion_probe_knob{false};
 // v1151: QPC at each alternate Present that refreshed an eye (its render's tick, closely), for the warp's two parts (design section 3):
 // fresh_part=(tN-tN-1)/(tN-tN-2), kept_part=(tN-tN-1)/(tN-1-tN-3); 0.5 when the Presents are not consecutive, times are missing or a part
-// falls outside 0.25..0.75 (a hitch). Status motion_textures = [passes, refused, engine MV view cache misses, passes with the other-eye still test].
+// falls outside 0.25..0.75 (a hitch). Status motion_textures = [passes, refused, engine MV view cache misses, passes with the other-eye still test, renders without one (no texture)].
 static struct AltMotionTimes {
     std::array<std::pair<UINT64,LONGLONG>,4> ring{};
     void note(UINT64 number,int fresh) noexcept {if(fresh<0) return;LARGE_INTEGER t{};QueryPerformanceCounter(&t);ring[number&3]={number,t.QuadPart};}
@@ -10310,7 +10310,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"stale_parallax_misses\":" << (game_xr?game_xr->stale_eye_parallax_misses:0) << ",\"stale_near_range\":" << stale_near_range << ",\"stale_fresh_warps\":" << (game_xr?game_xr->stale_fresh_passes():0)
                << ",\"stale_fresh_refusals\":" << (game_xr?game_xr->stale_fresh_refusals():0)
                << ",\"stale_motion\":" << (stale_eye_motion_knob?"true":"false") << ",\"motion_passes\":" << (game_xr?game_xr->stale_motion_passes():0) // v1151
-               << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ']'
+               << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
                << ",\"object_motion\":" << d2vr::ObjectMotion::alternate_status_json()

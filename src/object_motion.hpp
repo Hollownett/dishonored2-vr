@@ -117,7 +117,7 @@ public:
         return filter();
     }
     static bool installed() noexcept {return installed_;}
-    static constexpr unsigned absent=0xff,max_floats=256; // shadowed per-instance cbuffers: up to 1 KB
+    static constexpr unsigned absent=0xff,max_floats=1024; // shadowed per-instance cbuffers: up to 4 KB (v1158: was 1 KB; 649,663 oversize draws a v1157 run kept the other eye's rows)
     // One draw's rows by its shader's layout (linux/proxy/vs_layouts.hpp: byte k = float4 index of
     // cb_mvpmatrix{x,y,z,w}[k], then of cb_previousmvpmatrix; 0xff = not declared). A missing z row is `z`, the eye VP's
     // z row: with reverse-Z every MVP's z row is (0,0,0,near). gather_current needs the x, y and w current rows; gather
@@ -336,8 +336,9 @@ private:
         void* vs{};std::uint64_t layout{};ID3D11Buffer* cb[2]{}; // the bound vertex shader, its rows, b1 and b2 as the game bound them
         ID3D11Buffer* pool{};bool pool_failed{};
         View view{};bool view_valid{};std::uint32_t view_frame{~0u}; // the last per-view write recorded here, and the newest frame then
-        std::array<Shadow,64> shadows{};
-        Shadow& shadow(const void* b) noexcept {return shadows[(reinterpret_cast<std::uintptr_t>(b)>>4)*0x9e3779b97f4a7c15ull>>58];}
+        // v1158: 256 slots (was 64, direct-mapped: two live cb2 buffers on one slot evict each other, the draw then counts no_shadow)
+        std::array<Shadow,256> shadows{};
+        Shadow& shadow(const void* b) noexcept {return shadows[(reinterpret_cast<std::uintptr_t>(b)>>4)*0x9e3779b97f4a7c15ull>>56];}
     };
     struct Latest {std::atomic<std::uint32_t> seq{};View view{};}; // an eye's newest classified view (seqlock: odd while written)
     struct B1Seen {std::atomic<const void*> buffer{};std::atomic<std::uint64_t> n[3]{};}; // v950 diagnostics: draws by own-context tag L/R, fallback
@@ -358,6 +359,7 @@ private:
     inline static std::mutex views_mutex_;
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views_{};
     inline static std::uint32_t alt_snapped_frame_{~0u}; // v1153: under views_mutex_
+    inline static std::array<std::atomic<std::uint64_t>,17> oversize_kb_{}; // v1158: oversize cb2 writes by size in KB (16 = 16 KB or more)
     inline static std::atomic<std::uintptr_t> alt_view_{};inline static std::atomic<AlternateEye> alt_eye_{}; // v1151
     inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{};
     inline static std::array<std::array<EyeView,4>,2> eye_records_{};
@@ -588,7 +590,7 @@ private:
         if(dimension==D3D11_RESOURCE_DIMENSION_BUFFER) static_cast<ID3D11Buffer*>(r)->GetDesc(&desc);
         ContextState* s=(desc.BindFlags&D3D11_BIND_CONSTANT_BUFFER)?state(c):nullptr;
         const unsigned kind=entry.kind.load(std::memory_order_relaxed);
-        if(s && kind==cb2_kind && desc.ByteWidth>max_floats*4) count(oversize);
+        if(s && kind==cb2_kind && desc.ByteWidth>max_floats*4) {count(oversize);oversize_kb_[std::min<UINT>(desc.ByteWidth/1024,16u)].fetch_add(1,std::memory_order_relaxed);}
         else if(s && kind==cb2_kind) {
             Shadow& sh=s->shadow(r);sh.buffer=r;sh.size=desc.ByteWidth;std::memcpy(sh.data,data,desc.ByteWidth);count(shadow_writes);
         } else if(s && kind==view_kind) {
@@ -930,6 +932,7 @@ private:
         for(const auto& e:b1_seen_) if(const void* b=e.buffer.load()) json<<std::hex<<reinterpret_cast<std::uintptr_t>(b)<<std::dec<<':'<<e.n[0].load()<<'/'<<e.n[1].load()<<'/'<<e.n[2].load()<<' ';
         json<<'"';
         json<<",\"kinds\":\"same,own_last,other_now,other_last,unproven,miss\",\"alternate\":"<<alternate_status_json();
+        json<<",\"oversize_kb\":[";for(unsigned k=0;k<oversize_kb_.size();++k) json<<(k?",":"")<<oversize_kb_[k].load();json<<']';
         for(unsigned eye=0;eye<2;++eye) {
             json<<(eye?",\"right\":[":",\"left\":[");
             for(unsigned k=0;k<PrevMvpTable::kinds;++k) json<<(k?",":"")<<stats_[(eye?kind_r:kind_l)+k].load();

@@ -78,7 +78,7 @@ public:
         width=e.motion_w;height=e.motion_h;
         return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.motion.p);
     }
-    std::atomic<std::uint64_t> motion_passes{},motion_refused{},motion_srv_misses{},motion_other_tests{}; // v1154: passes with the other-eye still test // v1151: motion textures written; renders with a receipt that made none
+    std::atomic<std::uint64_t> motion_passes{},motion_refused{},motion_srv_misses{},motion_other_tests{},motion_no_other{}; // v1154: passes with the other-eye still test; v1158: renders without it (no texture) // v1151: motion textures written; renders with a receipt that made none
     // Perf-mode motion Phase 0 (dxgi_probe knob build/alt-motion-probe, diagnostics only): handed to replace() by the TAA dispatch it
     // belongs to; that eye's next FSR/DLSS dispatch writes <stem>-mv.rg16f (raw engine motion vectors), <stem>-depth.r32 (the Eye::depth
     // copy), optionally <stem>-colour.raw, each the render rectangle at the top left as u32 width,height,DXGI format,bytes per row then
@@ -1025,7 +1025,10 @@ private:
             // v1154: the other eye's last receipt, when it is the render one Present before this one (its current = the other eye at N-1)
             const auto& other=last_receipt_[static_cast<std::size_t>(job.eye^1)];
             const bool other_ok=other && other->key.eye==(job.eye^1) && other->key.display+1==job.receipt->key.display;
-            if(eye_motion_constants(job.receipt->current,job.receipt->previous,depth_w,depth_h,k,other_ok?&other->current:nullptr)) {
+            // v1158: no other-eye snapshot one Present earlier (a reset, a history start, a skipped dispatch): no texture this render (the
+            // warp's mover rules then stay off; movers lag a frame as without the textures)
+            if(!other_ok) ++motion_no_other;
+            else if(eye_motion_constants(job.receipt->current,job.receipt->previous,depth_w,depth_h,k,&other->current)) {
                 if(other_ok && k.other_step[3]>0) ++motion_other_tests;
                 if(e.mv_key!=job.motion.p) {
                     ++motion_srv_misses; // v1153 status: whether the engine rotates its motion-vector texture

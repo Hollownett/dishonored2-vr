@@ -15,7 +15,7 @@ import argparse, glob, itertools, json, os, re, struct, sys, tempfile, zlib
 import numpy as np
 
 R16G16_FLOAT, R32_FLOAT, R16G16B16A16_FLOAT = 34, 41, 10
-OTHER_STILL_PX = 0.25  # src/eye_motion_pass.hpp eye_motion_other_still_px (v1154)
+OTHER_STILL_PX = 3.0  # src/eye_motion_pass.hpp eye_motion_other_still_px (v1158; v1154 0.25)
 ARM_REACH = 0.5  # metres; src/eye_motion_pass.hpp eye_motion_arm_reach: nearer pixels carry w = 0 (first-person arms)
 
 
