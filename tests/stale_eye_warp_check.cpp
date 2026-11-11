@@ -916,13 +916,14 @@ static void gpu_rig() {
     // r3. a forearm (rig) reaching 40 cm from the palm moves with the hand, in this eye's own shading, beyond the 22 cm sphere too
     {
         Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.forearm = fresh.forearm = now.forearm = true; fresh.lift = 30;
-        both("r3. forearm 25-40 cm from the palm", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), arm_kind,
+        // (v1173: the hand layers, as with rig_from_fresh off; a moving hand is otherwise drawn from the fresh eye: case r10)
+        both("r3. forearm 25-40 cm from the palm", render(0.032, kept), render(-0.032, fresh), [&] {auto l = layers_for(-0.05, 0.0); l.rig_from_fresh = false; return l;}(), render(0.032, now), arm_kind,
              [](double x) {return x > 0.25;});
     }
     // r4. a held stick (rig) reaching 38 cm the other way moves with the hand
     {
         Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.stick = fresh.stick = now.stick = true; fresh.lift = 30;
-        both("r4. held stick 25-38 cm from the palm", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), stick_kind,
+        both("r4. held stick 25-38 cm from the palm", render(0.032, kept), render(-0.032, fresh), [&] {auto l = layers_for(-0.05, 0.0); l.rig_from_fresh = false; return l;}(), render(0.032, now), stick_kind,
              [](double x) {return x < -0.25;});
     }
     // r5. a still left hand beside the moving right one keeps its own kept pixels exactly (within the sRGB round trip)
@@ -965,6 +966,25 @@ static void gpu_rig() {
 
         std::printf("r9. hand moving up from the image's bright bottom band: %d of %d pixels above the band white\n", white, n);
         CHECK(white == 0);
+    }
+    // r10. (v1173, headset v1172: a halo around moving hands) the drawn hand moved 2.5 cm, its recorded grip 5 cm, beside a still prop over a
+    // textured wall: the hand where the fresh eye has it, nothing of it at the over-moved place, prop and wall as they are
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = -0.025; kept.prop = fresh.prop = now.prop = 0.10; fresh.lift = 30;
+        const Frame k = render(0.032, kept), f = render(-0.032, fresh), truth = render(0.032, now);
+        const auto out = row(k, f, layers_for(-0.05, 0.0), true);
+        int over = 0, n_over = 0, hand_missing = 0, n_hand = 0, scenery = 0, n_scenery = 0;
+        for (int x = 1; x < static_cast<int>(W) - 1; ++x) {
+            const double px = plane_x(x); const int kind = truth.kind[(H / 2) * W + x];
+            if (px > 0.040 && px < 0.058) {++n_over; over += out[x] >= 100 && out[x] <= 160; std::printf("   over-moved column %d: %d (truth %d, kept %d, fresh %d)\n", x, out[x], truth.row[x], k.row[x], f.row[x]);}
+            if (kind == hand_kind && std::abs(px + 0.025) < 0.05) {++n_hand; hand_missing += out[x] < 100;}  // the hand where it is now
+            if ((kind == prop_kind || (kind == wall_kind && (px < -0.14 || (px > 0.07 && px < 0.20)))) && !(px > -0.09 && px < -0.08)) {
+                ++n_scenery; scenery += !near_truth(out, truth, x);                                         // prop and wall beyond the strip
+            }
+        }
+        std::printf("r10. hand moved 2.5 cm, grip 5 cm: hand fill at the over-moved place in %d of %d columns, hand missing in %d of %d, scenery wrong in %d of %d\n",
+                    over, n_over, hand_missing, n_hand, scenery, n_scenery);
+        CHECK(n_over >= 3 && over == 0 && hand_missing == 0 && n_scenery > 40 && scenery == 0);
     }
     // r7. the view corner (canted eyes turned 14 degrees apart each way): the right hand and its stick at the right edge of the rebuilt
     // eye, 3 cm further out now, where the fresh eye has no view. No black or white there, and this eye's own rig where it was.

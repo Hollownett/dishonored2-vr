@@ -180,6 +180,11 @@ struct StaleLayers {
     std::array<bool,2> rig_motion{};
     // v1171: a camera cut since the kept frame (stale_eye_cut): the whole frame is rebuilt from the fresh eye alone
     bool cut{};
+    // v1173 (headset v1172: "a halo around the hands while they move"): with the rig masks, a moving hand (hand_moving, from its recorded
+    // poses) is taken from the fresh eye, gated by the masks, not moved by its recorded grip (which over-moves the drawn hand); rig_from_fresh
+    // false keeps the hand layers
+    bool rig_from_fresh{true};
+    std::array<bool,2> hand_moving{};
     bool motion_rules{true};
     WarpMatrix kept_axes{};
 };
@@ -225,6 +230,10 @@ inline std::optional<StaleLayers> stale_eye_layers(const WarpCamera& kept,const 
     if(!world) return std::nullopt;
     StaleLayers layers{*world,std::nullopt,kept_fov,near_range};
     layers.cut=cut;
+    for(unsigned side=0;side<2;++side) { // v1173: each drawn hand moved (stale_hands_still per hand; drawn in only one frame counts as moved)
+        WarpCamera a=kept,b=target;a.hand_bits=kept.hand_bits&(1u<<side);b.hand_bits=target.hand_bits&(1u<<side);
+        layers.hand_moving[side]=(a.hand_bits|b.hand_bits)!=0 && !stale_hands_still(a,b);
+    }
     if(fresh && near_range>0) layers.fresh=stale_eye_parallax(*fresh,fresh_fov,target,target_fov);
     WarpCamera with_head=target;with_head.m10=kept.m10;with_head.m11=kept.m11; // the kept depth's projection, the target's place
     layers.carried=stale_eye_parallax(with_head,kept_fov,target,target_fov);
@@ -834,7 +843,25 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
     colour=Smooth(sourceTex,c);
     return k;
 }
-)HLSL" R"HLSL(// v1171: a camera cut (frameMap.x): the target view from the fresh eye alone: its near surface on the ray (NearHit), else its fixed
+)HLSL" R"HLSL(// v1173: the drawn hand (2 left, 3 right) a rig point (kept camera metres) belongs to, if it moves (frameMap.y left, .z right); 0 none
+int MovingHandAt(float3 p) {
+    const float dl=palmL.w>0?distance(p,palmL.xyz):1e9,dr=palmR.w>0?distance(p,palmR.xyz):1e9;
+    if(min(dl,dr)>=min(rigMap.y,length(p))) return 0;
+    const int h=dl<=dr?2:3;
+    return (h==2?frameMap.y:frameMap.z)>0?h:0;
+}
+// v1173: kept pixel q is a moving hand's, or its 2 px fringe on what lies behind (KeptMoverAt's rule)
+bool KeptMovingHand(float2 q) {
+    if(KeptRig(q) && MovingHandAt(KeptPoint(q))!=0) return true;
+    const float d=Ahead(depthTex,depthSize.xy,depthMap.xy,q);
+    [unroll] for(int i=0;i<8;++i) {
+        float2 dir;sincos(i*0.7853982,dir.y,dir.x);
+        const float2 o=q+round(dir*2)/depthSize.xy;
+        if(InKept(o) && KeptRig(o) && Ahead(depthTex,depthSize.xy,depthMap.xy,o)<0.995*(d>0?d:1e30) && MovingHandAt(KeptPoint(o))!=0) return true;
+    }
+    return false;
+}
+// v1171: a camera cut (frameMap.x): the target view from the fresh eye alone: its near surface on the ray (NearHit), else its fixed
 // point, else the nearest valid fresh pixel to the ray's far point (never the kept image, never black, never the edge band)
 float4 FreshOnly(float3 t) {
     float2 now,edge;float k;
@@ -858,6 +885,21 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     const float2 q=Solve(scene,depthTex,depthSize.xy,depthMap.xy,t,0,kept_k,kept_ok);
     const bool kept_in=kept_k>=0 && InKept(q);
     if(fresh[3].w<=0) return kept_k<0?float4(0,0,0,1):Smooth(sourceTex,q); // no fresh eye: the scene layer alone (v796)
+    // v1173 (headset v1172: a halo around the hands while they move: the recorded grip over-moves the drawn hand, and the scenery around was
+    // filled around that wrong place): a moving hand comes from the fresh eye, gated by the masks; where this eye's kept pixel is that hand's
+    // (its old place, with its 2 px fringe), the fresh eye's surface on the ray; only where the fresh eye cannot see the spot, today's rules.
+    // Where the fresh eye sees scenery on the ray, a moving hand's layer (its recorded grip) places nothing either (fresh_scenery).
+    bool fresh_scenery=false;
+    if(frameMap.y>0 || frameMap.z>0) {
+        float2 p,edge;float k;
+        const int nh=NearHit(t,p,k,edge);
+        if(nh>0 && InFresh(p) && FreshRig(p) &&
+           MovingHandAt(KeptFrom(k*float3(dot(scene[0].xyz,t),dot(scene[1].xyz,t),dot(scene[2].xyz,t))+scene[3].xyz))!=0) return Smooth(freshTex,p);
+        float2 f=float2(-1,-1);
+        if(nh>0 && InFresh(p) && !FreshRig(p)) {fresh_scenery=true;f=p;}
+        else if(nh==0) {bool ok;float kf;f=Solve(fresh,freshDepthTex,depthSize.zw,freshMap.xy,t,0,kf,ok);fresh_scenery=ok && kf>0 && InFresh(f);}
+        if(fresh_scenery && kept_in && KeptMovingHand(q)) return Smooth(freshTex,f);
+    }
     // v810 (headset v809, see StaleLayers): this eye's own kept image wherever one of the motions explains it. Each layer gives its kept
     // pixel for this ray; the fresh eye, which sees this moment, confirms or refutes the surface there; the nearest confirmed one shows
     // (a hand in front of the wall it moved past). The world beyond reach is taken as it is (v805: never the other eye's shading there;
@@ -879,6 +921,8 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     ca[2]=Candidate(handL,t-float3(fitL,0),cq[2],ck[2])?Confirm(t,ck[2],cp[2]):-2;
     ca[3]=Candidate(handR,t-float3(fitR,0),cq[3],ck[3])?Confirm(t,ck[3],cp[3]):-2;
     [unroll] for(int i=1;i<4;++i) if(ca[i]!=-2 && ck[i]>=reach) ca[i]=-2;
+    if(fresh_scenery) {if(frameMap.y>0) ca[2]=-2;if(frameMap.z>0) ca[3]=-2;} // v1173
+    if(frameMap.y>0 && ca[2]==-1) ca[2]=-2;if(frameMap.z>0 && ca[3]==-1) ca[3]=-2; // v1173: a moving hand the fresh eye refutes there is not there
     int own[4];
     own[0]=kept_in?Owner(q):0;
     [unroll] for(int o=1;o<4;++o) own[o]=ca[o]!=-2?Owner(cq[o]):0;
@@ -1059,7 +1103,8 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         else {put(0,0,0,0);put(0,0,0,0);}
         if(layers) {const double u=1-std::clamp(layers->border[0],0.,.25),v=1-std::clamp(layers->border[1],0.,.25);put(u,v,u,v);} else put(1,1,1,1); // v1167
         const bool cut=fresh_read && layers->cut; // v1171: the fresh eye alone (needs it)
-        put(cut?1:0,0,0,0);
+        const bool fresh_hands=kept_rig_read && !cut && layers->rig_from_fresh; // v1173
+        put(cut?1:0,fresh_hands && layers->hand_moving[0]?1:0,fresh_hands && layers->hand_moving[1]?1:0,0);
         if(cut) {fit_on=false;++cut_passes;}
         if(depth_read) ++parallax_passes;
         if(fresh_read) ++fresh_passes;
