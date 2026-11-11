@@ -70,6 +70,9 @@ public:
     static constexpr unsigned buffer_slots=6;
     inline static std::atomic<bool> enabled{};          // dxgi_probe, each Present: alternate-eye on and build/no-stale-eye-rig absent
     inline static std::atomic<std::uintptr_t> view{};    // the alternate one-view whose passes are replayed (0: a paired frame)
+    // v1171: rig motion vectors (own previous palette + rows, v1166-v1169) are opt-in: dxgi_probe sets this from build/stale-eye-rig-motion.
+    // Off: rig draws keep the engine's previous rows and palette (v1165), no copies, no substitution, rig pixels zeroed by the mask.
+    inline static std::atomic<bool> motion{false};
     struct DrawArgs {unsigned kind{};UINT count{},instances{1},start{};INT base{};UINT first{};}; // 0 DrawIndexed 1 ..Instanced 2 Draw 3 DrawInstanced
     using DrawFn=void(*)(ID3D11DeviceContext*,const DrawArgs&) noexcept;               // the engine's draw, past every hook
     using TargetsFn=void(*)(ID3D11DeviceContext*,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*) noexcept; // OMSetRenderTargets, past the hooks
@@ -283,9 +286,10 @@ private:
     }
     static bool is_rig(ID3D11DeviceContext* c) noexcept {
         if(!published_buffers_.load(std::memory_order_relaxed)) return false;
-        constexpr unsigned scan=8; // v1168: t0..t7 (v1167 looked at t0..t2 only)
-        ID3D11ShaderResourceView* views[scan]{};c->VSGetShaderResources(0,scan,views);
-        bool hit=false;int which[scan]{-1,-1,-1,-1,-1,-1,-1,-1}; // the rig buffer slot (model*2 + wrapper) each view is of
+        constexpr unsigned slots_max=8; // v1168: t0..t7 (v1167 looked at t0..t2 only); v1171: t0..t2 without the rig motion feature
+        const unsigned scan=motion.load(std::memory_order_relaxed)?slots_max:3u;
+        ID3D11ShaderResourceView* views[slots_max]{};c->VSGetShaderResources(0,scan,views);
+        bool hit=false;int which[slots_max]{-1,-1,-1,-1,-1,-1,-1,-1}; // the rig buffer slot (model*2 + wrapper) each view is of
         for(unsigned k=0;k<scan;++k) if(auto* v=views[k]) {
             ID3D11Resource* r{};v->GetResource(&r);const auto at=reinterpret_cast<std::uintptr_t>(r);
             for(unsigned i=0;i<buffer_slots;++i) if(at && buffers_[i].load(std::memory_order_relaxed)==at) {which[k]=static_cast<int>(i);hit=true;}
@@ -303,7 +307,7 @@ private:
         // previous palette the engine took elsewhere. t0 is the previous-palette slot by layout: it gets this eye's own copy (or the current
         // palette) like any prepass draw. Its buffer is described in the status (foreign_t0) to name it in the next sim.
         tl_foreign_t0_=false;
-        if(!tl_prepass_ && which[1]>=0 && views[0] && which[0]<0 && !views[2] && !views[3]) {
+        if(motion.load(std::memory_order_relaxed) && !tl_prepass_ && which[1]>=0 && views[0] && which[0]<0 && !views[2] && !views[3]) {
             tl_prepass_=true;tl_prev_slot_=0;tl_foreign_t0_=true;foreign_t0_.fetch_add(1,std::memory_order_relaxed);
             describe_foreign(views[0],views[1]);
         }

@@ -15307,7 +15307,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose
             stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion"); // v1151: motion textures + mover rules (design 2026-11-11)
             stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig");
-            stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion"); // v1167 // v1162/v1163: the player-rig mask (rig_mask.hpp)
+            stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion"); // v1167
+            d2vr::RigMask::motion=fs::exists(root/L"build"/L"stale-eye-rig-motion"); // v1171: rig motion vectors are opt-in (absent = v1165 rig draws) // v1162/v1163: the player-rig mask (rig_mask.hpp)
             stale_eye_parallax_knob=!fs::exists(root/L"build"/L"no-stale-eye-parallax"); // v796: and its world pixels with parallax (walking)
             stale_near_range=d2vr::near_range_default; // v798: near content from the fresh eye within this many metres (0: off)
             {std::ifstream knob(root/L"build"/L"stale-near-range");double metres{};if(knob>>metres && metres>=0 && metres<=20) stale_near_range=metres;}

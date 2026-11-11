@@ -214,3 +214,11 @@ assert 'restore_t0(); // v1166' in rig and 'if(e.rig_motion) {k.proj[2]=0;++moti
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
 assert 'ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;' in rig and 'targets(c,rtv_count,rtvs.data(),dsv);' in rig
 print('PASS: v1163 rig mask routing (knob, one-view rig draws replayed, mask at the copy, both-or-none masks, motion arm rule, raw rig rows, status)')
+
+# v1171: rig motion vectors opt-in (build/stale-eye-rig-motion); off = the v1165 rig draws, no palette work, rig pixels zeroed
+assert 'd2vr::RigMask::motion=fs::exists(root/L"build"/L"stale-eye-rig-motion");' in probe
+assert "if(mode_.load(std::memory_order_relaxed)<1 || !RigMask::motion.load(std::memory_order_relaxed)) return false;" in om
+assert 'const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed) && job.receipt' in fsr
+assert 'inline static std::atomic<bool> motion{false};' in rig
+assert 'pad_render_edge' not in fsr and 'edge_pad' not in fsr  # v1171: the v1168 FSR input edge replication is reverted
+print('PASS: v1171 rig motion opt-in (knob, off = v1165 rig draws), FSR input edge replication reverted')

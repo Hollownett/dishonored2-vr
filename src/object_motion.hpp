@@ -686,7 +686,7 @@ private:
         // (RigMask::previous_palette at VS t0); without either, both are the current ones (zero motion). Never one without the other.
         if(alt && RigMask::draw_is_rig()) {
             alt_rig_.fetch_add(1,std::memory_order_relaxed);
-            if(mode_.load(std::memory_order_relaxed)<1) return false;
+            if(mode_.load(std::memory_order_relaxed)<1 || !RigMask::motion.load(std::memory_order_relaxed)) return false; // v1171 opt-in: off = v1165 (raw rows, engine palette)
             if(!have_prev) return false; // no previous rows: not a motion-vector writer (the colour pass), nothing to pair
             bool rows_own=false;
             if(have_view && (affine(view.inv[0],cur) || affine(view.inv[1],cur))) {
