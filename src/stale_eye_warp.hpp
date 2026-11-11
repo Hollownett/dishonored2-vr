@@ -654,6 +654,19 @@ float3 KeptStep(float3 d,float part) {return part*float3(dot(keptAxes[0].xyz,d),
 float3 KeptImage(float3 p) {return float3((p.x-keptFov.x*p.z)/(keptFov.y-keptFov.x),(p.y-keptFov.z*p.z)/(keptFov.w-keptFov.z),p.z);}
 float3 KeptFrom(float3 h) {return float3(keptFov.x*h.z+(keptFov.y-keptFov.x)*h.x,keptFov.z*h.z+(keptFov.w-keptFov.z)*h.y,h.z);}
 // the kept frame has a surface d metres ahead at kept pixel q (within a texel and Confirm's tolerance)
+// M2's test: kept pixel q (its surface d metres ahead) shows a mover, or the fringe a mover's edge leaves on what lies behind it (v1152
+// dump 5: anti-aliasing darkens 1-2 px of floor beyond a boot's edge, motion and depth there say "still floor", and that fringe stayed at
+// the boot's old place as a dark line): a mover texel 2 px away, 8 directions, nearer than d (by any margin: a sole lies 8 cm before the
+// floor, within every depth tolerance). A mover at least 2 px thick covers the texel 2 px beyond the fringe in some direction.
+bool KeptMoverAt(float2 q,float d) {
+    if(Mover(MotionAt(keptMotionTex,motionSize.xy,q))) return true;
+    [unroll] for(int i=0;i<8;++i) {
+        float2 dir;sincos(i*0.7853982,dir.y,dir.x);
+        const float2 o=q+round(dir*2)/motionSize.xy;
+        if(Mover(MotionAt(keptMotionTex,motionSize.xy,o)) && Ahead(depthTex,depthSize.xy,depthMap.xy,o)<0.995*d) return true;
+    }
+    return false;
+}
 bool KeptHas(float2 q,float d) {
     const float tol=0.02+0.03*d;
     [unroll] for(int y=-1;y<=1;++y) [unroll] for(int x=-1;x<=1;++x)
@@ -704,7 +717,9 @@ float MoverSeen(float3 t,out float4 colour) {
     float2 p,edge;float k;
     const int near=NearHit(t,p,k,edge);
     if(near<0 || (near==0 && !FarHit(t,p,k))) return 1e38;
-    if(!FreshMover(p)) return 1e38;
+    // v1152: movers are a rule for the world beyond reach only. Within reach the fresh eye already places what moved (NearHit), and the
+    // arms, a drawn sword and what the hands carry have no usable engine motion (measured 2026-11-11: ~300 px off).
+    if(k<reach || !FreshMover(p)) return 1e38;
     const float3 now=KeptFrom(k*float3(dot(scene[0].xyz,t),dot(scene[1].xyz,t),dot(scene[2].xyz,t))+scene[3].xyz);
     const float3 then=now-KeptStep(MotionAt(freshMotionTex,motionSize.zw,p).xyz,motionMap.x);
     if(OwnerAt(now)!=0 || OwnerAt(then)!=0) return 1e38;
@@ -740,14 +755,15 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
         if(n==1 && distance(e,d)>0.01+0.01*k) return 1e38;
         d=e;start=k;
     }
-    if(Owner(c)!=0) return 1e38;
-    // (Confirm's texel beside also confirms: the ray that grazes the edge hiding it, which NearHit refuses so M1 missed it. But its own
-    // texel seeing farther still means gone: a texel beside would fatten a mover whose kept motion is off by a pixel.)
+    if(k<reach || Owner(c)!=0) return 1e38;
+    // (Confirm's texel beside also confirms: the ray that grazes the edge hiding it, which NearHit refuses so M1 missed it. Then its own
+    // texel must hide it (nearer) or be a mover too: v1152 dump 5, a boot lifting off the floor: the floor 8 cm behind the sole is within
+    // Confirm's depth tolerance, and "confirmed" by the floor M3 carried the old sole on by stale motion into a dark band under the boot.)
     float2 p;const int seen=Confirm(t,k,p);
     if(seen<0) return 1e38;
     if(seen==1) {
         const float ray=k*dot(fresh[2].xyz,t)+fresh[3].z,a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);
-        if(a<=0 || a>ray+0.02+0.03*ray) return 1e38;
+        if(!(a>0 && a<ray-0.02-0.03*ray) && !FreshMover(p)) return 1e38;
     }
     colour=Smooth(sourceTex,c);
     return k;
@@ -794,7 +810,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     // Hand-owned pixels keep the hand layers. Without motion textures nothing is read here.
     const bool movers=motionMap.z>0 && own[0]==0;
     bool kept_mover=false;
-    if(movers && kept_in) kept_mover=Mover(MotionAt(keptMotionTex,motionSize.xy,q));
+    if(movers && kept_in && kept_k>=reach) kept_mover=KeptMoverAt(q,kept_k);
     if(kept_mover && ca[0]!=-2) ca[0]=-1;
     const int world=ca[0];
     // The world beyond reach is taken as it is (v805: never the other eye's shading there; guards walking far away step a frame behind),
@@ -838,7 +854,8 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     if(near>0 && k<reach && (world!=0 || (k<kept_k-0.02 && !FreshEdge(now,k)))) return Smooth(freshTex,now);
     if(kept_in && (world==0 || world==2)) return Smooth(sourceTex,q);                 // hidden from the fresh eye, or beyond its view: this eye's own
     float2 b;if(KeptBeside(t,b)) {                                                      // what a move uncovered: this eye's own scenery beside it (v805),
-        bool gone=false;if(movers) gone=Mover(MotionAt(keptMotionTex,motionSize.xy,b)); // not a mover's old place (v1150 M2)
+        bool gone=false;                                                                 // not a mover's old place or its fringe (v1150 M2)
+        if(movers) {const float a=Ahead(depthTex,depthSize.xy,depthMap.xy,b);gone=KeptMoverAt(b,a>0?a:1e30);}
         if(!gone) return Smooth(sourceTex,b);
     }
     bool ok;const float2 f=Solve(fresh,freshDepthTex,depthSize.zw,freshMap.xy,t,0,k,ok);

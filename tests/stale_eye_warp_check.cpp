@@ -606,7 +606,7 @@ static void gpu_movers() {
     // An eye at (eye_x, 0, 0) looking down -z. guard: its centre (NaN: none), moved: its motion texture xyz (world metres); pillar: 26 cm
     // wide, 0.6 m away, at x -0.30..-0.04; hand: a 12 cm square 0.5 m away centred at x (NaN: none); lift: levels added (the other eye's
     // shading); junk: every still pixel's xyz nonzero (w stays 0). kind: what each pixel shows.
-    const auto render = [&](double eye_x, double guard, Vec3 moved, bool pillar, double hand, int lift, bool junk = false) {
+    const auto render = [&](double eye_x, double guard, Vec3 moved, bool pillar, double hand, int lift, bool junk = false, bool soft = false) {
         Frame f; f.row.resize(W); f.kind.resize(W * H);
         std::vector<unsigned char> pixels(W * H * 4); std::vector<float> d(W * H); std::vector<std::uint16_t> m(W * H * 4);
         for (UINT y = 0; y < H; ++y) for (UINT x = 0; x < W; ++x) {
@@ -615,6 +615,13 @@ static void gpu_movers() {
             double a = 8; int c = 20 + (static_cast<int>((eye_x + 8 * tx + 10) * 60) * 7) % 40, kind = wall_kind; float w = 0; Vec3 xyz{};
             if (std::isfinite(guard) && hit(3, guard - 0.25, guard + 0.25, 0.9)) {
                 a = 3; c = (static_cast<int>(std::floor((eye_x + 3 * tx - guard) / 0.05)) & 1) ? 200 : 150; kind = guard_kind; w = length(moved) > 0 ? 8.f : 0.f; xyz = moved;
+            }
+            // soft: the guard's anti-aliased edge darkens the 2 wall pixels beside it (60 %, 30 % of the guard's level), which keep the wall's
+            // depth and no motion, as the game draws them (v1152 dump 5)
+            if (soft && kind == wall_kind && std::isfinite(guard) && std::abs(3 * ty) < 0.9) {
+                const double px = W / (2 * T), left = ((guard - 0.25 - eye_x) / 3 / T + 1) / 2 * W, right = ((guard + 0.25 - eye_x) / 3 / T + 1) / 2 * W;
+                const double out = std::min(std::abs(x + 0.5 - left), std::abs(x + 0.5 - right)); (void)px;
+                if (out < 2) c = static_cast<int>(std::lround(c + (out < 1 ? 0.6 : 0.3) * (175 - c)));
             }
             if (pillar && hit(0.6, -0.30, -0.04, 1)) {a = 0.6; c = 80; kind = pillar_kind; w = 0; xyz = {};}
             if (std::isfinite(hand) && hit(0.5, hand - 0.06, hand + 0.06, 0.06)) {a = 0.5; c = 120; kind = hand_kind; w = 0; xyz = {};}
@@ -656,14 +663,19 @@ static void gpu_movers() {
         return out[x] >= lo - 12 && out[x] <= hi + 12;
     };
     // per class of column (the guard now, the wall it uncovered, the rest of the wall): columns wrong. Uncovered wall: wrong if it shows
-    // the guard (>= 130: this eye never saw that wall, so only the fresh eye has it).
+    // the guard (>= 130: this eye never saw that wall, so only the fresh eye has it). v1152: with the 2 px fringe beside the guard's old
+    // outline, which M2 clears with it (in the game those pixels carry its anti-aliased edge).
     struct Score {int guard{}, guard_wrong{}, uncovered{}, uncovered_wrong{}, wall{}, wall_wrong{};};
     const auto score = [&](const std::vector<int>& out, const Frame& kept, const Frame& truth) {
         Score s;
+        const auto kept_guard_near = [&](int x) {
+            for (int d = -2; d <= 2; ++d) if (x + d >= 0 && x + d < static_cast<int>(W) && kept.kind[(H / 2) * W + x + d] == guard_kind) return true;
+            return false;
+        };
         for (int x = 1; x < static_cast<int>(W) - 1; ++x) {
             const int k = truth.kind[(H / 2) * W + x];
             if (k == guard_kind) {++s.guard; s.guard_wrong += !near_truth(out, truth, x);}
-            else if (k == wall_kind && kept.kind[(H / 2) * W + x] == guard_kind) {++s.uncovered; s.uncovered_wrong += out[x] >= 130;}
+            else if (k == wall_kind && kept_guard_near(x)) {++s.uncovered; s.uncovered_wrong += out[x] >= 130;}
             else if (k == wall_kind) {++s.wall; s.wall_wrong += !near_truth(out, truth, x);}
         }
         return s;
@@ -737,6 +749,23 @@ static void gpu_movers() {
         std::printf("c'. accelerating guard: seen part off its silhouette in %d columns, %d/%d seen columns not the truth's levels (M1 lookup 7 cm off);"
                     " hidden part: %d/%d wrong, %d without the guard (M3 lags 15 cm)\n", silhouette, sw, s, hw, h, hidden_lag);
         CHECK(silhouette == 0);
+    }
+    // a'. (v1152 dump 5: a dark line followed a lifted boot's old sole edge) the same walk with soft, anti-aliased guard edges whose 2 px
+    // fringe lies on the wall (wall depth, no motion): the wall at the guard's old place shows no line; its trailing fringe columns are wall
+    {
+        const Frame kept = render(0.032, 0.2, walk, false, none, 0, false, true), fresh = render(-0.032, 0.0, walk, false, none, 0, false, true);
+        const Frame soft_truth = render(0.032, 0.0, walk, false, none, 0, false, true);
+        const auto out = run(kept, fresh, true);
+        const double old_right = ((0.2 + 0.25 - 0.032) / 3 / T + 1) / 2 * W;  // the old trailing edge (the guard walks left)
+        int fringe = 0, line = 0;
+        for (int x = static_cast<int>(old_right); x < static_cast<int>(old_right) + 3; ++x) {
+            ++fringe; const bool bad = std::abs(out[x] - soft_truth.row[x]) > 12; line += bad;
+            if (bad) std::printf("   column %d: %d (truth %d, kept %d)\n", x, out[x], soft_truth.row[x], kept.row[x]);
+        }
+        const auto on = score(out, kept, soft_truth);
+        std::printf("a'. soft edges: old trailing fringe %d of %d columns not the wall; guard %d/%d wrong, uncovered wall shows the guard in %d/%d\n",
+                    line, fringe, on.guard_wrong, on.guard, on.uncovered_wrong, on.uncovered);
+        CHECK(line == 0 && on.uncovered_wrong == 0);
     }
     // d. the guard is gone in the fresh eye (left the view between the ticks): no afterimage
     {
