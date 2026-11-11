@@ -3,7 +3,9 @@
 // without a read view), and an identity warp must reproduce the image.
 #include "../src/stale_eye_warp.hpp"
 #include "../src/canted_fov.hpp"
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <vector>
 #pragma comment(lib,"d3d11.lib")
@@ -583,6 +585,203 @@ static void uncant_math() {
     std::printf("uncant: located views of 3 eyes resample from their turned images exactly, corners covered\n");
 }
 
+// v1150 (design 2026-11-11 section 3, lab section 4.1): movers from the eyes' motion textures. A striped guard (50 cm wide, 3 m away)
+// in front of a wall 8 m away walks 20 cm left between the kept tick and now; narrow views (+-15 deg) so it spans 80 columns. The kept
+// eye's motion texture spans the two ticks before the kept tick, the fresh eye's the two ending now (constant velocity: 40 cm each).
+static std::uint16_t half_float(float f) {  // normal numbers, truncated; tiny ones flush to zero (enough for the lab)
+    std::uint32_t x; std::memcpy(&x, &f, 4);
+    const std::uint32_t sign = (x >> 16) & 0x8000u; const int e = static_cast<int>((x >> 23) & 0xffu) - 127 + 15;
+    if (e <= 0) return static_cast<std::uint16_t>(sign);
+    if (e >= 31) return static_cast<std::uint16_t>(sign | 0x7c00u);
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(e) << 10) | ((x & 0x7fffffu) >> 13));
+}
+static void gpu_movers() {
+    ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
+    CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+    constexpr UINT W = 256, H = 64;
+    const double T = std::tan(15 * 3.14159265358979 / 180);
+    const WarpFov narrow{-std::atan(T), std::atan(T), std::atan(T), -std::atan(T)};
+    enum {wall_kind, guard_kind, pillar_kind, hand_kind};
+    struct Frame {ComPtr<ID3D11Texture2D> image, depth, motion; std::vector<int> row, kind;};
+    // An eye at (eye_x, 0, 0) looking down -z. guard: its centre (NaN: none), moved: its motion texture xyz (world metres); pillar: 26 cm
+    // wide, 0.6 m away, at x -0.30..-0.04; hand: a 12 cm square 0.5 m away centred at x (NaN: none); lift: levels added (the other eye's
+    // shading); junk: every still pixel's xyz nonzero (w stays 0). kind: what each pixel shows.
+    const auto render = [&](double eye_x, double guard, Vec3 moved, bool pillar, double hand, int lift, bool junk = false) {
+        Frame f; f.row.resize(W); f.kind.resize(W * H);
+        std::vector<unsigned char> pixels(W * H * 4); std::vector<float> d(W * H); std::vector<std::uint16_t> m(W * H * 4);
+        for (UINT y = 0; y < H; ++y) for (UINT x = 0; x < W; ++x) {
+            const double tx = ((x + 0.5) / W * 2 - 1) * T, ty = (1 - (y + 0.5) / H * 2) * T;
+            const auto hit = [&](double z, double x0, double x1, double half) {const double wx = eye_x + z * tx; return wx >= x0 && wx <= x1 && std::abs(z * ty) < half;};
+            double a = 8; int c = 20 + (static_cast<int>((eye_x + 8 * tx + 10) * 60) * 7) % 40, kind = wall_kind; float w = 0; Vec3 xyz{};
+            if (std::isfinite(guard) && hit(3, guard - 0.25, guard + 0.25, 0.9)) {
+                a = 3; c = (static_cast<int>(std::floor((eye_x + 3 * tx - guard) / 0.05)) & 1) ? 200 : 150; kind = guard_kind; w = length(moved) > 0 ? 8.f : 0.f; xyz = moved;
+            }
+            if (pillar && hit(0.6, -0.30, -0.04, 1)) {a = 0.6; c = 80; kind = pillar_kind; w = 0; xyz = {};}
+            if (std::isfinite(hand) && hit(0.5, hand - 0.06, hand + 0.06, 0.06)) {a = 0.5; c = 120; kind = hand_kind; w = 0; xyz = {};}
+            if (junk && w == 0) xyz = {0.3, -0.2, 0.5};
+            c = std::min(255, c + lift);
+            auto* p = &pixels[(y * W + x) * 4]; p[0] = p[1] = p[2] = static_cast<unsigned char>(c); p[3] = 255;
+            d[y * W + x] = static_cast<float>(0.01 / a); f.kind[y * W + x] = kind;
+            const float v[4]{static_cast<float>(xyz.x), static_cast<float>(xyz.y), static_cast<float>(xyz.z), w};
+            for (int i = 0; i < 4; ++i) m[(y * W + x) * 4 + i] = half_float(v[i]);
+            if (y == H / 2) f.row[x] = c;
+        }
+        D3D11_TEXTURE2D_DESC desc{}; desc.Width = W; desc.Height = H; desc.MipLevels = 1; desc.ArraySize = 1; desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;  // no read view, as GameXr keeps them
+        const D3D11_SUBRESOURCE_DATA data{pixels.data(), W * 4, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &data, &f.image)));
+        desc.Format = DXGI_FORMAT_R32_FLOAT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        const D3D11_SUBRESOURCE_DATA ddata{d.data(), W * 4, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &ddata, &f.depth)));
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        const D3D11_SUBRESOURCE_DATA mdata{m.data(), W * 8, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &mdata, &f.motion)));
+        return f;
+    };
+    const double none = std::nan("");
+    const Vec3 walk{-0.4, 0, 0};  // two ticks at 20 cm a tick, leftward
+    const WarpCamera kept_cam = camera({}, {0.032, 0, 0}), fresh_cam = camera({}, {-0.032, 0, 0});
+    auto layers = *stale_eye_layers(kept_cam, narrow, kept_cam, narrow, &fresh_cam, narrow, 2.0);
+    StaleEyeWarp warp(device.Get());
+    const auto id = *stale_eye_homography({}, square, {}, square);
+    const auto image = [&](const Frame& k, const Frame& f, const StaleLayers& l, bool motion) {
+        return read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &l, {k.depth.Get(), W, H}, f.image.Get(), {f.depth.Get(), W, H},
+                                                                   motion ? StaleMotion{k.motion.Get(), W, H} : StaleMotion{}, motion ? StaleMotion{f.motion.Get(), W, H} : StaleMotion{}));
+    };
+    const auto middle = [&](const std::vector<unsigned char>& i) {std::vector<int> r(W); for (UINT x = 0; x < W; ++x) r[x] = i[((H / 2) * W + x) * 4]; return r;};
+    const auto run = [&](const Frame& k, const Frame& f, bool rules) {layers.motion_rules = rules; const auto r = middle(image(k, f, layers, true)); layers.motion_rules = true; return r;};
+    // the truth within a column either side (an edge's anti-aliasing) and 12 levels
+    const auto near_truth = [&](const std::vector<int>& out, const Frame& truth, int x) {
+        int lo = 255, hi = 0; for (int i = std::max(0, x - 1); i <= std::min<int>(W - 1, x + 1); ++i) {lo = std::min(lo, truth.row[i]); hi = std::max(hi, truth.row[i]);}
+        return out[x] >= lo - 12 && out[x] <= hi + 12;
+    };
+    // per class of column (the guard now, the wall it uncovered, the rest of the wall): columns wrong. Uncovered wall: wrong if it shows
+    // the guard (>= 130: this eye never saw that wall, so only the fresh eye has it).
+    struct Score {int guard{}, guard_wrong{}, uncovered{}, uncovered_wrong{}, wall{}, wall_wrong{};};
+    const auto score = [&](const std::vector<int>& out, const Frame& kept, const Frame& truth) {
+        Score s;
+        for (int x = 1; x < static_cast<int>(W) - 1; ++x) {
+            const int k = truth.kind[(H / 2) * W + x];
+            if (k == guard_kind) {++s.guard; s.guard_wrong += !near_truth(out, truth, x);}
+            else if (k == wall_kind && kept.kind[(H / 2) * W + x] == guard_kind) {++s.uncovered; s.uncovered_wrong += out[x] >= 130;}
+            else if (k == wall_kind) {++s.wall; s.wall_wrong += !near_truth(out, truth, x);}
+        }
+        return s;
+    };
+    const auto say = [](const char* name, const Score& on, const Score& off) {
+        std::printf("%s: guard %d/%d wrong (rules off %d), uncovered wall %d/%d shows the guard (off %d), other wall %d/%d wrong (off %d)\n", name,
+                    on.guard_wrong, on.guard, off.guard_wrong, on.uncovered_wrong, on.uncovered, off.uncovered_wrong, on.wall_wrong, on.wall, off.wall_wrong);
+    };
+    const Frame truth = render(0.032, 0.0, walk, false, none, 0);  // the target eye now, in its own shading
+    // a. the guard at its new place in this eye's own kept pixels, wall at its old place
+    {
+        const Frame kept = render(0.032, 0.2, walk, false, none, 0), fresh = render(-0.032, 0.0, walk, false, none, 0);
+        const auto on = score(run(kept, fresh, true), kept, truth), off = score(run(kept, fresh, false), kept, truth);
+        say("a. guard walks 20 cm", on, off);
+        CHECK(on.guard > 60 && on.uncovered > 20 && on.guard_wrong == 0 && on.uncovered_wrong == 0 && on.wall_wrong == 0);
+        CHECK(off.guard_wrong > 20 && off.uncovered_wrong > 20);  // v1132: the guard where the kept frame had it
+        CHECK(warp.motion_passes == 1 && warp.motion_refusals == 0);  // the run with the rules off reads no motion
+    }
+    // b. the fresh eye 30 levels brighter: guard and wall keep this eye's own levels (the guard from its own kept pixels, not the other
+    // eye's). The wall the guard uncovered is in no kept pixel: there it is the fresh eye's (reported, not hidden).
+    {
+        const Frame kept = render(0.032, 0.2, walk, false, none, 0), fresh = render(-0.032, 0.0, walk, false, none, 30);
+        const auto out = run(kept, fresh, true);
+        const auto on = score(out, kept, truth), off = score(run(kept, fresh, false), kept, truth);
+        say("b. other eye 30 brighter", on, off);
+        int lifted = 0; for (int x = 0; x < static_cast<int>(W); ++x) if (truth.kind[(H / 2) * W + x] == wall_kind && kept.kind[(H / 2) * W + x] == guard_kind) lifted += out[x] > truth.row[x] + 20;
+        std::printf("   uncovered wall in the fresh eye's shading: %d of %d columns\n", lifted, on.uncovered);
+        CHECK(on.guard_wrong == 0 && on.uncovered_wrong == 0 && on.wall_wrong == 0);
+        CHECK(off.guard_wrong > 20);
+    }
+    // c. a pillar 0.6 m away hides the guard's left part (x < -7 cm) from the fresh eye; this eye sees all of it. The hidden part moves with
+    // the visible part (M3): every guard column within a column of the truth, both sides of the pillar's edge in the fresh view.
+    const auto hidden_from_fresh = [&](int x) {  // the guard point on this column lies behind the pillar for the fresh eye
+        const double tx = ((x + 0.5) / W * 2 - 1) * T, wx = 0.032 + 3 * tx, f = (wx + 0.032) / 3;
+        return f >= (-0.30 + 0.032) / 0.6 && f <= (-0.04 + 0.032) / 0.6;
+    };
+    const Frame pillar_truth = render(0.032, 0.0, walk, true, none, 0);
+    const auto split = [&](const std::vector<int>& out, int& hidden, int& hidden_wrong, int& seen, int& seen_wrong) {
+        hidden = hidden_wrong = seen = seen_wrong = 0;
+        for (int x = 1; x < static_cast<int>(W) - 1; ++x) if (pillar_truth.kind[(H / 2) * W + x] == guard_kind) {
+            const bool bad = !near_truth(out, pillar_truth, x);
+            if (hidden_from_fresh(x)) {++hidden; hidden_wrong += bad;} else {++seen; seen_wrong += bad;}
+            if (bad) std::printf("   column %d (%s): %d (truth %d)\n", x, hidden_from_fresh(x) ? "hidden" : "seen", out[x], pillar_truth.row[x]);
+        }
+    };
+    {
+        const Frame kept = render(0.032, 0.2, walk, true, none, 0), fresh = render(-0.032, 0.0, walk, true, none, 30);
+        int h, hw, s, sw, oh, ohw, os, osw;
+        split(run(kept, fresh, true), h, hw, s, sw);
+        split(run(kept, fresh, false), oh, ohw, os, osw);
+        const auto on = score(run(kept, fresh, true), kept, pillar_truth);
+        std::printf("c. half hidden by a pillar: hidden part %d/%d columns wrong (rules off %d), seen part %d/%d (off %d); uncovered wall shows the guard in %d/%d\n",
+                    hw, h, ohw, sw, s, osw, on.uncovered_wrong, on.uncovered);
+        CHECK(h > 15 && s > 40 && hw == 0 && sw == 0 && on.uncovered_wrong == 0);  // tolerance: within a column of the truth (near_truth)
+        CHECK(ohw > 10);
+    }
+    // c'. the guard accelerates: the kept eye's motion says 10 cm over its two ticks (the M3 carry: 5 cm), this tick it walked 20 cm, and the
+    // fresh eye's two ticks say 26 cm (6 + 20; fresh_part 0.5 takes 13 cm back for M1's lookup). M1 still draws the seen part where the
+    // fresh eye has it (silhouette: guard on every seen guard column, wall where it was); only the hidden part (M3) lags.
+    {
+        const Frame kept = render(0.032, 0.2, {-0.10, 0, 0}, true, none, 0), fresh = render(-0.032, 0.0, {-0.26, 0, 0}, true, none, 0);
+        const auto out = run(kept, fresh, true);
+        int h, hw, s, sw; split(out, h, hw, s, sw);
+        int silhouette = 0, hidden_lag = 0;
+        for (int x = 1; x < static_cast<int>(W) - 1; ++x) {
+            const int k = pillar_truth.kind[(H / 2) * W + x];
+            const bool off_silhouette = (k == guard_kind && !hidden_from_fresh(x) && out[x] < 130) || (k == wall_kind && out[x] >= 130 && kept.kind[(H / 2) * W + x] == guard_kind);
+            if (off_silhouette) {++silhouette; std::printf("   silhouette column %d: %d (truth %d)\n", x, out[x], pillar_truth.row[x]);}
+            if (k == guard_kind && hidden_from_fresh(x)) hidden_lag += out[x] < 130;
+        }
+        std::printf("c'. accelerating guard: seen part off its silhouette in %d columns, %d/%d seen columns not the truth's levels (M1 lookup 7 cm off);"
+                    " hidden part: %d/%d wrong, %d without the guard (M3 lags 15 cm)\n", silhouette, sw, s, hw, h, hidden_lag);
+        CHECK(silhouette == 0);
+    }
+    // d. the guard is gone in the fresh eye (left the view between the ticks): no afterimage
+    {
+        const Frame kept = render(0.032, 0.2, walk, false, none, 0), fresh = render(-0.032, none, walk, false, none, 0);
+        int ghost = 0, ghost_off = 0;
+        const auto on = run(kept, fresh, true), off = run(kept, fresh, false);
+        for (UINT x = 0; x < W; ++x) {ghost += on[x] >= 130; ghost_off += off[x] >= 130;}
+        std::printf("d. guard gone: it shows in %d columns (rules off %d)\n", ghost, ghost_off);
+        CHECK(ghost == 0 && ghost_off > 40);
+    }
+    // e. anti-goal: a motion texture with w 0 everywhere (its xyz junk) changes not one byte against no motion texture, on a walk with a
+    // tracked hand in front of the guard and the wall (and the rules switched off with real motion, likewise)
+    {
+        WarpCamera k = camera({}, {-0.068, 0, 0}), now = kept_cam;  // walked 10 cm right since the kept tick
+        const auto at = [](double x) {WorldTrackedPose p; p.position = {x, 0, -0.5}; p.basis = {Vec3{0, 0, -1}, Vec3{-1, 0, 0}, Vec3{0, 1, 0}}; return p;};
+        k.hand_bits = now.hand_bits = 1u; k.hands[0] = at(-0.1); now.hands[0] = at(0.0);
+        const auto walk_layers = *stale_eye_layers(k, narrow, now, narrow, &fresh_cam, narrow, 2.0);
+        const Frame still_kept = render(-0.068, 0.0, {}, false, -0.1, 0, true), still_fresh = render(-0.032, 0.0, {}, false, 0.0, 30, true);
+        const auto bare = image(still_kept, still_fresh, walk_layers, false), zero = image(still_kept, still_fresh, walk_layers, true);
+        const Frame mover_kept = render(-0.068, 0.2, walk, false, -0.1, 0), mover_fresh = render(-0.032, 0.0, walk, false, 0.0, 30);
+        auto off_layers = walk_layers; off_layers.motion_rules = false;
+        const auto mover_bare = image(mover_kept, mover_fresh, walk_layers, false), mover_off = image(mover_kept, mover_fresh, off_layers, true);
+        int differ = 0, differ_off = 0, hand = 0;
+        for (std::size_t i = 0; i < bare.size(); ++i) {differ += bare[i] != zero[i]; differ_off += mover_bare[i] != mover_off[i];}
+        for (UINT x = 0; x < W; ++x) hand += still_kept.kind[(H / 2) * W + x] == hand_kind;
+        std::printf("e. zero motion vs none: %d bytes differ; rules off vs none: %d bytes differ (hand on %d columns)\n", differ, differ_off, hand);
+        CHECK(differ == 0 && differ_off == 0 && hand > 10);
+    }
+    // f. a still, tracked hand in front of the walking guard: the hand's own pixels as without the rules
+    {
+        WarpCamera k = kept_cam;
+        k.hand_bits = 1u; k.hands[0].position = {0.0, 0, -0.5}; k.hands[0].basis = k.pose.basis;
+        const auto hand_layers = *stale_eye_layers(k, narrow, k, narrow, &fresh_cam, narrow, 2.0);
+        const Frame kept = render(0.032, 0.2, walk, false, 0.0, 0), fresh = render(-0.032, 0.0, walk, false, 0.0, 30);
+        auto off_layers = hand_layers; off_layers.motion_rules = false;
+        const auto on = image(kept, fresh, hand_layers, true), off = image(kept, fresh, off_layers, true);
+        int owned = 0, differ = 0, guard_moved = 0;
+        for (UINT p = 0; p < W * H; ++p) if (kept.kind[p] == hand_kind) {++owned; for (int c = 0; c < 4; ++c) differ += on[p * 4 + c] != off[p * 4 + c];}
+        const auto row_on = middle(on);
+        for (int x = 0; x < static_cast<int>(W); ++x) guard_moved += truth.kind[(H / 2) * W + x] == wall_kind && kept.kind[(H / 2) * W + x] == guard_kind && row_on[x] >= 130;
+        std::printf("f. still hand before the guard: %d bytes differ over its %d pixels; guard afterimage beside it in %d columns\n", differ, owned, guard_moved);
+        CHECK(owned > 50 && differ == 0 && guard_moved == 0);
+    }
+}
+
 // v802: the drawn hands held still from the kept frame's Setup to the target's (what is within reach may show from the kept image)
 static void hands_still() {
     WarpCamera a = camera({}, {0, 0, 0}), b = a;
@@ -608,6 +807,7 @@ int main() {
     fresh_math();
     gpu_fresh();
     gpu_turn();
+    gpu_movers();
     uncant_math();
     hands_still();
     std::puts("PASS: stale eye warp (homography: identity, yaw, pitch, relative rotation, round trip, behind, invalid; WARP: identity copy, line shift on both read paths;"
@@ -618,5 +818,7 @@ int main() {
               " v806 canted fresh layer; v807 snap turn: beyond the kept frame the fresh eye; v808 uncant to the located view;"
               " v809 hand at 18 cm; v810 tracked hand moved with its grip in this eye's own shading;"
               " v811 each kept pixel moves with its owner alone, a still hand beside a moving one, hands where the fresh eye sees them (fit);"
-              " v813 no hand where its recorded motion put it and the fresh eye sees past it)");
+              " v813 no hand where its recorded motion put it and the fresh eye sees past it;"
+              " v1150 movers: a walking guard at its new place in its own shading, wall where it was, other eye brighter, half hidden by a pillar (M3),"
+              " accelerating, gone; zero motion and rules off byte-identical; a still hand unchanged)");
 }
