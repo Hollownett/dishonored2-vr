@@ -96,6 +96,21 @@ int main() {
         CHECK(jr.find("\"size\":[8,8]")!=std::string::npos && jr.find("\"pass_name\":\"ARK_RENDERPASS_TEXTURE_STREAMER\"")==std::string::npos);
         CHECK(jr.find("\"pass\":11")!=std::string::npos && jr.find("\"pass\":9,")==std::string::npos);
         std::printf("released texture reported from its recorded description: %s\n",jr.find("\"size\":[8,8]")!=std::string::npos?"yes":"NO");
+        // v1188: a write in render N read in render N+2 (the same eye again, one-view frames) is not cross-eye; N+1 is (above)
+        D3D11_TEXTURE2D_DESC td2=t;td2.Width=td2.Height=16;ComPtr<ID3D11Texture2D> late;ComPtr<ID3D11RenderTargetView> late_rtv;ComPtr<ID3D11ShaderResourceView> late_srv;
+        dev->CreateTexture2D(&td2,nullptr,&late);dev->CreateRenderTargetView(late.Get(),nullptr,&late_rtv);dev->CreateShaderResourceView(late.Get(),nullptr,&late_srv);
+        ++frame_now;d2vr::CrossEyeHistory::present();
+        c->OMSetRenderTargets(1,late_rtv.GetAddressOf(),nullptr);{d2vr::CrossEyeHistory::Scope s(c.Get(),1,12);c->Draw(3,0);s.after();}
+        c->OMSetRenderTargets(1,rtv[0].GetAddressOf(),nullptr);
+        ++frame_now;d2vr::CrossEyeHistory::present();++frame_now;d2vr::CrossEyeHistory::present();
+        c->PSSetShaderResources(1,1,late_srv.GetAddressOf());{d2vr::CrossEyeHistory::Scope s(c.Get(),1,13);c->Draw(3,0);s.after();}
+        c->PSSetShaderResources(1,1,&none);c->OMSetRenderTargets(0,nullptr,nullptr);
+        const auto j2=d2vr::CrossEyeHistory::json();
+        CHECK(j2.find("\"size\":[16,16]")==std::string::npos || j2.find("\"pass\":13,")==std::string::npos);
+        CHECK(j2.find("\"pass\":13,")==std::string::npos);
+        // the shaped list sees the ping-pong history of sections 1-4 one render back
+        CHECK(j2.find("\"shaped\":[{")!=std::string::npos);
+        std::printf("N+2 read not flagged: %s\n",j2.find("\"pass\":13,")==std::string::npos?"yes":"NO");
     }
     d2vr::CrossEyeHistory::reset();
     if(failures) {std::printf("cross_eye_history_check: %d failure(s)\n",failures);return 1;}

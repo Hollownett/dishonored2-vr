@@ -54,7 +54,7 @@ public:
     using FrameFn=std::uint32_t(*)() noexcept;inline static std::atomic<FrameFn> frame_fn{}; // the engine frame counter (the fix's bookkeeping)
     static constexpr unsigned min_frames=32,learn_frames=600;
     // A census event (record time). kind 0 write, 1 read. Size/format are of the bound texture (0 for a buffer).
-    struct Event {std::uintptr_t r{},ps{};std::uint32_t w{},h{};std::uint16_t format{};std::int16_t pass{-1};std::uint8_t kind{},slot{};std::int8_t eye{-1};bool shaped{},buffer{};};
+    struct Event {std::uintptr_t r{},ps{};std::uint32_t w{},h{};std::uint16_t format{},array{};std::int16_t pass{-1};std::uint8_t kind{},slot{};std::int8_t eye{-1};bool shaped{},buffer{};};
     class Scope {
     public:
         // paired_eye: the eye whose view `pass_view` is on a paired frame (ObjectMotion::eye_of_view), else -1
@@ -175,10 +175,20 @@ public:
             o<<(first?"":",")<<"{\"texture\":\""<<std::hex<<e->key.load()<<"\",\"ps\":\""<<e->ps.load()<<std::dec<<"\",\"reads\":"<<e->cross.load()<<",\"frames\":"<<e->frames.load()
              <<",\"pass\":"<<pass<<",\"pass_name\":\""<<(pass>=0?render_pass_name(static_cast<unsigned>(pass)):"untagged")
              <<"\",\"writer_pass\":"<<writer<<",\"writer_name\":\""<<(writer>=0?render_pass_name(static_cast<unsigned>(writer)):"untagged")<<"\",\"writer_eye\":"<<e->writer.load()
-             <<",\"slot\":"<<e->slot.load()<<",\"buffer\":"<<(e->buffer.load()?"true":"false")<<",\"size\":["<<e->w.load()<<','<<e->h.load()<<"],\"format\":"<<e->format.load()
+             <<",\"slot\":"<<e->slot.load()<<",\"buffer\":"<<(e->buffer.load()?"true":"false")<<",\"size\":["<<e->w.load()<<','<<e->h.load()<<"],\"array\":"<<e->array.load()<<",\"format\":"<<e->format.load()
              <<",\"shaped\":"<<(e->shaped.load()?"true":"false")<<'}';
             first=false;
         }
+        // v1188: every "history-shaped" read (input shaped like render target 0), whoever wrote it: how many renders back its last write
+        // executed (0 = this render, 1 = the previous render, ...; never = no write seen). A temporal pass reading its previous output shows
+        // here with renders_back 1 (one-view frames) whether or not it is flagged; absent here = no such pass ran.
+        o<<"],\"shaped\":[";
+        {std::lock_guard<std::mutex> lock(apply_mutex_);bool f=true;
+         for(const auto& h:shaped_) if(h.reads) {
+             o<<(f?"":",")<<"{\"ps\":\""<<std::hex<<h.ps<<std::dec<<"\",\"pass\":"<<h.pass<<",\"pass_name\":\""<<(h.pass>=0?render_pass_name(static_cast<unsigned>(h.pass)):"untagged")
+              <<"\",\"slot\":"<<h.slot<<",\"size\":["<<h.w<<','<<h.h<<"],\"format\":"<<h.format<<",\"reads\":"<<h.reads<<",\"renders_back\":["<<h.back[0]<<','<<h.back[1]<<','<<h.back[2]<<','<<h.back[3]<<"]}";
+             f=false;
+         }}
         o<<"],\"roles\":[";
         {std::lock_guard<std::mutex> lock(mutex_);
          for(unsigned i=0;i<role_count_.load();++i) o<<(i?",":"")<<"{\"ps\":\""<<std::hex<<roles_[i].ps<<std::dec<<"\",\"slot\":"<<roles_[i].slot<<",\"restored\":"<<roles_[i].restored<<",\"run\":"<<roles_[i].run<<'}';}
@@ -191,11 +201,21 @@ public:
     }
 private:
     struct Entry {std::atomic<std::uintptr_t> key{};std::atomic<std::uint64_t> written{};std::atomic<std::uint64_t> flag_render{~0ull};std::atomic<int> writer{-1};
-        std::atomic<std::uint64_t> cross{};std::atomic<unsigned> frames{},slot{},w{},h{},format{};
+        std::atomic<std::uint64_t> cross{};std::atomic<unsigned> frames{},slot{},w{},h{},format{},array{};
         std::atomic<int> pass{-1},writer_pass{-1};std::atomic<std::uintptr_t> ps{};std::atomic<bool> shaped{},buffer{};};
     struct Role {std::uintptr_t ps{};unsigned slot{};ID3D11Texture2D* a{};ID3D11Texture2D* b{};ID3D11Device* device{};D3D11_TEXTURE2D_DESC desc{};
         std::uint32_t last{~0u};int last_eye{-1};unsigned run{};std::uint64_t restored{};};
     struct Buffer {std::atomic<ID3D11DeviceContext*> context{};std::vector<Event> events;};
+    // renders_back histogram per (pixel shader, slot): [0] same render, [1] previous, [2] two or more back, [3] no write seen (apply_mutex_)
+    struct Shaped {std::uintptr_t ps{};int pass{-1};unsigned slot{},w{},h{},format{};std::uint64_t reads{};std::array<std::uint64_t,4> back{};};
+    inline static std::array<Shaped,32> shaped_{};
+    static void shaped_read(const Event& ev,std::uint64_t back) noexcept {
+        Shaped* pick=nullptr;
+        for(auto& h:shaped_) {if(h.reads && h.ps==ev.ps && h.slot==ev.slot) {pick=&h;break;} if(!h.reads && !pick) pick=&h;}
+        if(!pick) return;
+        if(!pick->reads) {pick->ps=ev.ps;pick->slot=ev.slot;pick->pass=ev.pass;pick->w=ev.w;pick->h=ev.h;pick->format=ev.format;}
+        ++pick->reads;++pick->back[back==0?0:back==1?1:back==~0ull?3:2];
+    }
     static constexpr unsigned table_size=4096,max_roles=8,context_slots=64;
     inline static std::array<Entry,table_size> table_{};
     inline static std::array<Role,max_roles> roles_{};inline static std::atomic<unsigned> role_count_{};
@@ -226,7 +246,7 @@ private:
     static Event describe_event(ID3D11Resource* r) noexcept {
         Event e{};e.r=reinterpret_cast<std::uintptr_t>(r);
         D3D11_RESOURCE_DIMENSION dim{};r->GetType(&dim);
-        if(dim==D3D11_RESOURCE_DIMENSION_TEXTURE2D) {D3D11_TEXTURE2D_DESC d{};static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);e.w=d.Width;e.h=d.Height;e.format=static_cast<std::uint16_t>(d.Format);}
+        if(dim==D3D11_RESOURCE_DIMENSION_TEXTURE2D) {D3D11_TEXTURE2D_DESC d{};static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);e.w=d.Width;e.h=d.Height;e.format=static_cast<std::uint16_t>(d.Format);e.array=static_cast<std::uint16_t>(d.ArraySize);}
         else if(dim==D3D11_RESOURCE_DIMENSION_BUFFER) {D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(r)->GetDesc(&d);e.w=d.ByteWidth;e.buffer=true;}
         return e;
     }
@@ -245,11 +265,12 @@ private:
         const std::uint64_t render=render_.load(std::memory_order_relaxed);
         if(ev.kind==0) {e->written.store(render,std::memory_order_relaxed);e->writer.store(ev.eye,std::memory_order_relaxed);e->writer_pass.store(ev.pass,std::memory_order_relaxed);return;}
         const std::uint64_t written=e->written.load(std::memory_order_relaxed);const int writer=e->writer.load(std::memory_order_relaxed);
+        if(ev.shaped) shaped_read(ev,written?render-written:~0ull);
         const bool cross=ev.eye<0?written!=0 && written+1==render:writer>=0 && writer!=ev.eye && written!=0 && (written==render || written+1==render);
         if(!cross) return;
         e->cross.fetch_add(1,std::memory_order_relaxed);e->pass.store(ev.pass,std::memory_order_relaxed);e->ps.store(ev.ps,std::memory_order_relaxed);
         e->slot.store(ev.slot,std::memory_order_relaxed);e->shaped.store(ev.shaped,std::memory_order_relaxed);e->buffer.store(ev.buffer,std::memory_order_relaxed);
-        e->w.store(ev.w,std::memory_order_relaxed);e->h.store(ev.h,std::memory_order_relaxed);e->format.store(ev.format,std::memory_order_relaxed);
+        e->w.store(ev.w,std::memory_order_relaxed);e->h.store(ev.h,std::memory_order_relaxed);e->format.store(ev.format,std::memory_order_relaxed);e->array.store(ev.array,std::memory_order_relaxed);
         if(e->flag_render.exchange(render,std::memory_order_relaxed)!=render) {
             const unsigned frames=e->frames.fetch_add(1,std::memory_order_relaxed)+1;
             if(ev.shaped && frames>=min_frames) add_role(ev.ps,ev.slot);
