@@ -208,12 +208,12 @@ int main() {
         auto in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);
         bone.distance=.09;in=input(body,bone);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // all grip-only targets share the contact gate (v1141: a bone's is body_gate_m)
         bone.distance=.25;in=input(body,bone,1200);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // v1141: a bone at 0.25 m grabs (body_gate_m 0.28)
-        bone.distance=.29;in=input(body,bone,1200);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);   // v1146: no part in reach -> the game's pickup (as the fist)
+        bone.distance=.29;in=input(body,bone,1200);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // v1146: no part in reach -> the physical request, as the fist
         auto prop=bone;prop.kind=PalmKind::prop;prop.distance=.05;in=input(body,prop);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab); // nearer prop wins beside a corpse
         in.takedown_offered=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use); // a real stealth offer keeps priority
         bone.distance=.5;in=input(body,bone,1000);in.native_corpse=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::pending);   // not in reach yet: the buffer runs
-        in.now_ms=1000+static_cast<std::uint64_t>(t.grab_buffer_ms)+1;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);     // v1146: then the game's pickup, as the fist does
-        in=input(body,std::nullopt,1000);in.native_corpse=true;in.now_ms=1200;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);   // v1146
+        in.now_ms=1000+static_cast<std::uint64_t>(t.grab_buffer_ms)+1;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);     // v1146: then the physical request, as the fist
+        in=input(body,std::nullopt,1000);in.native_corpse=true;in.now_ms=1200;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::grab);   // v1146
         in=input(body,std::nullopt,1000);in.native_corpse=false;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);           // doors/levers/loot unchanged
         in=input(body,bone);in.native_corpse=true;in.occupied=true;assert(decide_grip_alone(in,t,hover)==GripAloneChoice::use);         // an occupied hand keeps today's path
     }
