@@ -131,8 +131,7 @@ static void hook(std::string& s, const std::string& from, const std::string& to)
 static std::string path_variant(std::string s) {
     hook(s, "float4 WarpPS(Vertex v) : SV_TARGET {", "static bool replayM2;\nfloat4 WarpCore(Vertex v) {");
     hook(s, "if(kept_mover && ca[0]!=-2) ca[0]=-1;", "if(kept_mover && ca[0]!=-2) ca[0]=-1;\n#ifdef REPLAY_PATHS\n    replayM2=kept_mover;\n#endif");
-    hook(s, "colour=all(q>=0) && all(q<=1) && KeptHas(q,h.z)?Smooth(sourceTex,q):Smooth(freshTex,p);",
-         "colour=all(q>=0) && all(q<=1) && KeptHas(q,h.z)?float4(Smooth(sourceTex,q).rgb,2):float4(Smooth(freshTex,p).rgb,3);");
+    hook(s, "?Smooth(sourceTex,q):Smooth(freshTex,p);", "?float4(Smooth(sourceTex,q).rgb,2):float4(Smooth(freshTex,p).rgb,3);");
     hook(s, "colour=Smooth(sourceTex,c);", "colour=float4(Smooth(sourceTex,c).rgb,4);");
     s = "#define REPLAY_PATHS 1\n" + s + R"(
 float4 WarpPS(Vertex v) : SV_TARGET {
@@ -242,6 +241,7 @@ int main(int argc, char** argv) {
         // STALE_REPLAY_AB=rig: compare without the rig masks (off: v1158's palm spheres) and with them (on), the mover rules on in both
         const char* ab = std::getenv("STALE_REPLAY_AB");
         const bool ab_rig = rig && ab && std::string(ab) == "rig";
+        const bool ab_rig_motion = rig && ab && std::string(ab) == "rigmotion";  // v1167: off = the rigid hand layers, on = rig motion (masks on)
         const bool rig_live = rig && meta.has("rig_mask") && meta["rig_mask"].a.size() == 2 && meta["rig_mask"].a[0].b && meta["rig_mask"].a[1].b;
         const auto kd = load(stem + "kept-depth.r32"), fd = load(stem + "fresh-depth.r32");
         std::vector<unsigned char> km, fm;
@@ -300,6 +300,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 3; ++i) layers.start[i] = meta["start"].at(i);
         for (int s = 0; s < 2; ++s) for (int i = 0; i < 4; ++i) layers.palms[s][i] = meta["palms"].a.at(s).at(i);
         layers.fresh_part = meta["fresh_part"].n; layers.kept_part = meta["kept_part"].n;
+        if (meta.has("rig_motion") && meta["rig_motion"].a.size() == 2) layers.rig_motion = {meta["rig_motion"].a[0].b, meta["rig_motion"].a[1].b};  // v1167
         layers.frame = static_cast<std::uint64_t>(meta["frame"].n); layers.eye = static_cast<unsigned>(meta["eye"].n);
         // kept_axes: the probe's yaw, the fitted pitch
         const double L = std::tan(layers.kept_fov.left), R = std::tan(layers.kept_fov.right), U = std::tan(layers.kept_fov.up), D = std::tan(layers.kept_fov.down);
@@ -349,7 +350,8 @@ int main(int argc, char** argv) {
         const StaleRig kept_rig = rig ? StaleRig{kr_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
         const StaleRig fresh_rig = rig ? StaleRig{fr_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleRig{};
         const auto run = [&](bool variant) {
-            const bool rules = ab_rig ? true : variant, masks = ab_rig ? variant : rig_live;  // v1160 stencils were not the rig: masks where the meta says rig_mask
+            const bool rules = ab_rig || ab_rig_motion ? true : variant, masks = ab_rig ? variant : rig_live;  // v1160 stencils were not the rig: masks where the meta says rig_mask
+            layers.rig_motion_rules = ab_rig_motion ? variant : true;
             layers.motion_rules = rules;
             const auto t0 = std::chrono::steady_clock::now();
             auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},

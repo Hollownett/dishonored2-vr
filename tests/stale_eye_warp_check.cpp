@@ -525,7 +525,8 @@ static void gpu_turn() {
     render(eye(-0.032), turn, fresh_image, fresh_depth, 30);       // left eye, now
     render(eye(0.032), turn, truth_image, truth_depth, 0);         // what the right eye sees now
     const WarpCamera kept = camera({}, {0.032, 0, 0}), target = camera(yaw(turn), eye(0.032)), fresh = camera(yaw(turn), eye(-0.032));
-    const auto layers = *stale_eye_layers(kept, square, target, square, &fresh, square, 2.0);
+    auto layers = *stale_eye_layers(kept, square, target, square, &fresh, square, 2.0);
+    layers.border = {0, 0};  // v1167: these synthetic images have no bright edge band (the game's eye images do: the default inset)
     StaleEyeWarp warp(device.Get());
     const auto h = *stale_eye_homography(yaw(0), square, yaw(turn), square);
     const auto row = [&](ID3D11Texture2D* t) {
@@ -825,7 +826,7 @@ static void gpu_rig() {
     // hand, hand2: a 12 cm square 0.5 m ahead centred at x (NaN: none; a bright line at its centre); forearm: a rig bar from the hand's right
     // edge to 40 cm right of its centre; stick: a held rig stick from its left edge to 38 cm left; prop: a still striped object (not rig),
     // 6 cm wide, 0.5 m ahead, from x; wall: the wall's distance; yaw: the camera turned about +Y (canted eyes)
-    struct Scene {double hand = std::nan(""), hand2 = std::nan(""); bool forearm = false, stick = false, hood = false; double prop = std::nan(""), wall = 1.8, yaw = 0; int lift = 0;};
+    struct Scene {double hand = std::nan(""), hand2 = std::nan(""); bool forearm = false, stick = false, hood = false; double prop = std::nan(""), wall = 1.8, yaw = 0, hand_y = 0; int lift = 0, band = 0;};
     const auto render = [&](double eye_x, const Scene& s) {
         Frame f; f.row.resize(W); f.kind.resize(W * H);
         std::vector<unsigned char> pixels(W * H * 4), mask(W * H); std::vector<float> d(W * H);
@@ -841,12 +842,13 @@ static void gpu_rig() {
             for (const double h : {s.hand, s.hand2}) if (std::isfinite(h)) {
                 if (s.stick && h == s.hand && px >= h - 0.38 && px < h - 0.06 && std::abs(py) < 0.015) {a = pa; c = stripes(px - h, 0.03, 160, 220); kind = stick_kind;}
                 if (s.forearm && h == s.hand && px > h + 0.06 && px <= h + 0.40 && std::abs(py) < 0.03) {a = pa; c = stripes(px - h, 0.03, 80, 110); kind = arm_kind;}
-                if (std::abs(px - h) <= 0.06 && std::abs(py) < 0.06) {a = pa; c = std::abs(px - h) < pa * 2 / W ? 255 : 120; kind = hand_kind;}
+                if (std::abs(px - h) <= 0.06 && std::abs(py - (h == s.hand ? s.hand_y : 0)) < 0.06) {a = pa; c = std::abs(px - h) < pa * 2 / W ? 255 : 120; kind = hand_kind;}
             }
             // hood: the player's own hood or collar (rig, head-attached) 0.1 m before the eye at the left edge of the view, striped
             double hx, hy; const double ha = plane(0.1, hx, hy);
             if (s.hood && hx < -0.028) {a = ha; c = stripes(hx, 0.004, 50, 90); kind = arm_kind;}
             c = std::min(255, c + s.lift);
+            if (static_cast<int>(y) >= static_cast<int>(H) - s.band) c = 240;  // the eye image's bright edge band (no scene; its depth is the scene's)
             auto* p = &pixels[(y * W + x) * 4]; p[0] = p[1] = p[2] = static_cast<unsigned char>(c); p[3] = 255;
             d[y * W + x] = static_cast<float>(0.01 / a); f.kind[y * W + x] = kind; mask[y * W + x] = kind == wall_kind || kind == prop_kind ? 0 : 255;
             if (y == H / 2) f.row[x] = c;
@@ -869,7 +871,9 @@ static void gpu_rig() {
         WarpCamera k = camera(yaw(yaw_kept), {0.032, 0, 0}), f = camera(yaw(yaw_fresh), {-0.032, 0, 0});
         k.hand_bits = std::isfinite(hand2) ? 3u : 2u; k.hands[1] = pose(kept_hand); if (std::isfinite(hand2)) k.hands[0] = pose(hand2);
         WarpCamera t = k; t.hands[1] = pose(now_hand);
-        return *stale_eye_layers(k, square, t, square, &f, square, 2.0);
+        auto l = *stale_eye_layers(k, square, t, square, &f, square, 2.0);
+        l.border = {0, 0};  // v1167: no bright edge band in these synthetic images
+        return l;
     };
     StaleEyeWarp warp(device.Get());
     const auto id = *stale_eye_homography({}, square, {}, square);
@@ -943,6 +947,25 @@ static void gpu_rig() {
         std::printf("r6. hood 10 cm before the eye: %d of %d columns off its kept pixels with the masks\n", moved, n);
         CHECK(n > 20 && moved == 0);
     }
+    // r9. (v1167, v1165 hold dump 7: a white block from the image's bottom band) the eye images end in an 8-row bright band (no scene); the
+    // right hand low in the view moved 3 cm up since the kept frame. The rebuilt rows above the band take nothing from it.
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = fresh.hand = now.hand = 0.0; kept.hand_y = -0.23; fresh.hand_y = now.hand_y = -0.20;
+        kept.band = fresh.band = now.band = 8;
+        const Frame k = render(0.032, kept), f = render(-0.032, fresh), truth = render(0.032, now);
+        WarpCamera kc = camera({}, {0.032, 0, 0}), fc = camera({}, {-0.032, 0, 0});
+        kc.hand_bits = 2u; kc.hands[1] = pose(0.0); kc.hands[1].position.y = -0.23;
+        WarpCamera tc = kc; tc.hands[1].position.y = -0.20;
+        auto l = *stale_eye_layers(kc, square, tc, square, &fc, square, 2.0);
+        l.border = {0.0, 8.0 / H};
+        const auto image = read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &l, {k.depth.Get(), W, H}, f.image.Get(), {f.depth.Get(), W, H}, {}, {},
+                                                                           StaleRig{k.rig.Get(), W, H}, StaleRig{f.rig.Get(), W, H}));
+        int white = 0, n = 0;
+        for (UINT y = H - 40; y < H - 8; ++y) for (UINT x = 0; x < W; ++x) if (truth.kind[y * W + x] != hand_kind) {++n; white += image[(y * W + x) * 4] > 200;}  // the hand has a white centre line
+
+        std::printf("r9. hand moving up from the image's bright bottom band: %d of %d pixels above the band white\n", white, n);
+        CHECK(white == 0);
+    }
     // r7. the view corner (canted eyes turned 14 degrees apart each way): the right hand and its stick at the right edge of the rebuilt
     // eye, 3 cm further out now, where the fresh eye has no view. No black or white there, and this eye's own rig where it was.
     {
@@ -1013,6 +1036,20 @@ static void gpu_edges() {
         std::printf("%s: beside a near sleeve at the edge, %d columns: %d the sleeve, %d white, %d not this eye's own wall\n",
                     border ? "a. fresh image's white border" : "b. fresh eye's sleeve at its edge", n, sleeve, white, other);
         CHECK(n >= 8 && sleeve == 0 && white == 0 && other == 0);
+    }
+    // d. (v1166, v1165 hold dump 2: a camera cut) the kept camera turned 0.6 rad away: the rebuilt eye's right edge lies outside the kept
+    // view and beside the near sleeve; the fresh eye sees it. Not black.
+    {
+        const WarpCamera turned = camera(yaw(0.6), {0.032, 0, 0});
+        const auto cut = *stale_eye_layers(turned, square, kept, square, &fresh, square, 2.0);
+        const Frame f = render(-0.032, false);
+        const auto image = read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &cut, {k.depth.Get(), W, H}, f.image.Get(), {f.depth.Get(), W, H}));
+        int black = 0, n = 0;
+        for (int x = first; x < static_cast<int>(W) - 1; ++x) if ((x + 0.5) / W * 2 - 1 + 0.064 / 1.2 <= 0.99) {  // the fresh eye sees its wall point
+            ++n; black += image[((H / 2) * W + x) * 4] < 5;
+        }
+        std::printf("d. camera cut, the kept view turned away: %d of %d columns beside the sleeve (in the fresh view) black\n", black, n);
+        CHECK(n >= 3 && black == 0);
     }
 }
 

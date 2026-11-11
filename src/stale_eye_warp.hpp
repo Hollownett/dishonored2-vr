@@ -171,6 +171,13 @@ struct StaleLayers {
     // of the kept eye's span to carry its movers forward, (tN-tN-1)/(tN-1-tN-3); 0.5 without frame times. motion_rules false: the motion
     // textures are ignored (knob no-stale-eye-motion). kept_axes: world -> kept camera (right, up, forward), rows (stale_eye_layers).
     double fresh_part{.5},kept_part{.5};
+    // v1167: the eye images' non-scene band at their right and bottom edges, fractions of the image (measured: up to 46 px of 2496 x 2688;
+    // the caller may pass the exact one)
+    std::array<double,2> border{.019,.018};
+    // v1167: rig pixels by their own motion where both renders' rig motion is valid (rig_motion: kept, fresh); rig_motion_rules false
+    // (knob no-stale-eye-rig-motion) keeps the hand and carried layers. Not used by the pass yet.
+    bool rig_motion_rules{true};
+    std::array<bool,2> rig_motion{};
     bool motion_rules{true};
     WarpMatrix kept_axes{};
 };
@@ -371,7 +378,7 @@ cbuffer Parameters : register(b0) {
     float4 carried[4]; float4 handL[4]; float4 handR[4];
     float4 keptFov; float4 palmL; float4 palmR; float4 backL[4]; float4 backR[4]; float4 fitGrid;
     float4 motionSize; float4 motionMap; float4 keptAxes[3];
-    float4 rigSize; float4 rigMap;
+    float4 rigSize; float4 rigMap; float4 validRect;
 }
 // v1150: motionSize: the kept motion rectangle (xy) and the fresh one (zw), texels; motionMap: fresh_part, kept_part, on (both motion
 // textures and the rules), mover_px; keptAxes: world -> kept camera (right, up, forward).
@@ -382,6 +389,11 @@ Texture2D<float4> freshMotionTex : register(t6);          // v1150: the fresh fr
 // fresh one (zw); rigMap: on (both masks), the reach of a hand over the rig (m)
 Texture2D<float> keptRigTex : register(t7);
 Texture2D<float> freshRigTex : register(t8);
+// v1167: where the kept (xy) and the fresh (zw) images hold scene: uv up to these (StaleLayers::border). The eye images carry a bright
+// band at their right and bottom edges (8-11 or 36-46 px of 2496 x 2688 in v1160-v1165 dumps, the same in kept, fresh and next, both
+// eyes; depth has none): texels there are no scene and are neither a source nor moved.
+bool InKept(float2 q) {return all(q>=0) && all(q<=validRect.xy);}
+bool InFresh(float2 p) {return all(p>=0) && all(p<=validRect.zw);}
 bool KeptRig(float2 q) {return keptRigTex.Load(int3(clamp(int2(floor(q*rigSize.xy)),int2(0,0),int2(rigSize.xy)-1),0))>0;}
 bool FreshRig(float2 p) {return freshRigTex.Load(int3(clamp(int2(floor(p*rigSize.zw)),int2(0,0),int2(rigSize.zw)-1),0))>0;}
 RWStructuredBuffer<float4> fitSamples : register(u0);     // v811: the hand fit's kept samples (target uv, target depth, hand + luma)
@@ -447,7 +459,7 @@ float2 Solve(float4 h[4],Texture2D<float> depth,float2 extent,float2 m,float3 t,
 // dumps 5 and 2): what the fresh eye sees at fresh image point p, metres ahead; 0 outside its image. Ahead clamps to the edge texel, so the
 // near search "met" whatever the fresh image has at its edge for a ray that leaves it: the 1-3 px white border of the eye image at the
 // bottom-right corner (dump 5), the fresh eye's own sleeve at its left edge drawn over the floor this eye sees beside it (dump 2).
-float AheadSeen(float2 p) {return any(p<0) || any(p>1)?0:Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);}
+float AheadSeen(float2 p) {return !InFresh(p)?0:Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);}
 bool Behind(float3 s,float3 shift,float w) {
     const float k=1/w,ray=k*s.z+shift.z;
     const float a=AheadSeen((k*s.xy+shift.xy)/ray);
@@ -499,7 +511,7 @@ int NearHit(float3 t,out float2 hit,out float k,out float2 edge) {
 bool KeptBeside(float3 t,out float2 q) {
     const float3 s=float3(dot(scene[0].xyz,t),dot(scene[1].xyz,t),dot(scene[2].xyz,t));
     q=s.z>1e-6?s.xy/s.z:float2(-1,-1);
-    if(any(q<0) || any(q>1)) return false;
+    if(!InKept(q)) return false;
     const float d=Ahead(depthTex,depthSize.xy,depthMap.xy,q);
     return d<=0 || d>=reach;
 }
@@ -512,7 +524,7 @@ int Confirm(float3 t,float k,out float2 p) {
     p=float2(-1,-1);
     if(ray<=0) return 2;
     p=(k*s.xy+fresh[3].xy)/ray;
-    if(any(p<0) || any(p>1)) return 2;
+    if(!InFresh(p)) return 2;
     // within a texel: a surface seen at a grazing angle lands a texel beside its own silhouette in the other view (a still hand's side
     // read as gone); what moved lies tens of texels away
     const float tol=0.02+0.03*ray;bool farther=true;
@@ -551,7 +563,7 @@ bool FreshEdge(float2 p,float k) {
 // no fixed point, outside the kept image).
 bool Candidate(float4 h[4],float3 t,out float2 q,out float k) {
     bool ok;q=Solve(h,depthTex,depthSize.xy,depthMap.xy,t,h[3].w,k,ok); // from the layer's own start (w), near what it moves
-    return h[3].w>0 && ok && k>0 && all(q>=0) && all(q<=1);
+    return h[3].w>0 && ok && k>0 && InKept(q);
 }
 // v811: the kept point under kept pixel q (metres: right, up, forward of the kept camera); z 0 for the sky.
 float3 KeptPoint(float2 q) {
@@ -606,7 +618,7 @@ bool KeptOutline(float2 q,float a) {
         const float2 span=float2(keptFov.y-keptFov.x,keptFov.w-keptFov.z);
         const float2 centre=(palm.xy/palm.z-keptFov.xz)/span,extent=palm.w/palm.z/abs(span);
         const float2 q=centre+((float2(id.xy)+0.5)/fitGrid.xy*2-1)*extent;
-        if(all(q>=0) && all(q<=1) && Owner(q)==2+int(id.z)) {
+        if(InKept(q) && Owner(q)==2+int(id.z)) {
             const float a=Ahead(depthTex,depthSize.xy,depthMap.xy,q);
             float4 b[4];if(id.z) b=backR; else b=backL;
             const float3 u=float3(q,1),s=float3(dot(b[0].xyz,u),dot(b[1].xyz,u),dot(b[2].xyz,u))*a+b[3].xyz;
@@ -622,7 +634,7 @@ uint FitMatch(float4 f,float2 d) {
     const float ray=f.z*s.z+fresh[3].z;
     if(ray<=0) return 0;
     const float2 p=(f.z*s.xy+fresh[3].xy)/ray;
-    if(any(p<0) || any(p>1)) return 0;
+    if(!InFresh(p)) return 0;
     const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);
     if(!(a>0) || abs(a-ray)>=0.01+0.02*ray) return 0;
     if(rigMap.x>0 && !FreshRig(p)) return 0; // v1159: a hand is matched against the fresh eye's hand, not the wall it touches
@@ -687,7 +699,7 @@ groupshared float2 fitCentre;
 )HLSL" R"HLSL(// v1150 movers (design 2026-11-11 section 3; the motion textures, see motionMap). Only called where motionMap.z is on.
 float4 MotionAt(Texture2D<float4> m,float2 extent,float2 q) {return m.Load(int3(clamp(int2(floor(q*extent)),int2(0,0),int2(extent)-1),0));}
 bool Mover(float4 m) {return m.w>=motionMap.w;}
-bool FreshMover(float2 p) {return all(p>=0) && all(p<=1) && Mover(MotionAt(freshMotionTex,motionSize.zw,p));}
+bool FreshMover(float2 p) {return InFresh(p) && Mover(MotionAt(freshMotionTex,motionSize.zw,p));}
 // a world displacement in the kept camera (right, up, forward), times part
 float3 KeptStep(float3 d,float part) {return part*float3(dot(keptAxes[0].xyz,d),dot(keptAxes[1].xyz,d),dot(keptAxes[2].xyz,d));}
 // a kept camera point (right, up, forward metres) <-> kept image homogeneous (u D, v D, D): KeptPoint's map, both ways (linear)
@@ -765,7 +777,7 @@ float MoverSeen(float3 t,out float4 colour) {
     if(rigMap.x<=0 && (OwnerAt(now)!=0 || OwnerAt(then)!=0)) return 1e38;
     const float3 h=KeptImage(then);
     const float2 q=h.z>1e-4?h.xy/h.z:float2(-1,-1);
-    colour=all(q>=0) && all(q<=1) && KeptHas(q,h.z)?Smooth(sourceTex,q):Smooth(freshTex,p);
+    colour=InKept(q) && KeptHas(q,h.z)?Smooth(sourceTex,q):Smooth(freshTex,p);
     return k;
 }
 // M3, a mover only this eye sees: the kept pixel whose surface, carried on by kept_part of its own motion, lies on ray t. Two fixed-point
@@ -779,7 +791,7 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
     [unroll] for(int r=0;r<2;++r) [unroll] for(int i=0;i<8;++i) if(!Mover(seed)) {
         float2 dir;sincos(i*0.7853982,dir.y,dir.x);
         at=q+dir*(r?0.08:0.03)*ring;
-        if(all(at>=0) && all(at<=1)) seed=MotionAt(keptMotionTex,motionSize.xy,at);
+        if(InKept(at)) seed=MotionAt(keptMotionTex,motionSize.xy,at);
     }
     if(!Mover(seed)) return 1e38;
     float4 h[4];h[0]=scene[0];h[1]=scene[1];h[2]=scene[2];h[3]=scene[3];
@@ -788,7 +800,7 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
     [unroll] for(int n=0;n<2;++n) {
         h[3].xyz=scene[3].xyz-KeptImage(d);   // the target ray moved back by d: its fixed point is the kept surface d carries onto it
         bool ok;c=Solve(h,depthTex,depthSize.xy,depthMap.xy,t,start,k,ok);
-        if(!ok || !(k>0) || k>=1e29 || any(c<0) || any(c>1)) return 1e38;
+        if(!ok || !(k>0) || k>=1e29 || !InKept(c)) return 1e38;
         const float4 m=MotionAt(keptMotionTex,motionSize.xy,c);
         if(!Mover(m)) return 1e38;
         const float3 e=KeptStep(m.xyz,motionMap.y);
@@ -808,16 +820,17 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
     colour=Smooth(sourceTex,c);
     return k;
 }
-float4 WarpPS(Vertex v) : SV_TARGET {
+)HLSL" R"HLSL(float4 WarpPS(Vertex v) : SV_TARGET {
     const float3 t=float3(v.uv,1);
     if(depthMap.w<=0) {
         const float3 s=float3(dot(row0.xyz,t),dot(row1.xyz,t),dot(row2.xyz,t));
         if(s.z<=1e-6) return float4(0,0,0,1);
         return Smooth(sourceTex,s.xy/s.z);
     }
+    if(any(v.uv>validRect.xy)) return Smooth(sourceTex,v.uv); // v1167: the image's own band keeps what this eye's frames have there
     float kept_k;bool kept_ok;
     const float2 q=Solve(scene,depthTex,depthSize.xy,depthMap.xy,t,0,kept_k,kept_ok);
-    const bool kept_in=kept_k>=0 && all(q>=0) && all(q<=1);
+    const bool kept_in=kept_k>=0 && InKept(q);
     if(fresh[3].w<=0) return kept_k<0?float4(0,0,0,1):Smooth(sourceTex,q); // no fresh eye: the scene layer alone (v796)
     // v810 (headset v809, see StaleLayers): this eye's own kept image wherever one of the motions explains it. Each layer gives its kept
     // pixel for this ray; the fresh eye, which sees this moment, confirms or refutes the surface there; the nearest confirmed one shows
@@ -902,8 +915,11 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     }
     bool ok;const float2 f=Solve(fresh,freshDepthTex,depthSize.zw,freshMap.xy,t,0,k,ok);
     const float2 g=ok || near==0?f:edge;
-    if(k>0 && all(g>=0) && all(g<=1)) return Smooth(freshTex,g);                       // what only the fresh eye has (a snap turn's new view)
-    return kept_in?Smooth(sourceTex,q):float4(0,0,0,1);                                 // v810: never the fresh image's clamped edge (stretched)
+    if(k>0 && InFresh(g)) return Smooth(freshTex,g);                       // what only the fresh eye has (a snap turn's new view)
+    if(kept_in) return Smooth(sourceTex,q);                                             // v810: never the fresh image's clamped edge (stretched)
+    // v1166 (v1165 hold dump 2, a camera cut: the kept view barely overlapped and NearHit's edge point lay outside the fresh image): black
+    // only where the fresh eye has no point on the ray either
+    return k>0 && InFresh(f)?Smooth(freshTex,f):float4(0,0,0,1);
 }
 )HLSL";
         auto v=compile(source,"WarpVS","vs_5_0"),p=compile(source,"WarpPS","ps_5_0");
@@ -912,7 +928,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sampler.MaxLOD=D3D11_FLOAT32_MAX;
         checked(device_->CreateSamplerState(&sampler,&sampler_),"sampler");
-        D3D11_BUFFER_DESC constants{};constants.ByteWidth=736;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
+        D3D11_BUFFER_DESC constants{};constants.ByteWidth=752;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
         checked(device_->CreateBuffer(&constants,nullptr,&parameters_),"parameter buffer");
         const char* fit_entries[]{"FitSample","FitCoarse","FitFine","FitPick"};
         for(std::size_t n=0;n<fit_.size();++n) {
@@ -973,7 +989,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             kept_rig_read=rig_view(kept_rig);fresh_rig_read=rig_view(fresh_rig);
             if(!kept_rig_read || !fresh_rig_read) {kept_rig_read=fresh_rig_read=nullptr;++rig_refusals;}
         }
-        std::array<float,184> parameters{};std::size_t at=0;
+        std::array<float,188> parameters{};std::size_t at=0;
         const auto put=[&](double x,double y,double z,double w) {
             parameters[at++]=static_cast<float>(x);parameters[at++]=static_cast<float>(y);parameters[at++]=static_cast<float>(z);parameters[at++]=static_cast<float>(w);
         };
@@ -1015,6 +1031,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         // v1159: the rig masks' rectangles, on, a hand's reach over the rig
         if(kept_rig_read) {put(kept_rig.width,kept_rig.height,fresh_rig.width,fresh_rig.height);put(1,hand_rig_radius,0,0);++rig_passes;}
         else {put(0,0,0,0);put(0,0,0,0);}
+        if(layers) {const double u=1-std::clamp(layers->border[0],0.,.25),v=1-std::clamp(layers->border[1],0.,.25);put(u,v,u,v);} else put(1,1,1,1); // v1167
         if(depth_read) ++parallax_passes;
         if(fresh_read) ++fresh_passes;
         context_->UpdateSubresource(parameters_.Get(),0,nullptr,parameters.data(),0,0);

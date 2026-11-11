@@ -2840,6 +2840,8 @@ public:
                                 stale_layers_[eye]->frame=alternate_frame;stale_layers_[eye]->eye=eye; // v811: the hand-fit read-backs' tags
                                 stale_layers_[eye]->fresh_part=stale_fresh_part;stale_layers_[eye]->kept_part=stale_kept_part; // v1151
                                 stale_layers_[eye]->motion_rules=stale_motion_rules;
+                                stale_layers_[eye]->rig_motion_rules=stale_rig_motion_rules; // v1167: rig pixels by their own motion (knob no-stale-eye-rig-motion)
+                                stale_layers_[eye]->rig_motion={stale_rig_motion(eye),fresh_now && stale_rig_motion(fresh_eye)};
                             }
                             if(!stale_layers_[eye]) ++stale_eye_parallax_misses;
                         }
