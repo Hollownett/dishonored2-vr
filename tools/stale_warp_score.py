@@ -37,6 +37,7 @@ def main():
     a = argparse.ArgumentParser(); a.add_argument('dumps'); a.add_argument('variants', nargs='+')
     a.add_argument('--dumps', dest='ns', type=int, nargs='*'); a.add_argument('--tiles', type=int, default=0)
     a.add_argument('--sheet'); a.add_argument('--dump', type=int)
+    a.add_argument('--compact', action='store_true', help='one line per dump: |R-X| per region per variant (and |R-K| of the last)')
     o = a.parse_args()
     variants = []
     for v in o.variants:
@@ -51,6 +52,14 @@ def main():
         read = lambda p: np.fromfile(p, np.uint8).reshape(H, W, 4)[..., :3].astype(np.float32)
         k, x = read(d + 'kept.rgba'), read(d + 'next.rgba')
         reg = load_regions(meta, d, H, W)
+        if o.compact:
+            rows = []
+            for name, path, suffix in variants:
+                r = read(d + 'warped.rgba') if path == 'game' else read(f'{path}/stale-warp-{n}-{suffix}.rgba')
+                ex = np.abs(r - x).mean(-1); ek = np.abs(r - k).mean(-1)
+                rows.append(' '.join(f'{ex[m].mean():5.2f}' if m.any() else '  -  ' for g, m in reg.items() if g != 'near*'))
+            print(f"{n:3d} cam {meta.get('camera_step_m', 0)*1000:4.1f}mm {meta.get('camera_turn_deg', 0):4.2f}deg hands {meta.get('hands_moved_m', 0)*1000:5.1f}mm | " + ' | '.join(rows), flush=True)
+            continue
         print(f'dump {n}: |X-K| ' + ' '.join(f'{g} {np.abs(x - k).mean(-1)[m].mean():.2f} ({m.mean()*100:.1f}%)' for g, m in reg.items()))
         rs = {}
         for name, path, suffix in variants:

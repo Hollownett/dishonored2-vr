@@ -390,7 +390,7 @@ int main(int argc, char** argv) {
         // v1177: masks before engine 4bd8ad2 hold 255 on every rig texel without valid rig motion; only a mask with 254 texels (rig
         // without motion) marks 255 as "valid own motion"
         bool rig_codes = false; for (const auto v : kr) rig_codes = rig_codes || v == 254; for (const auto v : fr) rig_codes = rig_codes || v == 254;
-        layers.rig_motion_rules = rig_codes;
+        layers.rig_motion_rules = rig_codes || (layers.rig_motion[0] && layers.rig_motion[1]);  // v1183 dumps: valid rig motion (all 255)
         layers.target_fov = layers.fresh_fov = layers.kept_fov;  // the dumps carry one FOV (the eyes' are equal there)
         const auto run = [&](bool variant) {
             const bool rules = ab_rig || ab_rig_motion || ab_afw2 ? true : variant, masks = ab_rig ? variant : rig_live;
@@ -403,7 +403,7 @@ int main(int argc, char** argv) {
                                      motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleMotion{},
                                      masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}));
             std::fprintf(stderr, "  dump %d rules %s, masks %s%s: %.1f s\n", n, rules ? "on" : "off", masks ? "on" : "off", layers.afw2 ? ", AFW2" : "", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-            if (layers.afw2 && warp.afw2) std::printf("      afw2: %u target texels left empty after the fill\n", warp.afw2->holes());
+            if (layers.afw2 && warp.afw2) {const auto t = warp.afw2->hole_tiles(); std::printf("      afw2: %u target texels left empty after the fill; hole tiles %u of %u\n", warp.afw2->holes(), t[0], t[1]);}
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 votes (confirmed/refuted): head %u/%u left %u/%u right %u/%u; hands moving %d %d, masks %d\n", v[2], v[3], v[4], v[5], v[6], v[7], int(layers.hand_moving[0]), int(layers.hand_moving[1]), int(masks));}
             return c;
         };
@@ -495,7 +495,7 @@ int main(int argc, char** argv) {
                     fresh_movers, fresh_movers ? 100.0 * fresh_beyond / fresh_movers : 0., pitch, fit_error, layers.fresh_part, layers.kept_part);
         if (movers_n) std::printf("      B4 movers off %.3f on %.3f | rest off %.3f on %.3f\n", bm_off / movers_n, bm_on / movers_n, rest_n ? br_off / rest_n : 0., rest_n ? br_on / rest_n : 0.);
         std::fflush(stdout);
-        if (!kept_movers && !fresh_movers && !ab_rig) continue;
+        if ((!kept_movers && !fresh_movers && !ab_rig) || std::getenv("STALE_REPLAY_NO_SHEETS")) continue;  // v1177: sheets are ~120 MB each
         // sheets: kept | off | on | next | F off - on | B4 off - on (green: on better; red: on worse; 1 level = 16; blue tint: mover region)
         const int pw = kb.w, ph = kb.h, sw = pw * 6;
         std::vector<unsigned char> sheet(static_cast<std::size_t>(sw) * ph * 3, 0);

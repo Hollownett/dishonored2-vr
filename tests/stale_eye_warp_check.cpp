@@ -1139,21 +1139,22 @@ static void gpu_afw2() {
     const double T = 0.5;
     const WarpFov fov{-std::atan(T), std::atan(T), std::atan(T), -std::atan(T)};
     enum {sky_kind, wall_kind, object_kind, pole_kind, hand_kind, guard_kind};
-    struct Scene {double object = std::nan(""), pole = std::nan(""), hand = std::nan(""), guard = std::nan(""); Vec3 walk{}; int lift = 0;};
+    // slant: the object's sides lean (x shifts by slant * y); aa: colour anti-aliased (4x4 samples a pixel, as the game's edges are)
+    struct Scene {double object = std::nan(""), pole = std::nan(""), hand = std::nan(""), guard = std::nan(""); Vec3 walk{}; int lift = 0; double slant = 0; bool aa = false;};
     struct Frame {ComPtr<ID3D11Texture2D> image, depth, rig, motion; std::vector<int> grey, kind; std::vector<double> ahead;};
     // what camera c (position, looking down -z) sees through uv: kind, colour, distance ahead
     const auto look = [&](Vec3 c, const Scene& s, double u, double v, int& kind, double& ahead) {
         const double tx = (2 * u - 1) * T, ty = (1 - 2 * v) * T;
-        kind = wall_kind; ahead = c.z + 3; double wx = c.x + ahead * tx, wy = ahead * ty;
+        kind = wall_kind; ahead = c.z + 3; double wx = c.x + ahead * tx, wy = c.y + ahead * ty;
         int g = 40 + 20 * ((static_cast<int>(std::floor(wx / 0.04)) + static_cast<int>(std::floor(wy / 0.04))) & 1);
-        const auto plane = [&](double z, double x0, double x1, double half, int k, int colour) {
+        const auto plane = [&](double z, double x0, double x1, double half, int k, int colour, double lean = 0) {
             const double a = c.z - z; if (a <= 0 || a >= ahead) return;
-            const double x = c.x + a * tx, y = a * ty;
-            if (x >= x0 && x <= x1 && std::abs(y) <= half) {ahead = a; kind = k; g = colour; wx = x; wy = y;}
+            const double x = c.x + a * tx, y = c.y + a * ty;
+            if (x - lean * y >= x0 && x - lean * y <= x1 && std::abs(y) <= half) {ahead = a; kind = k; g = colour; wx = x - lean * y; wy = y;}
         };
         if (std::isfinite(s.guard)) plane(-2.5, s.guard - 0.25, s.guard + 0.25, 0.4, guard_kind, 0);
         if (std::isfinite(s.pole)) plane(-0.6, s.pole - 0.0075, s.pole + 0.0075, 10, pole_kind, 220);
-        if (std::isfinite(s.object)) plane(-0.5, s.object - 0.06, s.object + 0.06, 0.06, object_kind, 0);
+        if (std::isfinite(s.object)) plane(-0.5, s.object - 0.06, s.object + 0.06, 0.06, object_kind, 0, s.slant);
         if (std::isfinite(s.hand)) plane(-0.45, s.hand - 0.05, s.hand + 0.05, 0.05, hand_kind, 0);
         if (kind == guard_kind) g = (static_cast<int>(std::floor((wx - s.guard) / 0.05)) & 1) ? 195 : 175;
         if (kind == object_kind) g = (static_cast<int>(std::floor((wx - s.object) / 0.02)) & 1) ? 170 : 140;
@@ -1164,7 +1165,8 @@ static void gpu_afw2() {
         Frame f; f.grey.resize(W * H); f.kind.resize(W * H); f.ahead.resize(W * H);
         std::vector<unsigned char> px(W * H * 4), mask(RW * RH); std::vector<float> d(RW * RH); std::vector<std::uint16_t> m(RW * RH * 4, 0);
         for (UINT y = 0; y < H; ++y) for (UINT x = 0; x < W; ++x) {
-            int k; double a; const int g = look(c, s, (x + 0.5) / W, (y + 0.5) / H, k, a);
+            int k; double a; int g = look(c, s, (x + 0.5) / W, (y + 0.5) / H, k, a);
+            if (s.aa) {int sum = 0, kk; double aa; for (int j = 0; j < 16; ++j) sum += look(c, s, (x + (j % 4 + 0.5) / 4) / W, (y + (j / 4 + 0.5) / 4) / H, kk, aa); g = (sum + 8) / 16;}
             auto* p = &px[(y * W + x) * 4]; p[0] = p[1] = p[2] = static_cast<unsigned char>(g); p[3] = 255;
             f.grey[y * W + x] = g; f.kind[y * W + x] = k; f.ahead[y * W + x] = a;
         }
@@ -1303,6 +1305,33 @@ static void gpu_afw2() {
         CHECK(hand > 300 && hand_wrong == 0 && ghost == 0 && a.holes == 0);
         if (grip == 0.0) CHECK(sa.lifted == 0);
     }
+    // F. (v1186 in-game: silhouettes stair-stepped under a 7 mm step) a leaning object 0.5 m away before the wall, anti-aliased like the
+    // game's edges; the camera steps 1 mm (under a texel) and 2 cm sideways and up: along its outline (its own pixels within a pixel of the
+    // wall in the truth) the rebuilt edge must follow the truth's blend, not render-texel steps (mean error, and pixels 30+ levels off)
+    for (const double step : {0.001, 0.02}) {
+        Scene s; s.object = 0.05; s.slant = 0.45; s.aa = true; Scene lit = s; lit.lift = 50;
+        const Vec3 kc{0.032 - step, -step, 0};
+        const Frame k = render(kc, s), f = render(fresh_at, lit), truth = render(here, s);
+        const auto a = run(true, kc, here, fresh_at, k, f, std::nan(""), 0, true, true), b = run(false, kc, here, fresh_at, k, f, std::nan(""), 0, true, true);
+        const auto edge = [&](const std::vector<unsigned char>& out, double& mean, int& steps) {
+            int n = 0; double sum = 0; steps = 0;
+            for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+                bool blend = false;
+                for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                    const int j = (y + dy) * W + x + dx;
+                    blend = blend || (truth.kind[j] != truth.kind[y * W + x]);
+                }
+                if (!blend || truth.kind[y * W + x] != object_kind) continue;  // the object's side of its outline (the wall's side may be uncovered)
+                const int e = std::abs(out[(y * W + x) * 4] - truth.grey[y * W + x]);
+                ++n; sum += e; steps += e >= 30;
+            }
+            mean = n ? sum / n : 0;
+        };
+        double ma, mb; int sa, sb; edge(a.out, ma, sa); edge(b.out, mb, sb);
+        std::printf("afw2 F. leaning anti-aliased edge, camera %.0f mm sideways and up: outline error AFW2 %.1f levels (%d px 30+ off) | today %.1f (%d)\n",
+                    step * 1000, ma, sa, mb, sb);
+        CHECK(ma < 12 && sa < 40);
+    }
     // E. a guard 2.5 m away walking 20 cm a tick (motion textures, both eyes), the camera 2 cm sideways: at its new place in this eye's own
     // shading, the wall at its old place. E'. the kept eye's motion texture says nothing (a vector it lacks: the guard just started): the fresh
     // eye's motion is handed to the kept texels it came from (scatter) and confirmed the same way
@@ -1331,6 +1360,7 @@ static void gpu_afw2() {
     }
 }
 
+// (gpu_afw2 F is inside gpu_afw2: see "F.")
 // v802: the drawn hands held still from the kept frame's Setup to the target's (what is within reach may show from the kept image)
 static void hands_still() {
     WarpCamera a = camera({}, {0, 0, 0}), b = a;
