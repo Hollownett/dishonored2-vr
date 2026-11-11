@@ -38,13 +38,16 @@ int main() {
     const auto read=[&](ID3D11Texture2D* x) {c->CopyResource(stage.Get(),x);D3D11_MAPPED_SUBRESOURCE m{};float v=-1;if(SUCCEEDED(c->Map(stage.Get(),0,D3D11_MAP_READ,0,&m))) {v=*static_cast<float*>(m.pData);c->Unmap(stage.Get(),0);}return v;};
     d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {return frame_now;};d2vr::CrossEyeHistory::view=1;
     float last[2]{};
+    unsigned execution=0;bool paired=false;
     const auto frame=[&](bool skip=false) {
-        ++frame_now;if(skip) return;
-        const unsigned eye=frame_now%2,in=frame_now%2,out=in^1u;
+        // alternate: one execution per engine frame (eye = frame parity); paired (v1181): two per engine frame, eye 0 then eye 1
+        if(!paired || execution%2==0) ++frame_now;
+        if(skip) return;
+        const unsigned eye=paired?execution%2:frame_now%2,in=paired?execution%2:frame_now%2,out=in^1u;++execution;
         const float v[4]{eye?1.f:100.f,0,0,0};c->UpdateSubresource(cb.Get(),0,nullptr,v,0,0);
         ID3D11ShaderResourceView* none[2]{};c->PSSetShaderResources(0,2,none);c->OMSetRenderTargets(1,rtv[out].GetAddressOf(),nullptr);
         ID3D11ShaderResourceView* h=srv[in].Get();c->PSSetShaderResources(1,1,&h);
-        {d2vr::CrossEyeHistory::Scope s(c.Get(),1,7);c->Draw(3,0);s.after();}
+        {d2vr::CrossEyeHistory::Scope s(c.Get(),paired?2:1,7,paired?static_cast<int>(eye):-1);c->Draw(3,0);s.after();}
         c->OMSetRenderTargets(0,nullptr,nullptr);c->PSSetShaderResources(1,1,none);
         last[eye]=read(tex[out].Get());
     };
@@ -66,6 +69,15 @@ int main() {
     std::printf("after a gap: eye 0 %.3f, eye 1 %.3f\n",last[0],last[1]);
     CHECK(std::abs(last[0]-200.f)<.01f && std::abs(last[1]-2.f)<.01f);
     CHECK(d2vr::CrossEyeHistory::json().find("\"roles\":[{")!=std::string::npos);
+    // 4. v1181 paired stereo: the same shared history between two eye views in one engine frame (view 2 is not the one-view)
+    d2vr::CrossEyeHistory::fix=false;d2vr::CrossEyeHistory::begin_epoch();paired=true;execution=0;
+    for(int i=0;i<60;++i) frame();
+    std::printf("paired, engine alone: eye 0 %.3f, eye 1 %.3f (mixed 134.0 / 68.0)\n",last[0],last[1]);
+    CHECK(std::abs(last[0]-134.f)<1 && std::abs(last[1]-68.f)<1);
+    d2vr::CrossEyeHistory::fix_paired=true;
+    for(int i=0;i<60;++i) frame();
+    std::printf("paired, fix: eye 0 %.3f, eye 1 %.3f (own 200.0 / 2.0)\n",last[0],last[1]);
+    CHECK(std::abs(last[0]-200.f)<.01f && std::abs(last[1]-2.f)<.01f);
     d2vr::CrossEyeHistory::reset();
     if(failures) {std::printf("cross_eye_history_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: cross_eye_history_check (census flags the history read; per-eye ring restores each eye's own previous output)\n");

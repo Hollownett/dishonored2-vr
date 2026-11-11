@@ -17,6 +17,14 @@
 // draw, B (its output two engine frames ago = this eye's previous render) is copied into the history texture; after the draw B <- A,
 // A <- render target 0. Needs the role's draw in consecutive engine frames (a gap leaves the engine's history for that frame). The census
 // runs while the fix still learns (600 frames) and stops then unless its own knob is on.
+//
+// v1181 paired stereo: two eye views render per engine frame (ObjectMotion::eye_of_view names them). A read of a texture last written by
+// the OTHER eye's view in this or the previous engine frame, and not since by this view, is a cross-eye read there. The ring needs no
+// change of idea: the role's draws alternate eyes in GPU order (L R L R ...), so "two executions back" is this eye's previous render in
+// both modes; only the CPU-side run bookkeeping differs (paired: consecutive executions alternate eyes within one engine frame step).
+// Knob build/eye-history enables the fix on paired frames (build/alt-eye-history on one-view frames); census as before covers both.
+// The reprojection inside those passes uses the view's own cb_previousviewprojectionmatrix (paired: each eye view rolls its own previous;
+// alternate: the seeded per-eye previous) or this view's motion vectors, so restoring the eye's own history makes the pass consistent.
 #include <d3d11.h>
 #include <array>
 #include <atomic>
@@ -27,23 +35,28 @@
 
 namespace d2vr {
 class CrossEyeHistory {
+    struct Role;
 public:
-    inline static std::atomic<bool> census{false},fix{false};
+    inline static std::atomic<bool> census{false},fix{false},fix_paired{false};
     inline static std::atomic<std::uintptr_t> view{};                 // the alternate one-view (0: paired frames, inert)
     using FrameFn=std::uint32_t(*)() noexcept;inline static std::atomic<FrameFn> frame_fn{};
     static constexpr unsigned min_frames=32,learn_frames=600;
     class Scope {
     public:
-        Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass) noexcept {
-            const bool learning=fix.load(std::memory_order_relaxed) && learned_.load(std::memory_order_relaxed)<learn_frames;
+        // paired_eye: the eye whose view `pass_view` is on a paired frame (ObjectMotion::eye_of_view), else -1
+        Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass,int paired_eye=-1) noexcept {
+            const bool alternate=pass_view && pass_view==view.load(std::memory_order_relaxed);
+            if(!c || !pass_view || (!alternate && paired_eye<0)) return;
+            const bool fixing=alternate?fix.load(std::memory_order_relaxed):fix_paired.load(std::memory_order_relaxed);
+            const bool learning=fixing && learned_.load(std::memory_order_relaxed)<learn_frames;
             const bool watch=census.load(std::memory_order_relaxed) || learning;
-            if(!c || !pass_view || pass_view!=view.load(std::memory_order_relaxed) || !(watch || fix.load(std::memory_order_relaxed))) return;
+            if(!(watch || fixing)) return;
             const auto fn=frame_fn.load(std::memory_order_relaxed);if(!fn) return;
-            frame_=fn();note_frame(frame_);
+            frame_=fn();note_frame(frame_);eye_=alternate?-1:paired_eye;
             ID3D11PixelShader* ps{};c->PSGetShader(&ps,nullptr,nullptr);if(ps) ps->Release(); // identity only
             if(!ps) return;
             ID3D11ShaderResourceView* srv[16]{};ID3D11RenderTargetView* rtv[8]{};ID3D11DepthStencilView* dsv{};
-            const int role=fix.load(std::memory_order_relaxed)?find_role(ps):-1;
+            const int role=fixing?find_role(ps):-1;
             if(!watch && role<0) return;
             c->PSGetShaderResources(0,16,srv);c->OMGetRenderTargets(8,rtv,&dsv);
             ID3D11Resource* out0{};if(rtv[0]) rtv[0]->GetResource(&out0);
@@ -63,11 +76,14 @@ public:
         Scope(const Scope&)=delete;Scope& operator=(const Scope&)=delete;
     private:
         friend class CrossEyeHistory;
-        std::uint32_t frame_{};ID3D11DeviceContext* c_{};unsigned role_{};ID3D11Resource* out_{};
+        std::uint32_t frame_{};int eye_{-1};ID3D11DeviceContext* c_{};unsigned role_{};ID3D11Resource* out_{};
         void note_read(ID3D11Resource* r,ID3D11Resource* out0,int pass,ID3D11PixelShader* ps,unsigned slot) noexcept {
             Entry* e=entry(r);if(!e) return;
-            const std::uint32_t written=e->written.load(std::memory_order_relaxed);
-            if(written!=frame_+1 && written==frame_) { // last written in the previous engine frame (stored +1), not yet in this one
+            const std::uint32_t written=e->written.load(std::memory_order_relaxed);const int writer=e->writer.load(std::memory_order_relaxed);
+            // alternate: last written in the previous engine frame (stored +1), not yet in this one; paired: last written by the other eye's
+            // view in this or the previous engine frame (this view has not written it since)
+            const bool cross=eye_<0?written==frame_:writer>=0 && writer!=eye_ && (written==frame_+1 || written==frame_);
+            if(cross) {
                 e->cross.fetch_add(1,std::memory_order_relaxed);e->pass.store(pass,std::memory_order_relaxed);
                 e->ps.store(reinterpret_cast<std::uintptr_t>(ps),std::memory_order_relaxed);e->slot.store(slot,std::memory_order_relaxed);
                 const bool shaped=out0 && same_shape(r,out0);e->shaped.store(shaped,std::memory_order_relaxed);
@@ -78,27 +94,33 @@ public:
                 cross_reads_.fetch_add(1,std::memory_order_relaxed);
             }
         }
-        void note_write(ID3D11Resource* r) noexcept {if(Entry* e=entry(r)) e->written.store(frame_+1,std::memory_order_relaxed);}
+        void note_write(ID3D11Resource* r) noexcept {if(Entry* e=entry(r)) {e->written.store(frame_+1,std::memory_order_relaxed);e->writer.store(eye_,std::memory_order_relaxed);}}
+        // the role's previous rotation was the execution just before this one in the eye sequence (alternate: one per engine frame;
+        // paired: the other eye, same or previous engine frame)
+        bool follows(const Role& ro) const noexcept {
+            if(ro.last==~0u) return false;
+            return eye_<0?ro.last_eye<0 && frame_==ro.last+1u:ro.last_eye>=0 && ro.last_eye!=eye_ && (frame_==ro.last || frame_==ro.last+1u);
+        }
         void begin_role(ID3D11DeviceContext* c,unsigned role,ID3D11ShaderResourceView* history,ID3D11Resource* out0) noexcept {
             if(!history) return;
             Role& ro=roles_[role];std::lock_guard<std::mutex> lock(mutex_);
             if(!ensure(c,ro,out0)) return;
             ID3D11Resource* h{};history->GetResource(&h);if(!h) return;
-            if(same_shape(h,out0) && ro.last+1==frame_ && ro.run>=2) {c->CopyResource(h,ro.b);++ro.restored;restores_.fetch_add(1,std::memory_order_relaxed);}
+            if(same_shape(h,out0) && follows(ro) && ro.run>=2) {c->CopyResource(h,ro.b);++ro.restored;restores_.fetch_add(1,std::memory_order_relaxed);}
             h->Release();
             c_=c;role_=role;out_=out0;out0->AddRef();
         }
         void end_role(ID3D11DeviceContext* c,unsigned role,ID3D11Resource* out0) noexcept {
             Role& ro=roles_[role];std::lock_guard<std::mutex> lock(mutex_);
-            if(!ro.a || ro.last==frame_) return; // one rotation per engine frame
-            ro.run=ro.last!=~0u && frame_==ro.last+1u?(ro.run<255u?ro.run+1u:ro.run):1u;
-            c->CopyResource(ro.b,ro.a);c->CopyResource(ro.a,out0);ro.last=frame_;
+            if(!ro.a || (ro.last==frame_ && ro.last_eye==eye_)) return; // one rotation per render
+            ro.run=follows(ro)?(ro.run<255u?ro.run+1u:ro.run):1u;
+            c->CopyResource(ro.b,ro.a);c->CopyResource(ro.a,out0);ro.last=frame_;ro.last_eye=eye_;
         }
     };
-    static void begin_epoch() noexcept {std::lock_guard<std::mutex> lock(mutex_);for(auto& r:roles_) {r.run=0;r.last=~0u;}}
+    static void begin_epoch() noexcept {std::lock_guard<std::mutex> lock(mutex_);for(auto& r:roles_) {r.run=0;r.last=~0u;r.last_eye=-1;}}
     static std::string json() {
         std::ostringstream o;
-        o<<"{\"census\":"<<(census.load()?"true":"false")<<",\"fix\":"<<(fix.load()?"true":"false")<<",\"frames\":"<<frames_.load()<<",\"cross_reads\":"<<cross_reads_.load()
+        o<<"{\"census\":"<<(census.load()?"true":"false")<<",\"fix\":"<<(fix.load()?"true":"false")<<",\"fix_paired\":"<<(fix_paired.load()?"true":"false")<<",\"frames\":"<<frames_.load()<<",\"cross_reads\":"<<cross_reads_.load()
          <<",\"restores\":"<<restores_.load()<<",\"top\":[";
         // the 16 entries with the most cross-eye reads: texture, reads, frames, pass, pixel shader, slot, w, h, format, history-shaped
         std::array<const Entry*,16> top{};
@@ -124,10 +146,10 @@ public:
         for(auto& r:roles_) {if(r.a) r.a->Release();if(r.b) r.b->Release();r.a=r.b=nullptr;r.run=0;r.last=~0u;r.device=nullptr;}
     }
 private:
-    struct Entry {std::atomic<std::uintptr_t> key{};std::atomic<std::uint32_t> written{},flag_frame{~0u};std::atomic<std::uint64_t> cross{};std::atomic<unsigned> frames{},slot{};
+    struct Entry {std::atomic<std::uintptr_t> key{};std::atomic<std::uint32_t> written{},flag_frame{~0u};std::atomic<int> writer{-1};std::atomic<std::uint64_t> cross{};std::atomic<unsigned> frames{},slot{};
         std::atomic<int> pass{-1};std::atomic<std::uintptr_t> ps{};std::atomic<bool> shaped{};};
     struct Role {std::uintptr_t ps{};unsigned slot{};ID3D11Texture2D* a{};ID3D11Texture2D* b{};ID3D11Device* device{};D3D11_TEXTURE2D_DESC desc{};
-        std::uint32_t last{~0u};unsigned run{};std::uint64_t restored{};};
+        std::uint32_t last{~0u};int last_eye{-1};unsigned run{};std::uint64_t restored{};};
     static constexpr unsigned table_size=4096,max_roles=8;
     inline static std::array<Entry,table_size> table_{};
     inline static std::array<Role,max_roles> roles_{};inline static std::atomic<unsigned> role_count_{};

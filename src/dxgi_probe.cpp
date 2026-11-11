@@ -2849,6 +2849,11 @@ static inline void visibility_stamp_before(ID3D11DeviceContext* context) noexcep
     if(pass!=d2vr::VisibilityStamp::forward_world_pass) return;
     d2vr::VisibilityStamp::before_draw(context,pass,d2vr::ObjectMotion::eye_of_view(d2vr::RenderPassMap::current_view()));
 }
+// v1181: the eye of the pass's view on a paired frame (-1: not an eye view, or the census and paired fix are both off: no lookup)
+static inline int cross_eye_paired_eye() noexcept {
+    if(!d2vr::CrossEyeHistory::census.load(std::memory_order_relaxed) && !d2vr::CrossEyeHistory::fix_paired.load(std::memory_order_relaxed)) return -1;
+    return d2vr::ObjectMotion::eye_of_view(d2vr::RenderPassMap::current_view());
+}
 // v1163: the rig mask's replay of a rig draw (rig_mask.hpp): the engine's draw and target bind, past every hook (no census, no target
 // observers: the replay binds and restores within one draw), the PS/wide census told that the targets changed.
 template<unsigned Binding> void rig_mask_draw(ID3D11DeviceContext* c,const d2vr::RigMask::DrawArgs& a) noexcept {
@@ -2867,7 +2872,7 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);d2vr::spyglass_art_probe().observe(context,count,true);
     if(skip_letterbox_draw(context,count)) return;
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162: before the note's skin swap
-    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1180: census / per-eye history (knobs)
+    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     NativeNoteDraw note(context,count,1,start,base);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
@@ -2878,7 +2883,7 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
-    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1180: census / per-eye history (knobs)
+    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
@@ -2889,7 +2894,7 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
 template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UINT count,UINT start) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_vertices",count,1,true);d2vr::spyglass_art_probe().observe(context,count,false);
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
-    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1180: census / per-eye history (knobs)
+    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawFn>(gpu_bindings.original(5,Binding))(context,count,start);
     rig_mask.after({2,count,1,start,0,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163
@@ -2898,7 +2903,7 @@ template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UI
 template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,UINT first) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_instanced_vertices",count,instances,true);
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
-    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1180: census / per-eye history (knobs)
+    d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
     rig_mask.after({3,count,instances,start,0,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163
@@ -16018,6 +16023,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         }
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         d2vr::CrossEyeHistory::census=fs::exists(root/L"build"/L"cross-eye-census");d2vr::CrossEyeHistory::fix=fs::exists(root/L"build"/L"alt-eye-history"); // v1180
+        d2vr::CrossEyeHistory::fix_paired=fs::exists(root/L"build"/L"eye-history"); // v1181: the same fix on paired stereo frames
         d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {std::uint32_t v{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&v,4);return v;};
         alt_mv_jittered=!fs::exists(root/L"build"/L"legacy-alt-mv-jitter");d2vr::eye_motion_mv_jittered=alt_mv_jittered.load(); // v1178
         vr_combat_enabled=!fs::exists(root/L"build"/L"legacy-combat");vr_combat.reset();
