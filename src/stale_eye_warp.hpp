@@ -167,10 +167,21 @@ struct StaleLayers {
     std::array<std::array<double,4>,2> palms{};     // v811: each drawn palm in the kept camera (right, up, forward metres), w the reach it
                                                     // owns (0: no hand drawn in the kept frame)
     std::uint64_t frame{};unsigned eye{};           // v811: the Present and eye rebuilt (the hand-fit trace)
+    // v1150 movers (design 2026-11-11 section 3): the share of the fresh eye's motion span since the kept tick, (tN-tN-1)/(tN-tN-2), and
+    // of the kept eye's span to carry its movers forward, (tN-tN-1)/(tN-1-tN-3); 0.5 without frame times. motion_rules false: the motion
+    // textures are ignored (knob no-stale-eye-motion). kept_axes: world -> kept camera (right, up, forward), rows (stale_eye_layers).
+    double fresh_part{.5},kept_part{.5};
+    bool motion_rules{true};
+    WarpMatrix kept_axes{};
 };
 inline constexpr double near_range_default=2.;
 // v811: a drawn hand owns the kept pixels within this distance of its palm: the hand, its wrist, what it holds (a glass, the Heart, a pistol).
 inline constexpr double hand_own_radius=.22;
+// v1150: a pixel whose object motion (motion texture w, render pixels over the eye's two ticks) reaches this is a mover.
+inline constexpr double mover_px=.75;
+// v1150: an eye's motion texture (RGBA16F; xyz world displacement in metres of the surface since that eye's previous render, w object
+// motion in render pixels, 0 static or unknown), its render rectangle (width x height) at the top left like StaleDepth.
+struct StaleMotion {ID3D11Texture2D* texture{};UINT width{},height{};};
 // v810: camera c as it would have to move to keep showing what moved rigidly from pose `from` to pose `to` (a drawn hand) where its
 // image has it: the same rigid motion applied to the camera.
 inline WarpCamera moved_with(const WarpCamera& c,const WorldTrackedPose& from,const WorldTrackedPose& to) {
@@ -200,6 +211,8 @@ inline std::optional<StaleLayers> stale_eye_layers(const WarpCamera& kept,const 
         const Vec3 d=(length(kept.palms[side])>0?kept.palms[side]:kept.hands[side].position)-kept.pose.position;
         if(finite(d)) layers.palms[side]={-dot(d,kept.pose.basis[1]),dot(d,kept.pose.basis[2]),dot(d,kept.pose.basis[0]),hand_own_radius};
     }
+    const auto& b=kept.pose.basis;
+    layers.kept_axes={-b[1].x,-b[1].y,-b[1].z, b[2].x,b[2].y,b[2].z, b[0].x,b[0].y,b[0].z};
     return layers;
 }
 
@@ -282,15 +295,24 @@ class StaleEyeWarp {
     }
     // v796: read views of the two kept depths (one per eye, so alternation does not rebuild them); nothing for a texture that is not R32.
     struct DepthView {Ptr<ID3D11Texture2D> texture;Ptr<ID3D11ShaderResourceView> view;};
-    std::array<DepthView,2> depth_views_{};unsigned depth_next_{};
+    std::array<DepthView,2> depth_views_{},motion_views_{};unsigned depth_next_{},motion_next_{};
+    // v1150: and of the two motion textures (RGBA16F)
+    ID3D11ShaderResourceView* read_view(ID3D11Texture2D* texture,UINT width,UINT height,DXGI_FORMAT typed,DXGI_FORMAT typeless,
+                                        std::array<DepthView,2>& views,unsigned& next) {
+        D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+        if(!(desc.BindFlags&D3D11_BIND_SHADER_RESOURCE) || desc.SampleDesc.Count!=1 || desc.ArraySize!=1 || width>desc.Width || height>desc.Height ||
+            (desc.Format!=typed && desc.Format!=typeless)) return nullptr;
+        for(auto& d:views) if(d.texture.Get()==texture) return d.view.Get();
+        D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=typed;v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
+        Ptr<ID3D11ShaderResourceView> view;if(FAILED(device_->CreateShaderResourceView(texture,&v,&view))) return nullptr;
+        auto& slot=views[next++&1u];slot.texture=texture;slot.view=view;return view.Get();
+    }
     ID3D11ShaderResourceView* depth_view(const StaleDepth& depth) {
-        D3D11_TEXTURE2D_DESC desc{};depth.texture->GetDesc(&desc);
-        if(!(desc.BindFlags&D3D11_BIND_SHADER_RESOURCE) || desc.SampleDesc.Count!=1 || desc.ArraySize!=1 || depth.width>desc.Width || depth.height>desc.Height ||
-            (desc.Format!=DXGI_FORMAT_R32_FLOAT && desc.Format!=DXGI_FORMAT_R32_TYPELESS)) return nullptr;
-        for(auto& d:depth_views_) if(d.texture.Get()==depth.texture) return d.view.Get();
-        D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R32_FLOAT;v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
-        Ptr<ID3D11ShaderResourceView> view;if(FAILED(device_->CreateShaderResourceView(depth.texture,&v,&view))) return nullptr;
-        auto& slot=depth_views_[depth_next_++&1u];slot.texture=depth.texture;slot.view=view;return view.Get();
+        return read_view(depth.texture,depth.width,depth.height,DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R32_TYPELESS,depth_views_,depth_next_);
+    }
+    ID3D11ShaderResourceView* motion_view(const StaleMotion& motion) {
+        if(!motion.texture || !motion.width || !motion.height) return nullptr;
+        return read_view(motion.texture,motion.width,motion.height,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_TYPELESS,motion_views_,motion_next_);
     }
     // An _SRGB read view of an eye image, or of a copy of it in `slot` when it has none (CopyResource still takes it).
     ID3D11ShaderResourceView* image_view(ID3D11Texture2D* image,std::size_t slot,Ptr<ID3D11ShaderResourceView>& own) {
@@ -309,6 +331,7 @@ class StaleEyeWarp {
 public:
     std::uint64_t parallax_passes{},depth_refusals{}; // v796: passes that used the kept depth; kept depths that had no read view
     std::uint64_t fresh_passes{},fresh_refusals{};    // v798: passes with the fresh eye's layer; fresh inputs refused (format, size)
+    std::uint64_t motion_passes{},motion_refusals{};  // v1150: passes with the mover rules; motion textures refused (format, size)
     // v811: hand fits run, and read back with a correction; each read-back: the Present and eye, per hand the correction (target pixels
     // x, y; 0 0 none), the fraction of its kept pixels the fresh eye sees there and with no correction. The caller takes hand_fits.
     struct HandFit {std::uint64_t frame{};unsigned eye{};std::array<std::array<float,4>,2> hands{};};
@@ -335,8 +358,13 @@ cbuffer Parameters : register(b0) {
     float4 scene[4]; float4 fresh[4]; float4 depthMap; float4 freshMap; float4 depthSize;
     float4 carried[4]; float4 handL[4]; float4 handR[4];
     float4 keptFov; float4 palmL; float4 palmR; float4 backL[4]; float4 backR[4]; float4 fitGrid;
+    float4 motionSize; float4 motionMap; float4 keptAxes[3];
 }
+// v1150: motionSize: the kept motion rectangle (xy) and the fresh one (zw), texels; motionMap: fresh_part, kept_part, on (both motion
+// textures and the rules), mover_px; keptAxes: world -> kept camera (right, up, forward).
 StructuredBuffer<float4> handFit : register(t4);          // v811: each hand's measured correction (target uv), from FitPick
+Texture2D<float4> keptMotionTex : register(t5);           // v1150: the kept frame's motion (xyz world metres, w object motion px)
+Texture2D<float4> freshMotionTex : register(t6);          // v1150: the fresh frame's
 RWStructuredBuffer<float4> fitSamples : register(u0);     // v811: the hand fit's kept samples (target uv, target depth, hand + luma)
 RWStructuredBuffer<uint4> fitCounts : register(u1);       // v811: per shift (2 x 169 coarse, then 2 x 49 fine): depth+brightness inliers,
                                                           // samples, outline depth inliers, outline samples
@@ -507,14 +535,14 @@ float3 KeptPoint(float2 q) {
     return float3(lerp(keptFov.x,keptFov.y,q.x)*a,lerp(keptFov.z,keptFov.w,q.y)*a,a);
 }
 // v811: the drawn hand that owns kept pixel q: 2 the left, 3 the right (the nearer palm, within its reach), 0 none (the world, the body).
-int Owner(float2 q) {
-    const float3 p=KeptPoint(q);
+int OwnerAt(float3 p) { // v1150: of kept point p (kept camera metres)
     if(p.z<=0) return 0;
     const float dl=palmL.w>0?distance(p,palmL.xyz):1e9,dr=palmR.w>0?distance(p,palmR.xyz):1e9;
     if(dl<=dr && dl<palmL.w) return 2;
     if(dr<dl && dr<palmR.w) return 3;
     return 0;
 }
+int Owner(float2 q) {return OwnerAt(KeptPoint(q));}
 float Luma(float4 c) {return dot(c.rgb,float3(0.2126,0.7152,0.0722));}
 )HLSL" R"HLSL(// v811 hand fit (headset v810 dumps: in a fall or a run both drawn hands moved 10-16 px in the view between two frames while the
 // recorded grips held their place relative to the head, so the rebuilt hands stayed a frame behind; the game's drawn hand is not the
@@ -616,6 +644,114 @@ groupshared float2 fitCentre;
     const float base=z.y?float(z.x)/z.y:0;
     fitResult[i]=bg>=0.10?float4(px*size.zw,float(c.x)/max(c.y,1u),base):float4(0,0,base,base);
 }
+)HLSL" R"HLSL(// v1150 movers (design 2026-11-11 section 3; the motion textures, see motionMap). Only called where motionMap.z is on.
+float4 MotionAt(Texture2D<float4> m,float2 extent,float2 q) {return m.Load(int3(clamp(int2(floor(q*extent)),int2(0,0),int2(extent)-1),0));}
+bool Mover(float4 m) {return m.w>=motionMap.w;}
+bool FreshMover(float2 p) {return all(p>=0) && all(p<=1) && Mover(MotionAt(freshMotionTex,motionSize.zw,p));}
+// a world displacement in the kept camera (right, up, forward), times part
+float3 KeptStep(float3 d,float part) {return part*float3(dot(keptAxes[0].xyz,d),dot(keptAxes[1].xyz,d),dot(keptAxes[2].xyz,d));}
+// a kept camera point (right, up, forward metres) <-> kept image homogeneous (u D, v D, D): KeptPoint's map, both ways (linear)
+float3 KeptImage(float3 p) {return float3((p.x-keptFov.x*p.z)/(keptFov.y-keptFov.x),(p.y-keptFov.z*p.z)/(keptFov.w-keptFov.z),p.z);}
+float3 KeptFrom(float3 h) {return float3(keptFov.x*h.z+(keptFov.y-keptFov.x)*h.x,keptFov.z*h.z+(keptFov.w-keptFov.z)*h.y,h.z);}
+// the kept frame has a surface d metres ahead at kept pixel q (within a texel and Confirm's tolerance)
+bool KeptHas(float2 q,float d) {
+    const float tol=0.02+0.03*d;
+    [unroll] for(int y=-1;y<=1;++y) [unroll] for(int x=-1;x<=1;++x)
+        if(abs(AheadNearest(depthTex,depthSize.xy,depthMap.xy,q+float2(x,y)/depthSize.xy)-d)<tol) return true;
+    return false;
+}
+// The front-most surface on target ray t in the fresh image beyond NearHit's range (1.25 reaches). The far part of the epipolar line is
+// short (the eyes' disparity at 1.25 reaches: ~38 px at 1129 px per tangent, ~16 px in the lab): 15 even steps in inverse distance
+// (even in pixels), the first crossing bisected five times and kept only where the ray meets that surface (NearHit's test: not a
+// crossing behind an edge). No crossing up to 30 m: the fixed point from 30 m (the rest of the line is a few pixels).
+bool FarHit(float3 t,out float2 hit,out float k) {
+    hit=float2(0,0);k=0;
+    const float3 s=float3(dot(fresh[0].xyz,t),dot(fresh[1].xyz,t),dot(fresh[2].xyz,t)),shift=fresh[3].xyz;
+    if(s.z<=1e-6) return false;
+    const float w1=1/(1.25*reach);
+    float front=w1;
+    [loop] for(int i=1;i<=15;++i) {
+        const float w=w1*(16-i)/16.0;
+        if(Behind(s,shift,w)) {
+            float lo=front,hi=w;
+            [unroll] for(int j=0;j<5;++j) {const float m=0.5*(lo+hi);if(Behind(s,shift,m)) hi=m; else lo=m;}
+            const float k_front=1/lo,ray_front=k_front*s.z+shift.z;
+            const float a_front=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,(k_front*s.xy+shift.xy)/ray_front);
+            k=1/hi;const float ray=k*s.z+shift.z;
+            hit=(k*s.xy+shift.xy)/ray;
+            const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,hit);
+            return a>0 && abs(ray-a)<0.02+0.03*a && a_front>0 && a_front-ray_front<0.02+0.03*a;
+        }
+        front=w;
+    }
+    bool ok;hit=Solve(fresh,freshDepthTex,depthSize.zw,freshMap.xy,t,16/w1,k,ok);
+    return ok && k>0 && k<1e29;
+}
+// M1, a mover the fresh eye sees: the fresh eye's front-most surface on ray t, where it moves, shows there (the fresh geometry) in this
+// eye's own kept pixel of it a tick ago (P_now - fresh_part * its motion) when the kept depth has it there, else in the fresh eye's (what
+// the kept frame did not show). Looked for only where the fresh image has a mover on the ray's epipolar line at infinity, 1.25 reaches,
+// 1 m or 0.5 m (a mover wider along that line than the gaps between them covers one). Hands stay on the hand layers. k: 1e38 none.
+float MoverSeen(float3 t,out float4 colour) {
+    colour=float4(0,0,0,0);
+    const float3 s=float3(dot(fresh[0].xyz,t),dot(fresh[1].xyz,t),dot(fresh[2].xyz,t)),shift=fresh[3].xyz;
+    if(s.z<=1e-6) return 1e38;
+    bool some=FreshMover(s.xy/s.z);
+    [unroll] for(int i=0;i<3;++i) {
+        const float g=i==0?1.25*reach:i==1?1.0:0.5,ray=g*s.z+shift.z;
+        if(ray>0) some=some || FreshMover((g*s.xy+shift.xy)/ray);
+    }
+    if(!some) return 1e38;
+    float2 p,edge;float k;
+    const int near=NearHit(t,p,k,edge);
+    if(near<0 || (near==0 && !FarHit(t,p,k))) return 1e38;
+    if(!FreshMover(p)) return 1e38;
+    const float3 now=KeptFrom(k*float3(dot(scene[0].xyz,t),dot(scene[1].xyz,t),dot(scene[2].xyz,t))+scene[3].xyz);
+    const float3 then=now-KeptStep(MotionAt(freshMotionTex,motionSize.zw,p).xyz,motionMap.x);
+    if(OwnerAt(now)!=0 || OwnerAt(then)!=0) return 1e38;
+    const float3 h=KeptImage(then);
+    const float2 q=h.z>1e-4?h.xy/h.z:float2(-1,-1);
+    colour=all(q>=0) && all(q<=1) && KeptHas(q,h.z)?Smooth(sourceTex,q):Smooth(freshTex,p);
+    return k;
+}
+// M3, a mover only this eye sees: the kept pixel whose surface, carried on by kept_part of its own motion, lies on ray t. Two fixed-point
+// steps from a seed motion: the ray's own kept pixel's, else the first mover on two rings of 8 around it (0.03 and 0.08 tangent: a mover
+// moves as one, so any of its pixels seeds it); kept only where the motion it lands on is the one it was carried by, and not where the
+// fresh eye sees farther at that point (the mover has gone): hidden behind something nearer, outside its view, or confirmed.
+float MoverHidden(float3 t,float2 q,out float4 colour) {
+    colour=float4(0,0,0,0);
+    float2 at=q;float4 seed=MotionAt(keptMotionTex,motionSize.xy,q);
+    const float2 ring=1/abs(float2(keptFov.y-keptFov.x,keptFov.w-keptFov.z));
+    [unroll] for(int r=0;r<2;++r) [unroll] for(int i=0;i<8;++i) if(!Mover(seed)) {
+        float2 dir;sincos(i*0.7853982,dir.y,dir.x);
+        at=q+dir*(r?0.08:0.03)*ring;
+        if(all(at>=0) && all(at<=1)) seed=MotionAt(keptMotionTex,motionSize.xy,at);
+    }
+    if(!Mover(seed)) return 1e38;
+    float4 h[4];h[0]=scene[0];h[1]=scene[1];h[2]=scene[2];h[3]=scene[3];
+    float3 d=KeptStep(seed.xyz,motionMap.y);
+    float k=0,start=Ahead(depthTex,depthSize.xy,depthMap.xy,at);float2 c=at;
+    [unroll] for(int n=0;n<2;++n) {
+        h[3].xyz=scene[3].xyz-KeptImage(d);   // the target ray moved back by d: its fixed point is the kept surface d carries onto it
+        bool ok;c=Solve(h,depthTex,depthSize.xy,depthMap.xy,t,start,k,ok);
+        if(!ok || !(k>0) || k>=1e29 || any(c<0) || any(c>1)) return 1e38;
+        const float4 m=MotionAt(keptMotionTex,motionSize.xy,c);
+        if(!Mover(m)) return 1e38;
+        const float3 e=KeptStep(m.xyz,motionMap.y);
+        if(n==1 && distance(e,d)>0.01+0.01*k) return 1e38;
+        d=e;start=k;
+    }
+    if(Owner(c)!=0) return 1e38;
+    // (Confirm's texel beside also confirms: the ray that grazes the edge hiding it, which NearHit refuses so M1 missed it. But its own
+    // texel seeing farther still means gone: a texel beside would fatten a mover whose kept motion is off by a pixel.)
+    float2 p;const int seen=Confirm(t,k,p);
+    if(seen<0) return 1e38;
+    if(seen==1) {
+        const float ray=k*dot(fresh[2].xyz,t)+fresh[3].z,a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);
+        if(a<=0 || a>ray+0.02+0.03*ray) return 1e38;
+    }
+    colour=Smooth(sourceTex,c);
+    return k;
+}
 float4 WarpPS(Vertex v) : SV_TARGET {
     const float3 t=float3(v.uv,1);
     if(depthMap.w<=0) {
@@ -654,10 +790,16 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     if(own[0]!=0 && ca[0]!=-2) ca[0]=-1;                                       // a hand's pixel is no world
     if(own[1]!=0) ca[1]=-2;                                                    // nor the head's
     [unroll] for(int h=2;h<4;++h) if(ca[h]!=-2 && own[h]!=0 && own[h]!=h) ca[h]=-2; // nor the other hand's
+    // v1150 M2: a kept pixel that moves is no world (the far rule below does not keep it either): its old place shows what is there now.
+    // Hand-owned pixels keep the hand layers. Without motion textures nothing is read here.
+    const bool movers=motionMap.z>0 && own[0]==0;
+    bool kept_mover=false;
+    if(movers && kept_in) kept_mover=Mover(MotionAt(keptMotionTex,motionSize.xy,q));
+    if(kept_mover && ca[0]!=-2) ca[0]=-1;
     const int world=ca[0];
     // The world beyond reach is taken as it is (v805: never the other eye's shading there; guards walking far away step a frame behind),
     // unless the fresh eye sees something nearer there: then something may cover this ray now, and the fallbacks look.
-    const bool far_world=world!=-2 && kept_k>=reach;
+    const bool far_world=world!=-2 && kept_k>=reach && !kept_mover;
     bool usable[4];float front=far_world && world!=0?kept_k:1e38;
     [unroll] for(int i=0;i<4;++i) {
         // a hand's own pixels as its motion puts them (the fresh eye sees them from elsewhere, or not at all), unless the fresh eye sees
@@ -666,6 +808,14 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         // fresh eye cannot see the point (outside its view) and the world is not confirmed there (canted eyes do not overlap at their outer edges)
         usable[i]=i==0?!far_world && world==1:(i>=2 && own[i]==i)?ca[i]!=-2 && !(ca[i]==-1 && GoneWide(t,ck[i])):ca[i]==1 || (ca[i]==2 && world!=1);
         if(usable[i]) front=min(front,ck[i]);
+    }
+    // v1150 M1 (the fresh eye sees it), else M3 (only this eye does): a mover on this ray, its distance and colour; ranked after a hand's
+    // own pixels, before the world
+    float4 mover_colour=float4(0,0,0,0);float mover_k=1e38;
+    if(movers) {
+        mover_k=MoverSeen(t,mover_colour);
+        if(mover_k>=1e37 && kept_in && world!=1) mover_k=MoverHidden(t,q,mover_colour);
+        if(mover_k<1e37) front=min(front,mover_k);
     }
     if(front<1e37) {
         if(far_world && front>=kept_k) return Smooth(sourceTex,q);
@@ -676,6 +826,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             const float r=(j>=2 && own[j]==j)?0:j==0?1:j==1?2:3;
             if(r<rank) {rank=r;best=j;}
         }
+        if(mover_k<=front*1.03+0.01 && rank>0.5) return mover_colour;
         return Smooth(sourceTex,cq[best]);
     }
     float k;
@@ -686,7 +837,10 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     // surface's very edge (the fresh depth's texels can claim the pixel beside a still silhouette)
     if(near>0 && k<reach && (world!=0 || (k<kept_k-0.02 && !FreshEdge(now,k)))) return Smooth(freshTex,now);
     if(kept_in && (world==0 || world==2)) return Smooth(sourceTex,q);                 // hidden from the fresh eye, or beyond its view: this eye's own
-    float2 b;if(KeptBeside(t,b)) return Smooth(sourceTex,b);                           // what a move uncovered: this eye's own scenery beside it (v805)
+    float2 b;if(KeptBeside(t,b)) {                                                      // what a move uncovered: this eye's own scenery beside it (v805),
+        bool gone=false;if(movers) gone=Mover(MotionAt(keptMotionTex,motionSize.xy,b)); // not a mover's old place (v1150 M2)
+        if(!gone) return Smooth(sourceTex,b);
+    }
     bool ok;const float2 f=Solve(fresh,freshDepthTex,depthSize.zw,freshMap.xy,t,0,k,ok);
     const float2 g=ok || near==0?f:edge;
     if(k>0 && all(g>=0) && all(g<=1)) return Smooth(freshTex,g);                       // what only the fresh eye has (a snap turn's new view)
@@ -699,7 +853,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sampler.MaxLOD=D3D11_FLOAT32_MAX;
         checked(device_->CreateSamplerState(&sampler,&sampler_),"sampler");
-        D3D11_BUFFER_DESC constants{};constants.ByteWidth=624;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
+        D3D11_BUFFER_DESC constants{};constants.ByteWidth=704;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
         checked(device_->CreateBuffer(&constants,nullptr,&parameters_),"parameter buffer");
         const char* fit_entries[]{"FitSample","FitCoarse","FitFine","FitPick"};
         for(std::size_t n=0;n<fit_.size();++n) {
@@ -724,8 +878,11 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     // The kept image warped by `h` (target pixel -> kept pixel); same size, RGBA8 typeless with _SRGB views. With `layers` and the kept
     // frame's depth: near content from `fresh` (the fresh eye's image of this moment, its depth `fresh_depth`) when the layers have its
     // camera, the rest from the kept image with parallax; without, `h` alone.
+    // v1150: with both eyes' motion textures (kept_motion: the kept frame's, fresh_motion: the fresh frame's) and layers->motion_rules,
+    // movers go where the fresh eye has them (M1-M3); without, nothing changes.
     ID3D11Texture2D* apply(ID3D11Texture2D* source,const WarpMatrix& h,const StaleLayers* layers=nullptr,const StaleDepth& depth={},
-                           ID3D11Texture2D* fresh=nullptr,const StaleDepth& fresh_depth={}) {
+                           ID3D11Texture2D* fresh=nullptr,const StaleDepth& fresh_depth={},const StaleMotion& kept_motion={},
+                           const StaleMotion& fresh_motion={}) {
         if(!source) throw std::runtime_error("Stale eye warp input is missing");
         D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
         Ptr<ID3D11Device> owner;source->GetDevice(&owner);
@@ -746,7 +903,12 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             if(fresh_depth_read) fresh_read=image_view(fresh,1,fresh_own);
             if(!fresh_read) {fresh_depth_read=nullptr;++fresh_refusals;}
         }
-        std::array<float,156> parameters{};std::size_t at=0;
+        ID3D11ShaderResourceView *kept_motion_read=nullptr,*fresh_motion_read=nullptr;
+        if(fresh_read && layers->motion_rules && kept_motion.texture && fresh_motion.texture) {
+            kept_motion_read=motion_view(kept_motion);fresh_motion_read=motion_view(fresh_motion);
+            if(!kept_motion_read || !fresh_motion_read) {kept_motion_read=fresh_motion_read=nullptr;++motion_refusals;}
+        }
+        std::array<float,176> parameters{};std::size_t at=0;
         const auto put=[&](double x,double y,double z,double w) {
             parameters[at++]=static_cast<float>(x);parameters[at++]=static_cast<float>(y);parameters[at++]=static_cast<float>(z);parameters[at++]=static_cast<float>(w);
         };
@@ -780,6 +942,11 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             else {rows(WarpMatrix{});put(0,0,0,0);}
         }
         put(fit_grid,fit_grid,4,0);
+        // v1150: the motion textures' rectangles, the two parts, on, mover_px; the kept camera's axes
+        if(kept_motion_read) {
+            put(kept_motion.width,kept_motion.height,fresh_motion.width,fresh_motion.height);
+            put(layers->fresh_part,layers->kept_part,1,mover_px);rows(layers->kept_axes);++motion_passes;
+        } else {put(0,0,0,0);put(0,0,0,0);rows(WarpMatrix{});}
         if(depth_read) ++parallax_passes;
         if(fresh_read) ++fresh_passes;
         context_->UpdateSubresource(parameters_.Get(),0,nullptr,parameters.data(),0,0);
@@ -805,11 +972,12 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         context_->OMSetDepthStencilState(depth_.Get(),0);context_->OMSetBlendState(nullptr,nullptr,0xffffffff);
         context_->PSSetConstantBuffers(0,1,&constants);
         ID3D11SamplerState* samplers[]{sampler_.Get()};context_->PSSetSamplers(0,1,samplers);
-        ID3D11ShaderResourceView* inputs[]{read,depth_read,fresh_read,fresh_depth_read,fit_result_srv_.Get()};context_->PSSetShaderResources(0,5,inputs);
+        ID3D11ShaderResourceView* inputs[]{read,depth_read,fresh_read,fresh_depth_read,fit_result_srv_.Get(),kept_motion_read,fresh_motion_read};
+        context_->PSSetShaderResources(0,7,inputs);
         auto* target=output_rtv_.Get();context_->OMSetRenderTargets(1,&target,nullptr);
         context_->VSSetShader(vertex_.Get(),nullptr,0);context_->PSSetShader(pixel_.Get(),nullptr,0);
         context_->Draw(3,0);
-        ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(0,5,empty);
+        ID3D11ShaderResourceView* empty[7]{};context_->PSSetShaderResources(0,7,empty);
         context_->OMSetRenderTargets(0,nullptr,nullptr);
         if(fit_on && layers) { // v811 trace: this fit, read back once the GPU is done with it
             if(fit_waiting_[fit_slot_]) collect_fits();
