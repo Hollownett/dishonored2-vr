@@ -66,6 +66,12 @@ public:
         width=e.depth_w;height=e.depth_h;
         return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.depth.p);
     }
+    // Perf-mode motion Phase 0 (dxgi_probe knob build/alt-motion-probe, diagnostics only): handed to replace() by the TAA dispatch it
+    // belongs to; that eye's next FSR/DLSS dispatch writes <stem>-mv.rg16f (raw engine motion vectors), <stem>-depth.r32 (the Eye::depth
+    // copy), optionally <stem>-colour.raw, each the render rectangle at the top left as u32 width,height,DXGI format,bytes per row then
+    // tightly packed rows; <stem>-b1.bin (the dispatch's CBPerViewGlobals) and <stem>.json (`json` plus this dispatch's sizes and jitter).
+    // Empty stem = nothing. The writes wait for the GPU.
+    struct MotionProbe {std::wstring stem;std::string json;Microsoft::WRL::ComPtr<ID3D11Buffer> b1;bool colour{};};
 private:
     template<class T> struct Ref {
         T* p{};~Ref() {if(p) p->Release();}
@@ -114,6 +120,7 @@ private:
     UINT ready_w_{},ready_h_{},render_w_{},render_h_{},context_w_{},context_h_{};float ready_fraction_{1}; // context_*: max render size the FSR contexts/inputs were built for
     DXGI_FORMAT ready_native_format_{DXGI_FORMAT_UNKNOWN};
     std::array<Ref<ID3D11Resource>,2> motion_{}; // upscale mode: this frame's motion vectors per eye (from the TAA dispatch)
+    std::array<MotionProbe,2> probe_{}; // upscale mode: the alt-motion-probe request of that TAA dispatch, until post_tonemap_end makes its job
     static thread_local Ref<ID3D11Resource> pass_source_,pass_target_; // upscale draw seen in this post-tonemap pass; defined after the class: clang-cl needs Ref's member initializers complete
     static thread_local InputDiagnostics pass_input_;
     std::mutex input_diagnostics_mutex_;
@@ -525,7 +532,7 @@ public:
         job->eye=eye;job->upscale=true;job->vfov=last_vfov[static_cast<std::size_t>(eye)].load();
         job->jitter_x=last_jitter_x[static_cast<std::size_t>(eye)].load();job->jitter_y=last_jitter_y[static_cast<std::size_t>(eye)].load();
         job->colour.reset(source.p);job->output.reset(target.p);
-        {std::lock_guard<std::mutex> lock(mutex_);job->motion.reset(motion_[static_cast<std::size_t>(eye)].p);}
+        {std::lock_guard<std::mutex> lock(mutex_);job->motion.reset(motion_[static_cast<std::size_t>(eye)].p);job->probe=std::move(probe_[static_cast<std::size_t>(eye)]);probe_[static_cast<std::size_t>(eye)]={};}
         if(!job->motion.p) {++upscale_skipped;return;}
         if(c->GetType()!=D3D11_DEVICE_CONTEXT_DEFERRED) {dispatch(c,*job);return;} // already on the immediate context
         std::lock_guard<std::mutex> lock(jobs_mutex_);
@@ -745,6 +752,7 @@ public:
         for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();}
         Fsr4EyeUpscaler::poll_retired();
         for(auto& m:motion_) m.reset();
+        for(auto& p:probe_) p={};
         selected_clear_.reset();dlss_depth_selection_generation=++depth_selection_generation_;depth_view_.reset();depth_resource_.reset();copy_.reset();ready_w_=ready_h_=0;wanted_w_=0;wanted_h_=0;ready_native_format_=DXGI_FORMAT_UNKNOWN;wanted_native_format_=DXGI_FORMAT_UNKNOWN;
         {std::lock_guard<std::mutex> jobs(jobs_mutex_);for(auto& r:recording_) {r.first=nullptr;r.second.reset();}queued_.clear();}
         std::lock_guard<std::mutex> lock2(candidate_mutex_);
@@ -753,7 +761,7 @@ public:
     // Job thread, inside the TAA dispatch hook. Seals everything recorded before the TAA dispatch
     // into its own command list and skips the dispatch; FSR then runs on the immediate context
     // between that prefix and the remainder (execute()). True when the dispatch was taken over.
-    bool replace(ID3D11DeviceContext* c,int eye,const TaaBindings& b,float vfov,float jitter_x,float jitter_y) {
+    bool replace(ID3D11DeviceContext* c,int eye,const TaaBindings& b,float vfov,float jitter_x,float jitter_y,MotionProbe probe={}) {
         if(!enabled.load() || !c || eye<0 || eye>1 || !b.taa() || c->GetType()!=D3D11_DEVICE_CONTEXT_DEFERRED) return false;
         const UINT w=b.tex[5].Width,h=b.tex[5].Height;
         wanted_w_=w;wanted_h_=h;
@@ -765,7 +773,7 @@ public:
         if(fraction.load()<.999f) {
             // Upscale mode: FSR accumulates at the end (post-tonemap); the native TAA becomes a copy so
             // there is no second temporal filter, and its motion vectors are kept for FSR.
-            {std::lock_guard<std::mutex> lock(mutex_);motion_[static_cast<std::size_t>(eye)].reset(b.res[1]);
+            {std::lock_guard<std::mutex> lock(mutex_);motion_[static_cast<std::size_t>(eye)].reset(b.res[1]);probe_[static_cast<std::size_t>(eye)]=std::move(probe);
                 if(!ready.load() || ready_w_!=w || ready_h_!=h || ready_fraction_!=fraction.load()) {++not_ready;return false;}}
             c->CopyResource(b.res[5],b.res[2]);++taa_copies;
             return true;
@@ -775,7 +783,7 @@ public:
         auto job=std::make_unique<Job>();
         job->fraction=fraction.load();job->epoch=reset_epoch_.load();job->width=w;job->height=h;
         job->eye=eye;job->vfov=vfov;job->jitter_x=jitter_x;job->jitter_y=jitter_y;
-        job->colour.reset(b.res[2]);job->motion.reset(b.res[1]);job->output.reset(b.res[5]);
+        job->colour.reset(b.res[2]);job->motion.reset(b.res[1]);job->output.reset(b.res[5]);job->probe=std::move(probe);
         // Claim this context's slot first: a context already split (a second TAA dispatch before its
         // Finish) or no free slot leaves the native dispatch in place rather than dropping a prefix.
         std::lock_guard<std::mutex> lock(jobs_mutex_);
@@ -820,7 +828,7 @@ private:
     }
     struct Job {
         int eye{};float vfov{},jitter_x{},jitter_y{},fraction=1;bool upscale{};UINT width{},height{};std::uint64_t epoch{};
-        Ref<ID3D11Resource> colour,motion,output;Ref<ID3D11CommandList> prefix,remainder;
+        Ref<ID3D11Resource> colour,motion,output;Ref<ID3D11CommandList> prefix,remainder;MotionProbe probe;
         std::unique_ptr<Job> next; // a later split of the same context (commands since this one)
     };
     std::mutex jobs_mutex_;
@@ -892,6 +900,62 @@ private:
         return true;
     }
     std::array<std::array<UINT,4>,2> fovea_key_{}; // v1107: the fovea boxes the contexts were built for (zeros = off)
+    // Immediate context, under mutex_, after this job's prefix ran and the depth copy was recorded (see MotionProbe). Diagnostics only.
+    void write_motion_probe(ID3D11DeviceContext* c,const Job& job,ID3D11Texture2D* depth,UINT rw,UINT rh) noexcept {
+        try {
+            Microsoft::WRL::ComPtr<ID3D11Device> dev;c->GetDevice(&dev);
+            if(!dev) return;
+            const auto& p=job.probe;
+            std::string sizes;
+            const auto save=[&](ID3D11Resource* r,const wchar_t* suffix,const char* name) {
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> t;
+                if(!r || FAILED(r->QueryInterface(IID_PPV_ARGS(&t)))) return;
+                D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);
+                sizes+=std::string(",\"")+name+"_texture\":["+std::to_string(d.Width)+','+std::to_string(d.Height)+','+std::to_string(static_cast<UINT>(d.Format))+']';
+                const UINT w=std::min(rw,d.Width),h=std::min(rh,d.Height);
+                const DXGI_FORMAT f=d.Format;
+                const UINT bpp=f==DXGI_FORMAT_R32G32B32A32_FLOAT?16u:(f==DXGI_FORMAT_R16G16B16A16_FLOAT || f==DXGI_FORMAT_R16G16B16A16_UNORM || f==DXGI_FORMAT_R32G32_FLOAT)?8u:4u;
+                d.Width=w;d.Height=h;d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.MipLevels=1;d.ArraySize=1;
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> s;
+                if(!w || !h || d.SampleDesc.Count!=1 || FAILED(dev->CreateTexture2D(&d,nullptr,&s))) return;
+                const D3D11_BOX box{0,0,0,w,h,1};c->CopySubresourceRegion(s.Get(),0,0,0,0,t.Get(),0,&box);
+                D3D11_MAPPED_SUBRESOURCE m{};
+                if(FAILED(c->Map(s.Get(),0,D3D11_MAP_READ,0,&m))) return;
+                FILE* out{};
+                if(!_wfopen_s(&out,(p.stem+suffix).c_str(),L"wb") && out) {
+                    const UINT row=std::min<UINT>(w*bpp,m.RowPitch),header[4]{w,h,static_cast<UINT>(f),row};fwrite(header,4,4,out);
+                    for(UINT y=0;y<h;++y) fwrite(static_cast<const char*>(m.pData)+static_cast<std::size_t>(y)*m.RowPitch,1,row,out);
+                    fclose(out);
+                }
+                c->Unmap(s.Get(),0);
+            };
+            save(job.motion.p,L"-mv.rg16f","motion");save(depth,L"-depth.r32","depth");
+            if(p.colour) save(job.colour.p,L"-colour.raw","colour");
+            // b1 = CBPerViewGlobals (0x320 bytes) as the TAA dispatch read it, copied on the game's context before the split
+            std::string b1;
+            if(p.b1) {
+                D3D11_MAPPED_SUBRESOURCE m{};
+                if(SUCCEEDED(c->Map(p.b1.Get(),0,D3D11_MAP_READ,0,&m)) && m.pData) {
+                    D3D11_BUFFER_DESC bd{};p.b1->GetDesc(&bd);
+                    const auto* f=static_cast<const float*>(m.pData);
+                    FILE* out{};
+                    if(!_wfopen_s(&out,(p.stem+L"-b1.bin").c_str(),L"wb") && out) {fwrite(m.pData,1,bd.ByteWidth,out);fclose(out);}
+                    char text[512]{};
+                    // taa_mv_dejitter.hpp: the step the MVs carry = (r[25].x-r[13].x, r[13].y-r[25].y)*0.5 in UV; cb_jittervectors at 0x1d0
+                    std::snprintf(text,sizeof text,",\"b1_bytes\":%u,\"b1_r13\":[%.9g,%.9g],\"b1_r25\":[%.9g,%.9g],\"b1_step_uv\":[%.9g,%.9g],\"b1_jittervectors\":[%.9g,%.9g,%.9g,%.9g]",
+                        bd.ByteWidth,f[13*4],f[13*4+1],f[25*4],f[25*4+1],(f[25*4]-f[13*4])*.5f,(f[13*4+1]-f[25*4+1])*.5f,f[0x1d0/4],f[0x1d0/4+1],f[0x1d0/4+2],f[0x1d0/4+3]);
+                    b1=text;c->Unmap(p.b1.Get(),0);
+                }
+            }
+            char text[512]{};
+            std::snprintf(text,sizeof text,",\"render\":[%u,%u],\"display\":[%u,%u],\"upscale\":%s,\"fraction\":%.9g,\"fsr_jitter_px\":[%.9g,%.9g],\"vfov\":%.9g,\"reset\":%s",
+                rw,rh,job.width,job.height,job.upscale?"true":"false",job.fraction,job.jitter_x,job.jitter_y,job.vfov,(*eyes_)[static_cast<std::size_t>(job.eye)].reset?"true":"false");
+            FILE* out{};
+            if(!_wfopen_s(&out,(p.stem+L".json").c_str(),L"wb") && out) {
+                const std::string json="{"+p.json+text+sizes+b1+"}\n";fwrite(json.data(),1,json.size(),out);fclose(out);
+            }
+        } catch(...) {}
+    }
     void dispatch(ID3D11DeviceContext* c,Job& job) {
         std::lock_guard<std::mutex> lock(mutex_);
         // A split native TAA list still needs a result if settings/resize invalidated FSR before execution.
@@ -959,6 +1023,7 @@ private:
             dumped_eyes_|=1u<<job.eye;
             if(dumped_eyes_==3) {dump_path.clear();dumped_eyes_=0;}
         }
+        if(!job.probe.stem.empty()) write_motion_probe(c,job,e.depth.p,depth_w,depth_h);
         const auto previous_generation=eye_upscaler_generation[static_cast<std::size_t>(job.eye)].load();
         if(in.colour) {
             Ref<ID3D11Texture2D> texture;

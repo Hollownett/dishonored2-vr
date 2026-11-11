@@ -1374,6 +1374,53 @@ static void read_pass_view_jitter(d2vr::TaaJitterCheck::Used& used) noexcept {
     float f[4];
     if(const auto view=d2vr::TaaDispatchHook::pass_view;view && read_self(view+0x7850,f,sizeof f)) std::memcpy(used.view,f,sizeof f);
 }
+// Perf-mode motion Phase 0 (docs/superpowers/specs/2026-11-11-perf-mode-motion-design.md; knob build/alt-motion-probe, diagnostics on,
+// alternate-eye gameplay with FSR/DLSS): bursts of consecutive fresh-eye TAA dispatches. Per dispatch, artifacts/alt-motion-<burst>-<index>
+// -mv.rg16f, -depth.r32, -colour.raw (first two of a burst), -b1.bin and .json with that render's alternate_taa receipt (FsrTaa::MotionProbe).
+// The Present thread arms a burst (alt_motion_probe_arm); the TAA job thread takes one dispatch per armed slot. Offline: tools/alt_motion_probe.py.
+// Knob content (optional): bursts, dispatches per burst, seconds between bursts (default 6 8 10).
+static std::atomic<bool> alt_motion_probe_knob{false};
+static std::atomic<unsigned> alt_motion_left{0},alt_motion_burst{0},alt_motion_index{0};
+static unsigned alt_motion_bursts=6,alt_motion_size=8,alt_motion_interval_s=10;static UINT64 alt_motion_next_tick=0;
+static void alt_motion_snapshot_json(std::ostream& o,const d2vr::alternate_taa::Snapshot& s) {
+    static constexpr const char* names[3]{"projection","view","view_projection"};
+    o<<'{';
+    for(std::size_t m=0;m<3;++m) {o<<(m?",\"":"\"")<<names[m]<<"\":[";for(std::size_t i=0;i<16;++i) o<<(i?",":"")<<s.matrices[m][i];o<<']';}
+    o<<",\"position\":["<<s.position[0]<<','<<s.position[1]<<','<<s.position[2]<<"],\"jitter\":["<<s.jitter[0]<<','<<s.jitter[1]<<"]}";
+}
+// Job thread, the FSR/DLSS TAA dispatch of `eye` (before replace()). Empty unless a burst is armed and this pass has an admitted receipt.
+static d2vr::FsrTaa::MotionProbe alt_motion_probe_take(ID3D11DeviceContext* c,int eye,const d2vr::TaaBindings& b) noexcept {
+    d2vr::FsrTaa::MotionProbe probe;
+    if(!alt_motion_left.load(std::memory_order_relaxed) || !d2vr::diag::on() || eye<0 || eye>1 ||
+       !d2vr::TaaDispatchHook::pass_display || !d2vr::TaaDispatchHook::pass_view) return probe;
+    try {
+        const auto receipt=alternate_taa_runtime.resolve(d2vr::TaaDispatchHook::pass_view);
+        if(!receipt || receipt->key.eye!=eye) return probe;
+        unsigned left=alt_motion_left.load();
+        do {if(!left) return probe;} while(!alt_motion_left.compare_exchange_weak(left,left-1));
+        const unsigned index=alt_motion_index++,burst=alt_motion_burst.load();
+        const auto stem=output_directory/(L"alt-motion-"+std::to_wstring(burst)+L"-"+std::to_wstring(index));
+        if(output_directory.empty() || stem.empty()) return probe;
+        std::ostringstream o;o.precision(9);
+        o<<"\"burst\":"<<burst<<",\"index\":"<<index<<",\"eye\":"<<eye<<",\"present\":"<<frames.load()<<",\"tick\":"<<GetTickCount64()
+         <<",\"display\":"<<receipt->key.display<<",\"native_counter\":"<<receipt->key.native_counter<<",\"phase\":"<<receipt->phase
+         <<",\"receipt_reset\":"<<(receipt->reset?"true":"false")<<",\"key_size\":["<<receipt->key.width<<','<<receipt->key.height<<']'
+         // weapon_draw_place.hpp: view+0x7510 is row-major with column vectors (clip = M*(x,y,z,1), z row 0,0,0,near); the projection
+         // (+0x7390) and view (+0x7450) are assumed stored the same way (not verified). b1 (CBPerViewGlobals) holds its matrices in the
+         // transposed order (taa_jitter_check.hpp: the frustum shift at floats 8,9 of cb_projectionmatrix). jitter: UV, engine sign.
+         <<",\"matrix_order\":\"engine view memory: row-major, column vectors (clip = M*v), per weapon_draw_place.hpp; projection/view order unverified\""
+         <<",\"current\":";
+        alt_motion_snapshot_json(o,receipt->current);o<<",\"previous\":";alt_motion_snapshot_json(o,receipt->previous);
+        if(d2vr::TaaDispatchHook::pass_jitter) {const auto& j=*d2vr::TaaDispatchHook::pass_jitter;o<<",\"pass_jitter\":["<<j[0]<<','<<j[1]<<','<<j[2]<<','<<j[3]<<']';}
+        probe.json=o.str();probe.stem=stem.wstring();probe.colour=index%alt_motion_size<2;
+        if(b.cb[0]) { // copied on the game's context now, so the job's prefix carries it; mapped at the FSR dispatch
+            D3D11_BUFFER_DESC d{};b.cb[0]->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.StructureByteStride=0;
+            ComPtr<ID3D11Device> device;c->GetDevice(&device);
+            if(device && SUCCEEDED(device->CreateBuffer(&d,nullptr,&probe.b1))) c->CopyResource(probe.b1.Get(),b.cb[0]);
+        }
+    } catch(...) {probe={};}
+    return probe;
+}
 bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2vr::TaaDispatchHook::Fn original) {
     d2vr::TaaBindings b;b.read(c);
     const bool taa=b.taa();
@@ -1424,7 +1471,8 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
             fsr_taa.last_jitter_x[static_cast<std::size_t>(eye)]=fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0];fsr_taa.last_jitter_y[static_cast<std::size_t>(eye)]=fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1];
             fsr_taa.last_vfov[static_cast<std::size_t>(eye)]=fsr_vfov[static_cast<std::size_t>(eye)].load();
         }
-        try {if(fsr_taa.replace(c,eye,b,fsr_vfov[static_cast<std::size_t>(eye)].load(),fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0],fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1])) return true;}
+        try {if(fsr_taa.replace(c,eye,b,fsr_vfov[static_cast<std::size_t>(eye)].load(),fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0],fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1],
+                                alt_motion_probe_take(c,eye,b))) return true;}
         catch(...) {}
         // No native shared-history dispatch while an eye's own upscaler is
         // unprepared, resizing, or cannot split its deferred command list.
@@ -10582,6 +10630,16 @@ static void capture_wheel_eye(unsigned eye,ID3D11Texture2D* texture,UINT64 now) 
 }
 // v790: one eye of a band burst (alt_band_request; diagnostic sessions only: knob build/alt-pose-trace). Both eyes of a Present share
 // its seq, and eye 1 ends the Present. The Map waits for the GPU, so a burst costs a short hitch.
+// Perf-mode motion Phase 0 (alt_motion_probe_take): Present thread, once per Present. First burst 5 s into alternate-eye gameplay.
+static void alt_motion_probe_arm(bool gameplay) noexcept {
+    if(!alt_motion_probe_knob.load(std::memory_order_relaxed) || !d2vr::diag::on() || alt_motion_left.load() || alt_motion_burst.load()>=alt_motion_bursts) return;
+    if(!gameplay || !alternate_on() || !fsr_taa.enabled.load()) return;
+    const auto now=GetTickCount64();
+    if(!alt_motion_next_tick) {alt_motion_next_tick=now+5000;return;}
+    if(now<alt_motion_next_tick) return;
+    alt_motion_next_tick=now+alt_motion_interval_s*1000ull;
+    ++alt_motion_burst;alt_motion_index=0;alt_motion_left=alt_motion_size;
+}
 static void capture_alt_band(unsigned eye,ID3D11Texture2D* texture,UINT64 now) noexcept {
     if(eye>1 || !texture || !game_xr || !d2vr::diag::on() || !alt_pose_trace_on() || game_logic_mask()!=2) return;
     if(eye==0 && !alt_band_left) {
@@ -11662,6 +11720,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 else mono_view_fallback("perf-mono-view: the one engine view was not matched for 180 gameplay frames");
                             }
                         }
+                        alt_motion_probe_arm(gameplay); // diagnostic (build/alt-motion-probe): perf-mode motion Phase 0 bursts
                         if(!cached_output_frame_ready) {completed_left.Reset();completed_right.Reset();}
                         // Do not hold the GPU-observer lock across OpenXR calls.
                         // VDXR dispatches D3D11 work on its own thread and waits
@@ -15034,6 +15093,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             legacy_gpu_queue=fs::exists(root/L"build"/L"legacy-gpu-queue");
             legacy_locate_horizon=fs::exists(root/L"build"/L"legacy-locate-horizon"); // v794: views and hands are located for their image's display
             alt_band_request=0;alt_band_bursts=0;alt_band_left=0;alt_band_seq=0;alt_band_next_tick=0;
+            alt_motion_left=0;alt_motion_burst=0;alt_motion_index=0;alt_motion_next_tick=0;alt_motion_bursts=6;alt_motion_size=8;alt_motion_interval_s=10;
+            alt_motion_probe_knob=fs::exists(root/L"build"/L"alt-motion-probe"); // perf-mode motion Phase 0 (diagnostics on only; see alt_motion_probe_take)
+            {std::ifstream knob(root/L"build"/L"alt-motion-probe");unsigned n{},k{},s{};
+             if(knob>>n>>k>>s && n>=1 && n<=50 && k>=2 && k<=64 && s>=1 && s<=600) {alt_motion_bursts=n;alt_motion_size=k;alt_motion_interval_s=s;}}
             layer_pose_sync_state=fs::exists(root/L"build"/L"no-layer-pose-sync")?0:1;layer_pose_synced=0;layer_pose_sync_fallbacks=0; // paired / perf-mono layer-pose sync (2026-10-22); the knob restores the Setup-time record
             if(fs::exists(root/L"build"/L"alternate-eye")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites)
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
