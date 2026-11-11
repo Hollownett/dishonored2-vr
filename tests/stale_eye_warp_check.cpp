@@ -1051,6 +1051,23 @@ static void gpu_edges() {
         std::printf("d. camera cut, the kept view turned away: %d of %d columns beside the sleeve (in the fresh view) black\n", black, n);
         CHECK(n >= 3 && black == 0);
     }
+    // e. (v1171, v1170 sim teleport and v1165 hold 2) the kept frame is another place entirely (here 245 everywhere, a level the fresh eye
+    // never shows), its camera 2 m away: a cut. The rebuilt frame takes nothing from it and nothing black; with no cut the kept image is used.
+    {
+        D3D11_TEXTURE2D_DESC desc{}; desc.Width = W; desc.Height = H; desc.MipLevels = 1; desc.ArraySize = 1; desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;
+        std::vector<unsigned char> elsewhere(W * H * 4, 245); const D3D11_SUBRESOURCE_DATA data{elsewhere.data(), W * 4, 0};
+        ComPtr<ID3D11Texture2D> other; CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &data, &other)));
+        const WarpCamera away = camera(yaw(0.4), {2.032, 0, 1.0});
+        auto teleport = *stale_eye_layers(away, square, kept, square, &fresh, square, 2.0);
+        CHECK(teleport.cut && !layers.cut);
+        const Frame f = render(-0.032, true);
+        const auto image = read_back(device.Get(), context.Get(), warp.apply(other.Get(), id, &teleport, {k.depth.Get(), W, H}, f.image.Get(), {f.depth.Get(), W, H}));
+        int kept_px = 0, black = 0;
+        for (UINT i = 0; i < W * H; ++i) {kept_px += image[i * 4] == 245; black += image[i * 4] < 5;}
+        std::printf("e. camera cut (teleport 2 m): %d pixels from the kept frame, %d black\n", kept_px, black);
+        CHECK(kept_px == 0 && black == 0 && warp.cut_passes == 1);
+    }
 }
 
 // v802: the drawn hands held still from the kept frame's Setup to the target's (what is within reach may show from the kept image)

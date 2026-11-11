@@ -302,6 +302,22 @@ int main(int argc, char** argv) {
         layers.fresh_part = meta["fresh_part"].n; layers.kept_part = meta["kept_part"].n;
         if (meta.has("rig_motion") && meta["rig_motion"].a.size() == 2) layers.rig_motion = {meta["rig_motion"].a[0].b, meta["rig_motion"].a[1].b};  // v1167
         layers.frame = static_cast<std::uint64_t>(meta["frame"].n); layers.eye = static_cast<unsigned>(meta["eye"].n);
+        {   // v1171: the cut decision of stale_eye_layers from the dumped world layer (world = I m A, shift = I step; same FOV both sides)
+            const auto I = warp_image_matrix(layers.kept_fov);
+            const auto inv = [](const WarpMatrix& m) {
+                const double det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+                return WarpMatrix{(m[4] * m[8] - m[5] * m[7]) / det, (m[2] * m[7] - m[1] * m[8]) / det, (m[1] * m[5] - m[2] * m[4]) / det,
+                                  (m[5] * m[6] - m[3] * m[8]) / det, (m[0] * m[8] - m[2] * m[6]) / det, (m[2] * m[3] - m[0] * m[5]) / det,
+                                  (m[3] * m[7] - m[4] * m[6]) / det, (m[1] * m[6] - m[0] * m[7]) / det, (m[0] * m[4] - m[1] * m[3]) / det};
+            };
+            const auto mul = [](const WarpMatrix& x, const WarpMatrix& y) {WarpMatrix r{}; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) for (int k = 0; k < 3; ++k) r[i * 3 + j] += x[i * 3 + k] * y[k * 3 + j]; return r;};
+            const auto A = inv(I); const auto m = mul(mul(A, layers.world.world), I);
+            const auto& sh = layers.world.shift;
+            const double sx = A[0] * sh[0] + A[1] * sh[1] + A[2] * sh[2], sy = A[3] * sh[0] + A[4] * sh[1] + A[5] * sh[2], sz = A[6] * sh[0] + A[7] * sh[1] + A[8] * sh[2];
+            const double step = std::sqrt(sx * sx + sy * sy + sz * sz), turn = std::acos(std::clamp(m[8], -1.0, 1.0)) * 180 / 3.14159265358979;
+            layers.cut = std::getenv("STALE_REPLAY_NO_CUT") ? false : (step > cut_step || (step > cut_turn_step && turn > cut_turn_deg));
+            std::fprintf(stderr, "  dump %d: step %.3f m, turn %.1f deg%s\n", n, step, turn, layers.cut ? ": CUT" : "");
+        }
         // kept_axes: the probe's yaw, the fitted pitch
         const double L = std::tan(layers.kept_fov.left), R = std::tan(layers.kept_fov.right), U = std::tan(layers.kept_fov.up), D = std::tan(layers.kept_fov.down);
         auto nearest = probe.lower_bound(static_cast<long long>(meta["frame"].n));

@@ -178,12 +178,19 @@ struct StaleLayers {
     // (knob no-stale-eye-rig-motion) keeps the hand and carried layers. Not used by the pass yet.
     bool rig_motion_rules{true};
     std::array<bool,2> rig_motion{};
+    // v1171: a camera cut since the kept frame (stale_eye_cut): the whole frame is rebuilt from the fresh eye alone
+    bool cut{};
     bool motion_rules{true};
     WarpMatrix kept_axes{};
 };
 inline constexpr double near_range_default=2.;
 // v811: a drawn hand owns the kept pixels within this distance of its palm: the hand, its wrist, what it holds (a glass, the Heart, a pistol).
 inline constexpr double hand_own_radius=.22;
+// v1171 (v1170 sim: a teleport; v1165 hold 2): the kept and target cameras show different places: the kept image is no source at all.
+// A step over cut_step (over 11 m/s even at 44 ms a frame: no head, sprint or jump), or over cut_turn_step together with a view turn over
+// cut_turn_deg (a head does not jump 10 cm while swinging its view 20 degrees in one tick; the two dumps: 0.3 m and 43 degrees). A snap turn
+// (yaw only, the eyes move 2-3 cm) and a sprint (0.3 m, little turn) are no cut: their rules stand.
+inline constexpr double cut_step=.5,cut_turn_step=.1,cut_turn_deg=20;
 // v1150: a pixel whose object motion (motion texture w, render pixels over the eye's two ticks) reaches this is a mover.
 // v1157: 3 px. The engine's entity vectors can carry another frame's jitter step than the static world's (measured 2026-11-11: still
 // props at 0.4-1.3 px). A step's components are within +-1 px, so mixing two steps stays under 2.83 px: no jitter error can make a
@@ -209,9 +216,15 @@ inline WarpCamera moved_with(const WarpCamera& c,const WorldTrackedPose& from,co
 // (the pass warps by rotation only then). near_range 0: no fresh layer (v796). v810: and the carried and hand layers.
 inline std::optional<StaleLayers> stale_eye_layers(const WarpCamera& kept,const WarpFov& kept_fov,const WarpCamera& target,const WarpFov& target_fov,
                                                    const WarpCamera* fresh=nullptr,const WarpFov& fresh_fov={},double near_range=near_range_default) {
-    const auto world=stale_eye_parallax(kept,kept_fov,target,target_fov);
+    // v1171: a cut (see cut_step) takes the frame from the fresh eye alone; the world layer is then the target's own (unused)
+    const double step=length(target.pose.position-kept.pose.position);
+    const double turn=std::acos(std::clamp(dot(kept.pose.basis[0],target.pose.basis[0]),-1.,1.))*180/3.14159265358979;
+    const bool cut=std::isfinite(step) && (step>cut_step || (step>cut_turn_step && turn>cut_turn_deg)) && fresh && near_range>0;
+    WarpCamera own=target;own.m10=kept.m10;own.m11=kept.m11;
+    const auto world=cut?stale_eye_parallax(own,kept_fov,target,target_fov):stale_eye_parallax(kept,kept_fov,target,target_fov);
     if(!world) return std::nullopt;
     StaleLayers layers{*world,std::nullopt,kept_fov,near_range};
+    layers.cut=cut;
     if(fresh && near_range>0) layers.fresh=stale_eye_parallax(*fresh,fresh_fov,target,target_fov);
     WarpCamera with_head=target;with_head.m10=kept.m10;with_head.m11=kept.m11; // the kept depth's projection, the target's place
     layers.carried=stale_eye_parallax(with_head,kept_fov,target,target_fov);
@@ -351,6 +364,7 @@ public:
     std::uint64_t fresh_passes{},fresh_refusals{};    // v798: passes with the fresh eye's layer; fresh inputs refused (format, size)
     std::uint64_t motion_passes{},motion_refusals{};  // v1150: passes with the mover rules; motion textures refused (format, size)
     std::uint64_t rig_passes{},rig_refusals{};        // v1159: passes with the rig masks; masks refused (format, size)
+    std::uint64_t cut_passes{};                       // v1171: frames rebuilt from the fresh eye alone (a camera cut)
     // v811: hand fits run, and read back with a correction; each read-back: the Present and eye, per hand the correction (target pixels
     // x, y; 0 0 none), the fraction of its kept pixels the fresh eye sees there and with no correction. The caller takes hand_fits.
     struct HandFit {std::uint64_t frame{};unsigned eye{};std::array<std::array<float,4>,2> hands{};};
@@ -378,7 +392,7 @@ cbuffer Parameters : register(b0) {
     float4 carried[4]; float4 handL[4]; float4 handR[4];
     float4 keptFov; float4 palmL; float4 palmR; float4 backL[4]; float4 backR[4]; float4 fitGrid;
     float4 motionSize; float4 motionMap; float4 keptAxes[3];
-    float4 rigSize; float4 rigMap; float4 validRect;
+    float4 rigSize; float4 rigMap; float4 validRect; float4 frameMap;
 }
 // v1150: motionSize: the kept motion rectangle (xy) and the fresh one (zw), texels; motionMap: fresh_part, kept_part, on (both motion
 // textures and the rules), mover_px; keptAxes: world -> kept camera (right, up, forward).
@@ -820,13 +834,25 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
     colour=Smooth(sourceTex,c);
     return k;
 }
-)HLSL" R"HLSL(float4 WarpPS(Vertex v) : SV_TARGET {
+)HLSL" R"HLSL(// v1171: a camera cut (frameMap.x): the target view from the fresh eye alone: its near surface on the ray (NearHit), else its fixed
+// point, else the nearest valid fresh pixel to the ray's far point (never the kept image, never black, never the edge band)
+float4 FreshOnly(float3 t) {
+    float2 now,edge;float k;
+    if(NearHit(t,now,k,edge)>0 && InFresh(now)) return Smooth(freshTex,now);
+    bool ok;const float2 f=Solve(fresh,freshDepthTex,depthSize.zw,freshMap.xy,t,0,k,ok);
+    if(k>0 && InFresh(f)) return Smooth(freshTex,f);
+    const float3 s=float3(dot(fresh[0].xyz,t),dot(fresh[1].xyz,t),dot(fresh[2].xyz,t));
+    const float2 g=s.z>1e-6?s.xy/s.z:t.xy;
+    return Smooth(freshTex,clamp(g,size.zw,validRect.zw-size.zw));
+}
+float4 WarpPS(Vertex v) : SV_TARGET {
     const float3 t=float3(v.uv,1);
     if(depthMap.w<=0) {
         const float3 s=float3(dot(row0.xyz,t),dot(row1.xyz,t),dot(row2.xyz,t));
         if(s.z<=1e-6) return float4(0,0,0,1);
         return Smooth(sourceTex,s.xy/s.z);
     }
+    if(frameMap.x>0) return FreshOnly(t);                         // v1171: a camera cut: the fresh eye alone, the band too
     if(any(v.uv>validRect.xy)) return Smooth(sourceTex,v.uv); // v1167: the image's own band keeps what this eye's frames have there
     float kept_k;bool kept_ok;
     const float2 q=Solve(scene,depthTex,depthSize.xy,depthMap.xy,t,0,kept_k,kept_ok);
@@ -928,7 +954,7 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
         D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sampler.MaxLOD=D3D11_FLOAT32_MAX;
         checked(device_->CreateSamplerState(&sampler,&sampler_),"sampler");
-        D3D11_BUFFER_DESC constants{};constants.ByteWidth=752;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
+        D3D11_BUFFER_DESC constants{};constants.ByteWidth=768;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
         checked(device_->CreateBuffer(&constants,nullptr,&parameters_),"parameter buffer");
         const char* fit_entries[]{"FitSample","FitCoarse","FitFine","FitPick"};
         for(std::size_t n=0;n<fit_.size();++n) {
@@ -980,7 +1006,7 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
             if(!fresh_read) {fresh_depth_read=nullptr;++fresh_refusals;}
         }
         ID3D11ShaderResourceView *kept_motion_read=nullptr,*fresh_motion_read=nullptr;
-        if(fresh_read && layers->motion_rules && kept_motion.texture && fresh_motion.texture) {
+        if(fresh_read && layers->motion_rules && !layers->cut && kept_motion.texture && fresh_motion.texture) { // v1171: no movers on a cut
             kept_motion_read=motion_view(kept_motion);fresh_motion_read=motion_view(fresh_motion);
             if(!kept_motion_read || !fresh_motion_read) {kept_motion_read=fresh_motion_read=nullptr;++motion_refusals;}
         }
@@ -989,7 +1015,7 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
             kept_rig_read=rig_view(kept_rig);fresh_rig_read=rig_view(fresh_rig);
             if(!kept_rig_read || !fresh_rig_read) {kept_rig_read=fresh_rig_read=nullptr;++rig_refusals;}
         }
-        std::array<float,188> parameters{};std::size_t at=0;
+        std::array<float,192> parameters{};std::size_t at=0;
         const auto put=[&](double x,double y,double z,double w) {
             parameters[at++]=static_cast<float>(x);parameters[at++]=static_cast<float>(y);parameters[at++]=static_cast<float>(z);parameters[at++]=static_cast<float>(w);
         };
@@ -1032,6 +1058,9 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
         if(kept_rig_read) {put(kept_rig.width,kept_rig.height,fresh_rig.width,fresh_rig.height);put(1,hand_rig_radius,0,0);++rig_passes;}
         else {put(0,0,0,0);put(0,0,0,0);}
         if(layers) {const double u=1-std::clamp(layers->border[0],0.,.25),v=1-std::clamp(layers->border[1],0.,.25);put(u,v,u,v);} else put(1,1,1,1); // v1167
+        const bool cut=fresh_read && layers->cut; // v1171: the fresh eye alone (needs it)
+        put(cut?1:0,0,0,0);
+        if(cut) {fit_on=false;++cut_passes;}
         if(depth_read) ++parallax_passes;
         if(fresh_read) ++fresh_passes;
         context_->UpdateSubresource(parameters_.Get(),0,nullptr,parameters.data(),0,0);
