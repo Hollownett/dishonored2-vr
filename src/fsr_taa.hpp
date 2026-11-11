@@ -117,7 +117,8 @@ public:
     // copy), optionally <stem>-colour.raw, each the render rectangle at the top left as u32 width,height,DXGI format,bytes per row then
     // tightly packed rows; <stem>-b1.bin (the dispatch's CBPerViewGlobals) and <stem>.json (`json` plus this dispatch's sizes and jitter).
     // Empty stem = nothing. The writes wait for the GPU.
-    struct MotionProbe {std::wstring stem;std::string json;Microsoft::WRL::ComPtr<ID3D11Buffer> b1;bool colour{};};
+    struct MotionProbe {std::wstring stem;std::string json;Microsoft::WRL::ComPtr<ID3D11Buffer> b1;bool colour{};Microsoft::WRL::ComPtr<ID3D11Resource> scene; // v1169: the TAA dispatch input (HDR scene colour)
+    };
 private:
     template<class T> struct Ref {
         T* p{};~Ref() {if(p) p->Release();}
@@ -888,7 +889,7 @@ public:
         if(fraction.load()<.999f) {
             // Upscale mode: FSR accumulates at the end (post-tonemap); the native TAA becomes a copy so
             // there is no second temporal filter, and its motion vectors are kept for FSR.
-            {std::lock_guard<std::mutex> lock(mutex_);motion_[static_cast<std::size_t>(eye)].reset(b.res[1]);probe_[static_cast<std::size_t>(eye)]=std::move(probe);receipt_[static_cast<std::size_t>(eye)]=receipt;
+            {std::lock_guard<std::mutex> lock(mutex_);motion_[static_cast<std::size_t>(eye)].reset(b.res[1]);probe.scene=b.res[2];probe_[static_cast<std::size_t>(eye)]=std::move(probe);receipt_[static_cast<std::size_t>(eye)]=receipt;
                 if(!ready.load() || ready_w_!=w || ready_h_!=h || ready_fraction_!=fraction.load()) {++not_ready;return false;}}
             c->CopyResource(b.res[5],b.res[2]);++taa_copies;
             return true;
@@ -1071,6 +1072,8 @@ private:
             if(p.colour) save(job.colour.p,L"-colour.raw","colour");
             // v1167 edge-band diagnostic: the upscale input with 64 texels beyond the render rectangle (what lies right of and below it)
             if(p.colour) save(job.colour.p,L"-colour-edge.raw","colour_edge",rw+64,rh+64);
+            // v1169: and the HDR scene colour the TAA dispatch got (before the engine's post passes), same box: is the edge band there yet?
+            if(p.colour && p.scene) save(p.scene.Get(),L"-scene-edge.raw","scene_edge",rw+64,rh+64);
             // b1 = CBPerViewGlobals (0x320 bytes) as the TAA dispatch read it, copied on the game's context before the split
             std::string b1;
             if(p.b1) {

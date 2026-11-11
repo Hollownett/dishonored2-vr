@@ -149,6 +149,10 @@ public:
         o<<"{\"enabled\":"<<(enabled.load()?"true":"false")<<",\"rig_motion\":{\"own\":"<<own_pairs_.load()<<",\"zero\":"<<zero_pairs_.load()
          <<",\"unpaired\":"<<unpaired_.load()<<",\"unpaired_t0t1t2t3\":\""<<patterns<<"\",\"unpaired_pass\":"<<unpaired_pass_.load()<<",\"unpaired_targets\":"<<unpaired_targets_.load()
          <<",\"depth_only\":"<<depth_only_.load()<<",\"depth_only_t0t1t2t3\":\""<<digits(depth_only_patterns_)<<"\",\"depth_only_pass\":"<<depth_only_pass_.load()<<",\"epoch\":"<<epoch_.load()
+         <<",\"foreign_t0\":{\"draws\":"<<foreign_t0_.load()<<",\"bytes\":"<<foreign_bytes_.load()<<",\"current_bytes\":"<<foreign_current_bytes_.load()
+         <<",\"bind\":"<<foreign_bind_.load()<<",\"misc\":"<<foreign_misc_.load()<<",\"stride\":"<<foreign_stride_.load()<<",\"usage\":"<<foreign_usage_.load()
+         <<",\"cpu\":"<<foreign_cpu_.load()<<",\"srv_format\":"<<foreign_format_.load()<<",\"srv_dimension\":"<<foreign_dimension_.load()<<",\"srv_elements\":"<<foreign_elements_.load()
+         <<",\"distinct\":"<<foreign_distinct_.load()<<",\"draw_count\":"<<foreign_count_.load()<<"}"
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"copies\":"<<history_copies_.load()<<"},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
@@ -170,6 +174,7 @@ public:
             if(tl_rig_) {rig_draws_.fetch_add(1,std::memory_order_relaxed);rig_draws_frame_.fetch_add(1,std::memory_order_relaxed);c_=c;}
         }
         void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {
+            if(tl_foreign_t0_) foreign_count_.store(args.count,std::memory_order_relaxed); // v1169 diagnostic: the draw's index/vertex count
             restore_t0(); // v1166: the engine's previous palette again before the replay (it sees the engine's bindings)
             if(c_ && draw && targets) replay(c_,args,draw,targets);
             c_=nullptr;
@@ -208,7 +213,25 @@ private:
     struct FrameTally {std::atomic<std::uint32_t> frame{};std::atomic<std::uint32_t> own{},zero{};};
     inline static std::array<FrameTally,8> tally_{};inline static std::array<std::atomic<std::uint64_t>,625> unpaired_patterns_{},depth_only_patterns_{};
     inline static std::atomic<std::uint64_t> depth_only_{};inline static std::atomic<int> unpaired_pass_{-2},depth_only_pass_{-2};inline static std::atomic<unsigned> unpaired_targets_{};
-    inline static thread_local int tl_pass_{-1};inline static thread_local UINT tl_prev_slot_{},tl_saved_slot_{};
+    inline static thread_local int tl_pass_{-1};inline static thread_local bool tl_foreign_t0_{};
+    // v1169 diagnostic: the last foreign t0 buffer seen (see is_rig) and how many distinct ones
+    inline static std::atomic<std::uint64_t> foreign_t0_{};inline static std::atomic<UINT> foreign_bytes_{},foreign_current_bytes_{},foreign_bind_{},foreign_misc_{},foreign_stride_{},
+        foreign_usage_{},foreign_cpu_{},foreign_format_{},foreign_dimension_{},foreign_elements_{},foreign_distinct_{},foreign_count_{};
+    inline static std::array<std::atomic<std::uintptr_t>,16> foreign_seen_{};
+    static void describe_foreign(ID3D11ShaderResourceView* t0,ID3D11ShaderResourceView* t1) noexcept {
+        const auto buffer_desc=[](ID3D11ShaderResourceView* v,D3D11_BUFFER_DESC& d) {
+            ID3D11Resource* r{};v->GetResource(&r);ID3D11Buffer* b{};const auto at=reinterpret_cast<std::uintptr_t>(r);
+            if(r) {r->QueryInterface(__uuidof(ID3D11Buffer),reinterpret_cast<void**>(&b));r->Release();}
+            if(b) {b->GetDesc(&d);b->Release();}
+            return at;};
+        D3D11_BUFFER_DESC d{},cd{};const auto at=buffer_desc(t0,d);buffer_desc(t1,cd);
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};t0->GetDesc(&vd);
+        foreign_bytes_.store(d.ByteWidth,std::memory_order_relaxed);foreign_current_bytes_.store(cd.ByteWidth,std::memory_order_relaxed);foreign_bind_.store(d.BindFlags,std::memory_order_relaxed);
+        foreign_misc_.store(d.MiscFlags,std::memory_order_relaxed);foreign_stride_.store(d.StructureByteStride,std::memory_order_relaxed);foreign_usage_.store(d.Usage,std::memory_order_relaxed);
+        foreign_cpu_.store(d.CPUAccessFlags,std::memory_order_relaxed);foreign_format_.store(vd.Format,std::memory_order_relaxed);foreign_dimension_.store(vd.ViewDimension,std::memory_order_relaxed);
+        foreign_elements_.store(vd.ViewDimension==D3D11_SRV_DIMENSION_BUFFEREX?vd.BufferEx.NumElements:vd.Buffer.NumElements,std::memory_order_relaxed);
+        for(auto& s:foreign_seen_) {std::uintptr_t k=s.load(std::memory_order_relaxed);if(k==at) return;if(!k && s.compare_exchange_strong(k,at)) {foreign_distinct_.fetch_add(1,std::memory_order_relaxed);return;}}
+    }inline static thread_local UINT tl_prev_slot_{},tl_saved_slot_{};
     inline static std::atomic<std::uint32_t> epoch_{1},max_frame_{};inline static thread_local unsigned tl_pattern_{};
     static void note_frame(std::uint32_t frame,bool own) noexcept {
         FrameTally& t=tally_[frame&7];std::uint32_t tag=t.frame.load(std::memory_order_acquire);
@@ -275,6 +298,15 @@ private:
         if(which[1]>=0) for(unsigned k=0;k<scan && !tl_prepass_;++k) if(k!=1 && which[k]>=0 && which[k]/2==which[1]/2) {tl_prepass_=true;tl_prev_slot_=k;}
         tl_pattern_=0;
         for(unsigned k=0;k<4;++k) tl_pattern_=tl_pattern_*5+(which[k]>=0?(which[1]>=0 && which[k]/2!=which[1]/2?3u:1u+static_cast<unsigned>(which[k]%2)):views[k] || (k==1 && tl_current_)?4u:0u);
+        // v1169 (sim v1168: 3.8 prepass draws per Present, pattern 4100/4200: t1 this model's current palette, t0 a buffer that is none of
+        // the six rig palettes, t2/t3 empty): the measured prepass layout (ro_previousframeskinningmatrices at t0, ro_matrices at t1) with a
+        // previous palette the engine took elsewhere. t0 is the previous-palette slot by layout: it gets this eye's own copy (or the current
+        // palette) like any prepass draw. Its buffer is described in the status (foreign_t0) to name it in the next sim.
+        tl_foreign_t0_=false;
+        if(!tl_prepass_ && which[1]>=0 && views[0] && which[0]<0 && !views[2] && !views[3]) {
+            tl_prepass_=true;tl_prev_slot_=0;tl_foreign_t0_=true;foreign_t0_.fetch_add(1,std::memory_order_relaxed);
+            describe_foreign(views[0],views[1]);
+        }
         if(tl_prepass_) {tl_model_=static_cast<unsigned>(which[1]/2);tl_current_=views[1];views[1]=nullptr;}
         for(auto* v:views) if(v) v->Release();
         return hit;
