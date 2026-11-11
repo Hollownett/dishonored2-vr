@@ -269,12 +269,15 @@ class OfferHold {
     std::uint32_t spawn_{};std::uint64_t tick_{},epoch_{};
 public:
     static constexpr std::uint64_t grace_ms=500;   // sim loiter v1141: head nods dip the sensor ~400 ms; 300 ms halved the flips (71 -> 32), 500 rides them out
-    std::uint32_t held(std::uint64_t now) const noexcept {return spawn_ && now>=tick_ && now-tick_<=grace_ms?spawn_:0u;}
+    // v1146 (user, headset v1145: "still flickering while I just look at the guard from behind"): update() keeps a spawn up to long_grace_ms, but past
+    // grace_ms only while still(spawn,age) says the player is behind him and in reach - the caller's own geometry, not the camera cone.
+    static constexpr std::uint64_t long_grace_ms=1200;
+    std::uint32_t held(std::uint64_t now,std::uint64_t grace=grace_ms) const noexcept {return spawn_ && now>=tick_ && now-tick_<=grace?spawn_:0u;}
     template<class Still> std::uint32_t update(std::uint32_t offered,std::uint64_t now,std::uint64_t epoch,Still&& still) noexcept {
         if(epoch!=epoch_) {spawn_=0;epoch_=epoch;}
         if(offered) {spawn_=offered;tick_=now;return offered;}
-        const auto h=held(now);
-        if(h && still(h)) return h;
+        const auto h=held(now,long_grace_ms);
+        if(h && still(h,now-tick_)) return h;   // still(spawn, ms since the sensor last offered it)
         spawn_=0;return 0;
     }
 };

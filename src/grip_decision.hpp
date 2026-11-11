@@ -59,7 +59,10 @@ inline GripAloneChoice decide_grip_alone(const GripAloneInput& in,const GrabTuni
         const std::uint64_t waited=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
         if(physical && (in.physical->kind!=PalmKind::living || in.native_fresh)) return GripAloneChoice::grab;
         if(!in.native_fresh && waited<grip_alone_fresh_wait_ms) return GripAloneChoice::pending;
-        return tuning.grab_buffer_ms>0 && static_cast<double>(waited)<tuning.grab_buffer_ms?GripAloneChoice::pending:GripAloneChoice::none;
+        // v1146 (user, headset v1145 on their own save: "two bodies near me: grip can't pick them up, grip + trigger can"): 280+ presses on such a body
+        // (its native carry the hand's target, no ragdoll part in the palm's reach) ended in none, while the fist's take hands the body to the game's own
+        // pickup. Grip alone now does the same once the grab buffer finds nothing: the hand on a body always picks it up.
+        return tuning.grab_buffer_ms>0 && static_cast<double>(waited)<tuning.grab_buffer_ms?GripAloneChoice::pending:GripAloneChoice::use;
     }
     const std::uint64_t elapsed=in.now_ms>=in.since_ms?in.now_ms-in.since_ms:0;
     if(!in.native_fresh && elapsed<grip_alone_fresh_wait_ms) return GripAloneChoice::pending;

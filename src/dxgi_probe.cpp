@@ -6690,7 +6690,7 @@ void publish_native_hud_art(UINT64 now) {
             if(native_prompt_slot(slot) && c.texture && (takedown_gap || (live_scope && d2vr::native_hud_child_same_element(live_scope.child,c.child) &&
                (same_live || (d2vr::NativeHudChildDraw::scope_current(c.child,game_xr->pose_epoch(),now) &&
                (!c.child.retained_entry || d2vr::native_prompt_entry::refresh(read_self,image_base,*c.child.retained_entry)))))) &&
-               hold.holds(now) && c.metadata.epoch==game_xr->pose_epoch()) {
+               hold.holds(now,takedown_gap?1300:600) && c.metadata.epoch==game_xr->pose_epoch()) {   // v1146: a takedown gap lasts as long as the held offer can
                 D3D11_TEXTURE2D_DESC d{};c.texture->GetDesc(&d);
                 if(game_xr->native_art_source(destination,false,c.texture.Get(),D3D11_BOX{0,0,0,d.Width,d.Height,1},c.metadata.owner,
                     c.metadata.epoch,now,hold.point,hold.width_for(d.Width))) {
@@ -6819,6 +6819,13 @@ void publish_native_hud_art(UINT64 now) {
             point=*placed;point.y+=lying?.35:npc_origin?1.95:target?(target->native_only?.7:.05):1.45;
             // Takedown range (<2 m): over the head is above the view. Bring it down to head height and toward the player.
             if(npc_origin && !lying) npc_near_gaze(point);
+            // v1146 (user, headset v1145: the kill/choke prompt "flickering a bit" while just looking at the guard): npc_near_gaze follows the live head every
+            // frame (10 deg off the gaze, clamped), so head jitter moved the hint. On the same takedown NPC it now eases toward that point (25 % a frame).
+            if(take && npc_origin && !lying) {
+                static d2vr::Vec3 eased{};static std::uintptr_t eased_npc{};static UINT64 eased_tick{};
+                if(eased_npc==take->identity.object && eased_tick && now>=eased_tick && now-eased_tick<=300) point=eased+(point-eased)*.25;
+                eased=point;eased_npc=take->identity.object;eased_tick=now;
+            }
             // On the object or character itself, at a constant angular size: the prompt's own share of the stage (v688).
             if(const auto views=game_xr->tracking_views()) {
                 const d2vr::Vec3 head{((*views)[0].pose.position.x+(*views)[1].pose.position.x)*.5,((*views)[0].pose.position.y+(*views)[1].pose.position.y)*.5,((*views)[0].pose.position.z+(*views)[1].pose.position.z)*.5};
@@ -12757,7 +12764,18 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // v1141 (review video 10:28: "needs a little bit of grace time ... the menu appears and disappears"): the kill and choke sensors
                                 // flicker with the camera cone (~240 flips a minute); grip, swing, prompt and target checks all read this one held offer.
                                 if(logic==2) {
-                                    const auto still=[&](std::uint32_t spawn){return d2vr::takedown_target(control_reader,image_base,spawn).has_value();};
+                                    // v1146: past the 500 ms grace the offer stays only while the player is still within 2.2 m and behind or beside the NPC
+                                    // (his forward = +row0, v645; the same rear test the sword contact uses) - the player's position, not the camera cone.
+                                    const auto still=[&](std::uint32_t spawn,std::uint64_t age){
+                                        const auto t=d2vr::takedown_target(control_reader,image_base,spawn);if(!t) return false;
+                                        if(age<=d2vr::OfferHold::grace_ms) return true;
+                                        const auto g=d2vr::rig::value<std::uintptr_t>(control_reader,image_base+0x39a5290);
+                                        const auto pl=g?d2vr::rig::value<std::uintptr_t>(control_reader,*g+0x3130b0):std::nullopt;
+                                        const auto pa=pl && d2vr::rig::pointer(*pl)?d2vr::rig::value<std::array<float,3>>(control_reader,*pl+0x300):std::nullopt;
+                                        const auto row0=d2vr::rig::value<std::array<float,3>>(control_reader,t->entity+0x30c);
+                                        if(!pa || !row0) return false;
+                                        const float dx=(*pa)[0]-t->origin[0],dy=(*pa)[1]-t->origin[1],dz=(*pa)[2]-t->origin[2];
+                                        return std::sqrt(dx*dx+dy*dy+dz*dz)<=2.2f && d2vr::attacker_rear_or_side(row0->data(),t->origin.data(),pa->data());};
                                     const auto tnow=GetTickCount64();const auto epoch=game_xr->pose_epoch();
                                     control_takedown.kill_spawn=takedown_kill_hold.update(control_takedown.kill?control_takedown.kill_spawn:0u,tnow,epoch,still);control_takedown.kill=control_takedown.kill_spawn!=0;
                                     control_takedown.choke_spawn=takedown_choke_hold.update(control_takedown.choke?control_takedown.choke_spawn:0u,tnow,epoch,still);control_takedown.choke=control_takedown.choke_spawn!=0;

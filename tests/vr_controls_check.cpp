@@ -12,10 +12,12 @@ static void require(bool condition,const char* what) {
 }
 int main() {
     { // v1141 OfferHold: a takedown offer survives sensor drop-outs on the same victim, not a dead one, a new epoch or the grace
-        d2vr::OfferHold h;bool alive=true;const auto still=[&](std::uint32_t){return alive;};
+        d2vr::OfferHold h;bool alive=true,behind=false;const auto still=[&](std::uint32_t,std::uint64_t age){return alive && (age<=d2vr::OfferHold::grace_ms || behind);};
         require(h.update(7,1000,1,still)==7,"offer passes");
         require(h.update(0,1200,1,still)==7,"drop-out held");
         require(h.update(0,1000+d2vr::OfferHold::grace_ms+1,1,still)==0,"grace ends");
+        behind=true;require(h.update(7,1500,1,still)==7 && h.update(0,1500+900,1,still)==7,"behind him: held to the long grace");
+        require(h.update(0,1500+d2vr::OfferHold::long_grace_ms+1,1,still)==0,"long grace ends");behind=false;
         require(h.update(7,2000,1,still)==7 && h.update(9,2050,1,still)==9,"new victim replaces");
         alive=false;require(h.update(0,2100,1,still)==0,"dead victim not held");
         alive=true;h.update(5,3000,1,still);require(h.update(0,3010,2,still)==0,"new epoch clears");

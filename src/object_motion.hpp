@@ -647,9 +647,13 @@ private:
             const bool view_pass=pass<0 || pass_eye>=0;
             if(view_pass) {
                 std::uint32_t frame=have_view?view.frame:0;
-                if(pass_eye>=0 && (!frame || !weapon_draw::Place::slot_of(frame))) { // no classified view: the pass eye's own newest frame
+                // v1146 (user, headset v1145: "a carried object is unstable in my LEFT eye, the right eye is good"): the held prop was placed in the
+                // right eye 6x as often as the left (weapon_placed_view1 14197 vs view0 2385): left draws carried a classified view frame with no
+                // published slot, or a pass-eye frame check that failed, and kept the engine's tick pose. The pass names the eye exactly; the render's
+                // published frame (both eyes are placed from the one publish at eye-0 begin) is the slot whatever the per-draw classifier says.
+                if(pass_eye>=0) {
                     const std::uint32_t latest=weapon_draw::Place::latest_frame();
-                    if(latest && newest_eye_frame_[static_cast<unsigned>(pass_eye)].load(std::memory_order_relaxed)==latest) frame=latest;
+                    if(latest && weapon_draw::Place::slot_of(latest)) frame=latest;
                 }
                 float placed[16]={},placed_prev[16]={};
                 static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
