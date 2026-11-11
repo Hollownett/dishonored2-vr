@@ -811,6 +811,146 @@ static void gpu_movers() {
     }
 }
 
+// v1159 (headset v1158: "artifacts around the body and arms; a lot when the arms come close to objects; white shimmer around the right
+// arm at the corner of the view"): the first-person rig masks. v811 gave a drawn hand every kept pixel within 22 cm of its palm: a still
+// prop or wall there moved with the hand, and a forearm or a held stick beyond 22 cm tore off it. With the masks the player is exactly the
+// masked pixels. Two eyes 6.4 cm apart, the right one rebuilt; the right hand (tracked) moved 5 cm right since the kept frame, the fresh
+// (left) eye 30 levels brighter, so any colour it lends shows. Each case runs with the masks and without (the sphere).
+static void gpu_rig() {
+    ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
+    CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+    constexpr UINT W = 256, H = 128;
+    enum {wall_kind, hand_kind, arm_kind, stick_kind, prop_kind};
+    struct Frame {ComPtr<ID3D11Texture2D> image, depth, rig; std::vector<int> row, kind;};
+    // hand, hand2: a 12 cm square 0.5 m ahead centred at x (NaN: none; a bright line at its centre); forearm: a rig bar from the hand's right
+    // edge to 40 cm right of its centre; stick: a held rig stick from its left edge to 38 cm left; prop: a still striped object (not rig),
+    // 6 cm wide, 0.5 m ahead, from x; wall: the wall's distance; yaw: the camera turned about +Y (canted eyes)
+    struct Scene {double hand = std::nan(""), hand2 = std::nan(""); bool forearm = false, stick = false; double prop = std::nan(""), wall = 1.8, yaw = 0; int lift = 0;};
+    const auto render = [&](double eye_x, const Scene& s) {
+        Frame f; f.row.resize(W); f.kind.resize(W * H);
+        std::vector<unsigned char> pixels(W * H * 4), mask(W * H); std::vector<float> d(W * H);
+        for (UINT y = 0; y < H; ++y) for (UINT x = 0; x < W; ++x) {
+            const double tx = (x + 0.5) / W * 2 - 1, ty = 1 - (y + 0.5) / H * 2;
+            const double dx = tx * std::cos(s.yaw) - std::sin(s.yaw), dz = -tx * std::sin(s.yaw) - std::cos(s.yaw);  // ahead = 1 along the camera
+            const auto plane = [&](double depth, double& wx, double& wy) {const double a = -depth / dz; wx = eye_x + a * dx; wy = a * ty; return a;};
+            double wx, wy, a = plane(s.wall, wx, wy);
+            int c = 20 + (static_cast<int>((wx + 10) * 60) * 7) % 40, kind = wall_kind;
+            double px, py; const double pa = plane(0.5, px, py);
+            const auto stripes = [](double v, double width, int lo, int hi) {return (static_cast<int>(std::floor(v / width)) & 1) ? hi : lo;};
+            if (std::isfinite(s.prop) && px >= s.prop && px <= s.prop + 0.06 && std::abs(py) < 0.04) {a = pa; c = stripes(px - s.prop, 0.015, 180, 240); kind = prop_kind;}
+            for (const double h : {s.hand, s.hand2}) if (std::isfinite(h)) {
+                if (s.stick && h == s.hand && px >= h - 0.38 && px < h - 0.06 && std::abs(py) < 0.015) {a = pa; c = stripes(px - h, 0.03, 160, 220); kind = stick_kind;}
+                if (s.forearm && h == s.hand && px > h + 0.06 && px <= h + 0.40 && std::abs(py) < 0.03) {a = pa; c = stripes(px - h, 0.03, 80, 110); kind = arm_kind;}
+                if (std::abs(px - h) <= 0.06 && std::abs(py) < 0.06) {a = pa; c = std::abs(px - h) < pa * 2 / W ? 255 : 120; kind = hand_kind;}
+            }
+            c = std::min(255, c + s.lift);
+            auto* p = &pixels[(y * W + x) * 4]; p[0] = p[1] = p[2] = static_cast<unsigned char>(c); p[3] = 255;
+            d[y * W + x] = static_cast<float>(0.01 / a); f.kind[y * W + x] = kind; mask[y * W + x] = kind == wall_kind || kind == prop_kind ? 0 : 255;
+            if (y == H / 2) f.row[x] = c;
+        }
+        D3D11_TEXTURE2D_DESC desc{}; desc.Width = W; desc.Height = H; desc.MipLevels = 1; desc.ArraySize = 1; desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;
+        const D3D11_SUBRESOURCE_DATA data{pixels.data(), W * 4, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &data, &f.image)));
+        desc.Format = DXGI_FORMAT_R32_FLOAT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        const D3D11_SUBRESOURCE_DATA ddata{d.data(), W * 4, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &ddata, &f.depth)));
+        desc.Format = DXGI_FORMAT_R8_UNORM;
+        const D3D11_SUBRESOURCE_DATA mdata{mask.data(), W, 0};
+        CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &mdata, &f.rig)));
+        return f;
+    };
+    const auto pose = [](double x) {WorldTrackedPose p; p.position = {x, 0, -0.5}; p.basis = {Vec3{0, 0, -1}, Vec3{-1, 0, 0}, Vec3{0, 1, 0}}; return p;};
+    // the right hand (side 1) drawn at kept_hand in the kept frame and at now_hand now; hand2 a still left hand; the eyes turned by yaw
+    const auto layers_for = [&](double kept_hand, double now_hand, double hand2 = std::nan(""), double yaw_kept = 0, double yaw_fresh = 0) {
+        WarpCamera k = camera(yaw(yaw_kept), {0.032, 0, 0}), f = camera(yaw(yaw_fresh), {-0.032, 0, 0});
+        k.hand_bits = std::isfinite(hand2) ? 3u : 2u; k.hands[1] = pose(kept_hand); if (std::isfinite(hand2)) k.hands[0] = pose(hand2);
+        WarpCamera t = k; t.hands[1] = pose(now_hand);
+        return *stale_eye_layers(k, square, t, square, &f, square, 2.0);
+    };
+    StaleEyeWarp warp(device.Get());
+    const auto id = *stale_eye_homography({}, square, {}, square);
+    const auto row = [&](const Frame& k, const Frame& f, const StaleLayers& l, bool masks) {
+        const auto image = read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &l, {k.depth.Get(), W, H}, f.image.Get(), {f.depth.Get(), W, H}, {}, {},
+                                                                           masks ? StaleRig{k.rig.Get(), W, H} : StaleRig{}, masks ? StaleRig{f.rig.Get(), W, H} : StaleRig{}));
+        std::vector<int> r(W); for (UINT x = 0; x < W; ++x) r[x] = image[((H / 2) * W + x) * 4];
+        return r;
+    };
+    const auto near_truth = [&](const std::vector<int>& out, const Frame& truth, int x) {
+        int lo = 255, hi = 0; for (int i = std::max(0, x - 1); i <= std::min<int>(W - 1, x + 1); ++i) {lo = std::min(lo, truth.row[i]); hi = std::max(hi, truth.row[i]);}
+        return out[x] >= lo - 12 && out[x] <= hi + 12;
+    };
+    // the world x a column shows on the 0.5 m plane (eyes not turned)
+    const auto plane_x = [&](int x) {return 0.032 + 0.5 * ((x + 0.5) / W * 2 - 1);};
+    // columns of the truth of `kind` whose 0.5 m point satisfies `where`, wrong (not within a column and 12 levels of the truth)
+    const auto wrong = [&](const std::vector<int>& out, const Frame& truth, int kind, auto where, int& total) {
+        int bad = 0; total = 0;
+        for (int x = 1; x < static_cast<int>(W) - 1; ++x) if (truth.kind[(H / 2) * W + x] == kind && where(plane_x(x))) {++total; bad += !near_truth(out, truth, x);}
+        return bad;
+    };
+    const auto both = [&](const char* name, const Frame& k, const Frame& f, const StaleLayers& l, const Frame& truth, int kind, auto where) {
+        int n = 0;
+        const int with = wrong(row(k, f, l, true), truth, kind, where, n), sphere = wrong(row(k, f, l, false), truth, kind, where, n);
+        std::printf("%s: %d of %d columns wrong with the rig masks, %d with the 22 cm sphere\n", name, with, n, sphere);
+        CHECK(n > 4 && with == 0 && sphere > 0);
+    };
+    // r1. a still striped prop 10 cm beside the palm stays where the world layer puts it
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.prop = fresh.prop = now.prop = 0.10; fresh.lift = 30;
+        both("r1. still prop 10 cm from a moving palm", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), prop_kind,
+             [](double) {return true;});
+    }
+    // r2. a hand sliding along a wall 10 cm behind it leaves the wall still (beside the hand, within 22 cm of the palm)
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.wall = fresh.wall = now.wall = 0.6; fresh.lift = 30;
+        both("r2. wall 10 cm behind a sliding hand", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), wall_kind,
+             [](double x) {return (x > 0.09 && x < 0.2) || (x > -0.25 && x < -0.14);});
+    }
+    // r3. a forearm (rig) reaching 40 cm from the palm moves with the hand, in this eye's own shading, beyond the 22 cm sphere too
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.forearm = fresh.forearm = now.forearm = true; fresh.lift = 30;
+        both("r3. forearm 25-40 cm from the palm", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), arm_kind,
+             [](double x) {return x > 0.25;});
+    }
+    // r4. a held stick (rig) reaching 38 cm the other way moves with the hand
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.stick = fresh.stick = now.stick = true; fresh.lift = 30;
+        both("r4. held stick 25-38 cm from the palm", render(0.032, kept), render(-0.032, fresh), layers_for(-0.05, 0.0), render(0.032, now), stick_kind,
+             [](double x) {return x < -0.25;});
+    }
+    // r5. a still left hand beside the moving right one keeps its own kept pixels exactly (within the sRGB round trip)
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = -0.05; fresh.hand = now.hand = 0.0; kept.hand2 = fresh.hand2 = now.hand2 = -0.3; fresh.lift = 30;
+        const Frame k = render(0.032, kept), f = render(-0.032, fresh);
+        const auto l = layers_for(-0.05, 0.0, -0.3);
+        int with = 0, sphere = 0, n = 0;
+        const auto on = row(k, f, l, true), off = row(k, f, l, false);
+        for (int x = 0; x < static_cast<int>(W); ++x) if (std::abs(plane_x(x) + 0.3) < 0.055) {++n; with += std::abs(on[x] - k.row[x]) > 1; sphere += std::abs(off[x] - k.row[x]) > 1;}
+        std::printf("r5. still hand beside a moving one: %d of %d columns off its kept pixels with the masks, %d with the sphere\n", with, n, sphere);
+        CHECK(n > 10 && with == 0);
+    }
+    // r7. the view corner (canted eyes turned 14 degrees apart each way): the right hand and its stick at the right edge of the rebuilt
+    // eye, 3 cm further out now, where the fresh eye has no view. No black or white there, and this eye's own rig where it was.
+    {
+        Scene kept{}, fresh{}, now{}; kept.hand = 0.78; fresh.hand = now.hand = 0.81; kept.stick = fresh.stick = now.stick = true;
+        kept.yaw = now.yaw = -0.25; fresh.yaw = 0.25; fresh.lift = 30;
+        const Frame k = render(0.032, kept), f = render(-0.032, fresh), truth = render(0.032, now);
+        const auto l = layers_for(0.78, 0.81, std::nan(""), -0.25, 0.25);
+        for (const bool masks : {true, false}) {
+            const auto out = row(k, f, l, masks);
+            int rig = 0, black = 0, white = 0, off_truth = 0;
+            for (int x = W - 60; x < static_cast<int>(W); ++x) {
+                const int kind = truth.kind[(H / 2) * W + x];
+                if (kind == wall_kind || kind == prop_kind) continue;
+                ++rig; black += out[x] < 10; white += out[x] > 250 && truth.row[x] < 250; off_truth += !near_truth(out, truth, x);
+                if (!near_truth(out, truth, x)) std::printf("   column %d: %d (truth %d, kept %d)\n", x, out[x], truth.row[x], k.row[x]);
+            }
+            std::printf("r7. rig at the view corner, %s: %d rig columns, %d black, %d white, %d off the truth\n", masks ? "masks" : "sphere", rig, black, white, off_truth);
+            if (masks) CHECK(rig > 20 && black == 0 && white == 0);
+        }
+    }
+}
+
 // v802: the drawn hands held still from the kept frame's Setup to the target's (what is within reach may show from the kept image)
 static void hands_still() {
     WarpCamera a = camera({}, {0, 0, 0}), b = a;
@@ -837,6 +977,7 @@ int main() {
     gpu_fresh();
     gpu_turn();
     gpu_movers();
+    gpu_rig();
     uncant_math();
     hands_still();
     std::puts("PASS: stale eye warp (homography: identity, yaw, pitch, relative rotation, round trip, behind, invalid; WARP: identity copy, line shift on both read paths;"
@@ -849,5 +990,6 @@ int main() {
               " v811 each kept pixel moves with its owner alone, a still hand beside a moving one, hands where the fresh eye sees them (fit);"
               " v813 no hand where its recorded motion put it and the fresh eye sees past it;"
               " v1150 movers: a walking guard at its new place in its own shading, wall where it was, other eye brighter, half hidden by a pillar (M3),"
-              " accelerating, gone; zero motion and rules off byte-identical; a still hand unchanged)");
+              " accelerating, gone; zero motion and rules off byte-identical; a still hand unchanged;"
+              " v1159 rig masks: a still prop and a wall beside a moving palm stay, a forearm and a held stick move whole, a still hand exact, the view corner)");
 }

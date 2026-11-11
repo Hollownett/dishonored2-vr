@@ -211,8 +211,15 @@ int main(int argc, char** argv) {
         const Box kb = box_of(meta["box"]), fb = box_of(meta["fresh_box"]), kdb = box_of(meta["kept_depth_box"]), fdb = box_of(meta["fresh_depth_box"]);
         const int kdw = static_cast<int>(meta["kept_depth_region"].at(0)), kdh = static_cast<int>(meta["kept_depth_region"].at(1));
         const int fdw = static_cast<int>(meta["fresh_depth_region"].at(0)), fdh = static_cast<int>(meta["fresh_depth_region"].at(1));
-        CHECK(kdw == W && kdh == H && fdw == W && fdh == H);  // this tool places depth crops 1:1 (true for these dumps)
+        // v1159: depth, motion and rig are render-sized (an upscaled session renders smaller than the eye image): each in its own region
         const auto kept = load(stem + "kept.rgba"), warped = load(stem + "warped.rgba"), next = load(stem + "next.rgba"), fresh = load(stem + "fresh.rgba");
+        std::vector<unsigned char> kr, fr;  // v1159: the rig masks (R8, under the depth boxes)
+        const bool rig = std::ifstream(stem + "kept-rig.r8").good() && std::ifstream(stem + "fresh-rig.r8").good();
+        if (rig) {kr = load(stem + "kept-rig.r8"); fr = load(stem + "fresh-rig.r8");
+                  CHECK(kr.size() == static_cast<std::size_t>(kdb.w) * kdb.h && fr.size() == static_cast<std::size_t>(fdb.w) * fdb.h);}
+        // STALE_REPLAY_AB=rig: compare without the rig masks (off: v1158's palm spheres) and with them (on), the mover rules on in both
+        const char* ab = std::getenv("STALE_REPLAY_AB");
+        const bool ab_rig = rig && ab && std::string(ab) == "rig";
         const auto kd = load(stem + "kept-depth.r32"), fd = load(stem + "fresh-depth.r32");
         std::vector<unsigned char> km, fm;
         const bool motion = std::ifstream(stem + "kept-motion.rgba16f").good() && std::ifstream(stem + "fresh-motion.rgba16f").good();
@@ -220,15 +227,17 @@ int main(int argc, char** argv) {
         CHECK(kept.size() == static_cast<std::size_t>(kb.w) * kb.h * 4 && fresh.size() == static_cast<std::size_t>(fb.w) * fb.h * 4);
         CHECK(kd.size() == static_cast<std::size_t>(kdb.w) * kdb.h * 4 && fd.size() == static_cast<std::size_t>(fdb.w) * fdb.h * 4);
         // full-size textures, each crop at its box
-        const auto place = [&](const std::vector<unsigned char>& crop, const Box& b, int bpp, DXGI_FORMAT format) {
-            std::vector<unsigned char> full(static_cast<std::size_t>(W) * H * bpp, 0);
-            for (int y = 0; y < b.h; ++y) std::memcpy(&full[(static_cast<std::size_t>(b.y + y) * W + b.x) * bpp], &crop[static_cast<std::size_t>(y) * b.w * bpp], static_cast<std::size_t>(b.w) * bpp);
-            D3D11_TEXTURE2D_DESC d{}; d.Width = W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1; d.SampleDesc.Count = 1; d.Format = format; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            const D3D11_SUBRESOURCE_DATA data{full.data(), static_cast<UINT>(W * bpp), 0};
+        const auto place = [&](const std::vector<unsigned char>& crop, const Box& b, int bpp, DXGI_FORMAT format, int RW, int RH) {
+            std::vector<unsigned char> full(static_cast<std::size_t>(RW) * RH * bpp, 0);
+            for (int y = 0; y < b.h; ++y) std::memcpy(&full[(static_cast<std::size_t>(b.y + y) * RW + b.x) * bpp], &crop[static_cast<std::size_t>(y) * b.w * bpp], static_cast<std::size_t>(b.w) * bpp);
+            D3D11_TEXTURE2D_DESC d{}; d.Width = RW; d.Height = RH; d.MipLevels = 1; d.ArraySize = 1; d.SampleDesc.Count = 1; d.Format = format; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            const D3D11_SUBRESOURCE_DATA data{full.data(), static_cast<UINT>(RW * bpp), 0};
             ComPtr<ID3D11Texture2D> t; CHECK(SUCCEEDED(device->CreateTexture2D(&d, &data, &t))); return t;
         };
-        const auto kept_t = place(kept, kb, 4, DXGI_FORMAT_R8G8B8A8_TYPELESS), fresh_t = place(fresh, fb, 4, DXGI_FORMAT_R8G8B8A8_TYPELESS);
-        const auto kd_t = place(kd, kdb, 4, DXGI_FORMAT_R32_FLOAT), fd_t = place(fd, fdb, 4, DXGI_FORMAT_R32_FLOAT);
+        const auto kept_t = place(kept, kb, 4, DXGI_FORMAT_R8G8B8A8_TYPELESS, W, H), fresh_t = place(fresh, fb, 4, DXGI_FORMAT_R8G8B8A8_TYPELESS, W, H);
+        const auto kd_t = place(kd, kdb, 4, DXGI_FORMAT_R32_FLOAT, kdw, kdh), fd_t = place(fd, fdb, 4, DXGI_FORMAT_R32_FLOAT, fdw, fdh);
+        ComPtr<ID3D11Texture2D> kr_t, fr_t;
+        if (rig) {kr_t = place(kr, kdb, 1, DXGI_FORMAT_R8_UNORM, kdw, kdh); fr_t = place(fr, fdb, 1, DXGI_FORMAT_R8_UNORM, fdw, fdh);}
         ComPtr<ID3D11Texture2D> km_t, fm_t;
         // STALE_REPLAY_MOVER_PX=v: replay as if mover_px were v (w is only compared with mover_px: scale w by mover_px / v)
         const char* threshold = std::getenv("STALE_REPLAY_MOVER_PX");
@@ -243,7 +252,7 @@ int main(int argc, char** argv) {
             }
             return m;
         };
-        if (motion) {km_t = place(scaled(km), kdb, 8, DXGI_FORMAT_R16G16B16A16_FLOAT); fm_t = place(scaled(fm), fdb, 8, DXGI_FORMAT_R16G16B16A16_FLOAT);}
+        if (motion) {km_t = place(scaled(km), kdb, 8, DXGI_FORMAT_R16G16B16A16_FLOAT, kdw, kdh); fm_t = place(scaled(fm), fdb, 8, DXGI_FORMAT_R16G16B16A16_FLOAT, fdw, fdh);}
         // the layers
         const auto parallax = [&](const Json& j) {
             StaleParallax p{};
@@ -286,7 +295,7 @@ int main(int argc, char** argv) {
             std::uint16_t m[4]; std::memcpy(m, &km[i * 8], 8);
             const double w = half_to_float(m[3]); float depth; std::memcpy(&depth, &kd[i * 4], 4);
             if (!(w >= mover_px) || !(depth > 1e-7f)) continue;
-            const double a = layers.world.m11 / (depth + layers.world.m10), u = (kdb.x + x + 0.5) / W, v = (kdb.y + y + 0.5) / H;
+            const double a = layers.world.m11 / (depth + layers.world.m10), u = (kdb.x + x + 0.5) / kdw, v = (kdb.y + y + 0.5) / kdh;
             samples.push_back({{(L + (R - L) * u) * a, (U + (D - U) * v) * a, a}, {half_to_float(m[0]), half_to_float(m[1]), half_to_float(m[2])}, w});
         }
         double pitch = 0, best_cost = -1, fit_error = 0;
@@ -297,7 +306,7 @@ int main(int argc, char** argv) {
                 const Vec3 d{ax[0] * s.xyz.x + ax[1] * s.xyz.y + ax[2] * s.xyz.z, ax[3] * s.xyz.x + ax[4] * s.xyz.y + ax[5] * s.xyz.z, ax[6] * s.xyz.x + ax[7] * s.xyz.y + ax[8] * s.xyz.z};
                 const Vec3 q = s.p - d;
                 if (!(q.z > 0.01)) {cost += s.w * s.w; continue;}
-                const double du = (s.p.x / s.p.z - q.x / q.z) / (R - L) * W, dv = (s.p.y / s.p.z - q.y / q.z) / (D - U) * H;
+                const double du = (s.p.x / s.p.z - q.x / q.z) / (R - L) * kdw, dv = (s.p.y / s.p.z - q.y / q.z) / (D - U) * kdh;
                 const double e = std::sqrt(du * du + dv * dv) - s.w; cost += e * e;
             }
             if (best_cost < 0 || cost < best_cost) {best_cost = cost; pitch = deg;}
@@ -314,13 +323,17 @@ int main(int argc, char** argv) {
             for (int y = 0; y < kb.h; ++y) std::memcpy(&c[static_cast<std::size_t>(y) * kb.w * 4], static_cast<const unsigned char*>(m.pData) + static_cast<std::size_t>(kb.y + y) * m.RowPitch + kb.x * 4, static_cast<std::size_t>(kb.w) * 4);
             context->Unmap(s.Get(), 0); return c;
         };
-        const auto run = [&](bool rules) {
+        const StaleRig kept_rig = rig ? StaleRig{kr_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
+        const StaleRig fresh_rig = rig ? StaleRig{fr_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleRig{};
+        const auto run = [&](bool variant) {
+            const bool rules = ab_rig ? true : variant, masks = ab_rig ? variant : rig;
             layers.motion_rules = rules;
             const auto t0 = std::chrono::steady_clock::now();
-            auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)},
-                                     motion ? StaleMotion{km_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)} : StaleMotion{},
-                                     motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)} : StaleMotion{}));
-            std::fprintf(stderr, "  dump %d rules %s: %.1f s\n", n, rules ? "on" : "off", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
+                                     motion ? StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleMotion{},
+                                     motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleMotion{},
+                                     masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}));
+            std::fprintf(stderr, "  dump %d rules %s, masks %s: %.1f s\n", n, rules ? "on" : "off", masks ? "on" : "off", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
             return c;
         };
         const auto on = run(true), off = run(false);
@@ -334,10 +347,18 @@ int main(int argc, char** argv) {
         // movers (kept or fresh w >= mover_px at that screen pixel), dilated 16 px
         std::vector<unsigned char> mover(static_cast<std::size_t>(kb.w) * kb.h, 0);
         std::size_t kept_movers = 0, kept_beyond = 0, fresh_movers = 0, fresh_beyond = 0;
-        if (motion) for (int y = 0; y < kb.h; ++y) for (int x = 0; x < kb.w; ++x) {
+        if (ab_rig) for (int y = 0; y < kb.h; ++y) for (int x = 0; x < kb.w; ++x) {  // the region: the rig in either eye
+            const int gx = (kb.x + x) * kdw / W, gy = (kb.y + y) * kdh / H;
+            const auto at = [&](const std::vector<unsigned char>& m, const Box& bx) {
+                const int lx = gx - bx.x, ly = gy - bx.y;
+                return lx >= 0 && ly >= 0 && lx < bx.w && ly < bx.h && m[static_cast<std::size_t>(ly) * bx.w + lx] > 0;
+            };
+            mover[static_cast<std::size_t>(y) * kb.w + x] = at(kr, kdb) || at(fr, fdb);
+        }
+        if (motion && !ab_rig) for (int y = 0; y < kb.h; ++y) for (int x = 0; x < kb.w; ++x) {
             const int gx = kb.x + x, gy = kb.y + y;
             const auto w_at = [&](const std::vector<unsigned char>& m, const std::vector<unsigned char>& dd, const Box& bx, double& ahead) {
-                const int lx = gx - bx.x, ly = gy - bx.y; ahead = 0;
+                const int lx = gx * kdw / W - bx.x, ly = gy * kdh / H - bx.y; ahead = 0;
                 if (lx < 0 || ly < 0 || lx >= bx.w || ly >= bx.h) return 0.f;
                 const std::size_t i = static_cast<std::size_t>(ly) * bx.w + lx; std::uint16_t v; std::memcpy(&v, &m[i * 8 + 6], 2);
                 float depth; std::memcpy(&depth, &dd[i * 4], 4); ahead = depth > 1e-7f ? layers.world.m11 / (depth + layers.world.m10) : 0;
@@ -386,7 +407,7 @@ int main(int argc, char** argv) {
                     fresh_movers, fresh_movers ? 100.0 * fresh_beyond / fresh_movers : 0., pitch, fit_error, layers.fresh_part, layers.kept_part);
         if (movers_n) std::printf("      B4 movers off %.3f on %.3f | rest off %.3f on %.3f\n", bm_off / movers_n, bm_on / movers_n, rest_n ? br_off / rest_n : 0., rest_n ? br_on / rest_n : 0.);
         std::fflush(stdout);
-        if (!kept_movers && !fresh_movers) continue;
+        if (!kept_movers && !fresh_movers && !ab_rig) continue;
         // sheets: kept | off | on | next | F off - on | B4 off - on (green: on better; red: on worse; 1 level = 16; blue tint: mover region)
         const int pw = kb.w, ph = kb.h, sw = pw * 6;
         std::vector<unsigned char> sheet(static_cast<std::size_t>(sw) * ph * 3, 0);
@@ -404,8 +425,8 @@ int main(int argc, char** argv) {
         write_png(out + "/stale-warp-" + std::to_string(n) + "-sheet.png", sw, ph, sheet);
         // path map
         auto& slot = pixel_of(warp); slot = paths; layers.motion_rules = true;
-        const auto path = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)},
-                                          StaleMotion{km_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)}, StaleMotion{fm_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)}));
+        const auto path = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
+                                          StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)}, kept_rig, fresh_rig));
         slot = shipped;
         if (std::getenv("STALE_REPLAY_REASONS")) {
             const std::string src = reasons_variant(shader_source("src/stale_eye_warp.hpp"));
@@ -415,8 +436,8 @@ int main(int argc, char** argv) {
             }
             CHECK(SUCCEEDED(device->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &reasons)));
             slot = reasons;
-            const auto why = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)},
-                                             StaleMotion{km_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)}, StaleMotion{fm_t.Get(), static_cast<UINT>(W), static_cast<UINT>(H)}));
+            const auto why = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
+                                             StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)}, kept_rig, fresh_rig));
             slot = shipped;
             std::ofstream(out + "/stale-warp-" + std::to_string(n) + "-reasons.rgba", std::ios::binary).write(reinterpret_cast<const char*>(why.data()), static_cast<std::streamsize>(why.size()));
         }

@@ -185,6 +185,10 @@ inline constexpr double mover_px=3.;
 // v1150: an eye's motion texture (RGBA16F; xyz world displacement in metres of the surface since that eye's previous render, w object
 // motion in render pixels, 0 static or unknown), its render rectangle (width x height) at the top left like StaleDepth.
 struct StaleMotion {ID3D11Texture2D* texture{};UINT width{},height{};};
+// v1159: an eye's first-person rig mask (R8: nonzero = the player's arms, body, held weapon or prop), its render rectangle at the top left.
+struct StaleRig {ID3D11Texture2D* texture{};UINT width{},height{};};
+// v1159: with the masks, how far from a drawn palm its motion moves rig pixels (the forearm, a sword); beyond, the head's (the body).
+inline constexpr double hand_rig_radius=.45;
 // v810: camera c as it would have to move to keep showing what moved rigidly from pose `from` to pose `to` (a drawn hand) where its
 // image has it: the same rigid motion applied to the camera.
 inline WarpCamera moved_with(const WarpCamera& c,const WorldTrackedPose& from,const WorldTrackedPose& to) {
@@ -298,7 +302,7 @@ class StaleEyeWarp {
     }
     // v796: read views of the two kept depths (one per eye, so alternation does not rebuild them); nothing for a texture that is not R32.
     struct DepthView {Ptr<ID3D11Texture2D> texture;Ptr<ID3D11ShaderResourceView> view;};
-    std::array<DepthView,2> depth_views_{},motion_views_{};unsigned depth_next_{},motion_next_{};
+    std::array<DepthView,2> depth_views_{},motion_views_{},rig_views_{};unsigned depth_next_{},motion_next_{},rig_next_{};
     // v1150: and of the two motion textures (RGBA16F)
     ID3D11ShaderResourceView* read_view(ID3D11Texture2D* texture,UINT width,UINT height,DXGI_FORMAT typed,DXGI_FORMAT typeless,
                                         std::array<DepthView,2>& views,unsigned& next) {
@@ -312,6 +316,10 @@ class StaleEyeWarp {
     }
     ID3D11ShaderResourceView* depth_view(const StaleDepth& depth) {
         return read_view(depth.texture,depth.width,depth.height,DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R32_TYPELESS,depth_views_,depth_next_);
+    }
+    ID3D11ShaderResourceView* rig_view(const StaleRig& rig) {
+        if(!rig.texture || !rig.width || !rig.height) return nullptr;
+        return read_view(rig.texture,rig.width,rig.height,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_TYPELESS,rig_views_,rig_next_);
     }
     ID3D11ShaderResourceView* motion_view(const StaleMotion& motion) {
         if(!motion.texture || !motion.width || !motion.height) return nullptr;
@@ -335,6 +343,7 @@ public:
     std::uint64_t parallax_passes{},depth_refusals{}; // v796: passes that used the kept depth; kept depths that had no read view
     std::uint64_t fresh_passes{},fresh_refusals{};    // v798: passes with the fresh eye's layer; fresh inputs refused (format, size)
     std::uint64_t motion_passes{},motion_refusals{};  // v1150: passes with the mover rules; motion textures refused (format, size)
+    std::uint64_t rig_passes{},rig_refusals{};        // v1159: passes with the rig masks; masks refused (format, size)
     // v811: hand fits run, and read back with a correction; each read-back: the Present and eye, per hand the correction (target pixels
     // x, y; 0 0 none), the fraction of its kept pixels the fresh eye sees there and with no correction. The caller takes hand_fits.
     struct HandFit {std::uint64_t frame{};unsigned eye{};std::array<std::array<float,4>,2> hands{};};
@@ -362,12 +371,19 @@ cbuffer Parameters : register(b0) {
     float4 carried[4]; float4 handL[4]; float4 handR[4];
     float4 keptFov; float4 palmL; float4 palmR; float4 backL[4]; float4 backR[4]; float4 fitGrid;
     float4 motionSize; float4 motionMap; float4 keptAxes[3];
+    float4 rigSize; float4 rigMap;
 }
 // v1150: motionSize: the kept motion rectangle (xy) and the fresh one (zw), texels; motionMap: fresh_part, kept_part, on (both motion
 // textures and the rules), mover_px; keptAxes: world -> kept camera (right, up, forward).
 StructuredBuffer<float4> handFit : register(t4);          // v811: each hand's measured correction (target uv), from FitPick
 Texture2D<float4> keptMotionTex : register(t5);           // v1150: the kept frame's motion (xyz world metres, w object motion px)
 Texture2D<float4> freshMotionTex : register(t6);          // v1150: the fresh frame's
+// v1159: the first-person rig (arms, body, what the hands hold) per eye, nonzero there; rigSize: the kept mask rectangle (xy) and the
+// fresh one (zw); rigMap: on (both masks), the reach of a hand over the rig (m)
+Texture2D<float> keptRigTex : register(t7);
+Texture2D<float> freshRigTex : register(t8);
+bool KeptRig(float2 q) {return keptRigTex.Load(int3(clamp(int2(floor(q*rigSize.xy)),int2(0,0),int2(rigSize.xy)-1),0))>0;}
+bool FreshRig(float2 p) {return freshRigTex.Load(int3(clamp(int2(floor(p*rigSize.zw)),int2(0,0),int2(rigSize.zw)-1),0))>0;}
 RWStructuredBuffer<float4> fitSamples : register(u0);     // v811: the hand fit's kept samples (target uv, target depth, hand + luma)
 RWStructuredBuffer<uint4> fitCounts : register(u1);       // v811: per shift (2 x 169 coarse, then 2 x 49 fine): depth+brightness inliers,
                                                           // samples, outline depth inliers, outline samples
@@ -429,7 +445,12 @@ float2 Solve(float4 h[4],Texture2D<float> depth,float2 extent,float2 m,float3 t,
 // Is the point at inverse target-side distance w on the ray (fresh image coordinates s*k+shift) at or behind what the fresh eye sees there?
 bool Behind(float3 s,float3 shift,float w) {
     const float k=1/w,ray=k*s.z+shift.z;
-    const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,(k*s.xy+shift.xy)/ray);
+    const float2 p=(k*s.xy+shift.xy)/ray;
+    // v1159 (headset v1158: "white shimmering around the right arm near the corner of the view"): outside the fresh image nothing is seen
+    // (Ahead clamps to its edge texel, so NearHit "hit" the fresh edge and drew its edge pixels stretched over the canted corner). With the
+    // rig masks only for now: without them the pass stays byte-identical to v1158.
+    if(rigMap.x>0 && (ray<=0 || any(p<0) || any(p>1))) return false;
+    const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);
     return a>0 && ray>=a;
 }
 // The front-most surface on target pixel t's ray in the fresh image between 0.1 m and 1.25 reaches (headset v798: a hand 0.3 m
@@ -513,7 +534,7 @@ bool GoneWide(float3 t,float k) {
     const float tol=0.02+0.03*ray;
     [unroll] for(int y=-2;y<=2;++y) [unroll] for(int x=-2;x<=2;++x) {
         const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p+float2(x,y)*3/depthSize.zw);
-        if(a>0 && a<ray+tol) return false;
+        if(a>0 && a<ray+tol && (rigMap.x<=0 || FreshRig(p+float2(x,y)*3/depthSize.zw))) return false; // v1159: the rig, not a prop beside it
     }
     return true;
 }
@@ -545,7 +566,20 @@ int OwnerAt(float3 p) { // v1150: of kept point p (kept camera metres)
     if(dr<dl && dr<palmR.w) return 3;
     return 0;
 }
-int Owner(float2 q) {return OwnerAt(KeptPoint(q));}
+// v1159 (headset v1158: "artifacts when the arms come close to objects"): with the rig masks a kept pixel belongs to the player only if
+// its mask says so. Then the nearer drawn palm within rigMap.y (a hand's reach over its forearm and what it holds) moves it, else the head
+// (1: carried: the body, the upper arm); every other pixel is the world's however near a palm (v811's 22 cm sphere took a door handle,
+// a bottle, the wall the hand touched along with the hand).
+int Owner(float2 q) {
+    if(rigMap.x>0) {
+        if(!KeptRig(q)) return 0;
+        const float3 p=KeptPoint(q);
+        const float dl=palmL.w>0 && p.z>0?distance(p,palmL.xyz):1e9,dr=palmR.w>0 && p.z>0?distance(p,palmR.xyz):1e9;
+        if(min(dl,dr)>=rigMap.y) return 1;
+        return dl<=dr?2:3;
+    }
+    return OwnerAt(KeptPoint(q));
+}
 float Luma(float4 c) {return dot(c.rgb,float3(0.2126,0.7152,0.0722));}
 )HLSL" R"HLSL(// v811 hand fit (headset v810 dumps: in a fall or a run both drawn hands moved 10-16 px in the view between two frames while the
 // recorded grips held their place relative to the head, so the rebuilt hands stayed a frame behind; the game's drawn hand is not the
@@ -589,6 +623,7 @@ uint FitMatch(float4 f,float2 d) {
     if(any(p<0) || any(p>1)) return 0;
     const float a=Ahead(freshDepthTex,depthSize.zw,freshMap.xy,p);
     if(!(a>0) || abs(a-ray)>=0.01+0.02*ray) return 0;
+    if(rigMap.x>0 && !FreshRig(p)) return 0; // v1159: a hand is matched against the fresh eye's hand, not the wall it touches
     const float e=frac(f.w)>=0.5?0.5:0,lk=(frac(f.w)-e)/0.499,lf=Luma(pow(freshTex.Load(int3(int2(p*size.xy),0)),1/2.2));
     return abs(lk-lf)<0.12*max(lk,lf)+0.024?3:1;
 }
@@ -722,10 +757,10 @@ float MoverSeen(float3 t,out float4 colour) {
     if(near<0 || (near==0 && !FarHit(t,p,k))) return 1e38;
     // v1152: movers are a rule for the world beyond reach only. Within reach the fresh eye already places what moved (NearHit), and the
     // arms, a drawn sword and what the hands carry have no usable engine motion (measured 2026-11-11: ~300 px off).
-    if(k<reach || !FreshMover(p)) return 1e38;
+    if((rigMap.x>0?FreshRig(p):k<reach) || !FreshMover(p)) return 1e38;
     const float3 now=KeptFrom(k*float3(dot(scene[0].xyz,t),dot(scene[1].xyz,t),dot(scene[2].xyz,t))+scene[3].xyz);
     const float3 then=now-KeptStep(MotionAt(freshMotionTex,motionSize.zw,p).xyz,motionMap.x);
-    if(OwnerAt(now)!=0 || OwnerAt(then)!=0) return 1e38;
+    if(rigMap.x<=0 && (OwnerAt(now)!=0 || OwnerAt(then)!=0)) return 1e38;
     const float3 h=KeptImage(then);
     const float2 q=h.z>1e-4?h.xy/h.z:float2(-1,-1);
     colour=all(q>=0) && all(q<=1) && KeptHas(q,h.z)?Smooth(sourceTex,q):Smooth(freshTex,p);
@@ -758,7 +793,7 @@ float MoverHidden(float3 t,float2 q,out float4 colour) {
         if(n==1 && distance(e,d)>0.01+0.01*k) return 1e38;
         d=e;start=k;
     }
-    if(k<reach || Owner(c)!=0) return 1e38;
+    if((rigMap.x<=0 && k<reach) || Owner(c)!=0) return 1e38;
     // (Confirm's texel beside also confirms: the ray that grazes the edge hiding it, which NearHit refuses so M1 missed it. Then its own
     // texel must hide it (nearer) or be a mover too: v1152 dump 5, a boot lifting off the floor: the floor 8 cm behind the sole is within
     // Confirm's depth tolerance, and "confirmed" by the floor M3 carried the old sole on by stale motion into a dark band under the boot.)
@@ -807,13 +842,14 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     own[0]=kept_in?Owner(q):0;
     [unroll] for(int o=1;o<4;++o) own[o]=ca[o]!=-2?Owner(cq[o]):0;
     if(own[0]!=0 && ca[0]!=-2) ca[0]=-1;                                       // a hand's pixel is no world
-    if(own[1]!=0) ca[1]=-2;                                                    // nor the head's
+    if(own[1]!=0 && own[1]!=1) ca[1]=-2;                                       // nor the head's (v1159: the body is, with masks)
     [unroll] for(int h=2;h<4;++h) if(ca[h]!=-2 && own[h]!=0 && own[h]!=h) ca[h]=-2; // nor the other hand's
     // v1150 M2: a kept pixel that moves is no world (the far rule below does not keep it either): its old place shows what is there now.
     // Hand-owned pixels keep the hand layers. Without motion textures nothing is read here.
+    // v1159: with the rig masks "not the player's" replaces "beyond reach" (a guard within reach moves too; arms never count)
     const bool movers=motionMap.z>0 && own[0]==0;
     bool kept_mover=false;
-    if(movers && kept_in && kept_k>=reach) kept_mover=KeptMoverAt(q,kept_k);
+    if(movers && kept_in && (rigMap.x>0?!KeptRig(q):kept_k>=reach)) kept_mover=KeptMoverAt(q,kept_k);
     if(kept_mover && ca[0]!=-2) ca[0]=-1;
     const int world=ca[0];
     // The world beyond reach is taken as it is (v805: never the other eye's shading there; guards walking far away step a frame behind),
@@ -825,7 +861,8 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         // past that place altogether (v813: the hand is not there: after a snap turn the recorded grip turned in place while the game moved
         // the hand away, and v811 left a dark ghost of hand and sleeve); the rest confirmed by the fresh eye; a motion layer also where the
         // fresh eye cannot see the point (outside its view) and the world is not confirmed there (canted eyes do not overlap at their outer edges)
-        usable[i]=i==0?!far_world && world==1:(i>=2 && own[i]==i)?ca[i]!=-2 && !(ca[i]==-1 && GoneWide(t,ck[i])):ca[i]==1 || (ca[i]==2 && world!=1);
+        // v1159: with the masks the body's own pixels go with the head the same way
+        usable[i]=i==0?!far_world && world==1:(i>=1 && own[i]==i)?ca[i]!=-2 && !(ca[i]==-1 && GoneWide(t,ck[i])):ca[i]==1 || (ca[i]==2 && world!=1);
         if(usable[i]) front=min(front,ck[i]);
     }
     // v1150 M1 (the fresh eye sees it), else M3 (only this eye does): a mover on this ray, its distance and colour; ranked after a hand's
@@ -842,7 +879,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         // head's, then a hand's motion for what no hand owns (the far end of a sword).
         int best=-1;float rank=9;
         [unroll] for(int j=0;j<4;++j) if(usable[j] && ck[j]<=front*1.03+0.01) {
-            const float r=(j>=2 && own[j]==j)?0:j==0?1:j==1?2:3;
+            const float r=(j>=1 && own[j]==j)?0:j==0?1:j==1?2:3;
             if(r<rank) {rank=r;best=j;}
         }
         if(mover_k<=front*1.03+0.01 && rank>0.5) return mover_colour;
@@ -873,7 +910,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sampler.MaxLOD=D3D11_FLOAT32_MAX;
         checked(device_->CreateSamplerState(&sampler,&sampler_),"sampler");
-        D3D11_BUFFER_DESC constants{};constants.ByteWidth=704;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
+        D3D11_BUFFER_DESC constants{};constants.ByteWidth=736;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constants.Usage=D3D11_USAGE_DEFAULT;
         checked(device_->CreateBuffer(&constants,nullptr,&parameters_),"parameter buffer");
         const char* fit_entries[]{"FitSample","FitCoarse","FitFine","FitPick"};
         for(std::size_t n=0;n<fit_.size();++n) {
@@ -900,9 +937,10 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     // camera, the rest from the kept image with parallax; without, `h` alone.
     // v1150: with both eyes' motion textures (kept_motion: the kept frame's, fresh_motion: the fresh frame's) and layers->motion_rules,
     // movers go where the fresh eye has them (M1-M3); without, nothing changes.
+    // v1159: with both eyes' rig masks (kept_rig, fresh_rig) the player's own pixels are the masks' (Owner); without, the palm spheres.
     ID3D11Texture2D* apply(ID3D11Texture2D* source,const WarpMatrix& h,const StaleLayers* layers=nullptr,const StaleDepth& depth={},
                            ID3D11Texture2D* fresh=nullptr,const StaleDepth& fresh_depth={},const StaleMotion& kept_motion={},
-                           const StaleMotion& fresh_motion={}) {
+                           const StaleMotion& fresh_motion={},const StaleRig& kept_rig={},const StaleRig& fresh_rig={}) {
         if(!source) throw std::runtime_error("Stale eye warp input is missing");
         D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
         Ptr<ID3D11Device> owner;source->GetDevice(&owner);
@@ -928,7 +966,12 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             kept_motion_read=motion_view(kept_motion);fresh_motion_read=motion_view(fresh_motion);
             if(!kept_motion_read || !fresh_motion_read) {kept_motion_read=fresh_motion_read=nullptr;++motion_refusals;}
         }
-        std::array<float,176> parameters{};std::size_t at=0;
+        ID3D11ShaderResourceView *kept_rig_read=nullptr,*fresh_rig_read=nullptr;
+        if(fresh_read && kept_rig.texture && fresh_rig.texture) {
+            kept_rig_read=rig_view(kept_rig);fresh_rig_read=rig_view(fresh_rig);
+            if(!kept_rig_read || !fresh_rig_read) {kept_rig_read=fresh_rig_read=nullptr;++rig_refusals;}
+        }
+        std::array<float,184> parameters{};std::size_t at=0;
         const auto put=[&](double x,double y,double z,double w) {
             parameters[at++]=static_cast<float>(x);parameters[at++]=static_cast<float>(y);parameters[at++]=static_cast<float>(z);parameters[at++]=static_cast<float>(w);
         };
@@ -967,6 +1010,9 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             put(kept_motion.width,kept_motion.height,fresh_motion.width,fresh_motion.height);
             put(layers->fresh_part,layers->kept_part,1,mover_px);rows(layers->kept_axes);++motion_passes;
         } else {put(0,0,0,0);put(0,0,0,0);rows(WarpMatrix{});}
+        // v1159: the rig masks' rectangles, on, a hand's reach over the rig
+        if(kept_rig_read) {put(kept_rig.width,kept_rig.height,fresh_rig.width,fresh_rig.height);put(1,hand_rig_radius,0,0);++rig_passes;}
+        else {put(0,0,0,0);put(0,0,0,0);}
         if(depth_read) ++parallax_passes;
         if(fresh_read) ++fresh_passes;
         context_->UpdateSubresource(parameters_.Get(),0,nullptr,parameters.data(),0,0);
@@ -974,7 +1020,8 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         // v811: each hand's correction (none unless the fit runs and is sure)
         const UINT zeros[4]{};context_->ClearUnorderedAccessViewUint(fit_result_uav_.Get(),zeros);
         if(fit_on) {
-            ID3D11ShaderResourceView* fit_inputs[]{read,depth_read,fresh_read,fresh_depth_read};context_->CSSetShaderResources(0,4,fit_inputs);
+            ID3D11ShaderResourceView* fit_inputs[]{read,depth_read,fresh_read,fresh_depth_read,nullptr,nullptr,nullptr,kept_rig_read,fresh_rig_read}; // v1159: Owner, FitMatch
+            context_->CSSetShaderResources(0,9,fit_inputs);
             ID3D11UnorderedAccessView* fit_outputs[]{fit_samples_uav_.Get(),fit_counts_uav_.Get(),fit_result_uav_.Get()};
             context_->CSSetUnorderedAccessViews(0,3,fit_outputs,nullptr);context_->CSSetConstantBuffers(0,1,&constants);
             context_->CSSetShader(fit_[0].Get(),nullptr,0);context_->Dispatch(fit_grid/8,fit_grid/8,2);
@@ -982,7 +1029,7 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             context_->CSSetShader(fit_[2].Get(),nullptr,0);context_->Dispatch(49,2,1);
             context_->CSSetShader(fit_[3].Get(),nullptr,0);context_->Dispatch(1,1,1);
             ID3D11UnorderedAccessView* no_outputs[3]{};context_->CSSetUnorderedAccessViews(0,3,no_outputs,nullptr);
-            ID3D11ShaderResourceView* no_inputs[4]{};context_->CSSetShaderResources(0,4,no_inputs);context_->CSSetShader(nullptr,nullptr,0);
+            ID3D11ShaderResourceView* no_inputs[9]{};context_->CSSetShaderResources(0,9,no_inputs);context_->CSSetShader(nullptr,nullptr,0);
             ++fit_passes;
         }
         const D3D11_VIEWPORT viewport{0,0,static_cast<float>(width_),static_cast<float>(height_),0,1};
@@ -992,12 +1039,12 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         context_->OMSetDepthStencilState(depth_.Get(),0);context_->OMSetBlendState(nullptr,nullptr,0xffffffff);
         context_->PSSetConstantBuffers(0,1,&constants);
         ID3D11SamplerState* samplers[]{sampler_.Get()};context_->PSSetSamplers(0,1,samplers);
-        ID3D11ShaderResourceView* inputs[]{read,depth_read,fresh_read,fresh_depth_read,fit_result_srv_.Get(),kept_motion_read,fresh_motion_read};
-        context_->PSSetShaderResources(0,7,inputs);
+        ID3D11ShaderResourceView* inputs[]{read,depth_read,fresh_read,fresh_depth_read,fit_result_srv_.Get(),kept_motion_read,fresh_motion_read,kept_rig_read,fresh_rig_read};
+        context_->PSSetShaderResources(0,9,inputs);
         auto* target=output_rtv_.Get();context_->OMSetRenderTargets(1,&target,nullptr);
         context_->VSSetShader(vertex_.Get(),nullptr,0);context_->PSSetShader(pixel_.Get(),nullptr,0);
         context_->Draw(3,0);
-        ID3D11ShaderResourceView* empty[7]{};context_->PSSetShaderResources(0,7,empty);
+        ID3D11ShaderResourceView* empty[9]{};context_->PSSetShaderResources(0,9,empty);
         context_->OMSetRenderTargets(0,nullptr,nullptr);
         if(fit_on && layers) { // v811 trace: this fit, read back once the GPU is done with it
             if(fit_waiting_[fit_slot_]) collect_fits();
