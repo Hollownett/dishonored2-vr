@@ -162,3 +162,26 @@ two-hop table lookup is stored. Any rule that cannot be met as written is report
 - Hands stay on the hand layers in this round.
 - World-space displacement in the texture, not pixel vectors, so the warp needs no extra matrices.
 - New worktree off v1132; the uncommitted v1141 work in `VR-mods-held-place` is not touched.
+
+## Open: entity jitter step
+
+Status after v1157 (2026-11-11). Unresolved; the warp's `mover_px` was raised to 3.0 px so a jitter-sized error cannot make a still
+prop a mover (each jitter step component is within +-1 px, a mix-up of two steps within +-2 px per axis, < 2.83 px).
+
+Sims, still head, room with doors/chandelier/fence/box (tools/alt_motion_probe.py, residual vs this eye's own previous receipt):
+- v1152, own two-frame rows (two-hop PrevMvpTable), no snap, no shift: best. Most dispatches props p99 0.002-0.44 px, < 1 % movers;
+  a uniform 0.44-1.1 px offset in a few dispatches.
+- v1155, + "jitter snap" (rows that differ from the camera-only previous by a frustum shift replaced by it, camera-only from +0x7590):
+  10 % of covered pixels at one uniform 0.7-1.3 px in most dispatches.
+- v1156, + row shift by the relation below: worse, 1.0-2.4 px (p99 up to 2.39).
+
+Measured under v1155 rows (16 renders, exact to 1/64 px): r = st(n) - st(n-3), st(k) = s(J_k) - s(J_k-2) the jitter step of the render
+at engine frame k, s(J) = (-J.x, +J.y), J = the view jitter (+0x7850), one sample per eye pair: J(n) = engine_taa_pattern[(n/2 + 5) % 8].
+r depends on n mod 16 (px): 4 (-.375,-.625), 5 (.375,-1.25), 6 (1,-.125), 7 (.625,1.125), 8 (.375,1.25), 9 (-.25,.125), 10 (-.75,-.375),
+11 (-.5,-.5), 12 (.375,-.75), 13 (.875,-.25). A second class (~0.3 % of pixels in two renders) fit st(n) - st(n-2).
+The relation describes the snapped rows' error, not the engine's entity path: applied as a row shift it doubled the error.
+
+Not read: the motion-vector pixel shader (rw_psposition / rw_pspreviousposition consumer) and any per-view jitter constant it uses
+(docs/WEAPON-DRAW-PLACE-TEMPORAL.md has only the vertex shader: jitter reaches per-instance draws only through the VP baked into
+cb_mvpmatrix / cb_previousmvpmatrix). Next step: disassemble that shader from the shader cache, find how the current and previous clip
+positions are made into a vector and which jitter term (if any) is removed, then state the relation the installed rows must satisfy.

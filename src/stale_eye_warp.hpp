@@ -178,7 +178,10 @@ inline constexpr double near_range_default=2.;
 // v811: a drawn hand owns the kept pixels within this distance of its palm: the hand, its wrist, what it holds (a glass, the Heart, a pistol).
 inline constexpr double hand_own_radius=.22;
 // v1150: a pixel whose object motion (motion texture w, render pixels over the eye's two ticks) reaches this is a mover.
-inline constexpr double mover_px=.75;
+// v1157: 3 px. The engine's entity vectors can carry another frame's jitter step than the static world's (measured 2026-11-11: still
+// props at 0.4-1.3 px). A step's components are within +-1 px, so mixing two steps stays under 2.83 px: no jitter error can make a
+// still prop a mover. A real mover under 3 px in two ticks lags at most 1.5 px. Lower it once the entity step is exact (design doc).
+inline constexpr double mover_px=3.;
 // v1150: an eye's motion texture (RGBA16F; xyz world displacement in metres of the surface since that eye's previous render, w object
 // motion in render pixels, 0 static or unknown), its render rectangle (width x height) at the top left like StaleDepth.
 struct StaleMotion {ID3D11Texture2D* texture{};UINT width{},height{};};

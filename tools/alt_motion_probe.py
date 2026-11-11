@@ -191,7 +191,9 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
             ahead = proj[11] / (dep + proj[10])
             covered = ahead >= ARM_REACH
             r['movers_covered'] = float((own[covered] > threshold).mean()) if covered.any() else 0.0
-            msg = f'      covered (beyond {ARM_REACH} m) {covered.mean() * 100:.1f}%: movers {r["movers_covered"] * 100:.3f}%'
+            r['movers_covered_3px'] = float((own[covered] > 3.0).mean()) if covered.any() else 0.0  # v1157: the warp's mover_px
+            msg = (f'      covered (beyond {ARM_REACH} m) {covered.mean() * 100:.1f}%: movers >{threshold} px {r["movers_covered"] * 100:.3f}%,'
+                   f' >3.0 px {r["movers_covered_3px"] * 100:.3f}%')
             if 'motion' in d:
                 m = d['motion'][ys, xs]
                 pw = m[:, 3]
@@ -199,10 +201,11 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
                 diff = np.abs(pw[both] - own[both])
                 r['pass_w_diff_p99'] = float(np.percentile(diff, 99)) if len(diff) else None
                 r['pass_movers'] = float((pw[covered] >= threshold).mean()) if covered.any() else 0.0
+                r['pass_movers_3px'] = float((pw[covered] >= 3.0).mean()) if covered.any() else 0.0
                 r['pass_netted'] = float((covered & (own > threshold) & (pw == 0)).mean())  # v1154: own movers the pass wrote as still
                 r['pass_w_zero_outside'] = bool(np.all(pw[~covered] == 0))
                 agree = ((pw[both] >= threshold) == (own[both] > threshold)).mean() if len(diff) else 1.0
-                msg += (f'; pass w vs script: |diff| {pct(diff)}, mover agreement {agree * 100:.2f}%, pass movers {r["pass_movers"] * 100:.3f}%,'
+                msg += (f'; pass w vs script: |diff| {pct(diff)}, mover agreement {agree * 100:.2f}%, pass movers {r["pass_movers"] * 100:.3f}% (>=3 px {r["pass_movers_3px"] * 100:.3f}%),'
                         f' w=0 outside cover: {r["pass_w_zero_outside"]}, own movers written still {r["pass_netted"] * 100:.3f}%')
             log(msg)
             per.append(r)
@@ -381,7 +384,8 @@ def check_pass(stem, exe, work):
     print(f'check-pass {os.path.basename(stem)}: {covered.sum()} covered px; |w - ref| {pct(dw)}; relative p99.9 {np.percentile(rel, 99.9):.4f};'
           f' |xyz - ref| m {pct(dxyz)}; sky/arm zeros {np.all(zero == 0) and np.all(g[outside] == 0)}')
     assert np.all(zero == 0) and np.all(g[outside] == 0), 'sky and arm-reach pixels must be 0'
-    assert np.percentile(dw, 99) < 0.05 and np.percentile(rel, 99.9) < 0.02, 'pass w differs from the reference'
+    small = w[covered] < 8  # half precision: absolute agreement where w is small, relative where it is large (a fast mover, a sway)
+    assert (not small.any() or np.percentile(dw[small], 99) < 0.05) and np.percentile(rel, 99.9) < 0.02, 'pass w differs from the reference'
     movers = w[covered] > 0.75
     assert ((g[covered, 3] >= 0.75) == movers).mean() > 0.999, 'pass and reference disagree on movers'
     print(f'check-pass: movers after the net {(g[:, 3] >= 0.75).mean() * 100:.3f}% of samples')
