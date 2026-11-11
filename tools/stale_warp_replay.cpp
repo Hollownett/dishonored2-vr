@@ -372,16 +372,39 @@ int main(int argc, char** argv) {
         };
         const StaleRig kept_rig = rig ? StaleRig{kr_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
         const StaleRig fresh_rig = rig ? StaleRig{fr_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleRig{};
+        // v1177 STALE_REPLAY_BORDER=auto: the eye image's bright band measured on the kept image (rows from the bottom, columns from the
+        // right, whose mean lies 8 levels over the mean 80-120 px inside; full-frame dumps only), as the game's caller passes it when it knows
+        if (const char* bd = std::getenv("STALE_REPLAY_BORDER"); bd && std::string(bd) == "auto" && kb.w == W && kb.h == H) {
+            const auto line = [&](bool row, int at) {double sum = 0; const int n = row ? W : H; for (int i = 0; i < n; ++i) {const std::size_t p = row ? (static_cast<std::size_t>(at) * W + i) : (static_cast<std::size_t>(i) * W + at); sum += (kept[p * 4] + kept[p * 4 + 1] + kept[p * 4 + 2]) / 3.0;} return sum / n;};
+            const auto band = [&](bool row) {
+                const int size = row ? H : W; double ref = 0; for (int i = 80; i < 120; ++i) ref += line(row, size - 1 - i); ref /= 40;
+                int b = 0; while (b < 79 && line(row, size - 1 - b) > ref + 8) ++b;
+                return b;
+            };
+            const int bx = band(false), by = band(true);
+            layers.border = {std::max(layers.border[0], (bx + 2.0) / W), std::max(layers.border[1], (by + 2.0) / H)};
+            std::fprintf(stderr, "  dump %d: band %d px right, %d px bottom\n", n, bx, by);
+        }
+        // v1177 STALE_REPLAY_AFW2=1: on = the AFW v2 forward splat (src/afw2.hpp), off = today's warp, the mover rules on in both
+        const bool ab_afw2 = std::getenv("STALE_REPLAY_AFW2") != nullptr;
+        // v1177: masks before engine 4bd8ad2 hold 255 on every rig texel without valid rig motion; only a mask with 254 texels (rig
+        // without motion) marks 255 as "valid own motion"
+        bool rig_codes = false; for (const auto v : kr) rig_codes = rig_codes || v == 254; for (const auto v : fr) rig_codes = rig_codes || v == 254;
+        layers.rig_motion_rules = rig_codes;
+        layers.target_fov = layers.fresh_fov = layers.kept_fov;  // the dumps carry one FOV (the eyes' are equal there)
         const auto run = [&](bool variant) {
-            const bool rules = ab_rig || ab_rig_motion ? true : variant, masks = ab_rig ? variant : rig_live;  // v1160 stencils were not the rig: masks where the meta says rig_mask
-            layers.rig_motion_rules = ab_rig_motion ? variant : true;
+            const bool rules = ab_rig || ab_rig_motion || ab_afw2 ? true : variant, masks = ab_rig ? variant : rig_live;
+            layers.afw2 = ab_afw2 && variant;  // v1160 stencils were not the rig: masks where the meta says rig_mask
+            if (!ab_afw2) layers.rig_motion_rules = ab_rig_motion ? variant : true;
             layers.motion_rules = rules;
             const auto t0 = std::chrono::steady_clock::now();
             auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
                                      motion ? StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleMotion{},
                                      motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleMotion{},
                                      masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}));
-            std::fprintf(stderr, "  dump %d rules %s, masks %s: %.1f s\n", n, rules ? "on" : "off", masks ? "on" : "off", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            std::fprintf(stderr, "  dump %d rules %s, masks %s%s: %.1f s\n", n, rules ? "on" : "off", masks ? "on" : "off", layers.afw2 ? ", AFW2" : "", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            if (layers.afw2 && warp.afw2) std::printf("      afw2: %u target texels left empty after the fill\n", warp.afw2->holes());
+            if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 votes (confirmed/refuted): head %u/%u left %u/%u right %u/%u; hands moving %d %d, masks %d\n", v[2], v[3], v[4], v[5], v[6], v[7], int(layers.hand_moving[0]), int(layers.hand_moving[1]), int(masks));}
             return c;
         };
         const auto on = run(true), off = run(false);

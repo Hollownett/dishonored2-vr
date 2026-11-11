@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <memory>
 #include <vector>
 #include "context_state.hpp"
 #include "tracked_pose.hpp"
@@ -190,6 +191,10 @@ struct StaleLayers {
     bool camera_moving{};
     bool motion_rules{true};
     WarpMatrix kept_axes{};
+    // v1177 AFW v2 (src/afw2.hpp): the forward splat of this eye's own kept frame instead of the gather below (off: today's warp). The
+    // target's and the fresh eye's FOV (stale_eye_layers; invalid: the kept one stands in)
+    bool afw2{};
+    WarpFov target_fov{},fresh_fov{};
 };
 inline constexpr double near_range_default=2.;
 // v811: a drawn hand owns the kept pixels within this distance of its palm: the hand, its wrist, what it holds (a glass, the Heart, a pistol).
@@ -234,6 +239,7 @@ inline std::optional<StaleLayers> stale_eye_layers(const WarpCamera& kept,const 
     const auto world=cut?stale_eye_parallax(own,kept_fov,target,target_fov):stale_eye_parallax(kept,kept_fov,target,target_fov);
     if(!world) return std::nullopt;
     StaleLayers layers{*world,std::nullopt,kept_fov,near_range};
+    layers.target_fov=target_fov;layers.fresh_fov=fresh_fov;
     layers.cut=cut;
     layers.camera_moving=!(step<=camera_still_m && turn<=camera_still_deg);
     for(unsigned side=0;side<2;++side) { // v1173: each drawn hand moved (stale_hands_still per hand; drawn in only one frame counts as moved)
@@ -258,6 +264,9 @@ inline std::optional<StaleLayers> stale_eye_layers(const WarpCamera& kept,const 
     return layers;
 }
 
+} // namespace d2vr
+#include "afw2.hpp"
+namespace d2vr {
 // One full-screen pass: every pixel of the target view samples the kept image through the homography, Catmull-Rom through nine
 // bilinear taps (a single bilinear tap would soften every warped frame). Read through an _SRGB view and written through an _SRGB target,
 // so the filter works in linear light, like EyeSharpen. One instance serves both eyes; the caller copies the output out at once.
@@ -380,6 +389,7 @@ public:
     std::uint64_t motion_passes{},motion_refusals{};  // v1150: passes with the mover rules; motion textures refused (format, size)
     std::uint64_t rig_passes{},rig_refusals{};        // v1159: passes with the rig masks; masks refused (format, size)
     std::uint64_t cut_passes{};                       // v1171: frames rebuilt from the fresh eye alone (a camera cut)
+    std::unique_ptr<Afw2Pass> afw2;                   // v1177: the forward-splat rebuild (StaleLayers::afw2), made on first use
     // v811: hand fits run, and read back with a correction; each read-back: the Present and eye, per hand the correction (target pixels
     // x, y; 0 0 none), the fraction of its kept pixels the fresh eye sees there and with no correction. The caller takes hand_fits.
     struct HandFit {std::uint64_t frame{};unsigned eye{};std::array<std::array<float,4>,2> hands{};};
@@ -1075,6 +1085,17 @@ float4 WarpPS(Vertex v) : SV_TARGET {
         if(fresh_read && kept_rig.texture && fresh_rig.texture) {
             kept_rig_read=rig_view(kept_rig);fresh_rig_read=rig_view(fresh_rig);
             if(!kept_rig_read || !fresh_rig_read) {kept_rig_read=fresh_rig_read=nullptr;++rig_refusals;}
+        }
+        // v1177 AFW v2: the forward splat when the layers ask for it and every input it needs is here (render-sized motion and masks of the
+        // depth's rectangle); a cut keeps the fresh-eye-only path below
+        if(layers && layers->afw2 && depth_read && fresh_read && !layers->cut) {
+            const bool same=depth.width==fresh_depth.width && depth.height==fresh_depth.height;
+            const bool motion_ok=kept_motion_read && kept_motion.width==depth.width && kept_motion.height==depth.height && same;
+            const bool rig_ok=kept_rig_read && kept_rig.width==depth.width && kept_rig.height==depth.height && same;
+            if(!afw2) afw2=std::make_unique<Afw2Pass>(device_.Get());
+            ++parallax_passes;++fresh_passes;if(motion_ok) ++motion_passes;if(rig_ok) ++rig_passes;
+            return afw2->run(*layers,width_,height_,read,depth_read,depth.width,depth.height,fresh_read,fresh_depth_read,fresh_depth.width,fresh_depth.height,
+                             motion_ok?kept_motion_read:nullptr,motion_ok?fresh_motion_read:nullptr,rig_ok?kept_rig_read:nullptr,rig_ok?fresh_rig_read:nullptr);
         }
         std::array<float,192> parameters{};std::size_t at=0;
         const auto put=[&](double x,double y,double z,double w) {

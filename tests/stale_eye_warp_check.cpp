@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS  // std::getenv (AFW2_VERBOSE)
 // v792 lab: the stale-eye warp (src/stale_eye_warp.hpp). The homography against hand-derived values, then the GPU pass on WARP: a
 // warped vertical line must land on the column the CPU math predicts, through both read paths (a readable source, and a kept copy
 // without a read view), and an identity warp must reproduce the image.
@@ -1127,6 +1128,209 @@ static void gpu_edges() {
     }
 }
 
+// v1177 AFW v2 (src/afw2.hpp): the rebuilt eye as a forward splat of its own kept frame. A scene of planes seen by cameras looking down -z
+// (tan +-0.5): a checkered wall 3 m away (40/60), a striped object 0.5 m away (140/170), a pole 1.5 cm wide 0.6 m away (220), the player's
+// hand (rig, 100/120) 0.45 m away, a striped guard 2.5 m away (175/195) with motion textures. Colour at 256 x 160, depth, masks and motion
+// at 0.75 of that (render fraction). The fresh eye is 50 levels brighter: any fresh colour shows.
+static void gpu_afw2() {
+    ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
+    CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+    constexpr UINT W = 256, H = 160, RW = 192, RH = 120;
+    const double T = 0.5;
+    const WarpFov fov{-std::atan(T), std::atan(T), std::atan(T), -std::atan(T)};
+    enum {sky_kind, wall_kind, object_kind, pole_kind, hand_kind, guard_kind};
+    struct Scene {double object = std::nan(""), pole = std::nan(""), hand = std::nan(""), guard = std::nan(""); Vec3 walk{}; int lift = 0;};
+    struct Frame {ComPtr<ID3D11Texture2D> image, depth, rig, motion; std::vector<int> grey, kind; std::vector<double> ahead;};
+    // what camera c (position, looking down -z) sees through uv: kind, colour, distance ahead
+    const auto look = [&](Vec3 c, const Scene& s, double u, double v, int& kind, double& ahead) {
+        const double tx = (2 * u - 1) * T, ty = (1 - 2 * v) * T;
+        kind = wall_kind; ahead = c.z + 3; double wx = c.x + ahead * tx, wy = ahead * ty;
+        int g = 40 + 20 * ((static_cast<int>(std::floor(wx / 0.04)) + static_cast<int>(std::floor(wy / 0.04))) & 1);
+        const auto plane = [&](double z, double x0, double x1, double half, int k, int colour) {
+            const double a = c.z - z; if (a <= 0 || a >= ahead) return;
+            const double x = c.x + a * tx, y = a * ty;
+            if (x >= x0 && x <= x1 && std::abs(y) <= half) {ahead = a; kind = k; g = colour; wx = x; wy = y;}
+        };
+        if (std::isfinite(s.guard)) plane(-2.5, s.guard - 0.25, s.guard + 0.25, 0.4, guard_kind, 0);
+        if (std::isfinite(s.pole)) plane(-0.6, s.pole - 0.0075, s.pole + 0.0075, 10, pole_kind, 220);
+        if (std::isfinite(s.object)) plane(-0.5, s.object - 0.06, s.object + 0.06, 0.06, object_kind, 0);
+        if (std::isfinite(s.hand)) plane(-0.45, s.hand - 0.05, s.hand + 0.05, 0.05, hand_kind, 0);
+        if (kind == guard_kind) g = (static_cast<int>(std::floor((wx - s.guard) / 0.05)) & 1) ? 195 : 175;
+        if (kind == object_kind) g = (static_cast<int>(std::floor((wx - s.object) / 0.02)) & 1) ? 170 : 140;
+        if (kind == hand_kind) g = (static_cast<int>(std::floor((wx - s.hand) / 0.02)) & 1) ? 120 : 100;
+        return std::min(255, g + s.lift);
+    };
+    const auto render = [&](Vec3 c, const Scene& s) {
+        Frame f; f.grey.resize(W * H); f.kind.resize(W * H); f.ahead.resize(W * H);
+        std::vector<unsigned char> px(W * H * 4), mask(RW * RH); std::vector<float> d(RW * RH); std::vector<std::uint16_t> m(RW * RH * 4, 0);
+        for (UINT y = 0; y < H; ++y) for (UINT x = 0; x < W; ++x) {
+            int k; double a; const int g = look(c, s, (x + 0.5) / W, (y + 0.5) / H, k, a);
+            auto* p = &px[(y * W + x) * 4]; p[0] = p[1] = p[2] = static_cast<unsigned char>(g); p[3] = 255;
+            f.grey[y * W + x] = g; f.kind[y * W + x] = k; f.ahead[y * W + x] = a;
+        }
+        for (UINT y = 0; y < RH; ++y) for (UINT x = 0; x < RW; ++x) {
+            int k; double a; look(c, s, (x + 0.5) / RW, (y + 0.5) / RH, k, a);
+            d[y * RW + x] = static_cast<float>(0.01 / a); mask[y * RW + x] = k == hand_kind ? 255 : 0;
+            if (k == guard_kind && length(s.walk) > 0) {
+                const float v[4]{static_cast<float>(s.walk.x), static_cast<float>(s.walk.y), static_cast<float>(s.walk.z), 8.f};
+                for (int i = 0; i < 4; ++i) m[(y * RW + x) * 4 + i] = half_float(v[i]);
+            }
+        }
+        D3D11_TEXTURE2D_DESC desc{}; desc.Width = W; desc.Height = H; desc.MipLevels = 1; desc.ArraySize = 1; desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;
+        const D3D11_SUBRESOURCE_DATA data{px.data(), W * 4, 0}; CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &data, &f.image)));
+        desc.Width = RW; desc.Height = RH; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.Format = DXGI_FORMAT_R32_FLOAT; const D3D11_SUBRESOURCE_DATA dd{d.data(), RW * 4, 0}; CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &dd, &f.depth)));
+        desc.Format = DXGI_FORMAT_R8_UNORM; const D3D11_SUBRESOURCE_DATA md{mask.data(), RW, 0}; CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &md, &f.rig)));
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; const D3D11_SUBRESOURCE_DATA vd{m.data(), RW * 8, 0}; CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &vd, &f.motion)));
+        return f;
+    };
+    const auto pose = [](double x) {WorldTrackedPose p; p.position = {x, 0, -0.45}; p.basis = {Vec3{0, 0, -1}, Vec3{-1, 0, 0}, Vec3{0, 1, 0}}; return p;};
+    StaleEyeWarp warp(device.Get());
+    const auto id = *stale_eye_homography({}, fov, {}, fov);
+    struct Run {std::vector<unsigned char> out; std::uint32_t holes;};
+    // kept camera kc (hand drawn at kept_hand, its grip at grip now), target tc, fresh fc; masks and motion textures on or off
+    const auto run = [&](bool afw2, Vec3 kc, Vec3 tc, Vec3 fc, const Frame& k, const Frame& f, double kept_hand, double grip, bool masks, bool motion) {
+        WarpCamera kcam = camera({}, kc), tcam = camera({}, tc), fcam = camera({}, fc);
+        if (std::isfinite(kept_hand)) {kcam.hand_bits = tcam.hand_bits = 2u; kcam.hands[1] = pose(kept_hand); tcam.hands[1] = pose(grip);}
+        auto l = *stale_eye_layers(kcam, fov, tcam, fov, &fcam, fov, 2.0);
+        l.afw2 = afw2;
+        const auto out = read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &l, {k.depth.Get(), RW, RH}, f.image.Get(), {f.depth.Get(), RW, RH},
+            motion ? StaleMotion{k.motion.Get(), RW, RH} : StaleMotion{}, motion ? StaleMotion{f.motion.Get(), RW, RH} : StaleMotion{},
+            masks ? StaleRig{k.rig.Get(), RW, RH} : StaleRig{}, masks ? StaleRig{f.rig.Get(), RW, RH} : StaleRig{}));
+        return Run{out, afw2 && warp.afw2 ? warp.afw2->holes() : 0u};
+    };
+    // a scored run: wrong = outside the truth's 3x3 range +-12 (silhouettes within a pixel of a depth step skipped); uncovered = truth pixels
+    // the kept camera cannot see (hidden there): `fore` counts those showing a nearer kind's colour (a doubled edge), black any black pixel
+    struct Score {int n{}, wrong{}, lifted{}, uncovered{}, fore{}, black{};};
+    const auto score = [&](const std::vector<unsigned char>& out, const Frame& truth, const Frame& lifted_truth, Vec3 kc, const Scene& kept_scene, int only_kind = -1) {
+        Score s;
+        for (int y = 1; y < static_cast<int>(H) - 1; ++y) for (int x = 1; x < static_cast<int>(W) - 1; ++x) {
+            const int i = y * W + x, o = out[i * 4]; s.black += o < 5;
+            bool edge = false; int lo = 255, hi = 0, llo = 255, lhi = 0;
+            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                const int j = (y + dy) * W + x + dx;
+                edge = edge || std::abs(truth.ahead[j] - truth.ahead[i]) > 0.05 * truth.ahead[i];
+                lo = std::min(lo, truth.grey[j]); hi = std::max(hi, truth.grey[j]); llo = std::min(llo, lifted_truth.grey[j]); lhi = std::max(lhi, lifted_truth.grey[j]);
+            }
+            if (edge || (only_kind >= 0 && truth.kind[i] != only_kind)) continue;
+            // the truth point, seen from the kept camera: is that what the kept camera sees there?
+            const double tx = (2 * (x + 0.5) / W - 1) * T, ty = (1 - 2 * (y + 0.5) / H) * T, a = truth.ahead[i];
+            const Vec3 tc{0.032, 0, 0}; const Vec3 p{tc.x + a * tx, a * ty, tc.z - a};
+            const double ka = kc.z - p.z, ku = ((p.x - kc.x) / ka / T + 1) / 2, kv = (1 - p.y / ka / T) / 2;
+            int kk; double kahead; look(kc, kept_scene, ku, kv, kk, kahead);
+            if (ku < 0 || ku > 1 || kv < 0 || kv > 1 || std::abs(kahead - ka) > 0.02 + 0.03 * ka) {
+                ++s.uncovered; s.fore += truth.kind[i] == wall_kind && o >= 125;
+                if (truth.kind[i] == wall_kind && o >= 125 && s.fore <= 12 && std::getenv("AFW2_VERBOSE")) std::printf("   fore (%d,%d): %d\n", x, y, o);
+                continue;
+            }
+            ++s.n; const bool bad = o < lo - 12 || o > hi + 12; s.wrong += bad; s.lifted += bad && o >= llo - 12 && o <= lhi + 12;
+            if (bad && s.wrong <= 12 && std::getenv("AFW2_VERBOSE")) std::printf("   wrong (%d,%d): %d, truth %d..%d kind %d ahead %.2f\n", x, y, o, lo, hi, truth.kind[i], a);
+        }
+        return s;
+    };
+    const auto say = [](const char* name, const Score& a, const Score& b, std::uint32_t holes) {
+        std::printf("%s: AFW2 %d/%d wrong (%d in the fresh shading), strip %d px: %d foreground, %d black, %u holes after the fill | today %d/%d wrong (%d fresh), strip %d foreground\n",
+                    name, a.wrong, a.n, a.lifted, a.uncovered, a.fore, a.black, holes, b.wrong, b.n, b.lifted, b.fore);
+    };
+    const Vec3 fresh_at{-0.032, 0, 0}, here{0.032, 0, 0};
+    // A. a near object before the wall, the camera stepping 2, 5 and 15 cm sideways and forward
+    for (const bool forward : {false, true}) for (const double step : {0.02, 0.05, 0.15}) {
+        Scene s; s.object = 0.05; Scene lit = s; lit.lift = 50;
+        const Vec3 kc = forward ? Vec3{0.032, 0, step} : Vec3{0.032 - step, 0, 0};
+        const Frame k = render(kc, s), f = render(fresh_at, lit), truth = render(here, s), lifted = render(here, lit);
+        const auto a = run(true, kc, here, fresh_at, k, f, std::nan(""), 0, true, true), b = run(false, kc, here, fresh_at, k, f, std::nan(""), 0, true, true);
+        const Score sa = score(a.out, truth, lifted, kc, s), sb = score(b.out, truth, lifted, kc, s);
+        char name[96]; std::snprintf(name, sizeof name, "afw2 A. object 0.5 m, wall 3 m, camera %s %.0f cm", forward ? "forward" : "sideways", step * 100);
+        say(name, sa, sb, a.holes);
+        // (one texel at the strip's far edge may take the stretch a render texel off: 1 in 10 000)
+        CHECK(sa.n > 15000 && sa.wrong * 10000 <= sa.n && sa.lifted == 0 && sa.fore == 0 && sa.black == 0 && a.holes == 0);
+    }
+    // B. a thin pole (1.5 cm, 0.6 m) and the object, the camera 5 cm sideways
+    {
+        Scene s; s.pole = -0.08; s.object = 0.1; Scene lit = s; lit.lift = 50;
+        const Vec3 kc{0.032 - 0.05, 0, 0};
+        const Frame k = render(kc, s), f = render(fresh_at, lit), truth = render(here, s), lifted = render(here, lit);
+        const auto a = run(true, kc, here, fresh_at, k, f, std::nan(""), 0, true, true), b = run(false, kc, here, fresh_at, k, f, std::nan(""), 0, true, true);
+        const Score sa = score(a.out, truth, lifted, kc, s), sb = score(b.out, truth, lifted, kc, s), pole = score(a.out, truth, lifted, kc, s, pole_kind);
+        say("afw2 B. thin pole 1.5 cm at 0.6 m, camera 5 cm", sa, sb, a.holes);
+        std::printf("   pole pixels: %d/%d wrong\n", pole.wrong, pole.n);
+        if (std::getenv("AFW2_VERBOSE")) {
+            const auto kept = read_back(device.Get(), context.Get(), k.image.Get());
+            for (int x = 70; x < 110; ++x) std::printf("   col %d: out %d truth %d (kind %d) kept %d\n", x, a.out[(80 * W + x) * 4], truth.grey[80 * W + x], truth.kind[80 * W + x], kept[(80 * W + x) * 4]);
+        }
+        CHECK(pole.n > 300 && pole.wrong == 0 && sa.wrong == 0 && sa.fore == 0 && a.holes == 0);
+    }
+    // C. a still frame (identical cameras, a still hand drawn, zero motion, masks): this eye's kept image byte for byte
+    {
+        Scene s; s.object = 0.05; s.hand = -0.1; s.guard = 0.3; Scene lit = s; lit.lift = 50;
+        const Frame k = render(here, s), f = render(fresh_at, lit);
+        const auto a = run(true, here, here, fresh_at, k, f, -0.1, -0.1, true, true);
+        const auto kept = read_back(device.Get(), context.Get(), k.image.Get());
+        int differ = 0; for (std::size_t i = 0; i < kept.size(); ++i) differ += a.out[i] != kept[i];
+        std::printf("afw2 C. still frame: %d bytes differ from the kept image\n", differ);
+        CHECK(differ == 0);
+    }
+    // D. a moving hand (rig mask), the camera 2 cm sideways: drawn 5 cm right of its kept place; (a) the grip says the same: the hand where it
+    // is, in this eye's own shading, wall at its old place; (b) the grip over-moved 10 cm (v1173): the fresh eye's hand where it is, no ghost
+    for (const double grip : {0.0, 0.05}) {
+        Scene ks; ks.hand = -0.05; ks.object = 0.12; Scene ns = ks; ns.hand = 0.0; Scene lit = ns; lit.lift = 50;
+        const Vec3 kc{0.032 - 0.02, 0, 0};
+        const Frame k = render(kc, ks), f = render(fresh_at, lit), truth = render(here, ns), lifted = render(here, lit);
+        const auto a = run(true, kc, here, fresh_at, k, f, -0.05, grip, true, false);
+        const Score sa = score(a.out, truth, lifted, kc, ks);
+        int hand = 0, hand_wrong = 0, ghost = 0;
+        // within a pixel of the truth (its stripes and outline; render-sized depth settles an outline to a render texel), in either eye's
+        // shading where the grip over-moved; ghost: the hand's levels on wall 2 px clear of the hand
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const int i = y * W + x, o = a.out[i * 4];
+            int lo = 255, hi = 0, llo = 255, lhi = 0; bool clear = true;
+            for (int d = -2; d <= 2; ++d) clear = clear && truth.kind[i + d] == wall_kind && truth.kind[i + d * W] == wall_kind;
+            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                const int j = i + dy * W + dx; lo = std::min(lo, truth.grey[j]); hi = std::max(hi, truth.grey[j]); llo = std::min(llo, lifted.grey[j]); lhi = std::max(lhi, lifted.grey[j]);
+            }
+            if (truth.kind[i] == hand_kind && truth.kind[i - 1] == hand_kind && truth.kind[i + 1] == hand_kind) {
+                ++hand; hand_wrong += !((o >= lo - 12 && o <= hi + 12) || (grip > 0 && o >= llo - 12 && o <= lhi + 12));
+            }
+            if (clear && o >= 95 && o <= 125) ++ghost;
+        }
+        std::printf("afw2 D. moving hand, grip %s: hand %d/%d wrong, hand colour on the wall in %d px; scene %d/%d wrong (%d fresh), %u holes\n",
+                    grip > 0 ? "over-moved" : "right", hand_wrong, hand, ghost, sa.wrong, sa.n, sa.lifted, a.holes);
+        if (std::getenv("AFW2_VERBOSE")) {
+            const auto kept = read_back(device.Get(), context.Get(), k.image.Get());
+            for (int x = 90; x < 150; ++x) std::printf("   col %d: out %d truth %d (kind %d) kept %d fresh %d\n", x, a.out[(80 * W + x) * 4], truth.grey[80 * W + x], truth.kind[80 * W + x], kept[(80 * W + x) * 4], f.grey[80 * W + x]);
+        }
+        CHECK(hand > 300 && hand_wrong == 0 && ghost == 0 && a.holes == 0);
+        if (grip == 0.0) CHECK(sa.lifted == 0);
+    }
+    // E. a guard 2.5 m away walking 20 cm a tick (motion textures, both eyes), the camera 2 cm sideways: at its new place in this eye's own
+    // shading, the wall at its old place. E'. the kept eye's motion texture says nothing (a vector it lacks: the guard just started): the fresh
+    // eye's motion is handed to the kept texels it came from (scatter) and confirmed the same way
+    for (const bool kept_vectors : {true, false}) {
+        Scene ks; ks.guard = 0.2; ks.walk = {-0.4, 0, 0}; Scene ns = ks; ns.guard = 0.0; Scene lit = ns; lit.lift = 50;
+        const Vec3 kc{0.032 - 0.02, 0, 0};
+        Scene kv = ks; if (!kept_vectors) kv.walk = {};
+        const Frame k = render(kc, kv), f = render(fresh_at, lit), truth = render(here, ns), lifted = render(here, lit);
+        const auto a = run(true, kc, here, fresh_at, k, f, std::nan(""), 0, true, true), b = run(false, kc, here, fresh_at, k, f, std::nan(""), 0, true, true);
+        const Score sa = score(a.out, truth, lifted, kc, ks), sb = score(b.out, truth, lifted, kc, ks);
+        int guard = 0, guard_wrong = 0, ghost = 0;
+        for (int y = 1; y < static_cast<int>(H) - 1; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const int i = y * W + x, o = a.out[i * 4];
+            if (truth.kind[i] == guard_kind && truth.kind[i - 2] == guard_kind && truth.kind[i + 2] == guard_kind && truth.kind[i - 2 * W] == guard_kind && truth.kind[i + 2 * W] == guard_kind) {
+                int lo = 255, hi = 0; for (int d = -1; d <= 1; ++d) {lo = std::min({lo, truth.grey[i + d], truth.grey[i + d * W]}); hi = std::max({hi, truth.grey[i + d], truth.grey[i + d * W]});}
+                ++guard; guard_wrong += o < lo - 12 || o > hi + 12;  // within a pixel of the truth's stripes, this eye's levels
+                if ((o < lo - 12 || o > hi + 12) && std::getenv("AFW2_VERBOSE") && guard_wrong < 25) std::printf("   guard (%d,%d): %d truth %d..%d\n", x, y, o, lo, hi);
+            }
+            if (truth.kind[i] == wall_kind && truth.kind[i - 2] == wall_kind && truth.kind[i + 2] == wall_kind && o >= 150) ++ghost;
+        }
+        say(kept_vectors ? "afw2 E. guard walking 20 cm, camera 2 cm" : "afw2 E'. the same, no kept vectors (scatter)", sa, sb, a.holes);
+        std::printf("   guard %d/%d off its own shading at its place, guard colour on the wall in %d px\n", guard_wrong, guard, ghost);
+        if (std::getenv("AFW2_VERBOSE") && !kept_vectors)
+            for (int x = 90; x < 200; x += 1) std::printf("   col %d: out %d truth %d (kind %d) kept %d\n", x, a.out[(80 * W + x) * 4], truth.grey[80 * W + x], truth.kind[80 * W + x], k.grey[80 * W + x]);
+        CHECK(guard > 1000 && guard_wrong == 0 && ghost == 0 && a.holes == 0);
+    }
+}
+
 // v802: the drawn hands held still from the kept frame's Setup to the target's (what is within reach may show from the kept image)
 static void hands_still() {
     WarpCamera a = camera({}, {0, 0, 0}), b = a;
@@ -1144,7 +1348,8 @@ static void hands_still() {
     a.hand_bits = b.hand_bits = 0u; CHECK(stale_hands_still(a, b));         // no hands drawn
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "afw2") == 0) {gpu_afw2(); std::puts("PASS: afw2"); return 0;}  // v1177: the AFW2 cases alone
     math();
     gpu();
     parallax_math();
@@ -1155,6 +1360,7 @@ int main() {
     gpu_movers();
     gpu_rig();
     gpu_edges();
+    gpu_afw2();
     uncant_math();
     hands_still();
     std::puts("PASS: stale eye warp (homography: identity, yaw, pitch, relative rotation, round trip, behind, invalid; WARP: identity copy, line shift on both read paths;"
