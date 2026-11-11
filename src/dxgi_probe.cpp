@@ -10842,6 +10842,69 @@ static void capture_climb_pair(unsigned eye,ID3D11Texture2D* texture,UINT64 now)
             << ",\"frame\":" << game_xr->alternate_frame << ",\"stage\":\"final_projection_before_release\"}";
     } catch(...) {}
 }
+// v1161 diagnostic (knob build/shadow-stability, diagnostics on; paired and alternate mode): scores image stability without a human. In
+// gameplay, bursts of consecutive final eye images (what the headset is sent); per eye, each image against that eye's previous one:
+// mean absolute luminance change (0-255) and its 64x64 tile with the largest mean change. On a still head a static scene stays near 0; a
+// flickering shadow shows as bursts in a few tiles. Knob text (optional): "<images per eye> <start delay s> <bursts> <interval s>",
+// default 90 20 3 30. Output: artifacts/shadow-stability.csv (burst,eye,present,index,width,height,mean_abs,top_tile_mean,top_x,top_y,
+// tiles_over_8) and, for the 48 largest-changing tiles above 6, shadow-stability-<burst>-<eye>-<index>-<x>-<y>-before|after.rgba
+// (128x128 RGBA8 around the tile, the eye's previous and this image). A burst reads every image back (a hitch per frame).
+static struct ShadowStability {
+    bool on{};unsigned frames=90,bursts=3;double delay=20,interval=30;
+    UINT64 next{};unsigned burst{},saved{};std::array<unsigned,2> left{},index{};
+    std::array<std::vector<std::uint8_t>,2> luma{};std::array<std::vector<std::byte>,2> rgba{};std::array<UINT,2> w{},h{};
+} shadow_stability;
+static void capture_shadow_stability(unsigned eye,ID3D11Texture2D* texture,UINT64 now) noexcept {
+    auto& st=shadow_stability;
+    if(!st.on || eye>1 || !texture || !d2vr::diag::on() || game_logic_mask()!=2) return;
+    if(eye==0 && !st.left[0] && !st.left[1] && st.burst<st.bursts) {
+        if(!st.next) {st.next=now+static_cast<UINT64>(st.delay*1000);return;}
+        if(now<st.next) return;
+        st.next=now+static_cast<UINT64>(st.interval*1000);++st.burst;st.left={st.frames+1,st.frames+1};st.index={0,0};
+        for(auto& v:st.luma) v.clear();
+    }
+    if(!st.left[eye]) return;
+    try {
+        const auto pixels=diag_readback_rgba(texture);
+        if(pixels.bytes.size()<static_cast<std::size_t>(pixels.width)*pixels.height*4 || !pixels.width || !pixels.height) return;
+        const UINT W=pixels.width,H=pixels.height;
+        std::vector<std::uint8_t> luma(static_cast<std::size_t>(W)*H);
+        const auto* b=reinterpret_cast<const std::uint8_t*>(pixels.bytes.data());
+        for(std::size_t i=0;i<luma.size();++i) luma[i]=static_cast<std::uint8_t>((2u*b[i*4]+5u*b[i*4+1]+b[i*4+2])/8u);
+        --st.left[eye];
+        if(st.luma[eye].size()==luma.size() && st.w[eye]==W && st.h[eye]==H) {
+            const UINT tx=(W+63)/64,ty=(H+63)/64;std::vector<std::uint64_t> tiles(static_cast<std::size_t>(tx)*ty);std::vector<std::uint32_t> tile_n(tiles.size());
+            std::uint64_t total=0;
+            for(UINT y=0;y<H;++y) for(UINT x=0;x<W;++x) {
+                const std::size_t i=static_cast<std::size_t>(y)*W+x;
+                const unsigned d=static_cast<unsigned>(std::abs(int(luma[i])-int(st.luma[eye][i])));
+                total+=d;const std::size_t t=static_cast<std::size_t>(y/64)*tx+x/64;tiles[t]+=d;++tile_n[t];
+            }
+            double top=0;std::size_t top_at=0;unsigned over=0;
+            for(std::size_t t=0;t<tiles.size();++t) {const double m=tile_n[t]?double(tiles[t])/tile_n[t]:0;if(m>8) ++over;if(m>top) {top=m;top_at=t;}}
+            const UINT top_x=static_cast<UINT>(top_at%tx)*64,top_y=static_cast<UINT>(top_at/tx)*64;
+            const auto path=output_directory/L"shadow-stability.csv";
+            if(!path.empty()) {
+                const bool new_file=!fs::exists(path);std::ofstream rows(path,std::ios::app);
+                if(new_file) rows<<"burst,eye,present,index,width,height,mean_abs,top_tile_mean,top_x,top_y,tiles_over_8\n";
+                rows<<st.burst<<','<<eye<<','<<frames.load()<<','<<st.index[eye]<<','<<W<<','<<H<<','<<double(total)/luma.size()<<','<<top<<','<<top_x<<','<<top_y<<','<<over<<'\n';
+            }
+            if(top>6 && st.saved<48) { // the tile with 32 px of context on each side, before and after
+                ++st.saved;
+                const UINT cx=top_x>32?top_x-32:0,cy=top_y>32?top_y-32:0,cw=std::min(128u,W-cx),ch=std::min(128u,H-cy);
+                const auto crop=[&](const std::vector<std::byte>& src,const wchar_t* tag) {
+                    std::vector<std::byte> out(static_cast<std::size_t>(128)*128*4);
+                    for(UINT y=0;y<ch;++y) std::memcpy(out.data()+static_cast<std::size_t>(y)*128*4,src.data()+(static_cast<std::size_t>(cy+y)*W+cx)*4,static_cast<std::size_t>(cw)*4);
+                    const auto f=output_directory/(L"shadow-stability-"+std::to_wstring(st.burst)+L"-"+std::to_wstring(eye)+L"-"+std::to_wstring(st.index[eye])+L"-"+
+                        std::to_wstring(top_x)+L"-"+std::to_wstring(top_y)+tag);
+                    if(!f.empty()) std::ofstream(f,std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(out.data()),static_cast<std::streamsize>(out.size()));
+                };
+                crop(st.rgba[eye],L"-before.rgba");crop(pixels.bytes,L"-after.rgba");
+            }
+        }
+        ++st.index[eye];st.luma[eye]=std::move(luma);st.rgba[eye]=pixels.bytes;st.w[eye]=W;st.h[eye]=H;
+    } catch(...) {}
+}
 static void capture_final_eye(unsigned eye,ID3D11Texture2D* texture) noexcept {
     static UINT64 next{};static unsigned count{},message_count{};
     const auto now=GetTickCount64();
@@ -10855,6 +10918,7 @@ static void capture_final_eye(unsigned eye,ID3D11Texture2D* texture) noexcept {
     }
     capture_alt_band(eye,texture,now);
     capture_climb_pair(eye,texture,now);
+    capture_shadow_stability(eye,texture,now); // v1161 diagnostic (build/shadow-stability)
     if(eye<2 && dual_wield_enabled && final_eye_capture_knob.load() && game_logic_mask()==256) {capture_wheel_eye(eye,texture,now);return;}
     if(eye!=0 || game_logic_mask()!=2) return;
     if(final_eye_message_wanted.load() && message_count<2) {final_eye_message_wanted=false;++message_count;}
@@ -15171,6 +15235,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             alt_pose_trace_rows=0;{std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);if(alt_pose_trace_csv.is_open()) alt_pose_trace_csv.close();}
             alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (every eye mode)
             stale_warp_dump_knob={}; // v1159 diagnostic (see capture_stale_warp)
+            shadow_stability=ShadowStability{}; // v1161 diagnostic (see capture_shadow_stability)
+            if(std::ifstream knob{root/L"build"/L"shadow-stability"}) {
+                shadow_stability.on=true;unsigned n{},b{};double d{},i{};
+                if(knob>>n>>d>>b>>i && n>=2 && n<=600 && d>=0 && d<=3600 && b>=1 && b<=20 && i>=1 && i<=3600) {shadow_stability.frames=n;shadow_stability.delay=d;shadow_stability.bursts=b;shadow_stability.interval=i;}
+            }
             {std::ifstream knob(root/L"build"/L"stale-warp-dump");double delay{},interval{};unsigned count{};std::string mode;
              if(knob>>delay>>interval>>count && delay>=0 && delay<=3600 && interval>=.5 && interval<=3600 && count>=1 && count<=200) {
                  knob>>mode;stale_warp_dump_knob={true,delay,interval,count,mode=="full"};}}
