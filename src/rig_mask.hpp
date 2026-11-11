@@ -7,7 +7,7 @@
 // mode. Not covered (by decision): held weapons and props (the mover rules take them), NPC models the hands hold.
 //
 // The mask: right after each rig draw that writes the scene depth in a pass of the alternate one-view, the SAME draw is replayed with this
-// file's pixel shader (SV_Position.z) into a rig-depth target (R32_FLOAT, the scene depth's size), the engine's depth view bound for the test
+// file's pixel shader (SV_Position.z; v1179: and the own-motion flag) into a rig target (R32G32_FLOAT, the scene depth's size), the engine's depth view bound for the test
 // with depth EQUAL, no depth write, no stencil, no blending: the rig depth where the rig won the depth test then. The engine's targets, depth
 // state, blend state and pixel shader are restored; nothing of the engine's is written. Visibility is resolved at the copy (FsrTaa):
 // Eye::rig = 255 where scene depth > 0 and |rig depth - scene depth| <= eps, so anything drawn over the rig later, in any order, wins.
@@ -25,18 +25,21 @@
 #include <string>
 
 namespace d2vr {
-// The copy/compare: t0 scene depth (float view), t1 rig depth; u0 Eye::rig (R8_UINT), u1 counters: [0] mask pixels, [1] near misses
-// (rig depth present, eps < |difference| <= 64 eps: an eps too tight shows here). k.xy eps = x + y * depth, k.zw the render rectangle.
+// The copy/compare: t0 scene depth (float view), t1 rig target (x rig depth, y 1 = that draw had this eye's own previous palette and rows);
+// u0 Eye::rig (R8_UINT): 255 a visible rig pixel whose engine MV is this eye's own motion (v1179), 254 a visible rig pixel without (the
+// engine's vectors), 0 not rig (consumers that test > 0 see both as rig); u1 counters: [0] mask pixels, [1] near misses (rig depth present,
+// eps < |difference| <= 64 eps: an eps too tight shows here), [2] own-motion pixels. k.xy eps = x + y * depth, k.zw the render rectangle.
 inline constexpr char rig_mask_copy_source[]=
-    "Texture2D<float> z:register(t0);Texture2D<float> r:register(t1);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
-    "cbuffer C:register(b0){float4 k;};groupshared uint g[2];"
+    "Texture2D<float> z:register(t0);Texture2D<float2> r:register(t1);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
+    "cbuffer C:register(b0){float4 k;};groupshared uint g[3];"
     "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID,uint t:SV_GroupIndex){"
-    "if(t<2) g[t]=0;GroupMemoryBarrierWithGroupSync();"
-    "const bool inside=all(float2(i.xy)<k.zw);const float d=z.Load(int3(i.xy,0)),q=r.Load(int3(i.xy,0));"
-    "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e;"
-    "o[i.xy]=rig?255:0;"
+    "if(t<3) g[t]=0;GroupMemoryBarrierWithGroupSync();"
+    "const bool inside=all(float2(i.xy)<k.zw);const float d=z.Load(int3(i.xy,0));const float2 rq=r.Load(int3(i.xy,0));const float q=rq.x;"
+    "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e,own=rig && rq.y>0.5;"
+    "o[i.xy]=own?255:rig?254:0;"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
-    "GroupMemoryBarrierWithGroupSync();if(t<2 && g[t]) n.InterlockedAdd(t*4,g[t]);}";
+    "if(own) InterlockedAdd(g[2],1);"
+    "GroupMemoryBarrierWithGroupSync();if(t<3 && g[t]) n.InterlockedAdd(t*4,g[t]);}";
 // eps for a depth view format: D24 one step is 2^-24 (the replay's float z vs the stored 24-bit value: half a step + rounding); float: 4 ulp.
 inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) noexcept {
     if(depth_srv==DXGI_FORMAT_R24_UNORM_X8_TYPELESS || depth_srv==DXGI_FORMAT_D24_UNORM_S8_UINT) {absolute=2.f/16777215.f;relative=0;}
@@ -48,22 +51,22 @@ inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) 
 // previous position with ro_previousframeskinningmatrices = VS t0 and the current with ro_matrices = VS t1 (v663 draw census: t0 = the
 // model's previous wrapper, t1 its current; the colour pass binds the current at t2), then multiplies with cb_previousmvpmatrix rows.
 // The engine ping-pongs the two wrappers every engine frame (0x25dfd0: previous index = current, current ^= 1 while dirty; 0x25f930
-// writes the CPU palette into the new current; 0x25da80 supplies the current as "previous" while +0x1fb0 has 4/0x10/0x20), so the
-// previous palette is the last ENGINE frame's: in alternate mode the other eye's render one tick ago. Its rows are the other eye's too
-// (raw). This file keeps, per eye and rig model, the palette of that eye's own last render (two GPU slots), and ObjectMotion binds it at
-// t0 together with the eye's own previous rows; either missing, both become the current ones (zero motion), counted.
-// Pure: the history slots for `frame` from the two slots' frames (stored +1, 0 = empty): read = the slot holding frame - step (-1 none),
-// write = the other one (done: this frame was copied already).
-// v1167: keys carry an epoch (high 32 bits): a new epoch at each start of the one-view mode and when the engine frame counter goes back
-// (a load restarts it), so a slot written in an earlier session can never pass for this eye's previous render.
-struct RigHistorySlots {int read{-1};unsigned write{};bool done{};};
-inline std::uint64_t rig_history_key(std::uint32_t epoch,std::uint32_t frame) noexcept {return std::uint64_t{epoch}<<32|std::uint32_t(frame+1);}
-inline RigHistorySlots rig_history_slots(std::uint64_t key0,std::uint64_t key1,std::uint32_t epoch,std::uint32_t frame,unsigned step) noexcept {
-    RigHistorySlots s{};const std::uint64_t want=frame>=step?rig_history_key(epoch,frame-step):~std::uint64_t{0},now=rig_history_key(epoch,frame);
-    s.read=key0==want?0:key1==want?1:-1;
-    if(key0==now) {s.write=0;s.done=true;} else if(key1==now) {s.write=1;s.done=true;} else s.write=s.read==0?1u:0u;
-    return s;
+// maps the new current with WRITE_DISCARD (0x2d3c60 -> context vtable +0x70) and writes the CPU palette into it; 0x25da80 hands out the
+// current as "previous" while +0x1fb0 has 4/0x10/0x20), so the previous palette is the last ENGINE frame's: in alternate mode the other
+// eye's render one tick ago. Its rows are the other eye's too (raw).
+// v1179: the eye's own previous palette comes from GPU order, not from labels. At each render's GPU skin copy of a rig model (0x25f930, once
+// per engine frame, on the context the engine uploads on, ahead of that render's draws) three mod buffers rotate: P <- B, B <- A, A <- the
+// new current palette. With one render per engine frame and the eyes alternating, P then holds the palette of the render two engine frames
+// back = this eye's previous render, whatever eye/frame a draw's classification says. Valid after three consecutive engine frames
+// (rig_ring_valid); a skipped frame (no skin copy) restarts the run. The v1166-v1170 per-eye slots keyed by the draw's classified frame,
+// and the per-frame validity tally, are gone: validity is per draw (own pair or not) and reaches the motion pass per pixel through the mask.
+inline constexpr unsigned rig_ring_run_needed=3;
+// Pure: the run length after a rotation at engine frame `frame` (last = the frame of the previous rotation, ~0u none).
+inline unsigned rig_ring_run(std::uint32_t last,unsigned run,std::uint32_t frame) noexcept {
+    if(last==frame) return run;                       // same engine frame: already rotated (a second call does nothing)
+    return last!=~0u && frame==last+1u?(run<255u?run+1u:run):1u;
 }
+inline bool rig_ring_valid(unsigned run) noexcept {return run>=rig_ring_run_needed;}
 
 class RigMask {
 public:
@@ -86,53 +89,59 @@ public:
         replays_last_.store(replays_frame_.exchange(0,std::memory_order_relaxed),std::memory_order_relaxed);
     }
     static bool draw_is_rig() noexcept {return tl_rig_;} // the draw now in a Scope binds a rig skin buffer (ObjectMotion)
-    // v1166, ObjectMotion at a rig draw (alternate): binds at VS t0 this eye's own previous palette when `rows_own` (the draw gets the eye's
-    // own previous rows) and that palette exists (this eye's render `frame - 2`), else the current palette (zero motion; the caller then
-    // uses the current rows too). Records the current palette for this eye's next render. True: the own pair is in place. Restored in after().
-    // v1167: called for every rig draw that has previous rows (a motion-vector writer). One whose palette bindings are not the prepass
-    // form (t0/t1 the model's wrappers; t0 == t1 when the engine itself reset the history) cannot be zeroed: its render is not valid.
-    static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own) noexcept {
+    // v1166, ObjectMotion at a rig draw (alternate): binds at the previous-palette slot (t0 in the prepass) this eye's own previous palette
+    // (v1179: the model's ring P, see rig_ring_valid) when `rows_own` (the draw gets the eye's own previous rows) and the ring is valid, else
+    // the current palette (zero motion; the caller then uses the current rows too). True: the own pair is in place; the mask replay of this
+    // draw then marks its pixels as own motion (255). Restored in after(). `eye`/`frame` are only diagnostics now (eye < 0: no view).
+    // A draw whose palette bindings are not the prepass form cannot be paired (its pixels stay 254: the engine's vectors).
+    static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t,bool rows_own) noexcept {
+        tl_own_=false;
         if(!tl_rig_ || !c) return false;
         if(!tl_prepass_ || !tl_current_) {
             // v1168: no previous-palette slot to set. Only a draw that writes a colour target (the prepass's motion-vector target) can carry
-            // motion; a depth-only draw (no render target bound) cannot, and never touches validity.
+            // motion; a depth-only draw (no render target bound) cannot.
             std::array<ID3D11RenderTargetView*,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs{};c->OMGetRenderTargets(static_cast<UINT>(rtvs.size()),rtvs.data(),nullptr);
             UINT targets=0;for(auto* r:rtvs) if(r) {++targets;r->Release();}
             const unsigned p=tl_pattern_%625;
-            if(targets) {note_frame(frame,false);unpaired_.fetch_add(1,std::memory_order_relaxed);unpaired_patterns_[p].fetch_add(1,std::memory_order_relaxed);
+            if(targets) {unpaired_.fetch_add(1,std::memory_order_relaxed);unpaired_patterns_[p].fetch_add(1,std::memory_order_relaxed);
                 unpaired_pass_.store(tl_pass_,std::memory_order_relaxed);unpaired_targets_.store(targets,std::memory_order_relaxed);}
             else {depth_only_.fetch_add(1,std::memory_order_relaxed);depth_only_patterns_[p].fetch_add(1,std::memory_order_relaxed);depth_only_pass_.store(tl_pass_,std::memory_order_relaxed);}
             return false;
         }
-        const std::uint32_t epoch=epoch_for(frame);
         ID3D11ShaderResourceView* bind=tl_current_;bool own=false;
-        if(eye==0 || eye==1) if(History* h=history(c,static_cast<unsigned>(eye),tl_model_)) {
-            const auto pick=rig_history_slots(h->key[0].load(std::memory_order_acquire),h->key[1].load(std::memory_order_acquire),epoch,frame,2);
-            if(!pick.done) {
-                const auto now=rig_history_key(epoch,frame);
-                std::uint64_t old=h->key[pick.write].load(std::memory_order_relaxed);
-                if(old!=now && h->key[pick.write].compare_exchange_strong(old,now,std::memory_order_acq_rel)) {
-                    ID3D11Resource* current{};tl_current_->GetResource(&current);
-                    if(current) {c->CopyResource(h->buffer[pick.write].Get(),current);current->Release();history_copies_.fetch_add(1,std::memory_order_relaxed);}
-                }
-            }
-            if(rows_own && pick.read>=0) {bind=h->view[static_cast<unsigned>(pick.read)].Get();own=true;}
-            else if(rows_own) no_history_.fetch_add(1,std::memory_order_relaxed);
+        if(rows_own && eye>=0) {
+            if(ID3D11ShaderResourceView* v=ring_view(c,tl_model_)) {bind=v;own=true;}
+            else no_history_.fetch_add(1,std::memory_order_relaxed);
         }
         if(!tl_saved_set_) {c->VSGetShaderResources(tl_prev_slot_,1,&tl_saved_t0_);tl_saved_set_=true;tl_saved_slot_=tl_prev_slot_;}
         c->VSSetShaderResources(tl_prev_slot_,1,&bind);
-        (own?own_pairs_:zero_pairs_).fetch_add(1,std::memory_order_relaxed);note_frame(frame,own);
-        return own;
+        (own?own_pairs_:zero_pairs_).fetch_add(1,std::memory_order_relaxed);
+        tl_own_=own;return own;
     }
-    // FsrTaa's motion pass, once a render (`frame` = its receipt's engine frame): every rig motion-vector draw of exactly that render had
-    // its own pair, and there was at least one. v1167: per engine frame (was: since the last call, which a pipelined next render could feed).
-    static bool take_rig_motion(std::uint32_t frame) noexcept {
-        FrameTally& t=tally_[frame&7];
-        if(t.frame.load(std::memory_order_acquire)!=frame+1) return false;
-        return t.own.load(std::memory_order_relaxed)>0 && t.zero.load(std::memory_order_relaxed)==0;
+    // v1179, the engine's GPU skin copy of rig model `model` (0x25f930 hook, after the engine's upload): `c` the context it uploaded on,
+    // `current` the buffer now holding this render's palette, `frame` the engine frame counter. Rotates the ring once per engine frame.
+    static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame) noexcept {
+        if(!c || !current || model>=ring_.size() || !motion.load(std::memory_order_relaxed)) return;
+        Ring& r=ring_[model];
+        D3D11_BUFFER_DESC d{};current->GetDesc(&d);
+        ID3D11Device* owner{};current->GetDevice(&owner);if(owner) owner->Release(); // identity only
+        std::lock_guard<std::mutex> lock(mutex_); // 3 calls a render; reset() and ring_view() take it too
+        if(!r.ready.load(std::memory_order_relaxed) || r.bytes!=d.ByteWidth || r.device!=owner) {
+            r.ready.store(false,std::memory_order_release);r.view.Reset();r.p.Reset();r.a.Reset();r.b.Reset();r.run.store(0,std::memory_order_relaxed);r.last.store(~0u,std::memory_order_relaxed);
+            d.Usage=D3D11_USAGE_DEFAULT;d.CPUAccessFlags=0;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            const bool ok=owner && SUCCEEDED(owner->CreateBuffer(&d,nullptr,&r.p)) && SUCCEEDED(owner->CreateBuffer(&d,nullptr,&r.a)) && SUCCEEDED(owner->CreateBuffer(&d,nullptr,&r.b));
+            if(!ok) {failures_.fetch_add(1,std::memory_order_relaxed);return;}
+            r.bytes=d.ByteWidth;r.device=owner;r.ready.store(true,std::memory_order_release);
+        }
+        const std::uint32_t last=r.last.load(std::memory_order_relaxed);
+        if(last==frame) {ring_repeats_.fetch_add(1,std::memory_order_relaxed);return;}
+        const unsigned run=rig_ring_run(last,r.run.load(std::memory_order_relaxed),frame);
+        if(run==1 && last!=~0u) ring_restarts_.fetch_add(1,std::memory_order_relaxed);
+        c->CopyResource(r.p.Get(),r.b.Get());c->CopyResource(r.b.Get(),r.a.Get());c->CopyResource(r.a.Get(),current);
+        r.last.store(frame,std::memory_order_relaxed);r.run.store(run,std::memory_order_release);rotations_.fetch_add(1,std::memory_order_relaxed);
     }
-    // dxgi_probe: the one-view mode (re)starts (the alternate view appears after paired frames or a mode change): a new history epoch.
-    static void begin_epoch() noexcept {epoch_.fetch_add(1,std::memory_order_relaxed);max_frame_.store(0,std::memory_order_relaxed);}
+    // dxgi_probe: the one-view mode (re)starts (the alternate view appears after paired frames or a mode change): every ring starts over.
+    static void begin_epoch() noexcept {epoch_.fetch_add(1,std::memory_order_relaxed);for(auto& r:ring_) {r.run.store(0,std::memory_order_relaxed);r.last.store(~0u,std::memory_order_relaxed);}}
     // FsrTaa's copy: draws of the alternate view seen since the last call (0: no one-view render, the mask is not live), and the rig target
     // of this scene depth (empty: none yet / another depth).
     static std::uint64_t take_view_draws() noexcept {return view_draws_.exchange(0,std::memory_order_relaxed);}
@@ -141,7 +150,9 @@ public:
         if(!depth || target_.depth!=depth || !target_.srv) return false;
         srv=target_.srv;rtv=target_.rtv;return true;
     }
-    static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);target_={};ps_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
+    static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);
+        for(auto& r:ring_) {r.ready.store(false);r.view.Reset();r.p.Reset();r.a.Reset();r.b.Reset();r.device=nullptr;r.bytes=0;r.run.store(0);r.last.store(~0u);}
+        target_={};ps_.Reset();ps_own_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
     static std::string json() {
         std::ostringstream o;
         // v1168: t0..t3 per digit: 0 none, 1 this model's wrapper 0, 2 its wrapper 1, 3 another rig model's, 4 a non-rig resource
@@ -155,8 +166,9 @@ public:
          <<",\"foreign_t0\":{\"draws\":"<<foreign_t0_.load()<<",\"bytes\":"<<foreign_bytes_.load()<<",\"current_bytes\":"<<foreign_current_bytes_.load()
          <<",\"bind\":"<<foreign_bind_.load()<<",\"misc\":"<<foreign_misc_.load()<<",\"stride\":"<<foreign_stride_.load()<<",\"usage\":"<<foreign_usage_.load()
          <<",\"cpu\":"<<foreign_cpu_.load()<<",\"srv_format\":"<<foreign_format_.load()<<",\"srv_dimension\":"<<foreign_dimension_.load()<<",\"srv_elements\":"<<foreign_elements_.load()
-         <<",\"distinct\":"<<foreign_distinct_.load()<<",\"draw_count\":"<<foreign_count_.load()<<"}"
-         <<",\"no_previous_slot\":"<<no_history_.load()<<",\"copies\":"<<history_copies_.load()<<"},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
+         <<",\"distinct\":"<<foreign_distinct_.load()<<",\"draw_count\":"<<foreign_count_.load()<<",\"mod_ring\":"<<foreign_ours_.load()<<"}"
+         <<",\"no_previous_slot\":"<<no_history_.load()<<",\"ring\":{\"rotations\":"<<rotations_.load()<<",\"restarts\":"<<ring_restarts_.load()
+         <<",\"repeats\":"<<ring_repeats_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
         return o.str();
@@ -166,7 +178,7 @@ public:
     class Scope {
     public:
         Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass=-1) noexcept {
-            tl_rig_=false;tl_pass_=pass;
+            tl_rig_=false;tl_own_=false;tl_pass_=pass;
             if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;
             view_draws_.fetch_add(1,std::memory_order_relaxed);
             ID3D11DepthStencilState* bound{};UINT ref{};c->OMGetDepthStencilState(&bound,&ref);
@@ -182,7 +194,7 @@ public:
             if(c_ && draw && targets) replay(c_,args,draw,targets);
             c_=nullptr;
         }
-        ~Scope() {restore_t0();tl_rig_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        ~Scope() {restore_t0();tl_held_.Reset();tl_rig_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
             c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
@@ -198,7 +210,7 @@ private:
     static constexpr unsigned slots=1024;
     inline static std::array<Entry,slots> table_{};inline static std::atomic<int> default_writes_{1}; // a null state is the default: depth written
     inline static std::mutex mutex_;inline static Target target_{};
-    inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal_;
+    inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_,ps_own_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal_;
     inline static Microsoft::WRL::ComPtr<ID3D11BlendState> blend_;inline static bool made_{},make_failed_{};inline static ID3D11Device* device_{}; // identity: whose objects these are
     inline static std::array<std::atomic<std::uintptr_t>,buffer_slots> buffers_{};inline static std::atomic<unsigned> published_buffers_{};
     inline static std::atomic<std::uint64_t> rig_draws_{},rig_draws_frame_{},rig_draws_last_{},replays_{},replays_frame_{},replays_last_{},view_draws_{},
@@ -207,14 +219,29 @@ private:
     // v1166: this draw's rig model (0, 1 arms, 2 body), its current palette view (t1, held), whether t0/t1 are that model's previous/current
     inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
     inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
-    struct History {std::atomic<std::uint64_t> key[2]{};Microsoft::WRL::ComPtr<ID3D11Buffer> buffer[2];Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view[2];
-        std::uintptr_t source{};UINT bytes{};std::atomic<bool> ready{};};
-    inline static std::array<std::array<History,3>,2> history_{};
-    inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},history_copies_{},unpaired_{};
-    // v1167: rig MV draws per engine frame (own pair / not), the unpaired draws' binding pattern (t0,t1,t2: 0 none, 1 previous wrapper,
-    // 2 current wrapper... encoded as the rig buffer slot kind: 0 none, 1 this model wrapper 0, 2 wrapper 1, 3 another model), the epoch
-    struct FrameTally {std::atomic<std::uint32_t> frame{};std::atomic<std::uint32_t> own{},zero{};};
-    inline static std::array<FrameTally,8> tally_{};inline static std::array<std::atomic<std::uint64_t>,625> unpaired_patterns_{},depth_only_patterns_{};
+    // v1179: per rig model, the ring the GPU skin copy rotates (P bound at draws; A, B the last two renders' palettes) and P's view
+    struct Ring {Microsoft::WRL::ComPtr<ID3D11Buffer> p,a,b;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;UINT bytes{};
+        std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};};
+    inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_;
+    inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{};
+    // P's view (made like the draw's current palette view) when the model's ring holds this eye's previous render, else null
+    // Held by the caller's thread until the draw's Scope ends (a reset may release the ring meanwhile). ~13 rig draws a render: the lock is cheap.
+    static ID3D11ShaderResourceView* ring_view(ID3D11DeviceContext* c,unsigned model) noexcept {
+        if(model>=ring_.size()) return nullptr;
+        Ring& r=ring_[model];
+        if(!r.ready.load(std::memory_order_acquire) || !rig_ring_valid(r.run.load(std::memory_order_acquire))) return nullptr;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!r.ready.load(std::memory_order_relaxed)) return nullptr;
+        ID3D11Device* device{};c->GetDevice(&device);if(device) device->Release();
+        if(device!=r.device) return nullptr; // the ring is another device's
+        if(!r.view && r.p) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd{};tl_current_->GetDesc(&vd);
+            if(FAILED(device->CreateShaderResourceView(r.p.Get(),&vd,&r.view))) failures_.fetch_add(1,std::memory_order_relaxed);
+        }
+        tl_held_=r.view;return tl_held_.Get();
+    }
+    // the unpaired draws' binding pattern (t0..t3: 0 none, 1 this model wrapper 0, 2 wrapper 1, 3 another rig model's, 4 another resource)
+    inline static std::array<std::atomic<std::uint64_t>,625> unpaired_patterns_{},depth_only_patterns_{};
     inline static std::atomic<std::uint64_t> depth_only_{};inline static std::atomic<int> unpaired_pass_{-2},depth_only_pass_{-2};inline static std::atomic<unsigned> unpaired_targets_{};
     inline static thread_local int tl_pass_{-1};inline static thread_local bool tl_foreign_t0_{};
     // v1169 diagnostic: the last foreign t0 buffer seen (see is_rig) and how many distinct ones
@@ -228,6 +255,8 @@ private:
             if(b) {b->GetDesc(&d);b->Release();}
             return at;};
         D3D11_BUFFER_DESC d{},cd{};const auto at=buffer_desc(t0,d);buffer_desc(t1,cd);
+        for(const auto& r:ring_) if(r.ready.load(std::memory_order_acquire) && (at==reinterpret_cast<std::uintptr_t>(r.p.Get()) || at==reinterpret_cast<std::uintptr_t>(r.a.Get()) ||
+            at==reinterpret_cast<std::uintptr_t>(r.b.Get()))) foreign_ours_.fetch_add(1,std::memory_order_relaxed); // v1179: a mod buffer left bound
         D3D11_SHADER_RESOURCE_VIEW_DESC vd{};t0->GetDesc(&vd);
         foreign_bytes_.store(d.ByteWidth,std::memory_order_relaxed);foreign_current_bytes_.store(cd.ByteWidth,std::memory_order_relaxed);foreign_bind_.store(d.BindFlags,std::memory_order_relaxed);
         foreign_misc_.store(d.MiscFlags,std::memory_order_relaxed);foreign_stride_.store(d.StructureByteStride,std::memory_order_relaxed);foreign_usage_.store(d.Usage,std::memory_order_relaxed);
@@ -235,39 +264,7 @@ private:
         foreign_elements_.store(vd.ViewDimension==D3D11_SRV_DIMENSION_BUFFEREX?vd.BufferEx.NumElements:vd.Buffer.NumElements,std::memory_order_relaxed);
         for(auto& s:foreign_seen_) {std::uintptr_t k=s.load(std::memory_order_relaxed);if(k==at) return;if(!k && s.compare_exchange_strong(k,at)) {foreign_distinct_.fetch_add(1,std::memory_order_relaxed);return;}}
     }inline static thread_local UINT tl_prev_slot_{},tl_saved_slot_{};
-    inline static std::atomic<std::uint32_t> epoch_{1},max_frame_{};inline static thread_local unsigned tl_pattern_{};
-    static void note_frame(std::uint32_t frame,bool own) noexcept {
-        FrameTally& t=tally_[frame&7];std::uint32_t tag=t.frame.load(std::memory_order_acquire);
-        if(tag!=frame+1 && t.frame.compare_exchange_strong(tag,frame+1,std::memory_order_acq_rel)) {t.own.store(0,std::memory_order_relaxed);t.zero.store(0,std::memory_order_relaxed);}
-        (own?t.own:t.zero).fetch_add(1,std::memory_order_relaxed);
-    }
-    static std::uint32_t epoch_for(std::uint32_t frame) noexcept { // the engine counter went back (a load): a new epoch
-        std::uint32_t seen=max_frame_.load(std::memory_order_relaxed);
-        if(seen>frame+16) {if(max_frame_.compare_exchange_strong(seen,frame,std::memory_order_relaxed)) epoch_.fetch_add(1,std::memory_order_relaxed);}
-        else while(frame>seen && !max_frame_.compare_exchange_weak(seen,frame,std::memory_order_relaxed)) {}
-        return epoch_.load(std::memory_order_relaxed);
-    }
-    // The eye's two palette slots of `model`, made like the current palette buffer and view (recreated when the model's buffers change).
-    static History* history(ID3D11DeviceContext* c,unsigned eye,unsigned model) noexcept {
-        History& h=history_[eye][model];
-        const auto source=buffers_[model*2].load(std::memory_order_relaxed)^(buffers_[model*2+1].load(std::memory_order_relaxed)<<1);
-        if(h.ready.load(std::memory_order_acquire) && h.source==source) return &h;
-        std::lock_guard<std::mutex> lock(mutex_);
-        if(h.ready.load(std::memory_order_relaxed) && h.source==source) return &h;
-        h.ready.store(false,std::memory_order_relaxed);h.key[0]=0;h.key[1]=0;
-        ID3D11Resource* r{};tl_current_->GetResource(&r);ID3D11Buffer* b{};
-        if(r) {r->QueryInterface(__uuidof(ID3D11Buffer),reinterpret_cast<void**>(&b));r->Release();}
-        if(!b) {failures_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
-        D3D11_BUFFER_DESC d{};b->GetDesc(&d);b->Release();
-        d.Usage=D3D11_USAGE_DEFAULT;d.CPUAccessFlags=0;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};tl_current_->GetDesc(&vd);
-        ID3D11Device* device{};c->GetDevice(&device);bool ok=device!=nullptr;
-        for(unsigned i=0;i<2 && ok;++i) {h.buffer[i].Reset();h.view[i].Reset();ok=SUCCEEDED(device->CreateBuffer(&d,nullptr,&h.buffer[i])) && SUCCEEDED(device->CreateShaderResourceView(h.buffer[i].Get(),&vd,&h.view[i]));}
-        if(device) device->Release();
-        if(!ok) {failures_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
-        h.source=source;h.bytes=d.ByteWidth;h.ready.store(true,std::memory_order_release);
-        return &h;
-    }
+    inline static std::atomic<std::uint32_t> epoch_{1};inline static thread_local unsigned tl_pattern_{};
 
     static unsigned hash(const void* p) noexcept {return static_cast<unsigned>((reinterpret_cast<std::uintptr_t>(p)>>4)*0x9e3779b97f4a7c15ull>>54);}
     static int writes_depth(ID3D11DepthStencilState* s) noexcept { // 1 writes, 0 not, -1 table full
@@ -318,21 +315,25 @@ private:
     // Under mutex_: the shader and states (once), and the rig target for this depth resource (recreated on a new depth/size).
     static bool prepare(ID3D11Device* device,ID3D11Resource* depth,const D3D11_TEXTURE2D_DESC& dd,bool& created) {
         created=false;
-        if(device_!=device) {target_={};ps_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;} // a new device
+        if(device_!=device) {target_={};ps_.Reset();ps_own_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;} // a new device
         if(!made_ && !make_failed_) {
-            static const char src[]="float main(float4 p:SV_Position):SV_Target{return p.z;}";
-            Microsoft::WRL::ComPtr<ID3DBlob> code;
+            // v1179: y = 1 when the draw had this eye's own previous palette and rows (its MV pixels are own motion), else 0
+            static const char src[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,0);}";
+            static const char src_own[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,1);}";
+            Microsoft::WRL::ComPtr<ID3DBlob> code,code_own;
             D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=TRUE;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;
             D3D11_BLEND_DESC bs{};bs.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL; // no blending, every channel
             make_failed_=FAILED(D3DCompile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr)) ||
                 FAILED(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&ps_)) ||
+                FAILED(D3DCompile(src_own,sizeof src_own-1,nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code_own,nullptr)) ||
+                FAILED(device->CreatePixelShader(code_own->GetBufferPointer(),code_own->GetBufferSize(),nullptr,&ps_own_)) ||
                 FAILED(device->CreateDepthStencilState(&ds,&equal_)) || FAILED(device->CreateBlendState(&bs,&blend_));
             made_=!make_failed_;
         }
         if(!made_) return false;
         if(target_.depth==depth && target_.w==dd.Width && target_.h==dd.Height && target_.rtv) return true;
         target_={};
-        D3D11_TEXTURE2D_DESC t{};t.Width=dd.Width;t.Height=dd.Height;t.MipLevels=t.ArraySize=1;t.Format=DXGI_FORMAT_R32_FLOAT;t.SampleDesc.Count=1;
+        D3D11_TEXTURE2D_DESC t{};t.Width=dd.Width;t.Height=dd.Height;t.MipLevels=t.ArraySize=1;t.Format=DXGI_FORMAT_R32G32_FLOAT;t.SampleDesc.Count=1;
         t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;Target n{};
         if(FAILED(device->CreateTexture2D(&t,nullptr,&tex)) || FAILED(device->CreateRenderTargetView(tex.Get(),nullptr,&n.rtv)) ||
@@ -355,7 +356,7 @@ private:
                 ID3D11Device* device{};c->GetDevice(&device);bool created=false;
                 try {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if(device && dd.Width && prepare(device,depth,dd,created)) {rig=target_.rtv.Get();rig->AddRef();ps=ps_;equal=equal_;opaque=blend_;}
+                    if(device && dd.Width && prepare(device,depth,dd,created)) {rig=target_.rtv.Get();rig->AddRef();ps=tl_own_?ps_own_:ps_;equal=equal_;opaque=blend_;}
                 } catch(...) {}
                 if(device) device->Release();
                 if(rig && created) {const float zero[4]{};c->ClearRenderTargetView(rig,zero);}

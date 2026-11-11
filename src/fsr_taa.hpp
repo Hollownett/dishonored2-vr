@@ -93,7 +93,8 @@ public:
     }
     // v1162: rig mask pixels of each eye's last counted mask (read back a few renders late, -1 none yet), renders with a live mask
     // v1163: and the near misses (rig depth present, beyond eps by at most 64 eps: an eps too tight shows here)
-    std::array<std::atomic<std::int64_t>,2> rig_pixels{-1,-1},rig_near_misses{-1,-1};std::atomic<std::uint64_t> rig_live_renders{};
+    std::array<std::atomic<std::int64_t>,2> rig_pixels{-1,-1},rig_near_misses{-1,-1},rig_own_pixels{-1,-1}; // v1179: own-motion (255) pixels
+    std::atomic<std::uint64_t> rig_live_renders{};
     // Present thread, immediate context: picks up finished mask counts (never waits for the GPU).
     void poll_rig_pixels(ID3D11DeviceContext* immediate) noexcept {
         if(!immediate) return;
@@ -104,8 +105,8 @@ public:
             const auto serial=e.rig_count_serial-2;auto& staging=e.rig_count_staging[(serial-1)%e.rig_count_staging.size()];
             D3D11_MAPPED_SUBRESOURCE m{};
             if(!staging.p || FAILED(immediate->Map(staging.p,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m)) || !m.pData) continue;
-            std::uint32_t n[2]{};std::memcpy(n,m.pData,8);immediate->Unmap(staging.p,0);
-            rig_pixels[eye].store(n[0],std::memory_order_relaxed);rig_near_misses[eye].store(n[1],std::memory_order_relaxed);e.rig_read_serial=serial;
+            std::uint32_t n[3]{};std::memcpy(n,m.pData,12);immediate->Unmap(staging.p,0);
+            rig_pixels[eye].store(n[0],std::memory_order_relaxed);rig_near_misses[eye].store(n[1],std::memory_order_relaxed);rig_own_pixels[eye].store(n[2],std::memory_order_relaxed);e.rig_read_serial=serial;
         }
     }
     std::atomic<std::uint64_t> motion_rig_masks{}; // v1162: motion passes that used the rig mask for the arm rule
@@ -1117,8 +1118,9 @@ private:
         e.rig_valid=false;e.rig_live=false;e.rig_motion=false;
         {
             const bool view_render=RigMask::take_view_draws()>0;
-            // v1166/v1167: this exact render's rig MV draws (its receipt names its engine frame), all with the eye's own pair
-            const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed) && job.receipt && !job.receipt->reset && RigMask::take_rig_motion(job.receipt->key.native_counter);
+            // v1179: rig motion validity is per pixel (mask 255 = a draw with the eye's own previous palette and rows); with the feature on,
+            // rig_motion says only that 255 pixels carry own motion (no per-render tally any more)
+            const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed) && job.receipt && !job.receipt->reset;
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rig_depth;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rig_target;
             if(view_render && rig_copy_.p && rig_cb_.p && e.rig_uav.p && e.rig_count_uav.p && e.rig_count_staging[0].p && RigMask::target(depth_resource_.p,rig_depth,rig_target)) {
                 float k[4]{0,0,static_cast<float>(depth_w),static_cast<float>(depth_h)};rig_mask_eps(depth_srv_format_,k[0],k[1]);
@@ -1157,8 +1159,8 @@ private:
                 }
                 // v1162: a live rig mask replaces the 0.5 m arm rule for this render (rig pixels: no motion, the warp's hand layers own them)
                 if(e.rig_live && e.rig_srv.p) {
-                    // v1166: rig pixels keep their motion when this render's rig vectors are the eye's own (no zeroing at all); else zeroed
-                    if(e.rig_motion) {k.proj[2]=0;++motion_rig_moving;} else k.mv_scale[2]=1;
+                    // v1179: rig pixels are zeroed unless the mask says own motion (255) and the rig motion feature is on
+                    k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}
                     ++motion_rig_masks;
                 }
                 if(e.mv_srv.p && motion_pass_.dispatch(c,e.mv_srv.p,e.depth_srv.p,e.motion_uav.p,k,e.rig_live?e.rig_srv.p:nullptr)) {e.motion_valid=true;e.motion_w=depth_w;e.motion_h=depth_h;++motion_passes;}

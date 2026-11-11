@@ -3725,6 +3725,19 @@ static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) 
     const auto before=tracing?skin_row59(model):std::array<float,12>{};const double hash_before=tracing?skin_row_hash(model):0.;
     const bool wrote=image_skin_enabled && image_skin_commit(model);
     const auto copied=original_skin_gpu_upload(model,context);
+    // v1179 (rig_mask.hpp RigMask::skin_copied): the rig models' palette ring rotates here, on the context the engine uploaded on, once per
+    // engine frame (called or not, copied or not: the current wrapper +0x2008 + (+0x1fb2)*0x38 holds this render's palette either way).
+    if(context && d2vr::RigMask::motion.load(std::memory_order_relaxed) && d2vr::RigMask::view.load(std::memory_order_relaxed)) try {
+        const auto m=reinterpret_cast<std::uintptr_t>(model);
+        for(unsigned i=0;i<3;++i) if(image_skin_slots[i].model.load(std::memory_order_relaxed)==m) {
+            signed char index{};std::uintptr_t buffer{};std::uint32_t frame{};
+            ID3D11DeviceContext* d3d=*static_cast<ID3D11DeviceContext**>(context); // 0x2d3c60: Map through *(param)'s vtable +0x70
+            if(read_self(m+0x1fb2,&index,1) && (index==0 || index==1) && read_self(m+0x2008+static_cast<std::uintptr_t>(index)*0x38,&buffer,8) &&
+               d2vr::rig::pointer(buffer) && d3d && read_self(image_base+d2vr::taa_history::frame_counter_rva,&frame,4))
+                d2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame);
+            break;
+        }
+    } catch(...) {}
     if(copied && tracing) if(const auto b=arm_binding_cache.load()) {
         const auto m=reinterpret_cast<std::uintptr_t>(model);
         if(m==b->arms[0].model || m==b->arms[1].model || m==image_skin_slots[2].model.load()) {   // v864: the body's copies too (a 2)
@@ -10418,7 +10431,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
-               << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' // v1162
+               << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
                << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'

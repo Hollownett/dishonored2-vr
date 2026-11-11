@@ -1,28 +1,24 @@
-// v1166 pure check of the rig palette history slots (src/rig_mask.hpp rig_history_slots): one eye's renders every other engine frame read
-// the slot of its own previous render (frame - 2) and write the other; a gap, a reset or the first render reads nothing (zero motion);
-// a second rig draw of the same model in the same render finds the copy done and still reads the previous render. No device.
+// v1179 pure check of the rig palette ring's run rule (src/rig_mask.hpp rig_ring_run / rig_ring_valid): the ring rotates once per engine
+// frame at the GPU skin copy (P <- B <- A <- current), so P holds the render two engine frames back only after three consecutive frames;
+// a second call in the same frame changes nothing; a skipped frame or a restart (~0u) begins a new run. No device.
+// (Replaces the v1166 per-eye slot check: the slots keyed by a draw's classified frame are gone.)
 #include <cstdio>
 #include <cstdint>
 #include "../src/rig_mask.hpp"
 static int failures=0;
 #define CHECK(x) do {if(!(x)) {std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#x);++failures;}} while(0)
 int main() {
-    std::uint64_t key[2]{};const std::uint32_t epoch=1;
-    const auto render=[&](std::uint32_t frame) { // first draw of the model in this render: write, then read
-        const auto s=d2vr::rig_history_slots(key[0],key[1],epoch,frame,2);
-        if(!s.done) key[s.write]=d2vr::rig_history_key(epoch,frame);
-        return s;
-    };
-    auto s=render(10);CHECK(s.read==-1 && !s.done);                 // first render: no own previous
-    s=d2vr::rig_history_slots(key[0],key[1],epoch,10,2);CHECK(s.done && s.read==-1); // second draw, same render
-    s=render(12);CHECK(s.read>=0 && key[s.read]==d2vr::rig_history_key(epoch,10) && key[s.write]==d2vr::rig_history_key(epoch,12)); // reads frame 10, writes 12 into the other slot
-    s=d2vr::rig_history_slots(key[0],key[1],epoch,12,2);CHECK(s.done && key[s.read]==d2vr::rig_history_key(epoch,10));
-    s=render(14);CHECK(s.read>=0 && key[s.read]==d2vr::rig_history_key(epoch,12));
-    s=render(20);CHECK(s.read==-1);                                  // a gap (reset, paired frames): zero motion
-    s=render(22);CHECK(s.read>=0 && key[s.read]==d2vr::rig_history_key(epoch,20));
-    s=d2vr::rig_history_slots(0,0,1,0,2);CHECK(s.read==-1);          // frame 0 never matches an empty slot
-    s=d2vr::rig_history_slots(key[0],key[1],2,24,2);CHECK(s.read==-1); // a new epoch (mode restart, frame counter reset): nothing from before
+    using d2vr::rig_ring_run;using d2vr::rig_ring_valid;
+    unsigned run=rig_ring_run(~0u,0,100);CHECK(run==1 && !rig_ring_valid(run));     // first rotation: only A is real
+    run=rig_ring_run(100,run,100);CHECK(run==1);                                     // same frame again: no rotation, no change
+    run=rig_ring_run(100,run,101);CHECK(run==2 && !rig_ring_valid(run));             // A, B real; P not yet
+    run=rig_ring_run(101,run,102);CHECK(run==3 && rig_ring_valid(run));              // P = frame 100's palette: valid
+    run=rig_ring_run(102,run,103);CHECK(run==4 && rig_ring_valid(run));
+    run=rig_ring_run(103,run,105);CHECK(run==1 && !rig_ring_valid(run));             // frame 104 had no skin copy: start over
+    run=rig_ring_run(~0u,run,106);CHECK(run==1);                                     // a restart (begin_epoch)
+    run=rig_ring_run(5,250,6);CHECK(run==251);run=rig_ring_run(6,255,7);CHECK(run==255); // saturates
+    run=rig_ring_run(10,5,9);CHECK(run==1);                                          // the counter went back (a load)
     if(failures) {std::printf("rig_history_check: %d failure(s)\n",failures);return 1;}
-    std::printf("PASS: rig_history_check (own previous slot, same-render reuse, gaps read nothing)\n");
+    std::printf("PASS: rig_history_check (ring run: three consecutive engine frames, same-frame calls inert, gaps restart)\n");
     return 0;
 }

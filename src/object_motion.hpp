@@ -699,9 +699,10 @@ private:
             bool rows_own=false;
             if(have_view && (affine(view.inv[0],cur) || affine(view.inv[1],cur))) {
                 const auto kind=table_.fix(view.eye,view.frame,cur,prev,2u);
-                // v1167: only this eye's render two frames back (own_last: already its rows; other_last: the chain through the other eye
-                // one frame back). other_now (the other eye in the same frame) cannot exist with one view per frame: never "own".
-                rows_own=kind==PrevMvpTable::own_last || kind==PrevMvpTable::other_last;
+                // v1179: only other_last (the chain through the other eye one frame back, both hops proven by content). The rig is drawn in
+                // every render, so its raw previous rows are always the other eye's: own_last on a rig draw means the draw was labelled with
+                // the wrong render (rows one engine frame old against a palette two frames old: the v1170 ~5000 px renders). Zero instead.
+                rows_own=kind==PrevMvpTable::other_last;
             }
             const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);
             if(!have_view) RigMask::previous_palette(c,-1,newest_frame_.load(std::memory_order_relaxed),false); // zero palette; its render is not valid

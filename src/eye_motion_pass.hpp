@@ -29,7 +29,8 @@ struct EyeMotionConstants {
     float then[16];   // previous NDC -> world point minus the current camera position (homogeneous)
     float size_step[4]; // render width, height; jitter step (UV)
     float proj[4];      // current projection [10], [11]; arm reach (m); on (1) / off (0)
-    float mv_scale[4];  // engine MV -> render UV; [2] v1162: 1 = the rig mask (t2, nonzero = rig) is the arm rule instead of arm reach
+    float mv_scale[4];  // engine MV -> render UV; [2] v1162: 1 = the rig mask (t2, nonzero = rig) is the arm rule instead of arm reach;
+                        // [3] v1179: 1 = rig pixels marked 255 (own previous palette and rows) keep their motion, 254 stay 0
     float other[16];    // v1154: current NDC -> the other eye's clip one Present earlier (its receipt's current render)
     float other_step[4];// v1154: its jitter step (UV), the still bound (px), mover_px; 0 0 0 0 = no other-eye test
 };
@@ -108,7 +109,8 @@ public:
         "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID){"
         "if(any(float2(i.xy)>=sizeStep.xy)) return;"
         "const float d=depthTex.Load(int3(i.xy,0));float4 o=float4(0,0,0,0);"
-        "if(proj.w>0 && d>1e-7 && (mvScale.z>0?rigTex.Load(int3(i.xy,0))==0:proj.y/(d+proj.x)>=proj.z)){"
+        "const uint rig=mvScale.z>0?rigTex.Load(int3(i.xy,0)):0;"
+        "if(proj.w>0 && d>1e-7 && (mvScale.z>0?(rig==0 || (mvScale.w>0 && rig==255)):proj.y/(d+proj.x)>=proj.z)){"
         "const float2 uv=(float2(i.xy)+0.5)/sizeStep.xy;"
         "const float2 puv=uv-mvTex.Load(int3(i.xy,0))*mvScale.xy-sizeStep.zw;"
         "const float4 n=float4(uv.x*2-1,1-uv.y*2,d,1);"

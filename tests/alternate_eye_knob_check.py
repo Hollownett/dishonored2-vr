@@ -208,9 +208,10 @@ assert 'if(!stale_rig_masks || eye>1 || !stale_rig_live_[eye] || stale_rig_frame
 assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fresh_rig.texture) ++stale_rig_one_sided;kept_rig={};fresh_rig={};}' in xr
 assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
 assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
-assert '(mvScale.z>0?rigTex.Load(int3(i.xy,0))==0:proj.y/(d+proj.x)>=proj.z)' in mp
-assert 'const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);' in om and 'rows_own=kind==PrevMvpTable::own_last || kind==PrevMvpTable::other_last;' in om and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
-assert 'restore_t0(); // v1166' in rig and 'if(e.rig_motion) {k.proj[2]=0;++motion_rig_moving;} else k.mv_scale[2]=1;' in fsr
+assert '(mvScale.z>0?(rig==0 || (mvScale.w>0 && rig==255)):proj.y/(d+proj.x)>=proj.z)' in mp  # v1179: 255 = own motion, 254 = rig without
+assert 'const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);' in om and 'rows_own=kind==PrevMvpTable::other_last;' in om and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
+assert 'restore_t0(); // v1166' in rig and 'k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}' in fsr
+assert 'd2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame);' in probe and 'o[i.xy]=own?255:rig?254:0;' in rig  # v1179 ring + per-pixel validity
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
 assert 'ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;' in rig and 'targets(c,rtv_count,rtvs.data(),dsv);' in rig
 print('PASS: v1163 rig mask routing (knob, one-view rig draws replayed, mask at the copy, both-or-none masks, motion arm rule, raw rig rows, status)')
