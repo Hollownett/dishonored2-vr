@@ -6678,7 +6678,13 @@ void publish_native_hud_art(UINT64 now) {
             // v1141 (review video: the kill/choke hint "appears and disappears" while pointing or swinging at the victim): the game withdraws its
             // takedown hint whenever its camera-cone sensor flickers. A takedown art with NO hint drawn now is kept for the hold while the mod's
             // held offer (takedown_prompt) is still on the same NPC; another hint drawn in the slot replaces it as before.
-            const bool takedown_gap=slot==d2vr::takedown_capture_slot && !live_scope && takedown_prompt(now).has_value();
+            // v1142: the capture snapshot keeps its last image with no age limit, so "no hint drawn now" is never !live_scope (v1141's test:
+            // takedown_gap_holds stayed 0 and the art went 250 ms after the hint). The gap is: the held offer is still on the NPC this art
+            // was captured for, and no fresh capture of a DIFFERENT element owns the slot.
+            const auto take_gap=slot==d2vr::takedown_capture_slot && c.texture?takedown_prompt(now):std::nullopt;
+            const bool takedown_gap=take_gap && c.child.target.object==take_gap->identity.object && c.child.target.generation==take_gap->identity.generation &&
+                !same_live && (!live_scope || d2vr::native_hud_child_same_element(live_scope.child,c.child) ||
+                               !d2vr::NativeHudChildDraw::scope_current(live_scope.child,game_xr->pose_epoch(),now));
             if(native_prompt_slot(slot) && c.texture && (takedown_gap || (live_scope && d2vr::native_hud_child_same_element(live_scope.child,c.child) &&
                (same_live || (d2vr::NativeHudChildDraw::scope_current(c.child,game_xr->pose_epoch(),now) &&
                (!c.child.retained_entry || d2vr::native_prompt_entry::refresh(read_self,image_base,*c.child.retained_entry)))))) &&
@@ -12805,7 +12811,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             const auto body=shoulder_place_body.load();const auto hand=shoulder_place_hand.load();const auto armed=shoulder_place_tick.load();
                                             d2vr::ShoulderCarryIn ci;ci.enabled=shoulder_native_on && !legacy_corpse_carry && logic==2 && controls_focus;ci.armed=body&&armed&&hand<2;
                                             ci.body=body;ci.now=now_c;ci.armed_ms=armed;ci.carrying=carrying;
-                                            if(ci.armed && now_c>=armed && now_c-armed<d2vr::shoulder_carry_window_ms) {   // the handoff window only: a docked body left on the shoulder costs nothing after it
+                                            if(ci.armed && now_c>=armed && now_c-armed<d2vr::shoulder_handoff_ms) {   // the handoff window only: a docked body left on the shoulder costs nothing after it
                                                 ci.target=native_interaction_aim.target_owner(static_cast<int>(hand),now_c);
                                                 ci.loot=!carrying && native_interaction_aim.loot_offered(body,now_c);
                                                 const auto offer=native_interaction_aim.loot_offer_state(static_cast<int>(hand));
@@ -13566,7 +13572,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     // the game's Use is the carry press, and it must act on that hand's body, not on whatever the other hand points at.
                                     const auto shoulder_body=shoulder_place_body.load();const auto shoulder_at=shoulder_place_tick.load();
                                     const auto shoulder_claim=[&](unsigned h) {return shoulder_body && shoulder_at && shoulder_press_hold && shoulder_place_hand.load()==h &&
-                                        controls_now>=shoulder_at && controls_now-shoulder_at<d2vr::shoulder_carry_window_ms;};
+                                        controls_now>=shoulder_at && controls_now-shoulder_at<d2vr::shoulder_handoff_ms;};
                                     const auto claims=[&](unsigned h) {return (query_input[h]>.55f || gazing(h) || pending_claim[h] || shoulder_claim(h)) && !(physical_grab_requested && native_grab.holding(h)) &&
                                         controller_aim_requested;};
                                     std::array<bool,2> claimants{claims(0),claims(1)};
@@ -14215,7 +14221,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     // It presses only while the interaction query is locked to the placing hand (its body is then the game's Use target).
                                     const auto shoulder_hand=shoulder_place_hand.load();const auto shoulder_body_now=shoulder_place_body.load();const auto shoulder_at_now=shoulder_place_tick.load();
                                     const bool shoulder_press=shoulder_press_hold && shoulder_hand<2 && shoulder_body_now && shoulder_at_now &&
-                                        use_now>=shoulder_at_now && use_now-shoulder_at_now<d2vr::shoulder_carry_window_ms &&
+                                        use_now>=shoulder_at_now && use_now-shoulder_at_now<d2vr::shoulder_handoff_ms &&
                                         native_lock_hand==static_cast<int>(shoulder_hand) &&
                                         native_lock_at && use_now>=native_lock_at && use_now-native_lock_at>=50;
                                     if(shoulder_press) input.x=true;

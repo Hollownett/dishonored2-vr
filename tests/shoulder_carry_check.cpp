@@ -8,13 +8,24 @@ ShoulderCarryIn in(bool armed,std::uintptr_t body,std::uintptr_t target,bool loo
 }
 }
 int main() {
-    {   // A body whose Loot action is still offered is never pressed: the game's Use on that body is its Loot, not its Carry.
-        // The physical shoulder keeps the body and the status counts the reason; looting it first clears the offer.
+    {   // v1142: a body whose Loot is offered is looted by a TAP (the engine's primary action), never a held Use; once the offer
+        // clears the held Use carries it, with a fresh window. On the shoulder = carried, looted or not.
         ShoulderCarryTrigger t;
-        const auto o=t.update(in(true,0x10,0x10,true,false,1000,1000));
-        assert(!o.press && o.loot_blocked && o.presses==0);
-        assert(!t.update(in(true,0x10,0x10,true,false,1500,1000)).loot_blocked);   // the notice is an edge, counted once
-        assert(!t.update(in(true,0x10,0x10,true,false,2500,1000)).press);          // and never becomes a press
+        auto o=t.update(in(true,0x10,0x10,true,false,1000,1000));assert(o.press && t.loot_taps()==1 && !o.loot_blocked);
+        assert(t.update(in(true,0x10,0x10,true,false,1100,1000)).press);                       // the tap is held its 150 ms
+        assert(!t.update(in(true,0x10,0x10,true,false,1000+shoulder_loot_tap_ms,1000)).press); // then released
+        assert(!t.update(in(true,0x10,0x10,true,false,1300,1000)).press);                      // the offer gets time to clear
+        o=t.update(in(true,0x10,0x10,false,false,1400,1000));assert(o.press && o.presses==1);  // looted: the carry hold starts
+        assert(t.update(in(true,0x10,0x10,false,false,2000,1000)).press);                      // held (the carry's own latency)
+        assert(t.update(in(true,0x10,0x10,false,false,2700,1000)).press);                      // window restarted at the loot (1400 + 1500)
+    }
+    {   // Loot that never clears: two taps at most, then the physical shoulder keeps it (loot_blocked once), never a held press.
+        ShoulderCarryTrigger t;unsigned presses=0;bool blocked=false;
+        for(std::uint64_t now=1000;now<2600;now+=10) {const auto o=t.update(in(true,0x10,0x10,true,false,now,1000));presses+=o.press;blocked|=o.loot_blocked;}
+        assert(t.loot_taps()==shoulder_loot_max_taps && blocked && presses<=shoulder_loot_max_taps*(shoulder_loot_tap_ms/10+1));
+    }
+    {   // A tap needs the hand's own target on the body (a Use elsewhere would loot or open something else).
+        ShoulderCarryTrigger t;assert(!t.update(in(true,0x10,0x20,true,false,1000,1000)).press && t.loot_taps()==0);
     }
     {   // Knob off (build/no-shoulder-carry, build/no-shoulder-native) or the legacy corpse carry: nothing at all.
         ShoulderCarryTrigger t;auto i=in(true,0x10,0x10,false,false,1000,1000);i.enabled=false;
