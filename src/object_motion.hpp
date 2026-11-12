@@ -266,7 +266,8 @@ public:
             +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]"
             +",\"view_mode\":\""+(alt_view_heuristic.load()?"heuristic":"certain")+"\",\"certainty\":{"+[] {std::string o; // v1199: per consumer [certain, fell back]
                 static constexpr const char* names[cert_consumers]{"rig_target","placement","previous_rows","held_mask"};
-                for(unsigned k=0;k<cert_consumers;++k) o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+']';
+                for(unsigned k=0;k<cert_consumers;++k) {o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+','+std::to_string(alt_cert_[k][2].load())+']';
+                    o+=",\""+std::string(names[k])+"_fallback_why\":[";for(unsigned w=0;w<5;++w) o+=(w?",":"")+std::to_string(alt_cert_why_[k][w].load());o+=']';}
                 return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"],\"content\":"+content_json()+"}}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
@@ -330,8 +331,17 @@ public:
     inline static std::atomic<bool> alt_view_heuristic{false}; // v1199 knob build/alt-view-heuristic: the v1197 timing rules instead (A/B only)
     // v1199 status certainty: per consumer, draws it handled with a certain view (or, rig target: both hypothesis slices retargeted) / fell back
     enum CertConsumer : unsigned {cert_rig_target,cert_placement,cert_previous_rows,cert_held_mask,cert_consumers};
-    inline static std::array<std::array<std::atomic<std::uint64_t>,2>,cert_consumers> alt_cert_{};
-    static void certainty(CertConsumer k,bool certain) noexcept {alt_cert_[k][certain?0:1].fetch_add(1,std::memory_order_relaxed);}
+    // v1201: [certain, fell back, not applicable]; per consumer the fallbacks by the draw's content outcome (tl_content_why_: 0 not tested,
+    // 1 ambiguous across eyes, 2 none fits, 3 another pass's view, 4 no candidates)
+    enum CertOutcome : unsigned {cert_certain,cert_fallback,cert_na,cert_outcomes};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,cert_outcomes>,cert_consumers> alt_cert_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,5>,cert_consumers> alt_cert_why_{};
+    inline static thread_local unsigned tl_content_why_{};
+    static void certainty(CertConsumer k,CertOutcome o) noexcept {
+        alt_cert_[k][o].fetch_add(1,std::memory_order_relaxed);
+        if(o==cert_fallback) alt_cert_why_[k][tl_content_why_<5?tl_content_why_:0].fetch_add(1,std::memory_order_relaxed);
+    }
+    static void certainty(CertConsumer k,bool certain) noexcept {certainty(k,certain?cert_certain:cert_fallback);}
     // v1199: certain draws whose eye's latest published Setup VP equals their own view's VP (agree) / not (the rig target's hypothesis slice
     // for that eye would have used another render's E: must stay 0)
     inline static std::array<std::atomic<std::uint64_t>,2> alt_hyp_{};
@@ -681,36 +691,42 @@ private:
     }
     // Tolerances (knob build/alt-view-content-tol: "<fit> <ratio> <floor>"), outcome counters and score histograms (log10 decades -9..0).
     inline static std::atomic<double> content_fit_{1e-4},content_ratio_{4.0},content_floor_{2e-6};
-    enum ContentOutcome : unsigned {content_certain,content_ambiguous,content_none_fit,content_other_pass,content_no_candidates,content_outcomes};
+    enum ContentOutcome : unsigned {content_certain,content_ambiguous,content_none_fit,content_other_pass,content_no_candidates,content_tie_same_eye,content_outcomes};
     inline static std::array<std::atomic<std::uint64_t>,content_outcomes> content_outcome_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,11>,2> content_hist_{}; // [0] best, [1] second best
-    inline static std::array<std::atomic<std::uint64_t>,2> content_tick_{},content_vs_job_{}; // tick: picked the newest of its eye / an older one; vs the job-b1 view: agree / disagree
+    inline static std::array<std::atomic<std::uint64_t>,2> content_tick_{}; // tick: picked the newest of its eye / an older one
+    // v1201: content vs the v1199 same-job b1 view: agree, other eye, same eye and content's render newer, same eye and content's older
+    inline static std::array<std::atomic<std::uint64_t>,4> content_vs_job_{};
     static unsigned decade(double x) noexcept {if(!(x>0)) return 0;const int d=static_cast<int>(std::floor(std::log10(x)))+10;return static_cast<unsigned>(std::clamp(d,0,10));}
     // The view this draw's rows were built with, by content; false = ambiguous / not this form (counted). `rows`: the draw's engine rows.
     static bool content_view(const float* rows,View& out) noexcept {
         if(const auto source=pass_source_.load(std::memory_order_relaxed)) { // a pass of another view (shadow, light): not this test's form
             const auto v=source().view;const auto alt=alt_view_.load(std::memory_order_relaxed);
-            if(v && alt && v!=alt) {content_outcome_[content_other_pass].fetch_add(1,std::memory_order_relaxed);return false;}
+            if(v && alt && v!=alt) {content_outcome_[content_other_pass].fetch_add(1,std::memory_order_relaxed);tl_content_why_=3;return false;}
         }
         refresh_candidates();
-        if(tl_cand_n_<1) {content_outcome_[content_no_candidates].fetch_add(1,std::memory_order_relaxed);return false;}
-        double shear[8]{};for(int i=0;i<tl_cand_n_;++i) shear[i]=rows_shear(tl_cand_[static_cast<std::size_t>(i)].p,rows);
-        int second=-1;
-        const int pick=pick_by_shear(shear,tl_cand_n_,content_fit_.load(std::memory_order_relaxed),content_ratio_.load(std::memory_order_relaxed),content_floor_.load(std::memory_order_relaxed),second);
-        int best=pick;if(best<0) {best=0;for(int i=1;i<tl_cand_n_;++i) if(shear[i]<shear[best]) best=i;}
+        if(tl_cand_n_<1) {content_outcome_[content_no_candidates].fetch_add(1,std::memory_order_relaxed);tl_content_why_=4;return false;}
+        double shear[8]{};unsigned eyes[8]{};std::uint32_t frames[8]{};
+        for(int i=0;i<tl_cand_n_;++i) {const auto& c=tl_cand_[static_cast<std::size_t>(i)];shear[i]=rows_shear(c.p,rows);eyes[i]=c.view.eye;frames[i]=c.view.frame;}
+        bool tied=false;
+        const int pick=pick_by_shear_eyes(shear,eyes,frames,tl_cand_n_,content_fit_.load(std::memory_order_relaxed),content_ratio_.load(std::memory_order_relaxed),content_floor_.load(std::memory_order_relaxed),tied);
+        int best=0,second=-1;for(int i=1;i<tl_cand_n_;++i) if(shear[i]<shear[best]) best=i;
+        for(int i=0;i<tl_cand_n_;++i) if(i!=best && eyes[i]!=eyes[best] && (second<0 || shear[i]<shear[second])) second=i; // the best of the OTHER eye
         content_hist_[0][decade(shear[best])].fetch_add(1,std::memory_order_relaxed);
         if(second>=0) content_hist_[1][decade(shear[second])].fetch_add(1,std::memory_order_relaxed);
-        if(pick<0) {content_outcome_[pick==-1?content_none_fit:content_ambiguous].fetch_add(1,std::memory_order_relaxed);return false;}
-        out=tl_cand_[static_cast<std::size_t>(pick)].view;content_outcome_[content_certain].fetch_add(1,std::memory_order_relaxed);
+        if(pick<0) {content_outcome_[pick==-1?content_none_fit:content_ambiguous].fetch_add(1,std::memory_order_relaxed);tl_content_why_=pick==-1?2u:1u;return false;}
+        out=tl_cand_[static_cast<std::size_t>(pick)].view;content_outcome_[tied?content_tie_same_eye:content_certain].fetch_add(1,std::memory_order_relaxed);
         bool newest=true;for(int i=0;i<tl_cand_n_;++i) if(tl_cand_[static_cast<std::size_t>(i)].view.eye==out.eye && tl_cand_[static_cast<std::size_t>(i)].view.frame>out.frame) newest=false;
         content_tick_[newest?0:1].fetch_add(1,std::memory_order_relaxed);
         return true;
     }
     static std::string content_json() {
         std::string o="{\"outcome\":{\"certain\":"+std::to_string(content_outcome_[0].load())+",\"ambiguous\":"+std::to_string(content_outcome_[1].load())
-            +",\"none_fit\":"+std::to_string(content_outcome_[2].load())+",\"other_pass\":"+std::to_string(content_outcome_[3].load())+",\"no_candidates\":"+std::to_string(content_outcome_[4].load())+"}";
+            +",\"none_fit\":"+std::to_string(content_outcome_[2].load())+",\"other_pass\":"+std::to_string(content_outcome_[3].load())+",\"no_candidates\":"+std::to_string(content_outcome_[4].load())
+            +",\"certain_same_eye_tie\":"+std::to_string(content_outcome_[5].load())+"}";
         for(unsigned h=0;h<2;++h) {o+=h?",\"second_log10\":[":",\"best_log10\":[";for(unsigned k=0;k<11;++k) o+=(k?",":"")+std::to_string(content_hist_[h][k].load());o+="]";}
-        o+=",\"tick\":["+std::to_string(content_tick_[0].load())+','+std::to_string(content_tick_[1].load())+"],\"vs_job\":["+std::to_string(content_vs_job_[0].load())+','+std::to_string(content_vs_job_[1].load())+"]";
+        o+=",\"tick\":["+std::to_string(content_tick_[0].load())+','+std::to_string(content_tick_[1].load())+"],\"vs_job\":["+std::to_string(content_vs_job_[0].load())+','+std::to_string(content_vs_job_[1].load())
+            +','+std::to_string(content_vs_job_[2].load())+','+std::to_string(content_vs_job_[3].load())+"]";
         o+=",\"tol\":["+std::to_string(content_fit_.load())+','+std::to_string(content_ratio_.load())+','+std::to_string(content_floor_.load())+"]}";
         return o;
     }
@@ -775,10 +791,11 @@ private:
             std::uint64_t job=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) job=source().job;
             const bool job_certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);
             // v1200: by the rows' content (the VP they were built with); the same-job b1 rule stays as a cross-check and a fallback
+            tl_content_why_=0;
             const bool by_content=rows && content_view(rows,out);
-            if(by_content && job_certain) content_vs_job_[out.frame==s.view.frame && out.eye==s.view.eye?0:1].fetch_add(1,std::memory_order_relaxed);
-            if(!by_content && job_certain) out=s.view;
-            const bool certain=by_content || job_certain;
+            // v1201: the same-job b1 view (v1199) is only compared (v1200 sim: it disagreed with content in 60 % of the draws both named)
+            if(by_content && job_certain) content_vs_job_[out.eye!=s.view.eye?1u:out.frame==s.view.frame?0u:out.frame>s.view.frame?2u:3u].fetch_add(1,std::memory_order_relaxed);
+            const bool certain=by_content;
             tl_view_src_=certain?6u:7u;alt_view_src_[tl_view_src_].fetch_add(1,std::memory_order_relaxed);
             return certain;
         }
@@ -868,7 +885,10 @@ private:
             float zn[4]{};const unsigned e=latest_eye_.load(std::memory_order_relaxed)&1u;for(unsigned k=0;k<4;++k) zn[k]=eye_z_[e][k].load(std::memory_order_relaxed);
             early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);
         }
-        const bool have_view=current_view(s,view,early_ok?early:nullptr);
+        // v1201: only draws a consumer can use are tested: previous rows, near (held / placement), rig (rig motion, rig target)
+        const float near_w0=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
+        const bool content_wanted=early_ok && (has_previous(s.layout,sh->size) || (early[15]>0.01f && early[15]<near_w0) || RigMask::draw_is_rig());
+        const bool have_view=current_view(s,view,content_wanted?early:nullptr);
         // The pass this draw is recorded in, when build/native-gpu-timing or build/shadow-share (or the weapon placement itself, which
         // installs the pass map) is on: its id and the eye its view names. A v1101 pass job's view is one of the eye views for a view pass.
         int pass=-1,pass_eye=-1;
@@ -928,14 +948,17 @@ private:
             }
             const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);
             if(have_view) view_use(use_rig_motion);
-            certainty(cert_previous_rows,have_view); // v1199: no certain view = zero motion (prev = cur, this render's palette)
+            certainty(cert_previous_rows,have_view?cert_certain:tl_content_why_==3?cert_na:cert_fallback); // v1199: no certain view = zero motion (prev = cur, this render's palette)
             if(!have_view) RigMask::previous_palette(c,-1,newest_frame_.load(std::memory_order_relaxed),false); // zero palette; its render is not valid
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
             if(!own) std::memcpy(prev,cur,64);
             return bind_pool(c,s,*sh,nullptr,prev);
         }
         // v1191: one-view frames: the held weapon/prop placed in this render's drawn hand, previous rows from this eye's previous render
-        if(near_draw && one_view_place && !have_view && alt) certainty(cert_placement,false); // v1199: uncertain: the engine's pose, no placement
+        // v1201: a placement candidate = a near draw matching a held thing's frame under either eye's latest view (weapons, copies, props);
+        // other near draws (the body, scenery) are not applicable
+        const auto held_any=[&] {for(unsigned h=0;h<2;++h) {rig_target::M4 e{};float vp[16]{};if(rig_target::book().latest_of(h,e,vp) && held_match(vp,cur)) return true;}return false;};
+        if(near_draw && one_view_place && !have_view && alt) certainty(cert_placement,held_any()?cert_fallback:cert_na); // v1199: uncertain: the engine's pose
         if(near_draw && one_view_place && have_view) {
             rig_target::M4 prev_vp{};
             if(rig_target::book().find_prev(view.vp,prev_vp)) {
@@ -949,7 +972,8 @@ private:
                     if(!bind_pool(c,s,*sh,placed,have_prev?placed_prev:nullptr)) return false;
                     count(view.eye?fixed_r:fixed_l);return true;
                 }
-            } else alt_place_no_view_.fetch_add(1,std::memory_order_relaxed);
+                certainty(cert_placement,cert_na); // v1201: certain view, not a held thing's part
+            } else {alt_place_no_view_.fetch_add(1,std::memory_order_relaxed);certainty(cert_placement,held_any()?cert_fallback:cert_na);}
         }
         if(near_draw && !alt && weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);
@@ -997,7 +1021,7 @@ private:
         }
         // Not a placed weapon draw: the general per-eye previous-row correction (unchanged), which needs a classified view and this
         // draw's own previous rows.
-        if(!have_view) {count(untagged);if(alt) {alt_untagged_.fetch_add(1,std::memory_order_relaxed);if(have_prev) certainty(cert_previous_rows,false);}return false;}
+        if(!have_view) {count(untagged);if(alt) {alt_untagged_.fetch_add(1,std::memory_order_relaxed);if(have_prev) certainty(cert_previous_rows,tl_content_why_==3?cert_na:cert_fallback);}return false;} // v1201: another pass's view (shadow): n/a
         if(!have_prev) {count(no_rows);return false;}
         // The current rows must be this view's: a stale shadow or another view's constants never are.
         if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);return false;}

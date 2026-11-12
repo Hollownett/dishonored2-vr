@@ -92,6 +92,20 @@ inline int pick_by_shear(const double* shear,int n,double fit,double ratio,doubl
     if(second>=0 && !(shear[second]>=ratio*shear[best] && shear[second]>=floor)) return -2;
     return best;
 }
+// v1201 (sim v1200: ambiguous ~= certain): the candidates that tie with the best (not >= ratio * best, or under floor) are almost always
+// renders of the SAME eye with identical x/y projection terms (jitter repeating; held pose). A tie inside one eye still names the eye, and
+// the newest render of that eye is the tick (its next render is two renders away). Only a tie across eyes is ambiguous (-2); -1 none fits.
+inline int pick_by_shear_eyes(const double* shear,const unsigned* eye,const std::uint32_t* frame,int n,double fit,double ratio,double floor,bool& tied) noexcept {
+    tied=false;int best=-1;
+    for(int i=0;i<n;++i) if(best<0 || shear[i]<shear[best]) best=i;
+    if(best<0 || !(shear[best]<=fit)) return -1;
+    int pick=best;
+    for(int i=0;i<n;++i) if(i!=best && !(shear[i]>=ratio*shear[best] && shear[i]>=floor)) {
+        if(eye[i]!=eye[best]) return -2;
+        tied=true;if(frame[i]>frame[pick]) pick=i;
+    }
+    return pick;
+}
 inline bool view_certain(bool own_valid,const void* own_buffer,const void* bound,std::uint64_t own_job,std::uint64_t job,bool immediate) noexcept {
     if(!own_valid || !own_buffer || own_buffer!=bound) return false;
     return immediate || (job!=0 && own_job==job);

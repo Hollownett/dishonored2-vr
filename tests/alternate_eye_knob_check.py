@@ -331,10 +331,16 @@ print('PASS: v1199 certain one-view draw views, two-slice rig target, afw2 rig_t
 
 # v1200: the one-view draw's view by its rows' content (buffer_views.hpp rows_shear/pick_by_shear against every recorded eye view), the
 # Setup-end final snapshot feeds the candidates; content status under alternate_eye.object_motion.content; build/alt-view-content-tol
-assert 'const bool by_content=rows && content_view(rows,out);' in om
-assert 'early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);' in om and 'const bool have_view=current_view(s,view,early_ok?early:nullptr);' in om
+assert 'const bool by_content=rows && content_view(rows,out);' in om and 'const bool certain=by_content;' in om  # v1201: content only
+assert 'early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);' in om and 'const bool have_view=current_view(s,view,content_wanted?early:nullptr);' in om
 assert 'd2vr::ObjectMotion::note_setup_final(reinterpret_cast<std::uintptr_t>(view));' in probe
 assert 'L"alt-view-content-tol"' in om and '\\"content\\":"+content_json()' in om
 bv = (root / 'src' / 'buffer_views.hpp').read_text(encoding='utf-8')
 assert 'inline double rows_shear(const ProjectionXY& p,const float* rows) noexcept {' in bv and 'inline int pick_by_shear(' in bv
 print('PASS: v1200 one-view draw views by content (rows vs each recorded render projection)')
+
+# v1201: same-eye ties name the newest render (pick_by_shear_eyes), cross-eye ties ambiguous; certainty [certain, fell back, n/a] + why
+assert 'const int pick=pick_by_shear_eyes(shear,eyes,frames,tl_cand_n_,' in om and 'inline int pick_by_shear_eyes(' in bv
+assert 'enum CertOutcome : unsigned {cert_certain,cert_fallback,cert_na,cert_outcomes};' in om and '_fallback_why' in om
+assert 'certainty(cert_placement,held_any()?cert_fallback:cert_na);' in om
+print('PASS: v1201 same-eye ties, content-only certainty, applicable-draw certainty counts')

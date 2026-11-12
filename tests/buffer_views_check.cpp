@@ -100,6 +100,13 @@ int main() {
       rig_target::M4 m=rot(.4,1.1,2.0);float rows[16];for(int k=0;k<16;++k) rows[k]=static_cast<float>(mul4(vm,m)[k]);
       double sh[R];for(int i=0;i<R;++i) sh[i]=rows_shear(pr[i],rows);int second=-1;
       std::printf("view-model rows: best shear %.3g -> pick %d\n",*std::min_element(sh,sh+R),pick_by_shear(sh,R,1e-4,4.0,2e-6,second));}
+     // v1201 ties: renders 0 and 2 (eye 0) share one projection (repeated jitter), render 1 (eye 1) differs: a draw of render 2 names eye 0
+     // and its newest render; if eye 1's projection equals too, it is ambiguous
+     {const unsigned eyes[3]{0,1,0};const std::uint32_t frames[3]{10,11,12};bool tied=false;
+      const double same_eye[3]{1e-7,3e-4,1.2e-7};CHECK(pick_by_shear_eyes(same_eye,eyes,frames,3,1e-4,4.0,2e-6,tied)==2 && tied);
+      const double cross[3]{1e-7,1.1e-7,3e-4};CHECK(pick_by_shear_eyes(cross,eyes,frames,3,1e-4,4.0,2e-6,tied)==-2);
+      const double clear[3]{3e-4,1e-7,4e-4};CHECK(pick_by_shear_eyes(clear,eyes,frames,3,1e-4,4.0,2e-6,tied)==1 && !tied);
+      const double nofit[3]{.3,.2,.4};CHECK(pick_by_shear_eyes(nofit,eyes,frames,3,1e-4,4.0,2e-6,tied)==-1);}
     }
     // eviction keeps the newest buffers
     int more[4]{};for(auto& b:more) views.store(&b,View{});CHECK(!views.find(&b_r,got) && views.find(&more[3],got));
