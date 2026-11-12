@@ -65,4 +65,10 @@ inline Refusal replay_refusal(const Record& r,std::uintptr_t view,std::uint64_t 
     for(std::size_t i=0;i<3;++i) if(prepared_position[i]!=record_engine_position[i]) return Refusal::prepared_moved;
     return Refusal::none;
 }
+// v1248 (review of v1246: 0x366590 returns early when the main view's byte +0x48 is set, without clearing +0x88, so the hook ran every frame
+// with no lens pass while the replay and the alternate-eye paired hold followed it): a lens pass ran this frame only when its Begin happened
+// inside the hook. The frame of the last real lens Begin is kept; the paired hold expires hold_frames after it.
+inline constexpr std::uint64_t hold_frames=2;
+inline std::uint64_t lens_pass_frame(bool began,std::uint64_t frame,std::uint64_t last) noexcept {return began?frame:last;}
+inline bool lens_paired_hold(std::uint64_t last,std::uint64_t frame) noexcept {return last && frame<=last+hold_frames;}
 } // namespace d2vr::secondary_view

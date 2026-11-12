@@ -1924,14 +1924,14 @@ static bool lens_guard_enabled=true;
 using LensRenderFn=void (__fastcall*)(void*,void*);
 using LensOwnerFn=std::uintptr_t (__fastcall*)(void*,void*,void*,void*);
 static LensRenderFn original_lens_render{};static LensOwnerFn original_lens_owner{};
-static std::atomic<bool> lens_active{false},lens_replaying{false};static std::atomic<std::uintptr_t> lens_view{0};
+static std::atomic<bool> lens_active{false},lens_replaying{false},lens_began{false};static std::atomic<std::uintptr_t> lens_view{0}; // v1248 lens_began: a lens Begin inside the hook
 static std::array<d2vr::secondary_view::Record,2> lens_records{}; // render thread (Setup hook, secondary render hook)
 static std::array<std::byte,d2vr::secondary_view::window_size> head_written_window{}; // the window the last head write put in the view
 static std::mutex lens_camera_mutex;
 static struct LensCamera {bool valid{},follows{};std::array<float,3> position{},translation{};std::array<float,9> basis{};UINT64 frame{};} lens_camera; // game thread -> render thread
 static struct LensStats {
     std::atomic<UINT64> frames{},owner_cameras{},setups{},camera_follow{},camera_own{},camera_none{},replays{},replay_exact{},replay_differs{},post_in{},post_after{},
-        taa_skips{},resets{},alt_held{},last_frame{};
+        taa_skips{},resets{},alt_held{},last_frame{},no_begin{};   // v1248 no_begin: hook entries whose engine pass returned early (no lens Begin)
     std::array<std::atomic<UINT64>,5> begins{},refused{};std::array<std::atomic<UINT64>,3> borrowed{}; // Kind order; Refusal order; [eye0 view, eye1 view, other]
     std::atomic<bool> eye_after{false};std::atomic<int> state{0};
 } lens_stats;
@@ -1978,7 +1978,7 @@ void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
         const auto kind=d2vr::secondary_view::classify(address,lens_active.load(),lens_view.load(),d2vr::PostTonemapPass::eye_views[0].load(),d2vr::PostTonemapPass::eye_views[1].load());
         if(capturing.load() && lens_guard_enabled) ++lens_stats.begins[static_cast<std::size_t>(kind)];
         if(kind==d2vr::secondary_view::Kind::secondary) {
-            view_trace("lens_begin",view,index,-1,_ReturnAddress());
+            view_trace("lens_begin",view,index,-1,_ReturnAddress());lens_began=true;
             letterbox_gate.begin_pass();
             original_eye_begin(backend,world,view,index);
             return;
@@ -2277,7 +2277,7 @@ static LONG diagnostic_separation{};
 static std::atomic<int> mono_view_state{0};
 // v1244 unpaired gameplay (Timepiece black screen): frames shown flat instead of black, runs that went flat, and why a stereo gameplay frame had no
 // pair [views!=2, no eye-0 begin matched, pair order invalid, eye 1 never begun, left copy missing]
-static std::atomic<UINT64> unpaired_flat_frames{},unpaired_flat_runs{};static std::array<std::atomic<UINT64>,5> unpaired_reason{};static unsigned unpaired_gameplay_run{};static bool unpaired_flat_last{};
+static std::atomic<UINT64> unpaired_flat_frames{},unpaired_flat_runs{};static std::array<std::atomic<UINT64>,5> unpaired_reason{};static d2vr::UnpairedFlat unpaired_gameplay{};static bool unpaired_flat_last{};
 static std::atomic<UINT64> mono_eye_frame{0},mono_view_frames{0},mono_view_misses{0},mono_view_unexpected{0}; // eye-0 begin matched for Present N; frames presented; consecutive misses; unexpected 2-view frames
 void mono_view_fallback(const char* reason) noexcept;
 // build/alternate-eye (plan F task 1, opt-in): on top of the mono-view path the engine renders ONE eye per displayed frame, alternating by frame
@@ -6697,12 +6697,15 @@ void __fastcall lens_render_hook(void* renderer,void* entry) {
     if(!lens_guard_enabled || !capturing.load() || !stereo_active.load() || !renderer || !read_self(at+0x88,&scene,8) || !scene || !read_self(at+0x90,&view,8) || !view) {
         original_lens_render(renderer,entry);return;
     }
-    ++lens_stats.frames;lens_stats.last_frame=frames.load();lens_stats.eye_after=false;
+    ++lens_stats.frames;lens_stats.eye_after=false;lens_began=false;
     {const auto l=d2vr::PostTonemapPass::eye_views[0].load(),r=d2vr::PostTonemapPass::eye_views[1].load();++lens_stats.borrowed[view==l?0:(view==r && l!=r)?1:2];}
     lens_view=view;lens_active=true;
     original_lens_render(renderer,entry);
     lens_active=false;
-    lens_replay(view);
+    // v1248: only a pass whose Begin ran is a lens pass (the engine returns early on main view +0x48 with +0x88 still set): no replay, no hold
+    const bool began=lens_began.exchange(false);
+    lens_stats.last_frame=d2vr::secondary_view::lens_pass_frame(began,frames.load(),lens_stats.last_frame.load());
+    if(began) lens_replay(view);else ++lens_stats.no_begin;
 }
 // The Timepiece (0x44d230, game thread): after it ran, its own camera (+0x150, the def it copies into the secondary view) is this frame's
 // other-timeline camera. Kept with its translation from the engine camera (the prepared eyes' centre) and whether it turns with it.
@@ -6740,7 +6743,7 @@ static std::string lens_status_json() {
      <<",\"replays\":"<<lens_stats.replays.load()<<",\"replay_exact\":"<<lens_stats.replay_exact.load()<<",\"replay_differs\":"<<lens_stats.replay_differs.load()
      <<",\"replay_refused_none_norecord_stale_alloc_moved\":"<<list(lens_stats.refused)
      <<",\"post_passes_in_after\":["<<lens_stats.post_in.load()<<','<<lens_stats.post_after.load()<<"],\"taa_skips\":"<<d2vr::NativeTaaHistory::skipped_views.load()
-     <<",\"history_resets\":"<<lens_stats.resets.load()<<",\"alt_held\":"<<lens_stats.alt_held.load()
+     <<",\"history_resets\":"<<lens_stats.resets.load()<<",\"alt_held\":"<<lens_stats.alt_held.load()<<",\"no_begin\":"<<lens_stats.no_begin.load()
      <<",\"native_eye_pairs\":"<<native_eye_pairs<<",\"flat_frames\":"<<unpaired_flat_frames.load()<<'}';
     return o.str();
 }
@@ -6896,11 +6899,17 @@ static std::optional<TakedownPrompt> takedown_prompt(UINT64 now) noexcept {
 struct SideArt {ComPtr<ID3D11Texture2D> texture;d2vr::NativeArtBounds::Metadata metadata{};UINT64 tick{};double per_depth{};}; // per_depth: art width per metre of depth
 static std::array<SideArt,2> native_hud_side_art;
 // v1236/v1242: the kept downed-body prompt art per kind (native_hud_child_draw.hpp body_prompt_cached: [0] Carry only, [1] with Loot). Written
-// and read by the HUD publish only; saved to artifacts\cache\prompt-kind-art.bin (at most every 10 s after a change) and loaded once.
-struct BodyPromptArt {ComPtr<ID3D11Texture2D> texture;std::uintptr_t body{};UINT64 owner{};d2vr::NativeHudChildScope child{};double per_depth{};d2vr::Vec3 offset{};bool dirty{};};
+// and read by the HUD publish only; saved to artifacts\cache\prompt-kind-art.bin and loaded once.
+// v1248 (review of v1242: the art was marked dirty on every frame the game drew a body's prompt, and the save waited for the GPU and wrote the
+// file at Present every 10 s): dirty only when the kind's texture is created or resized (a cache-loaded art of the same size is not saved again);
+// the save copies to a staging texture, maps it on a later frame with DO_NOT_WAIT and writes the file on a worker thread. pixels: the CPU copy
+// last loaded or saved (the file holds both kinds). No lateral offset any more: the kept art anchors on the body under the hand (body_prompt_anchor).
+// ponytail: same-size content changes (another glyph of equal width) are not re-saved; hash the staging copy if that ever shows.
+struct BodyPromptArt {ComPtr<ID3D11Texture2D> texture,staging;std::uintptr_t body{};UINT64 owner{};d2vr::NativeHudChildScope child{};double per_depth{};bool dirty{};std::vector<std::byte> pixels;};
 static std::array<BodyPromptArt,2> body_kind_art;
 static std::array<std::pair<std::uintptr_t,bool>,8> body_loot_seen{};static unsigned body_loot_next{};   // a body's loot offer, last seen while it was the Use target
-static UINT64 body_kind_saved_tick{},body_kind_cache_loaded{},body_kind_cache_saved{},body_kind_cache_rejected{};static bool body_kind_load_tried{};
+static UINT64 body_kind_cache_loaded{},body_kind_cache_rejected{};static bool body_kind_load_tried{};
+static std::atomic<UINT64> body_kind_cache_saved{},body_kind_save_ms_max{},body_kind_frame_us_max{},body_kind_deferred_maps{};static std::atomic<bool> body_kind_writing{};
 static std::array<UINT64,5> body_use_refused{};static UINT64 body_refused_far_mm{};   // v1236: HUD publish thread only; read by the status writer
 static d2vr::BodyPromptMiss body_prompt_miss{};static bool body_prompt_cached_frame{},body_prompt_kind_frame{};   // this frame's outcome, for native_body_prompt_stats
 static bool downed_body(std::uintptr_t e) noexcept {std::uint8_t f{};return npc_entity(e) && read_self(e+0xd1,&f,1) && (f&0x28);}
@@ -6945,46 +6954,90 @@ static void body_kind_load(ID3D11DeviceContext* context) {
             d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
             const D3D11_SUBRESOURCE_DATA init{a.pixels.data(),a.width*4,0};auto& k=body_kind_art[a.kind];
             if(k.texture || FAILED(device->CreateTexture2D(&d,&init,&k.texture))) continue;
-            k.body=0;k.owner=0;k.per_depth=a.per_depth;k.offset=a.offset;++body_kind_cache_loaded;
+            k.body=0;k.owner=0;k.per_depth=a.per_depth;k.pixels=a.pixels;++body_kind_cache_loaded;
         }
     } catch(...) {++body_kind_cache_rejected;}
 }
-static void body_kind_save(UINT64 now) {
-    if(body_kind_saved_tick && now<body_kind_saved_tick+10000) return;
-    bool dirty=false;for(const auto& k:body_kind_art) dirty=dirty || k.dirty;
-    if(!dirty) return;
-    body_kind_saved_tick=now;
+// v1248: called every HUD publish frame (immediate context). A dirty kind is copied to staging on one frame and mapped with DO_NOT_WAIT on later
+// frames (WAS_STILL_DRAWING: try again next frame, counted); once no kind is pending, the file is encoded and written on a worker thread.
+static void body_kind_save(ID3D11DeviceContext* context) {
+    if(!context || body_kind_writing.load()) return;
+    bool pending=false,any=false;const auto t0=std::chrono::steady_clock::now();
     try {
-        std::vector<d2vr::PromptKindArt> arts;
-        for(unsigned i=0;i<body_kind_art.size();++i) {auto& k=body_kind_art[i];if(!k.texture) continue;
-            auto px=d2vr::readback_rgba(k.texture.Get());if(px.bytes.empty()) continue;
-            arts.push_back({i,px.width,px.height,static_cast<std::uint32_t>(px.format),k.per_depth,k.offset,std::move(px.bytes)});k.dirty=false;}
-        if(arts.empty()) return;
-        std::filesystem::create_directories(body_kind_cache_path().parent_path());
-        const auto bytes=d2vr::encode_prompt_kind_art(arts);auto tmp=body_kind_cache_path();tmp+=L".tmp";
-        {std::ofstream out(tmp,std::ios::binary|std::ios::trunc);out.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!out) return;}
-        std::filesystem::rename(tmp,body_kind_cache_path());++body_kind_cache_saved;
-    } catch(...) {}
+        for(auto& k:body_kind_art) {
+            if(!k.dirty || !k.texture) continue;
+            if(!k.staging) {
+                D3D11_TEXTURE2D_DESC d{};k.texture->GetDesc(&d);
+                if(!d2vr::eye_texture_matches(d,d.Width,d.Height,DXGI_FORMAT_R8G8B8A8_UNORM)) {k.dirty=false;continue;}
+                d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
+                ComPtr<ID3D11Device> device;context->GetDevice(&device);
+                if(!device || FAILED(device->CreateTexture2D(&d,nullptr,&k.staging))) {k.dirty=false;continue;}
+                context->CopyResource(k.staging.Get(),k.texture.Get());pending=true;continue;   // mapped from the next frame on
+            }
+            D3D11_MAPPED_SUBRESOURCE m{};const HRESULT hr=context->Map(k.staging.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
+            if(hr==DXGI_ERROR_WAS_STILL_DRAWING) {++body_kind_deferred_maps;pending=true;continue;}
+            D3D11_TEXTURE2D_DESC d{};k.staging->GetDesc(&d);const std::size_t row=std::size_t{d.Width}*4;
+            if(SUCCEEDED(hr) && m.pData && m.RowPitch>=row) {
+                k.pixels.resize(row*d.Height);
+                for(UINT y=0;y<d.Height;++y) std::memcpy(k.pixels.data()+y*row,static_cast<const std::byte*>(m.pData)+std::size_t{y}*m.RowPitch,row);
+                any=true;
+            }
+            if(SUCCEEDED(hr)) context->Unmap(k.staging.Get(),0);
+            k.staging.Reset();k.dirty=false;
+        }
+    } catch(...) {for(auto& k:body_kind_art) {k.staging.Reset();k.dirty=false;}return;}
+    if(pending || !any) return;
+    std::vector<d2vr::PromptKindArt> arts;
+    for(unsigned i=0;i<body_kind_art.size();++i) {const auto& k=body_kind_art[i];if(!k.texture || k.pixels.empty()) continue;
+        D3D11_TEXTURE2D_DESC d{};k.texture->GetDesc(&d);if(k.pixels.size()!=std::size_t{d.Width}*d.Height*4) continue;
+        arts.push_back({i,d.Width,d.Height,static_cast<std::uint32_t>(d.Format),k.per_depth,k.pixels});}
+    const auto frame_us=static_cast<UINT64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-t0).count());
+    if(frame_us>body_kind_frame_us_max.load()) body_kind_frame_us_max=frame_us;
+    if(arts.empty()) return;
+    body_kind_writing=true;
+    try {
+        std::thread([arts=std::move(arts),path=body_kind_cache_path()] {
+            const auto w0=std::chrono::steady_clock::now();
+            try {
+                std::filesystem::create_directories(path.parent_path());
+                const auto bytes=d2vr::encode_prompt_kind_art(arts);auto tmp=path;tmp+=L".tmp";bool ok=false;
+                {std::ofstream out(tmp,std::ios::binary|std::ios::trunc);out.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));ok=static_cast<bool>(out);}
+                if(ok) {std::filesystem::rename(tmp,path);++body_kind_cache_saved;}
+            } catch(...) {}
+            const auto ms=static_cast<UINT64>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-w0).count());
+            if(ms>body_kind_save_ms_max.load()) body_kind_save_ms_max=ms;
+            body_kind_writing=false;
+        }).detach();
+    } catch(...) {body_kind_writing=false;}
 }
 // Keep a copy of slot-0 art the game drew for a downed body while that body is the hand's live Use target (the game offers it now, so this is
 // neither the fade-in, 150 ms, nor the fade-out after the offer went), as the art of the body's kind; the game's fresh art always replaces it.
-static void body_prompt_keep(ID3D11DeviceContext* context,const NativeCompactArt& art,std::uintptr_t owner,d2vr::Vec3 point,double art_w,double depth,UINT64 now) {
+static void body_prompt_keep(ID3D11DeviceContext* context,const NativeCompactArt& art,std::uintptr_t owner,double art_w,double depth,UINT64 now) {
     static std::uintptr_t run_body{};static UINT64 run_since{},run_last{};
     const auto live=native_interaction_aim.qualified_target(now);
     if(!owner || !live || live->owner!=owner || !downed_body(owner) || depth<=0 || player_carrying()) {run_body=0;return;}
     if(run_body!=owner || now<run_last || now-run_last>100) {run_body=owner;run_since=now;}
     run_last=now;if(now-run_since<150) return;
-    const auto origin=body_world_point(owner,art.metadata.epoch,now);if(!origin) return;
     auto& k=body_kind_art[body_prompt_kind(owner,now)];
     D3D11_TEXTURE2D_DESC d{},have{};art.texture->GetDesc(&d);if(k.texture) k.texture->GetDesc(&have);
     if(!k.texture || have.Width!=d.Width || have.Height!=d.Height || have.Format!=d.Format) {
-        ComPtr<ID3D11Device> device;context->GetDevice(&device);k.texture.Reset();
-        if(!device || FAILED(device->CreateTexture2D(&d,nullptr,&k.texture))) {k.body=0;return;}
+        ComPtr<ID3D11Device> device;context->GetDevice(&device);k.texture.Reset();k.staging.Reset();k.pixels.clear();
+        if(!device || FAILED(device->CreateTexture2D(&d,nullptr,&k.texture))) {k.body=0;k.dirty=false;return;}
+        k.dirty=true;   // v1248: created or resized: saved once (body_kind_save, off the frame)
     }
     context->CopyResource(k.texture.Get(),art.texture.Get());
-    k.body=owner;k.owner=art.metadata.owner;k.child=art.child;k.dirty=true;
-    k.per_depth=art_w/depth;k.offset=point-*origin;   // the kept art sits where the game's art last stood on its body, relative to the origin
-    body_kind_save(now);
+    k.body=owner;k.owner=art.metadata.owner;k.child=art.child;k.per_depth=art_w/depth;
+}
+// v1248 (review of v1242: the kept offset was an XR-space vector captured on another body/pose and reused through the cache): the kept art of a
+// body under the hand stands over the part under the palm (a hand's grab focus on this body; else the body origin), at the height the game's own
+// lying-body prompt uses (origin + 0.35 m in XR up, the native slot-0 placement above), so it never depends on where the art was captured.
+static std::optional<d2vr::Vec3> body_prompt_anchor(std::uintptr_t body,UINT64 epoch,UINT64 now) {
+    auto at=body_world_point(body,epoch,now);if(!at) return {};
+    if(physical_grab_requested) for(unsigned side=0;side<2;++side) if(const auto f=native_grab.focus_cached(side,now); f && f->entity==body) {
+        if(const auto part=d2vr::native_marker_world_point(f->pose.position,native_hud_world_frame,epoch,frames.load()-1,now,now)) {at->x=part->x;at->z=part->z;}
+        break;
+    }
+    at->y+=.35;return at;
 }
 // Slot 0 has no current game art this frame: a downed body under the hand shows the kept art of its kind over it (no time limit), unless the
 // player carries a body or the game draws a different prompt in the slot now (a fresh capture of another element).
@@ -6995,10 +7048,10 @@ template<class Live> static bool body_prompt_from_cache(UINT64 now,unsigned dest
     const bool other=live && now>=live.child.tick && now-live.child.tick<=100 && k.child.kind!=d2vr::NativeHudChildKind::none &&
         !d2vr::native_hud_child_same_element(live.child,k.child);
     const auto epoch=game_xr->pose_epoch();
-    const auto point=body && k.texture?body_world_point(body,epoch,now):std::nullopt;
+    const auto point=body && k.texture?body_prompt_anchor(body,epoch,now):std::nullopt;
     body_prompt_miss=d2vr::body_prompt_cached(body,body && player_carrying(),static_cast<bool>(k.texture),other,point.has_value());
     if(body_prompt_miss!=d2vr::BodyPromptMiss::none) return false;
-    const auto at=*point+k.offset;double art_w=.36;
+    const auto at=*point;double art_w=.36;
     if(const auto views=game_xr->tracking_views()) {
         const d2vr::Vec3 head{((*views)[0].pose.position.x+(*views)[1].pose.position.x)*.5,((*views)[0].pose.position.y+(*views)[1].pose.position.y)*.5,((*views)[0].pose.position.z+(*views)[1].pose.position.z)*.5};
         art_w=k.per_depth*d2vr::length(at-head);
@@ -7659,7 +7712,7 @@ void publish_native_hud_art(UINT64 now) {
                     if(!art_owner) if(const auto t=native_interaction_aim.prompt_target(now); t && t->identity==compact.child.target) art_owner=t->owner;
                     double depth=0;if(const auto views=game_xr->tracking_views()) depth=d2vr::length(point-d2vr::Vec3{((*views)[0].pose.position.x+(*views)[1].pose.position.x)*.5,
                         ((*views)[0].pose.position.y+(*views)[1].pose.position.y)*.5,((*views)[0].pose.position.z+(*views)[1].pose.position.z)*.5});
-                    body_prompt_keep(context,compact,art_owner,point,art_width,depth,now);
+                    body_prompt_keep(context,compact,art_owner,art_width,depth,now);
                 }
                 if(npc_prompt) {std::lock_guard<std::mutex> l(speaker_mutex);speaker_point=point;speaker_tick=now;}
                 if(compact.child.retained_entry) {
@@ -7714,6 +7767,7 @@ void publish_native_hud_art(UINT64 now) {
         native_body_prompt_stats.update(now,hand_body(now),shown,shown?d2vr::BodyPromptMiss::none:body_prompt_miss,shown && body_prompt_cached_frame,
             shown && body_prompt_kind_frame);
         body_prompt_miss=d2vr::BodyPromptMiss::none;body_prompt_cached_frame=body_prompt_kind_frame=false;
+        body_kind_save(gpu_game_context.load());   // v1248: a dirty kind's staged copy, mapped without waiting; the file on a worker
         // v1236: frames where a hand's grab focus is a downed body but the game's Use target is not that body, by the stage that refused it:
         // [0] another owner chosen, [1] its LOS blocked with the hand off the part (> 25 cm), [2] LOS passed but not chosen, [3] no LOS call for
         // it in 100 ms (not a candidate: hand ray / shape query / eligibility / range), [4] LOS blocked with no grab focus on it at that call
@@ -10689,7 +10743,7 @@ void alternate_after_present(UINT64 number,bool gameplay,bool free_gameplay,bool
     // v1246: a secondary pass (Timepiece lens) in the last 2 frames holds paired frames too: it borrows the last view object, which in a
     // one-view frame is the only eye, and its other-timeline image is not something the stale-eye warp can carry.
     const UINT64 lens_frame=lens_stats.last_frame.load();
-    const bool lens_hold=lens_guard_enabled && lens_frame && number<=lens_frame+2;
+    const bool lens_hold=lens_guard_enabled && d2vr::secondary_view::lens_paired_hold(lens_frame,number);   // v1248: frames of a real lens Begin only
     const bool scope_hold=d2vr::alternate_plan_paired_hold(authored,spyglass_scope_enabled,spyglass_scope_m.load(std::memory_order_relaxed));
     const bool hold=scope_hold || lens_hold;
     if(scope_hold && !authored && free_gameplay) ++alt_scope_held;
@@ -11140,7 +11194,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                    <<",\"pull\":"<<(d2vr::NativeWeaponHands::living_pull_enabled?"true":"false")<<",\"holds\":"<<lv.holds<<",\"hard_pulls\":"<<lv.hard_pulls
                    <<",\"releases\":"<<lv.releases<<",\"shoves\":"<<d2vr::NativeWeaponHands::living_shoves.load()<<'}';return o.str();}() << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"pacer\":" << (game_xr?game_xr->pacer_status_json():std::string("null")) << ",\"frame_split\":" << frame_split_status_json()
                << ",\"mono_view\":\"" << (mono_view_state.load()==1?"on":mono_view_state.load()==2?"fallback":"off") << "\",\"mono_view_frames\":" << mono_view_frames.load()
-               << ",\"unpaired_gameplay\":{\"flat_frames\":" << unpaired_flat_frames.load() << ",\"flat_runs\":" << unpaired_flat_runs.load() << ",\"run\":" << unpaired_gameplay_run
+               << ",\"unpaired_gameplay\":{\"flat_frames\":" << unpaired_flat_frames.load() << ",\"flat_runs\":" << unpaired_flat_runs.load() << ",\"run\":" << unpaired_gameplay.run
                << ",\"reason\":[" << unpaired_reason[0].load() << ',' << unpaired_reason[1].load() << ',' << unpaired_reason[2].load() << ',' << unpaired_reason[3].load() << ',' << unpaired_reason[4].load()
                << "],\"pair_repeats\":" << native_eye_pair.repeats << ",\"pair_invalidations\":" << native_eye_pair.invalidations << ",\"strict_pair\":" << (native_eye_pair.tolerate_repeat?"false":"true")
                << ",\"eye_begin_calls\":" << eye_begin_calls.load() << ",\"eye_begin_matches\":" << eye_begin_matches.load() << ",\"native_eye_pairs\":" << native_eye_pairs << ",\"eye_copies\":" << native_eye_copy_count << '}'
@@ -11206,7 +11260,8 @@ std::string feedback_status_json() {    std::ostringstream out;
             << ",\"no_anchor\":" << native_body_prompt_stats.hide_reasons[3] << ",\"not_targeted\":" << native_body_prompt_stats.hide_reasons[4] << ",\"other\":" << native_body_prompt_stats.hide_reasons[0] << '}'
             << ",\"use_refused\":{\"other_owner\":" << body_use_refused[0] << ",\"los_hand_far\":" << body_use_refused[1] << ",\"los_far_mean_mm\":" << (body_use_refused[1]?body_refused_far_mm/body_use_refused[1]:0)
             << ",\"after_los\":" << body_use_refused[2] << ",\"not_candidate\":" << body_use_refused[3] << ",\"los_no_focus\":" << body_use_refused[4] << ",\"hand_on_passes\":" << native_interaction_aim.body_hand_on_passes() << '}'
-            << ",\"kind_frames\":" << native_body_prompt_stats.kind << ",\"kind_cache_loaded\":" << body_kind_cache_loaded << ",\"kind_cache_saved\":" << body_kind_cache_saved
+            << ",\"kind_frames\":" << native_body_prompt_stats.kind << ",\"kind_cache_loaded\":" << body_kind_cache_loaded << ",\"kind_cache_saved\":" << body_kind_cache_saved.load()
+            << ",\"kind_save_ms_max\":" << body_kind_save_ms_max.load() << ",\"kind_save_frame_us_max\":" << body_kind_frame_us_max.load() << ",\"kind_deferred_maps\":" << body_kind_deferred_maps.load()
             << ",\"kind_cache_rejected\":" << body_kind_cache_rejected << ",\"hides_carried\":" << native_body_prompt_stats.hide_reasons[5]
             << ",\"hand_los\":" << native_interaction_aim.body_hand_los() << ",\"eye_los\":" << native_interaction_aim.body_eye_los() << "}" <<",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"sun_sprite_aspect\":[" << d2vr::SunSpriteAspect::state() << ',' << d2vr::SunSpriteAspect::applied() << ']' << ",\"sun_sprite_shape\":[" << d2vr::SunSpriteShape::state() << ',' << d2vr::SunSpriteShape::calls() << ']' << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << ",\"left_power\":" << (left_power.load()?"true":"false") << "}"
                << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << ",\"last_delay_ms\":" << d2vr::NativeGrenadeThrow::last_delay_ms.load() << ",\"scene_rate\":" << d2vr::NativeGrenadeThrow::scene_rate.load() << ",\"scenes_sped\":" << d2vr::NativeGrenadeThrow::scenes_sped.load() << "}"
@@ -12697,10 +12752,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(pair_ready && mono_path) ++mono_view_frames;
                             if(gameplay && !pair_ready && stereo_active.load() && !mono_path)
                                 ++unpaired_reason[views.size()!=2?0:native_eye_pair.phase()==0 && !native_eye_pair.invalid()?1:native_eye_pair.invalid()?2:native_eye_pair.phase()<2?3:4];
-                            unpaired_gameplay_run=pair_ready || !gameplay?0:unpaired_gameplay_run+1;
+                            const bool flat_now=unpaired_gameplay.step(gameplay,authored_camera,pair_ready,GetTickCount64()); // v1248: 45 frames every run, settle/authored not counted
                             if(pair_ready) {completed_left=mono_path?paired_backbuffer:paired_left;completed_right=paired_backbuffer;}
                             else if(!gameplay) {completed_left=paired_backbuffer;completed_right=paired_backbuffer;}
-                            else if(game_xr && d2vr::unpaired_gameplay_flat(unpaired_gameplay_run,game_xr->last_projection_usable())) { // v1244: flat, never black
+                            else if(game_xr && flat_now) { // v1244: flat, never black
                                 completed_left=paired_backbuffer;completed_right=paired_backbuffer;unpaired_flat=true;
                                 ++unpaired_flat_frames;if(!unpaired_flat_last) ++unpaired_flat_runs;
                             }
@@ -13385,6 +13440,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 native_note_trace_event("accept",note_frame->serial,note_frame->panel.frame);
                             }
                             native_note_input_live=false;
+                            game_xr->unpaired_flat_frame=unpaired_flat;   // v1248: the flat fallback never suspends an open VR settings panel
                             game_xr->present(completed_left.Get(),completed_right.Get(),
                                 views.empty()?1.4f:views[0].pose->horizontal_fov,views.empty()?.88f:views[0].pose->vertical_fov,gameplay && !unpaired_flat,authored_camera || cutscene_immersive,game_logic_mask()==4,
                                 pair_ready?completed_right.Get():nullptr,mirror_view(desc.OutputWindow),game_logic_mask()==32,cutscene_immersive); // G2: the immersive cutscene is an authored scene render (raw gameplay stays false)

@@ -51,9 +51,19 @@ int main() {
     a.reason=EmptyFrameReason::tracked_pair_missing;a.state=XR_SESSION_STATE_VISIBLE;require(choose_frame_fallback(a)==FrameFallback::last_projection,"VISIBLE counts");
     a.state=XR_SESSION_STATE_READY;require(choose_frame_fallback(a)==FrameFallback::none,"READY/idle states may stay empty");a.state=XR_SESSION_STATE_FOCUSED;
     a.should_render=false;require(choose_frame_fallback(a)==FrameFallback::none,"shouldRender false: nothing to show");a.should_render=true;
-    // v1244 Timepiece: an unpaired gameplay run goes flat (never black for long): after 45 frames with a re-sendable projection, after 3 without
-    require(!unpaired_gameplay_flat(0,true) && !unpaired_gameplay_flat(45,true) && unpaired_gameplay_flat(46,true),"usable projection: re-sent for 45 frames, then flat");
-    require(!unpaired_gameplay_flat(3,false) && unpaired_gameplay_flat(4,false),"no projection to re-send: flat after 3 frames, not black");
+    // v1244 Timepiece: an unpaired gameplay run goes flat (never black for long). v1248: 45 consecutive unpaired gameplay frames EVERY run, the
+    // first pair ends it, and frames where no pair is expected (not gameplay, authored camera, the settle window after gameplay starts) never count
+    {UnpairedFlat u;std::uint64_t t=0;const auto frames=[&](unsigned n,bool gameplay,bool authored,bool pair) {bool f=false;for(unsigned i=0;i<n;++i) {t+=11;f=u.step(gameplay,authored,pair,t);}return f;};
+     require(!frames(150,true,false,false),"session start / level load: the settle window (150 x 11 ms) is never flat");
+     t=10000;u=UnpairedFlat{};frames(1,true,false,true);t+=UnpairedFlat::settle_ms;   // settled gameplay
+     require(!frames(45,true,false,false) && frames(1,true,false,false),"first unpaired run: flat only after 45 frames");
+     require(!frames(1,true,false,true),"the first complete pair leaves flat");
+     require(!frames(45,true,false,false) && frames(1,true,false,false),"second run after paired frames: 45 frames again, no shortcut");
+     frames(1,true,false,true);
+     require(!frames(200,false,false,false) && u.run==0,"a load-screen / menu gap (not gameplay) never goes flat");
+     t+=UnpairedFlat::settle_ms;frames(1,true,false,true);
+     t+=UnpairedFlat::settle_ms;require(!frames(200,true,true,false),"an authored camera / theater gap keeps the old hold path");
+     require(!frames(45,true,false,false) && frames(1,true,false,false),"after an authored gap: 45 unpaired gameplay frames again");}
     a.layer_count=2;require(choose_frame_fallback(a)==FrameFallback::none,"a frame that has layers is never touched");
     // last good projection
     std::array<XrCompositionLayerProjectionView,2> views;auto p=good_projection(views);

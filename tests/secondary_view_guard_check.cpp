@@ -34,6 +34,12 @@ int main() {
     for(std::size_t i=0;i<history_spans.size();++i) for(std::size_t j=i+1;j<history_spans.size();++j) {
         const auto a=history_spans[i],b=history_spans[j];CHECK(a.offset+a.size<=b.offset || b.offset+b.size<=a.offset);}
     std::size_t v=0;for(const auto& s:verify_spans) v+=s.size;CHECK(v==sizeof(Record::verify));
+    // v1248: the hook runs every frame while +0x88 stays set, but only frames with a lens Begin are lens passes; the hold expires 2 frames after.
+    {std::uint64_t last=0;
+     for(std::uint64_t f=100;f<110;++f) {last=lens_pass_frame(false,f,last);CHECK(!lens_paired_hold(last,f));}   // early returns only: never held
+     last=lens_pass_frame(true,110,last);CHECK(last==110 && lens_paired_hold(last,110));
+     for(std::uint64_t f=111;f<140;++f) {last=lens_pass_frame(false,f,last);CHECK(lens_paired_hold(last,f)==(f<=110+hold_frames));}   // expires
+     last=lens_pass_frame(true,140,last);CHECK(lens_paired_hold(last,141) && !lens_paired_hold(last,143));}
     std::printf("PASS secondary_view_guard\n");
     return 0;
 }

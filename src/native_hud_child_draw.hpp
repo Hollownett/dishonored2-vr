@@ -87,15 +87,16 @@ inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,bool carrying,
     return anchor?BodyPromptMiss::none:BodyPromptMiss::no_anchor;
 }
 // v1242: the kept kind art on disk (artifacts\cache\prompt-kind-art.bin), so the first body of a later session has it. RGBA8 pixels, the
-// art's metres per metre of depth and its offset from the body origin; magic, version, sizes, finite ranges and an FNV-1a checksum are
-// validated on load, anything else is rejected whole.
-struct PromptKindArt {std::uint32_t kind{},width{},height{},format{};double per_depth{};Vec3 offset{};std::vector<std::byte> pixels;};
-inline constexpr std::uint32_t prompt_kind_magic=0x4b505644u,prompt_kind_version=1;
+// art's metres per metre of depth; magic, version, sizes, finite ranges and an FNV-1a checksum are validated on load, anything else is rejected
+// whole. v1248: version 2 has no offset from the body origin (an XR vector of the capture pose; the art now anchors on the body under the hand),
+// so version-1 files are rejected.
+struct PromptKindArt {std::uint32_t kind{},width{},height{},format{};double per_depth{};std::vector<std::byte> pixels;};
+inline constexpr std::uint32_t prompt_kind_magic=0x4b505644u,prompt_kind_version=2;
 inline std::uint64_t prompt_kind_hash(const std::byte* p,std::size_t n) noexcept {std::uint64_t h=1469598103934665603ull;for(std::size_t i=0;i<n;++i){h^=static_cast<std::uint8_t>(p[i]);h*=1099511628211ull;}return h;}
 inline std::vector<std::byte> encode_prompt_kind_art(const std::vector<PromptKindArt>& arts) {
     std::vector<std::byte> out;const auto put=[&](const void* v,std::size_t n){const auto* b=static_cast<const std::byte*>(v);out.insert(out.end(),b,b+n);};
     const std::uint32_t head[3]{prompt_kind_magic,prompt_kind_version,static_cast<std::uint32_t>(arts.size())};put(head,sizeof(head));
-    for(const auto& a:arts) {const std::uint32_t u[4]{a.kind,a.width,a.height,a.format};const double d[4]{a.per_depth,a.offset.x,a.offset.y,a.offset.z};
+    for(const auto& a:arts) {const std::uint32_t u[4]{a.kind,a.width,a.height,a.format};const double d[1]{a.per_depth};
         put(u,sizeof(u));put(d,sizeof(d));put(a.pixels.data(),a.pixels.size());}
     const auto h=prompt_kind_hash(out.data(),out.size());put(&h,sizeof(h));return out;
 }
@@ -106,10 +107,9 @@ inline std::optional<std::vector<PromptKindArt>> decode_prompt_kind_art(const st
     std::uint32_t head[3]{};if(!get(head,sizeof(head)) || head[0]!=prompt_kind_magic || head[1]!=prompt_kind_version || head[2]>2) return {};
     std::vector<PromptKindArt> out;
     for(std::uint32_t i=0;i<head[2];++i) {
-        PromptKindArt a;std::uint32_t u[4]{};double d[4]{};if(!get(u,sizeof(u)) || !get(d,sizeof(d))) return {};
-        a.kind=u[0];a.width=u[1];a.height=u[2];a.format=u[3];a.per_depth=d[0];a.offset={d[1],d[2],d[3]};
-        if(a.kind>1 || !a.width || !a.height || a.width>2048 || a.height>1024 || !std::isfinite(a.per_depth) || a.per_depth<=0 || a.per_depth>1 ||
-           !finite(a.offset) || length(a.offset)>2) return {};
+        PromptKindArt a;std::uint32_t u[4]{};double d[1]{};if(!get(u,sizeof(u)) || !get(d,sizeof(d))) return {};
+        a.kind=u[0];a.width=u[1];a.height=u[2];a.format=u[3];a.per_depth=d[0];
+        if(a.kind>1 || !a.width || !a.height || a.width>2048 || a.height>1024 || !std::isfinite(a.per_depth) || a.per_depth<=0 || a.per_depth>1) return {};
         a.pixels.resize(std::size_t{a.width}*a.height*4);if(!get(a.pixels.data(),a.pixels.size())) return {};
         out.push_back(std::move(a));
     }

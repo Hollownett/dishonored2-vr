@@ -153,15 +153,15 @@ int main(){
         assert(body_prompt_cached(0x10,false,true,false,false)==BodyPromptMiss::no_anchor);
         {   // the kind cache file: round trip, and corrupt / truncated / wrong version / out-of-range files rejected whole
             std::vector<PromptKindArt> arts(2);
-            for(unsigned i=0;i<2;++i) {auto& a=arts[i];a.kind=i;a.width=3+i;a.height=2;a.format=28;a.per_depth=.21;a.offset={0,.35,.1*i};
+            for(unsigned i=0;i<2;++i) {auto& a=arts[i];a.kind=i;a.width=3+i;a.height=2;a.format=28;a.per_depth=.21;
                 a.pixels.resize(std::size_t{a.width}*a.height*4);for(std::size_t p=0;p<a.pixels.size();++p) a.pixels[p]=static_cast<std::byte>(p*7+i);}
             const auto blob=encode_prompt_kind_art(arts);const auto back=decode_prompt_kind_art(blob);
-            assert(back && back->size()==2 && (*back)[1].width==4 && (*back)[1].pixels==arts[1].pixels && (*back)[1].offset.z==.1 && (*back)[0].per_depth==.21);
+            assert(back && back->size()==2 && (*back)[1].width==4 && (*back)[1].pixels==arts[1].pixels && (*back)[0].per_depth==.21);
             auto bad=blob;bad[20]^=std::byte{1};assert(!decode_prompt_kind_art(bad));
             assert(!decode_prompt_kind_art(std::vector<std::byte>(blob.begin(),blob.end()-9)));
             arts[0].per_depth=5;assert(!decode_prompt_kind_art(encode_prompt_kind_art(arts)));arts[0].per_depth=.21;
-            auto v2=blob;const std::uint32_t version=2;std::memcpy(v2.data()+4,&version,4);const auto h=prompt_kind_hash(v2.data(),v2.size()-8);
-            std::memcpy(v2.data()+v2.size()-8,&h,8);assert(!decode_prompt_kind_art(v2));   // a valid checksum over a wrong version
+            auto v1=blob;const std::uint32_t version=1;std::memcpy(v1.data()+4,&version,4);const auto h=prompt_kind_hash(v1.data(),v1.size()-8);
+            std::memcpy(v1.data()+v1.size()-8,&h,8);assert(!decode_prompt_kind_art(v1));   // a valid checksum over a wrong version (v1248: version-1 files, with the XR offset, rejected)
         }
         {NativeBodyPromptStats s;for(UINT64 t=0;t<=1000;t+=11) {const bool shown=t<400 || t>=600;   // one hide by another prompt, then back
              s.update(5000+t,0x10,shown,shown?BodyPromptMiss::none:BodyPromptMiss::other_prompt);}

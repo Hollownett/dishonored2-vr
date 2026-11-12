@@ -516,7 +516,7 @@ print('PASS: v1234 binder drops G for a different holder; sanity per hold')
 hd36 = (root / 'src' / 'native_hud_child_draw.hpp').read_text(encoding='utf-8')
 assert 'live_offer' not in hd36 and 'return takedown_slot?1300:std::max<UINT64>(kept,250);' in hd36
 assert 'inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,bool carrying,bool kind_art,bool other_prompt_drawn,bool anchor) noexcept {' in hd36
-assert 'if(slot==0 && body_prompt_from_cache(now,destination,live_scope)) return;' in probe and 'body_prompt_keep(context,compact,art_owner,point,art_width,depth,now);' in probe
+assert 'if(slot==0 && body_prompt_from_cache(now,destination,live_scope)) return;' in probe and 'body_prompt_keep(context,compact,art_owner,art_width,depth,now);' in probe
 assert 'native_body_prompt_stats.update(now,hand_body(now),shown,' in probe and 'prompt_live_holds' not in probe
 ia36 = (root / 'src' / 'native_interaction_aim.hpp').read_text(encoding='utf-8')
 sp36 = (root / 'src' / 'selection_policy.hpp').read_text(encoding='utf-8')
@@ -593,8 +593,8 @@ fh44 = (root / 'src' / 'xr_frame_hardening.hpp').read_text(encoding='utf-8')
 ng44 = (root / 'src' / 'native_grab.hpp').read_text(encoding='utf-8')
 assert 'if(tolerate_repeat && !invalid_ && eye>=0 && eye<=1 && phase_==eye+1) {++repeats;return false;}' in gs44
 assert 'native_eye_pair.tolerate_repeat=!fs::exists(root/L"build"/L"strict-eye-pair");' in probe
-assert 'inline bool unpaired_gameplay_flat(unsigned run,bool last_projection_usable) noexcept {' in fh44
-assert 'else if(game_xr && d2vr::unpaired_gameplay_flat(unpaired_gameplay_run,game_xr->last_projection_usable())) {' in probe
+assert 'bool step(bool gameplay,bool authored,bool pair_ready,std::uint64_t now_ms) noexcept {' in fh44   # v1248: UnpairedFlat, 45 frames every run
+assert 'else if(game_xr && flat_now) {' in probe and 'const bool flat_now=unpaired_gameplay.step(gameplay,authored_camera,pair_ready,GetTickCount64());' in probe
 assert 'gameplay && !unpaired_flat,authored_camera || cutscene_immersive,' in probe and ',\\"unpaired_gameplay\\":{\\"flat_frames\\":' in probe
 assert 'request_obstruction(side,*body,true);++press_rehovers_;' in ng44 and '<<",\\"press_rehovers\\":"<<los.press_rehovers' in probe
 print('PASS: v1244 unpaired gameplay flat fallback, eye pair repeat tolerance, aged hover press re-ask')
@@ -621,3 +621,12 @@ assert 'if(claimed && arm_slip_fix) arm_snap_note_setup();' in probe and 'if(eye
 assert '==d2vr::weapon_draw::HandLock::slip_applied) live=snap.frame;' in probe and 'arm_slip_fix=!fs::exists(root/L"build"/L"no-arm-slip-fix");' in probe
 assert '<<",\\"arm_slip\\":"<<weapon_draw::HandLock::slip_json()' in om47
 print('PASS: v1247 arm slip fix')
+# v1248 review fixes: held census restored as code; body kind art saved once per change off the frame (staging + DO_NOT_WAIT + worker) and
+# anchored on the body under the hand (cache v2, no offset); unpaired flat = 45 gameplay frames every run, settle/authored not counted, panel kept;
+# lens replay/hold only after a real lens Begin
+assert '\n                if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev); // v1248' in om47.replace('\r\n','\n')
+assert 'const HRESULT hr=context->Map(k.staging.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m);' in probe and 'body_kind_save(gpu_game_context.load());' in probe
+assert 'static std::optional<d2vr::Vec3> body_prompt_anchor(std::uintptr_t body,UINT64 epoch,UINT64 now) {' in probe and 'prompt_kind_version=2;' in hd36
+assert 'game_xr->unpaired_flat_frame=unpaired_flat;' in probe
+assert 'if(began) lens_replay(view);else ++lens_stats.no_begin;' in probe and 'd2vr::secondary_view::lens_paired_hold(lens_frame,number)' in probe
+print('PASS: v1248 review fixes')

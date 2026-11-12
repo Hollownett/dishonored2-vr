@@ -197,7 +197,7 @@ def check(probe: str, xr: str) -> None:
     order = [present.index(lines[k]) for k in ("asr", "scene", "world", "authored")]
     assert order == sorted(order) and present.index(lines["world"]) < present.index("XrEventDataBuffer event{}")
     # raw gameplay keeps the settings, calibration and Y-hold semantics; overlays (HUD, wrist, vignette, art) stay off for an authored view
-    for raw in ("settings_.update(settings_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);",
+    for raw in ("settings_.update(settings_input,gameplay || unpaired_flat_frame,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);",  # v1248: a flat-fallback frame keeps the panel
                 "const bool hold_gameplay=gameplay && !authored_camera && continuity_.usable() && views_valid_ &&",
                 "!gameplay && settings_available && settings_enabled_?YHoldMenu::Screen::pause:YHoldMenu::Screen::unavailable;",
                 "if(world_scene && !authored_camera) {", "if(gameplay && !authored_camera && tracked_pair_()) {",

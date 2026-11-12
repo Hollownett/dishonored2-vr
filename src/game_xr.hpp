@@ -531,6 +531,7 @@ public:
     // v1040: the right-eye scope (spyglass_scope.hpp): the zoom factor the right eye's image shown at this Present was rendered with (1 = no scope),
     // set by the probe from the Setup that rendered that image; draws, faults (a fault turns the mask off for the session).
     float spyglass_scope_mag=1.f;UINT64 spyglass_scope_draws{},spyglass_scope_failures{};
+    bool unpaired_flat_frame{};   // v1248: this present() is the unpaired-gameplay flat fallback (gameplay passed false): an open VR settings panel is kept, not suspended
     int wheel_hand() const noexcept {return wheel_hand_;} // the hand the wheel is at, -1 none
     bool wheel_eye_art_enabled=true; // build/wheel-quad: the hand wheel keeps its quad layer (the headset A/B for the ring in the eyes)
     bool wheel_eye_ready() const noexcept {
@@ -2613,7 +2614,7 @@ public:
             // v1073 (user: "delete the old VR menu; the user must not see it when holding any buttons; the only way to VR settings is Pause >
             // VR Settings"): nothing opens the drawn panel any more - not the menu item's fallback request, not a Y hold, not a Y press.
             settings_requested.store(false);
-            if(settings_.gameplay_panel_open() && !panel_drawable) settings_.suspend(); // never consume input while the panel is not drawn
+            if(settings_.gameplay_panel_open() && !panel_drawable && !unpaired_flat_frame) settings_.suspend(); // never consume input while the panel is not drawn (v1248: a flat-fallback frame keeps it)
             settings_in_world_=gameplay && settings_.open();
             if(settings_.open()) {
                 constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
@@ -2639,7 +2640,7 @@ public:
             auto settings_input=controller_input;
             // A paused tap of Y must not bypass the new hold, but Y still closes an open panel and serves calibration pages.
             if(!settings_.open()) settings_input.y=false;   // v1073: Y never opens the drawn panel
-            auto changes=settings_.update(settings_input,gameplay,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
+            auto changes=settings_.update(settings_input,gameplay || unpaired_flat_frame,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
             // v1073: the drawn panel may show only the avatar calibration page started from the game's own VR Settings page (its Calibrate row).
             // Anything else - the old settings page, the automatic recalibration prompt in a menu - is closed before it is ever drawn.
             if(settings_.open() && !(settings_.calibration_page() && settings_.native_calibration())) {settings_.suspend();changes.opened=false;++old_panel_blocked;}

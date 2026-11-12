@@ -55,10 +55,22 @@ inline FrameFallback choose_frame_fallback(const FallbackFacts& f) noexcept {
 // v1244 (user, Timepiece: black screen): gameplay frames without a native eye pair re-sent the last projection for up to 3 s and then
 // submitted BLACK for as long as the pair stayed missing. After a short run the game's own image goes on the flat panel instead (the
 // cutscene theater path: no unpaired image is ever shown as stereo); without a re-sendable projection that happens after a few frames.
-inline constexpr unsigned unpaired_flat_after_frames=45,unpaired_flat_black_frames=3;
-inline bool unpaired_gameplay_flat(unsigned run,bool last_projection_usable) noexcept {
-    return run>(last_projection_usable?unpaired_flat_after_frames:unpaired_flat_black_frames);
-}
+// v1248 (review: after one flat run the last projection was gone (present(gameplay=false) resets it), so every later gap went flat after 3
+// frames): flat is the last resort. Every run needs 45 consecutive unpaired GAMEPLAY frames (no shortcut after a previous flat run); the first
+// complete pair ends it; frames where no pair is expected keep the old resubmit/hold path and are not counted: not gameplay (loading, pause and
+// menu masks), an authored camera / cutscene theater, and the first settle_ms after gameplay (re)starts (session start, level load, unpause).
+// ponytail: the settle window also follows an unpause; a load-only signal would narrow it.
+inline constexpr unsigned unpaired_flat_after_frames=45;
+struct UnpairedFlat {
+    static constexpr std::uint64_t settle_ms=2000;
+    unsigned run{};std::uint64_t since{};bool in_gameplay{},flat{};
+    bool step(bool gameplay,bool authored,bool pair_ready,std::uint64_t now_ms) noexcept {
+        if(!gameplay) {in_gameplay=false;run=0;return flat=false;}
+        if(!in_gameplay) {in_gameplay=true;since=now_ms;}
+        if(pair_ready || authored || now_ms<since || now_ms-since<settle_ms) {run=0;return flat=false;}
+        return flat=++run>unpaired_flat_after_frames;
+    }
+};
 
 // G2 cutscene hold (hold 0 none, 1 black, 2 replay): may an empty frame re-send the last good projection? Not on a black hold; on a replay
 // hold only when that projection was this cutscene's own immersive layer (scene ids match, nonzero). Without a hold: as before.
