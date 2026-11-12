@@ -99,6 +99,14 @@ int main(){
         assert(native_prompt_keep_grace(true,false,true,false,true,false)==0); // a fresh capture of ANOTHER element replaces it at once
         assert(native_prompt_keep_grace(true,true,false,false,false,false)==0); // no target any more: the prompt goes as before
         assert(native_prompt_keep_grace(false,false,false,false,true,false)==250 && native_prompt_keep_grace(false,false,false,false,true,true)==1300);
+        // v1225, sim v1222 rows: 187292500 hide retained owner ...266112 (crop 459, hand target present), 187292562 show hand-route owner ...254976
+        // (crop 372): the same window rebound to ANOTHER object; its fresh binding is current, its art lands 62 ms later. v1222 cleared (blank 62 ms).
+        {const bool live=true,same=false,current=true,bound=false,offer=false;   // retained owner != hand target owner: not the same object
+         assert(old_rule(live,same,current,bound,offer,false)==0);
+         const UINT64 g=native_prompt_keep_grace(live,same,current,bound,offer,false,true);assert(g==100 && 62<=g);
+         assert(native_prompt_keep_grace(live,same,current,bound,offer,true,true)==0);     // takedown slot: another hint replaces at once, as before
+         assert(native_prompt_keep_grace(live,same,current,bound,offer,false,false)==0);   // another window (node): replaced at once, as before
+         assert(native_prompt_keep_grace(live,same,false,bound,offer,false,true)==0);}     // the new binding not current: nothing to hand over to
     }
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,true,false,false)); // target exists: never flat
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,false,false,true));

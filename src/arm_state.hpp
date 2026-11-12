@@ -169,6 +169,16 @@ struct ArmSet {
         if(a[h].home==Home::slot0) {a[h]={};fx.sword_left|=1u<<h;sword_leaving=true;sword_leave_until=now+leave_ms;}
         rest_slot1=h;request(h,false,Held::none,now,rev);return fx;
     }
+    // v1224: the hand let go of its native slot-1 gun away from the hip (the engine's instant unequip is on its way). The arm is empty NOW, so
+    // the other hand's catch inside the unequip window is a native pickup (gun_catch.hpp), not a copy; the engine's report of the gun until
+    // the unequip lands is the put-away's (leave_kind), not this arm's.
+    Fx drop_slot1(unsigned h,std::uint64_t now) noexcept {
+        Fx fx;h&=1u;
+        if(a[h].home!=Home::slot1 || !native_gun(a[h].what)) {fx.refused=true;return fx;}
+        leave_kind=a[h].what;leave_until=now+leave_ms;a[h]={};
+        applied_valid=false;   // an unequip the engine never finishes is applied again once the put-away window ends (the gun is then some arm's)
+        return fx;
+    }
     // The hand let go of its copy (or a copy was lost): the arm is empty.
     void release(unsigned h) noexcept {h&=1u;if(a[h].home==Home::copy) a[h]={};}
     // Test/debug: set an arm's copy directly.
@@ -244,7 +254,11 @@ private:
     Fx apply_slot1(Held k,std::uint64_t rev,std::uint64_t now,bool& deferred) noexcept {
         Fx fx;const int p=slot1_holder();
         if(leave_kind!=Held::none) {
-            if(k==leave_kind && now<leave_until) {deferred=true;return fx;}   // asked for it to go: the engine has not caught up
+            // asked for it to go: the engine has not caught up. v1224: unless this is the ticketed equip of the same item (a catch whose unequip
+            // and re-equip fell inside one settle: the empty slot was never applied), which arrives now, not at the end of the put-away window.
+            bool ticketed=false;
+            for(unsigned i=0;i<2;++i) ticketed=ticketed || (pend[i].on && !pend[i].wheel && pend[i].want==k && rev!=pend[i].revision);
+            if(k==leave_kind && now<leave_until && !ticketed) {deferred=true;return fx;}
             leave_kind=Held::none;
         }
         if(k==Held::none) {
@@ -260,7 +274,12 @@ private:
             return fx;
         }
         if(p>=0) a[static_cast<unsigned>(p)].what=k;
-        else fx.merge(place(derive().slot1_arm,k,Home::slot1,now,false));
+        else {
+            const unsigned s=derive().slot1_arm;
+            // v1224: a pickup's gun that never left slot 1 (its unequip was cancelled) is that pickup's arrival, not an expiry 3.5 s later
+            if(pend[s].on && !pend[s].wheel && pend[s].want==k) {pend[s].on=false;fx.arrived|=1u<<s;}
+            fx.merge(place(s,k,Home::slot1,now,false));
+        }
         return fx;
     }
     // The ticketed equip landed: slot 1 now holds k natively, for arm h.

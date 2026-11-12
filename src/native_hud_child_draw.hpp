@@ -57,10 +57,14 @@ struct NativeHudPromptHold {
 // the same gap for the hand/gaze prompt - the game withdraws its retained HUD entry and rebinds the same window to the hand target every
 // ~0.75 s on a body, and the new binding's art lands 15-78 ms later (1670 logged gaps with the target still offered: p50 31, p95 78, 98.9 % <= 250 ms)
 // while the hand target (its own 500 ms hold) still names the same object. 250 ms rides those out and lets a prompt linger at most that long.
-inline UINT64 native_prompt_keep_grace(bool live,bool live_same_element,bool live_current,bool held_still_bound,bool offer_same_object,bool takedown_slot) noexcept {
+// v1225 handover (sim v1222: the window rebound from one object's prompt to ANOTHER object's, crop 459 -> 372, and stayed blank 62 ms until the
+// new art landed): the same window (node) now bound to another object keeps the old art at most 100 ms (p95 art latency 78 ms), never longer.
+inline UINT64 native_prompt_keep_grace(bool live,bool live_same_element,bool live_current,bool held_still_bound,bool offer_same_object,bool takedown_slot,
+        bool live_same_window=false) noexcept {
     const bool same_live=live && live_same_element && live_current;
     const UINT64 kept=live && live_same_element && (same_live || held_still_bound)?600:0;
     if(offer_same_object && !same_live && (!live || live_same_element || !live_current)) return takedown_slot?1300:std::max<UINT64>(kept,250);
+    if(!takedown_slot && !kept && live && !live_same_element && live_current && live_same_window) return 100;
     return kept;
 }
 // The flat prompt is allowed only when no interaction target exists and no world art is

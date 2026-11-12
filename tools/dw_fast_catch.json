@@ -1,0 +1,217 @@
+{
+"segments": [
+{
+"start_ms": 0,
+"end_ms": 300,
+"input": {
+"move_x": 0.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+],
+"command": "equip pistol"
+},
+{
+"start_ms": 300,
+"end_ms": 2500,
+"input": {
+"left_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 2500,
+"end_ms": 2520,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 2520,
+"end_ms": 4020,
+"input": {
+"right_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 4020,
+"end_ms": 4052,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 4052,
+"end_ms": 5552,
+"input": {
+"left_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 5552,
+"end_ms": 5599,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 5599,
+"end_ms": 7099,
+"input": {
+"right_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 7099,
+"end_ms": 7159,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 7159,
+"end_ms": 8659,
+"input": {
+"left_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 8659,
+"end_ms": 8679,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 8679,
+"end_ms": 10179,
+"input": {
+"right_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 10179,
+"end_ms": 10211,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 10211,
+"end_ms": 11711,
+"input": {
+"left_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 11711,
+"end_ms": 11758,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 11758,
+"end_ms": 13258,
+"input": {
+"right_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 13258,
+"end_ms": 13318,
+"input": {},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 13318,
+"end_ms": 14818,
+"input": {
+"left_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+},
+{
+"start_ms": 14818,
+"end_ms": 16818,
+"input": {
+"left_grip": 1.0
+},
+"left_hand_offset": [
+-0.2,
+0.0,
+0.0
+]
+}
+]
+}

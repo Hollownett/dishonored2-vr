@@ -26,6 +26,7 @@
 #include "native_manual_equip_runtime.hpp"
 #include "crash_observer.hpp"
 #include "held_copy.hpp"
+#include "gun_catch.hpp"
 #include "native_ranged_fire.hpp"
 #include "diagnostics.hpp"
 #include <algorithm>
@@ -109,6 +110,7 @@ struct LyingGun {
     std::vector<std::uintptr_t> struck; // v783: the guards this throw stunned (thrown_stun)
     // native only: what brings it back (the inventory record is found again by decl and entity id; the record pointer moves when the list grows)
     std::uintptr_t item_decl{},ammo_decl{},entity{};std::uint32_t item_spawn{};
+    gun_catch::Lying c{}; // v1224: native only: the unequip since the drop and a catch made before it finished
 };
 struct HeldSide {int pe{-1};bool shown{},have_cmd{};const char* failed{};unsigned tries{};std::uint64_t retry_at{};held_copy::Pose cmd{};}; // failed: the def that did not spawn; retried every 250 ms, 12 times
 struct Adopt {int pe{-1};const char* def{};std::uint64_t tick{};}; // v1113: a lying gun picked up as a copy, still shown, waiting for held_copy() to want it (no hide-and-reshow flicker)
@@ -120,7 +122,8 @@ struct HeldPub {bool valid{};held_copy::Pose pose{};std::uint64_t tick{};std::ui
 // model frame itself is read live from entity+0xf0 -> model+0x1860 by the publisher, like the native weapon's.
 struct CopyDraw {bool valid{};std::uintptr_t entity{};std::uint32_t id{};std::array<float,15> read{};std::array<float,15> offset{};bool offset_valid{};std::uint64_t serial{};std::uint64_t write_serial{};unsigned kind{};};
 // A lying gun as the input thread sees it (NativeWeaponHands::gun_copy).
-struct GunCopyInfo {bool present{},flying{},native{};unsigned kind{};std::array<float,3> pos{};std::array<float,9> axis{1,0,0,0,1,0,0,0,1};const char* def{};std::uint64_t since{};};
+// v1224: unequipping = slot 1 still shows this native gun since its drop; claimed = a catch already took it (gun_catch::Lying)
+struct GunCopyInfo {bool present{},flying{},native{},unequipping{},claimed{};unsigned kind{};std::array<float,3> pos{};std::array<float,9> axis{1,0,0,0,1,0,0,0,1};const char* def{};std::uint64_t since{};};
 // v1102: a copy placement's report to the draw-time weapon publisher (src/weapon_draw_place.hpp WriteLog): the physical hand
 // that draws the copy, its entity, the exact hand pose it was placed from and the writer kind (2 mirror, 3 mod-held). v1104: returns
 // the WriteLog serial that identifies that note (0 when the note was dropped), so a fallback candidate built from CopyDraw is ordered
@@ -1311,6 +1314,7 @@ public:
         std::lock_guard<std::mutex> l(feed_m_);const auto& p=held_pub_[side&1u];
         return p.valid && steady_ms()-p.tick<=250?std::make_pair(p.ent,p.id):std::make_pair<std::uintptr_t,std::uint32_t>(0,0);
     }
+    inline static std::atomic<std::uint64_t> gun_catch_claims{},gun_catches_native{},gun_catch_giveups{}; // v1224: native catches claimed during the unequip, completed natively, given up
     inline static std::atomic<std::uint64_t> gun_drops{},gun_drops_native{},gun_pickups{},gun_pickups_explicit{},gun_returns{},gun_redraws{},gun_failed{},gun_spawned{},
         gun_teleports{},gun_flight_frames{},gun_stows{},held_spawned{},held_teleports{},held_failed{},held_hides{},held_measured{},held_carried{},held_rejected{},gun_hits{},bash_hits{},gadget_hits{};
     inline static std::atomic<unsigned> held_bits{}; // 1<<side: a copy is shown there; 4<<side: its offset is measured from the native twin (else the per-kind constant)
@@ -1344,12 +1348,12 @@ public:
         std::string pin;   // v1114: the copy scenes' pinned prologues (scene_pin_rvas order), once read
         if(scene_pin_.load()>=0) for(const auto& p:scene_pin_bytes_) {if(!pin.empty()) pin+=' ';for(const auto c:p) {char h[4];std::snprintf(h,sizeof(h),"%02x",static_cast<unsigned>(c));pin+=h;}}
         char b[4096];
-        std::snprintf(b,sizeof(b),"{\"on\":%d,\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
+        std::snprintf(b,sizeof(b),"{\"on\":%d,\"catch\":[%llu,%llu,%llu],\"drops\":%llu,\"native_drops\":%llu,\"pickups\":%llu,\"explicit_pickups\":%llu,\"returns\":%llu,\"redraws\":%llu,\"failed\":%llu,"
             "\"spawned\":%llu,\"teleports\":%llu,\"flight_frames\":%llu,\"stows\":%llu,\"lying\":[%s],\"held\":{\"spawned\":%llu,\"teleports\":%llu,\"failed\":%llu,\"hides\":%llu,"
             "\"measured\":%llu,\"rejected\":%llu,\"carried\":%llu,\"step_mm\":%.1f,\"turn_mdeg\":%.0f,\"bits\":%u,\"want\":[%d,%d],\"last_failed\":\"%s\",\"kinds\":[%s]},\"restores\":%llu,\"rides_other\":%d,"
             "\"last_return\":[%.2f,%.1f],\"stuns\":[%llu,%llu,%llu],\"upgrade_parts\":[%llu,%llu,%llu,%llu,%llu,%llu],\"real\":[%llu,%llu,%llu,%llu,%llu],\"parts\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu],"
             "\"scenes\":{\"knob_off\":%d,\"pin\":%d,\"faults\":%llu,\"conds\":%llu,\"late_conds\":%llu,\"stops\":%llu,\"dry\":%llu,\"arm\":[%d,%llu,%llu,%llu,%llu],\"transient\":[%llu,%llu],"
-            "\"anim\":[%d,%d,%llu,%llu,%llu,%d,%d],\"events\":%s,\"bytes\":\"%s\"}}",dual_wield()?1:0,
+            "\"anim\":[%d,%d,%llu,%llu,%llu,%d,%d],\"events\":%s,\"bytes\":\"%s\"}}",dual_wield()?1:0,static_cast<unsigned long long>(gun_catch_claims.load()),static_cast<unsigned long long>(gun_catches_native.load()),static_cast<unsigned long long>(gun_catch_giveups.load()),
             static_cast<unsigned long long>(gun_drops.load()),static_cast<unsigned long long>(gun_drops_native.load()),static_cast<unsigned long long>(gun_pickups.load()),
             static_cast<unsigned long long>(gun_pickups_explicit.load()),static_cast<unsigned long long>(gun_returns.load()),static_cast<unsigned long long>(gun_redraws.load()),
             static_cast<unsigned long long>(gun_failed.load()),static_cast<unsigned long long>(gun_spawned.load()),static_cast<unsigned long long>(gun_teleports.load()),
@@ -1503,7 +1507,7 @@ private:
         // copy the hand released has its want cleared by the caller already.
         auto& g=lying_[li];g=LyingGun{};
         g.present=true;g.native=native;g.pe=pe;g.def=pool_[pe].def;g.kind=static_cast<unsigned>(held_copy::kind_of(def));
-        g.since=GetTickCount64();g.stow_ms=g.since;g.checked_ms=g.since;
+        g.since=GetTickCount64();g.stow_ms=g.since;g.checked_ms=g.since;g.c.dropped=g.since;
         if(native) {g.item_decl=s1.item_decl;g.ammo_decl=s1.ammo_decl;g.entity=s1.entity;g.item_spawn=s1.spawn;gun_native_lying_=true;++gun_drops_native;}
         auto& f=g.flight;f.pos=at.position;f.vel={r.vel[0],r.vel[1],r.vel[2]};f.axis={at.basis[0],at.basis[1],at.basis[2]};
         const auto sidev=cross(f.vel,Vec3{0,0,1});const double speed=length(f.vel);
@@ -1513,8 +1517,11 @@ private:
     }
     template<class Read> static bool gun_take_native(std::uintptr_t base,Read& read,const LyingGun& g,const Request& r,NativeManualEquipRuntime& manual) {
         Slot1 now{};
-        if(read_slot1(base,read,now) && now.entity==g.entity) return true; // already back in the hand (the wheel drew it)
+        if(read_slot1(base,read,now) && now.entity==g.entity) return true; // already back in the hand (the wheel drew it; gun_pickup claims a gun whose unequip never finished)
         if(r.manual_generation && service_gun_draw(base,read,r,manual)) return true; // the hip draw's lease: the remembered item is this gun
+        return equip_lying(base,read,g);
+    }
+    template<class Read> static bool equip_lying(std::uintptr_t base,Read& read,const LyingGun& g) { // the lying native gun's inventory record, equipped as the wheel does
         const auto fsm=player_fsm(base,read);if(!fsm) return false;
         const auto inventory=rig::value<std::uintptr_t>(read,fsm+0x328);if(!inventory || !*inventory) return false;
         const auto item=find_record(read,*inventory,g.item_decl,g.item_spawn);if(!item) return false;
@@ -1527,10 +1534,16 @@ private:
         Vec3 pos[2]{};bool present[2]{};
         // r.decl set = a mod-owned copy's pickup, else the native gun's; either within reach of the hand (review: no cross-picking, no 1e9 reach).
         // as_copy: whichever lies nearest, taken as the hand's mod-owned copy (a native one stays in the inventory, unequipped).
-        for(unsigned i=0;i<2;++i) {present[i]=lying_[i].present && (r.as_copy || lying_[i].native==(r.decl==nullptr));pos[i]=lying_[i].flight.pos;}
+        for(unsigned i=0;i<2;++i) {present[i]=lying_[i].present && lying_[i].c.claim<0 && (r.as_copy || lying_[i].native==(r.decl==nullptr));pos[i]=lying_[i].flight.pos;}
         const int i=held_copy::nearest(pos,present,2,Vec3{r.pos[0],r.pos[1],r.pos[2]},.6);if(i<0) return false;
         auto& g=lying_[i];
-        if(g.native && !r.as_copy && !gun_take_native(base,read,g,r,manual)) return false;
+        if(g.native && !r.as_copy) {
+            // v1224: caught while the engine still unequips it (slot 1 shows this very gun): claimed, finished by service_lying (gun_catch::Lying)
+            Slot1 s1{};const bool in_slot=read_slot1(base,read,s1) && s1.entity==g.entity;
+            if(!in_slot) g.c.left_slot=true;
+            if(!g.c.left_slot) {g.c.claim_for(r.side,GetTickCount64());g.flight.flying=false;++gun_catch_claims;++gun_pickups;return true;}
+            if(!gun_take_native(base,read,g,r,manual)) return false;
+        }
         if((r.as_copy || r.decl) && pool_alive(base,read,g.pe)) { // v1113: the entity stays shown and in_use; service_held hands it to the hand's copy
             auto& a=adopt_[r.side&1u];if(a.pe>=0) pool_release(base,read,a.pe);
             a=Adopt{g.pe,pool_[g.pe].def,GetTickCount64()};g=LyingGun{};
@@ -1565,8 +1578,30 @@ private:
         for(unsigned i=0;i<3;++i) {axis[i*3]=float(g.flight.axis[i].x);axis[i*3+1]=float(g.flight.axis[i].y);axis[i*3+2]=float(g.flight.axis[i].z);}
         teleport<Read>(base,e.ent,origin,axis);++gun_teleports;
     }
+    // v1224: a claimed native catch is shown in the catching hand (the copy service's grip) while the engine finishes its unequip and re-equip.
+    template<class Read> static void hold_at_hand(std::uintptr_t base,Read&,LyingGun& g,unsigned side) {
+        held_copy::Pose hand{},offset{},out{};held_copy::Motion speed{};bool mirrored{};
+        if(!g.def || g.pe<0 || !feed(side,hand,speed,.25)) return;
+        grip_offset(g.def,side,offset,mirrored);
+        if(!held_copy::place(hand,offset,mirrored,out)) return;
+        std::array<float,3> pos{float(out.position.x),float(out.position.y),float(out.position.z)};std::array<float,9> axis{};
+        for(unsigned i=0;i<3;++i) {axis[i*3]=float(out.basis[i].x);axis[i*3+1]=float(out.basis[i].y);axis[i*3+2]=float(out.basis[i].z);}
+        teleport<Read>(base,pool_[g.pe].ent,pos,axis);g.flight.pos=out.position;g.flight.axis={out.basis[0],out.basis[1],out.basis[2]};
+    }
     template<class Read> static void service_lying(std::uintptr_t base,Read& read,LyingGun& g,std::uint64_t now) {
         if(!pool_alive(base,read,g.pe)) {if(g.pe>=0 && g.pe<static_cast<int>(pool_.size())) pool_[g.pe]={};gun_release(base,read,g);return;} // the engine took it (level change, save): the native gun is still the hip's
+        if(g.native && (g.c.claim>=0 || !g.c.left_slot)) { // v1224: each tick while slot 1 may still show it, or a catch waits for it (gun_catch::Lying)
+            Slot1 s1{};const bool in_slot=read_slot1(base,read,s1) && s1.entity==g.entity;
+            const unsigned side=static_cast<unsigned>(g.c.claim)&1u;using D=gun_catch::Lying::Do;
+            switch(g.c.step(in_slot,now)) {
+                case D::arrived: ++gun_catches_native;gun_release(base,read,g);return;   // the same native gun is in the catching hand
+                case D::give_up: ++gun_catch_giveups;g.flight.flying=true;g.flight.vel=Vec3{};QueryPerformanceCounter(&g.qpc);break;   // it falls from the hand
+                case D::equip: if(equip_lying(base,read,g)) {g.c.equipped(now);++gun_pickups_explicit;}
+                    hold_at_hand(base,read,g,side);return;
+                case D::wait: hold_at_hand(base,read,g,side);return;   // shown in the catching hand until the equip lands
+                default: break;
+            }
+        }
         if(g.flight.flying) gun_fly(base,read,g);
         if(now-g.checked_ms<100) return;
         g.checked_ms=now;
@@ -2755,6 +2790,7 @@ private:
         for(unsigned i=0;i<2;++i) {const auto& g=lying_[i];
             if(!g.present) continue;
             auto& c=out[i];c.present=true;c.flying=g.flight.flying;c.native=g.native;c.kind=g.kind;c.def=g.def;c.since=g.since;
+            c.unequipping=g.native && g.c.unequipping();c.claimed=g.native && g.c.claim>=0;
             c.pos={float(g.flight.pos.x),float(g.flight.pos.y),float(g.flight.pos.z)};
             for(unsigned k=0;k<3;++k) {c.axis[k*3]=float(g.flight.axis[k].x);c.axis[k*3+1]=float(g.flight.axis[k].y);c.axis[k*3+2]=float(g.flight.axis[k].z);}
         }

@@ -7019,13 +7019,15 @@ void publish_native_hud_art(UINT64 now) {
             const UINT64 grace=native_prompt_slot(slot) && c.texture?d2vr::native_prompt_keep_grace(static_cast<bool>(live_scope),live_same,
                 live_scope && d2vr::NativeHudChildDraw::scope_current(live_scope.child,game_xr->pose_epoch(),now),
                 live_same && !same_live && d2vr::NativeHudChildDraw::scope_current(c.child,game_xr->pose_epoch(),now) &&
-                    (!c.child.retained_entry || d2vr::native_prompt_entry::refresh(read_self,image_base,*c.child.retained_entry)),offer_same,take_slot):0;
+                    (!c.child.retained_entry || d2vr::native_prompt_entry::refresh(read_self,image_base,*c.child.retained_entry)),offer_same,take_slot,
+                slot==0 && live_scope && live_scope.child.kind==c.child.kind && live_scope.child.file==c.child.file && live_scope.child.iggy==c.child.iggy &&
+                    live_scope.child.node==c.child.node && live_scope.child.epoch==c.child.epoch):0;   // v1225: the same window rebound to another object
             const bool takedown_gap=take_gap && grace==1300;
             if(grace && hold.holds(now,grace) && c.metadata.epoch==game_xr->pose_epoch()) {   // v1146: a takedown gap lasts as long as the held offer can
                 D3D11_TEXTURE2D_DESC d{};c.texture->GetDesc(&d);
                 if(game_xr->native_art_source(destination,false,c.texture.Get(),D3D11_BOX{0,0,0,d.Width,d.Height,1},c.metadata.owner,
                     c.metadata.epoch,now,hold.point,hold.width_for(d.Width))) {
-                    native_hud_next_scopes[slot]=c.child;native_hud_next_ticks[slot]=now;if(takedown_gap) ++takedown_gap_holds;else if(slot==0 && offer_same && !same_live) ++prompt_gap_holds;return;}
+                    native_hud_next_scopes[slot]=c.child;native_hud_next_ticks[slot]=now;if(takedown_gap) ++takedown_gap_holds;else if(slot==0 && (grace==250 || grace==100)) ++prompt_gap_holds;return;}
             }
             clear();};
         const auto& compact=native_hud_compact_art[slot];const auto& metadata=compact.metadata;
@@ -13745,7 +13747,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         }
                                         d2vr::GunGrip::In in{};in.grip=rh?game_xr->controller_input.right_grip:game_xr->controller_input.left_grip;in.trigger=rh?game_xr->controller_input.right_trigger:game_xr->controller_input.left_trigger;
                                         in.gameplay=logic==2 && input.active && game_xr->state==XR_SESSION_STATE_FOCUSED && !chord.menu_modifier && !x_wheel.wheel() && hands[rh];
-                                        in.zone=at_hip;in.drawn=gun;in.empty=empty;in.loaded=hip_loaded;
+                                        // v1224: a native catch claimed during the engine's unequip (gun_catch.hpp): the gun slot 1 still shows is the one on its way
+                                        // back to this hand, not a gun this hand holds; the catch's expect stays armed until the equip lands
+                                        bool catch_pending=false;for(const auto& c:d2vr::NativeWeaponHands::gun_copies()) catch_pending=catch_pending || (c.present && c.claimed);
+                                        in.zone=at_hip;in.drawn=gun && !catch_pending;in.empty=empty;in.loaded=hip_loaded;
                                         // v763 (user, headset v762: the left hand could not let go of its gun; no drop or holster in the journal): the physical
                                         // lanes' readiness gates a draw (draw_authorized), not a gun already in the hand. Dual wield: it no longer blocks holding it.
                                         const bool lanes_busy=!hip_current || !physical_ready;
@@ -13760,7 +13765,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         d2vr::Vec3 gun_hand_w{},gun_hand_v{};d2vr::WorldTrackedPose gun_drawn{};
                                         {std::lock_guard<std::mutex> hl(hand_state_mutex);gun_hand_w=hand_raw_world[rh].position;gun_drawn=hand_world[rh];gun_hand_v=hand_velocity[rh];}
                                         const bool gun_held_before=gun_grip.held();
-                                        auto o=gun_grip.update(in);gun_owns=o.owns;hip_draw_reserved=o.reserved;
+                                        auto o=gun_grip.update(in);gun_owns=o.owns;hip_draw_reserved=o.reserved;if(catch_pending) gun_grip.expect(hip_now);
                                         using GA=d2vr::GunGrip::Action;
                                         {static bool gun_pressed_was{};const bool pressed_now=in.grip>=.4f; // the journal says why a let-go kept the gun
                                          if(dual_wield_enabled && gun_pressed_was && !pressed_now && gun && o.action==GA::none)
@@ -13772,7 +13777,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             const auto fl=[](double v){return static_cast<float>(v);};const auto v=d2vr::grab_limit(gun_hand_v*1.5,20); // as the sword's toss; tune
                                             r.pos={fl(gun_drawn.position.x),fl(gun_drawn.position.y),fl(gun_drawn.position.z)};r.vel={fl(v.x),fl(v.y),fl(v.z)};
                                             const auto& b=gun_drawn.basis;r.axis={fl(b[0].x),fl(b[0].y),fl(b[0].z),fl(b[1].x),fl(b[1].y),fl(b[1].z),fl(b[2].x),fl(b[2].y),fl(b[2].z)};
-                                            if(d2vr::NativeWeaponHands::request(r)) {++gun_actions[static_cast<unsigned>(o.action)];game_xr->pulse(rh,.25f,.05f);}
+                                            if(d2vr::NativeWeaponHands::request(r)) {++gun_actions[static_cast<unsigned>(o.action)];game_xr->pulse(rh,.25f,.05f);
+                                                arms_apply(arm_set.drop_slot1(rh,GetTickCount64()),"gun_drop");}   // v1224: the arm is empty now, a catch in the unequip window is native
                                             dual_wield_event("\"ev\":\"gun_drop\",\"hand\":"+std::to_string(rh));
                                         } else if(o.action==GA::pickup) { // the lying gun back into this hand
                                             d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::gun_pickup;r.side=rh;
@@ -13825,6 +13831,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             dual_wield_event("\"ev\":\"test_extra\",\"hand\":"+std::to_string(th)+",\"kind\":"+std::to_string(tk));}
                                         for(unsigned h=0;h<2;++h) {
                                             const bool pressed=gnow[h]>=(ex_down[h]?.4f:.6f),edge=pressed && !ex_down[h],released=!pressed && ex_down[h];ex_down[h]=pressed;
+                                            // v1224: a hand that closed up to 150 ms before the gun was there (a catch at 0 ms: the drop is published one game tick later) still takes it
+                                            static std::array<UINT64,2> squeeze_at{};if(edge) squeeze_at[h]=GetTickCount64();const bool fresh_squeeze=edge || (pressed && GetTickCount64()-squeeze_at[h]<=150);
                                             d2vr::WorldTrackedPose hw{},hr{};d2vr::Vec3 hv{};{std::lock_guard<std::mutex> l(hand_state_mutex);hw=hand_world[h];hr=hand_raw_world[h];hv=hand_velocity[h];}
                                             const auto fl=[](double v){return static_cast<float>(v);};
                                             const std::array<float,9> rows{fl(hw.basis[0].x),fl(hw.basis[0].y),fl(hw.basis[0].z),fl(hw.basis[1].x),fl(hw.basis[1].y),fl(hw.basis[1].z),fl(hw.basis[2].x),fl(hw.basis[2].y),fl(hw.basis[2].z)};
@@ -13858,17 +13866,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                         r.pos={fl(hw.position.x),fl(hw.position.y),fl(hw.position.z)};r.vel={fl(v.x),fl(v.y),fl(v.z)};r.axis=rows;d2vr::NativeWeaponHands::request(r);}
                                                     arm_set.release(h);ex=E::none;game_xr->pulse(h,.25f,.05f);
                                                 }
-                                            } else if(edge && logic==2 && !busy_ex[h] && arm_set.free_for_pickup(h) && !(h==mh && sword_owns) && !(h==rh && (gun_owns || hip_draw_reserved || slot1_ex))) {
+                                            } else if(fresh_squeeze && logic==2 && !busy_ex[h] && arm_set.free_for_pickup(h) && !(h==mh && sword_owns) && !(h==rh && (gun_owns || hip_draw_reserved || slot1_ex))) {
                                                 // a free hand squeezing at a lying second gun (a mod-owned copy) or a guard's dropped weapon takes it
                                                 bool taken=false;
                                                 // v758: either hand takes either lying gun: the game's own when slot 1 is free (this hand then drives slot 1), else this hand's copy
                                                 // v763 (user: "juggle it like the sword"): a gun in flight is caught too
-                                                for(const auto& c:d2vr::NativeWeaponHands::gun_copies()) if(!taken && c.present && c.def &&
+                                                for(const auto& c:d2vr::NativeWeaponHands::gun_copies()) if(!taken && c.present && !c.claimed && c.def &&
                                                     d2vr::held_copy::in_reach(hr.position,{c.pos[0],c.pos[1],c.pos[2]})) {
                                                     const E kind=d2vr::held_copy::kind_of(c.def)==d2vr::held_copy::Kind::crossbow?E::crossbow:E::pistol;
                                                     // native only when the engine's slot 1 is free for this arm (ArmSet::pickup); with a power or gadget in the other arm, or a
                                                     // power in this one, the gun is this arm's copy (the power stays or swaps), never an overwrite
-                                                    auto plan=arm_set;const auto pfx=plan.pickup(h,kind,c.native && !slot1_ex && !holding_ex,GetTickCount64(),left_aim_equip_revision.load(std::memory_order_acquire));
+                                                    auto plan=arm_set;const auto pfx=plan.pickup(h,kind,d2vr::gun_catch::native_ok(c.native,slot1_ex,c.unequipping,holding_ex),GetTickCount64(),left_aim_equip_revision.load(std::memory_order_acquire));
                                                     if(pfx.refused) continue;
                                                     const bool native=pfx.native;
                                                     d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::gun_pickup;r.side=h;r.decl=c.native?nullptr:c.def;r.as_copy=c.native && !native;
