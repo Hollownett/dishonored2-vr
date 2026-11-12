@@ -52,6 +52,9 @@ public:
         if(blend) blends_[kind].fetch_add(1,std::memory_order_relaxed);
         if(snap) snaps_[kind].fetch_add(1,std::memory_order_relaxed);
     }
+    // v1249 dxgi_probe, per exactly placed render of a held thing: the engine's own render frame (model+0x1860, what shadows/culling/the eye
+    // draws are composed from) against the placed frame the draw is moved to. held_render_pose.hpp makes it the hold's goal: ~0 is the target.
+    void engine(unsigned kind,double player_mps,double gap_m) noexcept {if(kind<kinds) engine_[kind][bucket(player_mps)].add(gap_m);}
     std::string json() const {
         static constexpr const char* kn[kinds]={"prop","severed","corpse"};
         static constexpr const char* sn[speeds]={"still","walk","run"};
@@ -61,13 +64,15 @@ public:
             for(unsigned s=0;s<speeds;++s) o+=std::string(s?",":"")+"\""+sn[s]+"\":"+motor_[k][s].json();
             o+="},\"drawn_gap\":{";
             for(unsigned s=0;s<speeds;++s) o+=std::string(s?",":"")+"\""+sn[s]+"\":"+drawn_[k][s].json();
+            o+="},\"engine_gap\":{";
+            for(unsigned s=0;s<speeds;++s) o+=std::string(s?",":"")+"\""+sn[s]+"\":"+engine_[k][s].json();
             o+="},\"caps\":"+std::to_string(caps_[k].load())+",\"blends\":"+std::to_string(blends_[k].load())+",\"snaps\":"+std::to_string(snaps_[k].load())+'}';
         }
         return o+'}';
     }
 private:
     static std::string num(double v) {char b[32];std::snprintf(b,sizeof b,"%.3f",v);return b;}
-    std::array<std::array<Hist,speeds>,kinds> motor_{},drawn_{};
+    std::array<std::array<Hist,speeds>,kinds> motor_{},drawn_{},engine_{};
     std::array<std::atomic<std::uint64_t>,kinds> caps_{},blends_{},snaps_{};
 };
 inline HoldSync& hold_sync() noexcept {static HoldSync s;return s;}

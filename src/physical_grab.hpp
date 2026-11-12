@@ -81,7 +81,7 @@ class PhysicalGrab {
     bool armed_=false,pressed_=false,held_=false,valid_sample_=false;
     std::uint64_t epoch_{},tick_{},velocity_tick_{};
     double velocity_at_s_{},sample_at_s_{};   // sample_at_s_: the newest sample's precise time (0 = unknown)   // v1090: the velocity baseline's precise time (s, steady clock; 0 = none: the tick clock)
-    WorldTrackedPose previous_{},relative_{};
+    WorldTrackedPose previous_{},relative_{},last_goal_{};
     // Velocity has its own baseline so same-quantum samples keep their motion while previous_/tick_ track the newest pose.
     Vec3 velocity_{},velocity_origin_{};
     Vec3 goal_velocity_{},goal_origin_{};bool goal_ok_=false;   // v1238: the hold goal's velocity (sample's EMA; ok = a baseline from this hold)
@@ -122,6 +122,7 @@ public:
     // v1074: the hold itself - the held body's pose in the sampled hand's frame (target() = hand * relative). The draw places the thing with it.
     const WorldTrackedPose& relative() const noexcept {return relative_;}
     const Vec3& velocity() const {return velocity_;}
+    const WorldTrackedPose& last_goal() const noexcept {return last_goal_;}   // v1249: the goal of the last corpse_motor write (led to its time)
     inline static bool goal_feed=true;   // v1238: feed the goal's velocity (false: the hand's, v1090; lab A/B and build/legacy-hand-feed)
     Vec3 feed_velocity() const {return goal_feed && goal_ok_?goal_velocity_:velocity_;}
     double recovery_s() const {return recovery_s_;}
@@ -368,6 +369,7 @@ public:
         if(!finite(step.linear) || !finite(step.angular)) return finish(ReleaseReason::fault,false,false,lag);
         const auto asked=length(want_v-v0)>1e-12?length(want_v-v0):length(want_w-w0),
             given=length(want_v-v0)>1e-12?length(step.linear-v0):length(step.angular-w0);
+        last_goal_=goal;   // v1249: the led goal of this write (held_render_pose.hpp draws the engine's render frame there)
         CorpseMotor out;
         out.motor=GrabMotor{step.linear,step.angular,false};out.lag_m=lag;
         out.capped=step.linear_capped||step.angular_capped;

@@ -630,3 +630,31 @@ assert 'static std::optional<d2vr::Vec3> body_prompt_anchor(std::uintptr_t body,
 assert 'game_xr->unpaired_flat_frame=unpaired_flat;' in probe
 assert 'if(began) lens_replay(view);else ++lens_stats.no_begin;' in probe and 'd2vr::secondary_view::lens_paired_hold(lens_frame,number)' in probe
 print('PASS: v1248 review fixes')
+# v1251: the Timepiece is held on the slot-1 grip (squeeze = unfold, open = fold) via native Use pulses keyed on player states 68/69/70
+tg51 = (root / 'src' / 'timepiece_grip.hpp').read_text(encoding='utf-8')
+assert 'bool update(bool equipped,float grip,int state,bool busy,std::uint64_t now) noexcept {' in tg51 and 'if(state==68) {wait_until_=now+settle_ms;return false;}' in tg51
+assert 'if(timepiece_grip.update(equipped,raw_grip(rh),tp_state,busy,use_now)) input.x=true;' in probe and '#include "timepiece_grip.hpp"' in probe
+assert '<<",\\"grip_unfold_fold_gaveup_busy\\":["' in probe
+print('PASS: v1251 Timepiece grip')
+# v1250: downed-body prompt target - one body entity (palm near any ragdoll part, or an arm pointing at it: 3 m, 0.15 m, LOS), held 350 ms after
+# both hands leave; a pointing hand's Use routed along its arm (grip withheld); one eased anchor per body (kept and fresh art); status body_prompt.target
+bt50 = (root / 'src' / 'body_target.hpp').read_text(encoding='utf-8')
+assert 'inline constexpr double enter_palm_m=.25,leave_palm_m=.40,point_tolerance_m=.15,point_leave_tolerance_m=.25,reach_m=3.0,reach_leave_m=3.3;' in bt50
+assert 'inline constexpr std::uint64_t hold_ms=350,takeover_ms=150,los_ttl_ms=300;' in bt50
+assert 'body_target_update(now);   // v1250' in probe and 'static std::uintptr_t hand_body(UINT64) {return body_tracker.body;}' in probe
+assert 'if(hand_rays[side] && !reach[side] && body_point_routed(side,now_b)) {reach[side]=true;grip_centres[side].reset();}' in probe
+assert 'if(body_point_routed(h,controls_now)) ++body_grip_withheld;' in probe and '!holding_object && !body_point_routed(1,controls_now)};' in probe
+assert 'if(lying && target->owner==body_tracker.body && body_tracker.anchored && metadata.epoch==game_xr->pose_epoch()) point=body_tracker.anchor;' in probe
+assert '<< ",\\"target\\":" << body_target_json()' in probe
+print('PASS: v1250 body prompt target')
+# v1249: a held prop's ENGINE render pose = the hold's goal: the rigid body POST_PHYSICS sync (0x80b7c0 -> 0x754ea0, call site 0x80b9aa) is given
+# PhysicalGrab::last_goal for the published entity; release blends back to the body; ragdolls refused; status held_render_pose + engine_gap
+hr49 = (root / 'src' / 'held_render_pose.hpp').read_text(encoding='utf-8')
+ng49 = (root / 'src' / 'native_grab.hpp').read_text(encoding='utf-8')
+assert 'inline static constexpr std::uintptr_t rva=0x754ea0,site_rva=0x80b9af;' in hr49 and 'reinterpret_cast<std::uintptr_t>(_ReturnAddress())==site_' in hr49
+assert 'if(!corpse && body.limb<0) held_render_pose().publish(side,body.entity,lane.grab.last_goal(),body.pose,motor_s);else held_render_pose().refuse(HeldRenderPose::ragdoll);' in ng49
+assert 'if(held && held->bone<0) held_render_pose().end(held->entity,precise_s());' in ng49 and 'd.body=held_render_pose().source(body.entity).value_or(body.pose);' in ng49
+assert 'if(!fs::exists(root/L"build"/L"no-held-render-pose")) (void)d2vr::HeldRenderPose::install(image_base);' in probe
+assert 'pose_mat(d2vr::held_render_pose().source(hb->entity).value_or(hb->pose)),ex.k)' in probe and 'd2vr::hold_sync().engine(hk->limb>=0?' in probe
+assert '<< ",\\"held_render_pose\\":" << d2vr::held_render_pose().json()' in probe
+print('PASS: v1249 held render pose')
