@@ -675,6 +675,10 @@ private:
         const auto gen=records_gen_.load(std::memory_order_acquire);if(gen==tl_cand_gen_) return;
         std::lock_guard<std::mutex> lock(views_mutex_);tl_cand_n_=0;
         for(unsigned eye=0;eye<2;++eye) for(const auto& r:eye_records_[eye]) if(r.valid && tl_cand_n_<8) {
+            // v1203: only the newest two renders of each eye (span 4: v1202 made any two renders within 3 differ; the 4-deep ring reached
+            // renders 7 apart whose jitter can repeat: the v1202 cross-eye ties)
+            unsigned newer=0;for(const auto& o:eye_records_[eye]) if(o.valid && o.frame>r.frame) ++newer;
+            if(newer>=2) continue;
             Candidate& c=tl_cand_[static_cast<std::size_t>(tl_cand_n_)];c.p=projection_of(r.m[2]);if(!c.p.ok) continue;
             View v{};
             const unsigned own_step=alt_view_.load(std::memory_order_relaxed)?2u:1u;
@@ -690,8 +694,10 @@ private:
         tl_cand_gen_=gen;
     }
     // Tolerances (knob build/alt-view-content-tol: "<fit> <ratio> <floor>"), outcome counters and score histograms (log10 decades -9..0).
-    inline static std::atomic<double> content_fit_{1e-4},content_ratio_{4.0},content_floor_{2e-6};
-    enum ContentOutcome : unsigned {content_certain,content_ambiguous,content_none_fit,content_other_pass,content_no_candidates,content_tie_same_eye,content_outcomes};
+    // v1203: fit 1e-5 (was 1e-4): a model skew of a jitter shear's size (1e-4..1e-3) could cancel the wrong render's shear; skewed models
+    // go to the Gram test (previous rows) instead
+    inline static std::atomic<double> content_fit_{1e-5},content_ratio_{4.0},content_floor_{2e-6};
+    enum ContentOutcome : unsigned {content_certain,content_ambiguous,content_none_fit,content_other_pass,content_no_candidates,content_tie_same_eye,content_certain_gram,content_outcomes};
     inline static std::array<std::atomic<std::uint64_t>,content_outcomes> content_outcome_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,11>,2> content_hist_{}; // [0] best, [1] second best
     inline static std::array<std::atomic<std::uint64_t>,2> content_tick_{}; // tick: picked the newest of its eye / an older one
@@ -700,11 +706,12 @@ private:
     // v1202: the draws no candidate fits, named: by kind (0 rig, 1 near non-rig, 2 far with previous rows) x best-shear decade, and the
     // engine frames they occurred in (first, last) to tell a start-up burst from a steady class
     inline static thread_local unsigned tl_draw_kind_{};
+    inline static thread_local float early_z_[4]{}; // v1203: the z row the early gathers used
     inline static std::array<std::array<std::atomic<std::uint64_t>,11>,3> none_fit_kind_{};
     inline static std::atomic<std::uint32_t> none_fit_first_{~0u},none_fit_last_{};
     static unsigned decade(double x) noexcept {if(!(x>0)) return 0;const int d=static_cast<int>(std::floor(std::log10(x)))+10;return static_cast<unsigned>(std::clamp(d,0,10));}
     // The view this draw's rows were built with, by content; false = ambiguous / not this form (counted). `rows`: the draw's engine rows.
-    static bool content_view(const float* rows,View& out) noexcept {
+    static bool content_view(const float* rows,View& out,const float* prev_rows=nullptr) noexcept {
         if(const auto source=pass_source_.load(std::memory_order_relaxed)) { // a pass of another view (shadow, light): not this test's form
             const auto v=source().view;const auto alt=alt_view_.load(std::memory_order_relaxed);
             if(v && alt && v!=alt) {content_outcome_[content_other_pass].fetch_add(1,std::memory_order_relaxed);tl_content_why_=3;return false;}
@@ -719,6 +726,22 @@ private:
         for(int i=0;i<tl_cand_n_;++i) if(i!=best && eyes[i]!=eyes[best] && (second<0 || shear[i]<shear[second])) second=i; // the best of the OTHER eye
         content_hist_[0][decade(shear[best])].fetch_add(1,std::memory_order_relaxed);
         if(second>=0) content_hist_[1][decade(shear[second])].fetch_add(1,std::memory_order_relaxed);
+        // v1203: not decided by orthogonality and the draw has previous rows: the Gram test (buffer_views.hpp rows_gram). Per current-render
+        // candidate h, the best agreement with any OLDER candidate g under which the previous rows were built; picked like the shear.
+        if(pick<0 && prev_rows) {
+            double g_cur[8][6]{},g_prev[8][6]{},score[8]{};bool ok_c[8]{},ok_p[8]{};
+            for(int i=0;i<tl_cand_n_;++i) {const auto& c=tl_cand_[static_cast<std::size_t>(i)];ok_c[i]=rows_gram(c.p,rows,g_cur[i]);ok_p[i]=rows_gram(c.p,prev_rows,g_prev[i]);}
+            for(int h=0;h<tl_cand_n_;++h) {
+                score[h]=1e30;if(!ok_c[h]) continue;
+                for(int g=0;g<tl_cand_n_;++g) if(ok_p[g] && frames[g]<frames[h]) score[h]=std::min(score[h],gram_distance(g_cur[h],g_prev[g]));
+            }
+            bool gram_tied=false;
+            const int gram=pick_by_shear_eyes(score,eyes,frames,tl_cand_n_,content_fit_.load(std::memory_order_relaxed),content_ratio_.load(std::memory_order_relaxed),content_floor_.load(std::memory_order_relaxed),gram_tied);
+            if(gram>=0) {
+                out=tl_cand_[static_cast<std::size_t>(gram)].view;content_outcome_[content_certain_gram].fetch_add(1,std::memory_order_relaxed);
+                content_tick_[0].fetch_add(1,std::memory_order_relaxed);return true;
+            }
+        }
         if(pick==-1) {
             none_fit_kind_[tl_draw_kind_<3?tl_draw_kind_:2][decade(shear[best])].fetch_add(1,std::memory_order_relaxed);
             const auto f=newest_frame_.load(std::memory_order_relaxed);
@@ -734,7 +757,7 @@ private:
     static std::string content_json() {
         std::string o="{\"outcome\":{\"certain\":"+std::to_string(content_outcome_[0].load())+",\"ambiguous\":"+std::to_string(content_outcome_[1].load())
             +",\"none_fit\":"+std::to_string(content_outcome_[2].load())+",\"other_pass\":"+std::to_string(content_outcome_[3].load())+",\"no_candidates\":"+std::to_string(content_outcome_[4].load())
-            +",\"certain_same_eye_tie\":"+std::to_string(content_outcome_[5].load())+"}";
+            +",\"certain_same_eye_tie\":"+std::to_string(content_outcome_[5].load())+",\"certain_gram\":"+std::to_string(content_outcome_[6].load())+"}";
         for(unsigned h=0;h<2;++h) {o+=h?",\"second_log10\":[":",\"best_log10\":[";for(unsigned k=0;k<11;++k) o+=(k?",":"")+std::to_string(content_hist_[h][k].load());o+="]";}
         o+=",\"tick\":["+std::to_string(content_tick_[0].load())+','+std::to_string(content_tick_[1].load())+"],\"vs_job\":["+std::to_string(content_vs_job_[0].load())+','+std::to_string(content_vs_job_[1].load())
             +','+std::to_string(content_vs_job_[2].load())+','+std::to_string(content_vs_job_[3].load())+"]";
@@ -795,7 +818,7 @@ private:
     // view's constants there leave the draw untagged), else the newest eye view written anywhere.
     // v950: in paired stereo that newest view is often the other eye's (weapon-pin: weapon draws tagged with the other eye).
     // The draw's VS b1, when it is the per-view globals buffer an eye's native TAA binds, names the eye; the tag keeps it.
-    static bool current_view(const ContextState& s,View& out,const float* rows=nullptr) noexcept {
+    static bool current_view(const ContextState& s,View& out,const float* rows=nullptr,const float* prev_rows=nullptr) noexcept {
         const std::uint32_t newest=newest_frame_.load(std::memory_order_acquire);
         const bool own=s.view_frame==newest;
         bool ok;
@@ -807,7 +830,7 @@ private:
             const bool job_certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);
             // v1200: by the rows' content (the VP they were built with); the same-job b1 rule stays as a cross-check and a fallback
             tl_content_why_=0;
-            const bool by_content=rows && content_view(rows,out);
+            const bool by_content=rows && content_view(rows,out,prev_rows);
             // v1201: the same-job b1 view (v1199) is only compared (v1200 sim: it disagreed with content in 60 % of the draws both named)
             if(by_content && job_certain) content_vs_job_[out.eye!=s.view.eye?1u:out.frame==s.view.frame?0u:out.frame>s.view.frame?2u:3u].fetch_add(1,std::memory_order_relaxed);
             const bool certain=by_content;
@@ -898,13 +921,14 @@ private:
         float early[16]{};bool early_ok=false;
         if(alternate() && !alt_view_heuristic.load(std::memory_order_relaxed)) {
             float zn[4]{};const unsigned e=latest_eye_.load(std::memory_order_relaxed)&1u;for(unsigned k=0;k<4;++k) zn[k]=eye_z_[e][k].load(std::memory_order_relaxed);
-            early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);
+            early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);std::memcpy(early_z_,zn,16);
         }
         // v1201: only draws a consumer can use are tested: previous rows, near (held / placement), rig (rig motion, rig target)
         const float near_w0=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool content_wanted=early_ok && (has_previous(s.layout,sh->size) || (early[15]>0.01f && early[15]<near_w0) || RigMask::draw_is_rig());
         tl_draw_kind_=RigMask::draw_is_rig()?0u:early_ok && early[15]>0.01f && early[15]<near_w0?1u:2u; // v1202 diagnostics
-        const bool have_view=current_view(s,view,content_wanted?early:nullptr);
+        float early_prev[16]{};const bool early_prev_ok=content_wanted && gather_previous(s.layout,sh->data,sh->size,early_z_,early_prev); // v1203: Gram test
+        const bool have_view=current_view(s,view,content_wanted?early:nullptr,early_prev_ok?early_prev:nullptr);
         // The pass this draw is recorded in, when build/native-gpu-timing or build/shadow-share (or the weapon placement itself, which
         // installs the pass map) is on: its id and the eye its view names. A v1101 pass job's view is one of the eye views for a view pass.
         int pass=-1,pass_eye=-1;

@@ -111,6 +111,46 @@ int main() {
       const double clear[3]{3e-4,1e-7,4e-4};CHECK(pick_by_shear_eyes(clear,eyes,frames,3,1e-4,4.0,2e-6,tied)==1 && !tied);
       const double nofit[3]{.3,.2,.4};CHECK(pick_by_shear_eyes(nofit,eyes,frames,3,1e-4,4.0,2e-6,tied)==-1);}
     }
+    // v1203: the full rule on realistic data. Renders N-2..N+1 (the newest two of each eye; N+1 = the overlap) with the game's Halton jitter
+    // (16 phases, eye 1 offset by half), world positions -80..+80 m and up to 300 m away, the head moving and turning between renders. Models:
+    // half orthogonal (non-uniform scale), half skewed (R1 * S * R2, skew up to ~0.3); previous rows = render N-1 with the object moved
+    // rigidly. Shear test at fit 1e-5, else the Gram test. 0 wrong required.
+    {std::uint32_t seed=777;const auto rnd=[&] {seed=seed*1664525u+1013904223u;return (seed>>8)/16777216.0;};
+     const auto rot=[](double ax,double ay,double az) {const double cx=std::cos(ax),sx=std::sin(ax),cy=std::cos(ay),sy=std::sin(ay),cz=std::cos(az),sz=std::sin(az);
+         rig_target::M4 x{1,0,0,0, 0,cx,-sx,0, 0,sx,cx,0, 0,0,0,1},y{cy,0,sy,0, 0,1,0,0, -sy,0,cy,0, 0,0,0,1},z{cz,-sz,0,0, sz,cz,0,0, 0,0,1,0, 0,0,0,1};
+         return rig_target::mul(rig_target::mul(z,y),x);};
+     const auto to_rows=[](const float* vpf,const rig_target::M4& m,float* rows) {for(int q=0;q<4;++q) for(int c=0;c<4;++c) {float t=0;for(int k=0;k<4;++k) t+=vpf[q*4+k]*static_cast<float>(m[static_cast<std::size_t>(k*4+c)]);rows[q*4+c]=t;}};
+     int right=0,wrong=0,fallback=0,by_gram=0,right_skew=0,n_skew=0;
+     for(int trial=0;trial<20000;++trial) {
+         const std::uint32_t base=static_cast<std::uint32_t>(rnd()*1000);const int first_eye=trial&1;
+         float vpf[4][16];ProjectionXY pr[4];unsigned eyes[4];std::uint32_t frames[4];
+         for(int i=0;i<4;++i) { // i=0 -> N-2, 1 -> N-1, 2 -> N (truth), 3 -> N+1
+             const std::uint32_t render=base+static_cast<std::uint32_t>(i);const int eye=static_cast<int>((render+static_cast<std::uint32_t>(first_eye))&1u);
+             const auto j=taa_sample_px(alternate_jitter_index(render/2,eye,16),true,16);
+             rig_target::M4 p{};p[0]=1/0.8;p[5]=1/0.8;p[10]=1.4e-6;p[11]=.01;p[14]=-1;p[2]=2*j[0]/1922;p[6]=2*j[1]/2070;
+             rig_target::M4 v=rot(.02*i+trial*1e-3,.3+.01*i,.005*i);v[3]=(eye?.032:-.032)-60+.01*i;v[7]=-80;v[11]=-14;
+             const auto m=rig_target::mul(p,v);for(int k=0;k<16;++k) vpf[i][k]=static_cast<float>(m[static_cast<std::size_t>(k)]);
+             pr[i]=projection_of(vpf[i]);eyes[i]=static_cast<unsigned>(eye);frames[i]=render;
+         }
+         const bool skew=trial%2==1;n_skew+=skew;
+         rig_target::M4 m=rot(rnd()*6.3,rnd()*6.3,rnd()*6.3);
+         {const double sx=.05+rnd()*4,sy=.05+rnd()*4,sz=.05+rnd()*4;for(int q=0;q<3;++q) {m[static_cast<std::size_t>(q*4)]*=sx;m[static_cast<std::size_t>(q*4+1)]*=sy;m[static_cast<std::size_t>(q*4+2)]*=sz;}}
+         if(skew) m=rig_target::mul(m,rot(rnd()*.5,rnd()*.5,rnd()*.5));
+         m[3]=60+(rnd()-.5)*300;m[7]=80+(rnd()-.5)*300;m[11]=14+(rnd()-.5)*20;
+         rig_target::M4 moved=rig_target::mul(rot((rnd()-.5)*.1,(rnd()-.5)*.1,(rnd()-.5)*.1),m);moved[3]+=(rnd()-.5)*.2; // previous pose
+         float rows[16],prev[16];to_rows(vpf[2],m,rows);to_rows(vpf[1],moved,prev);
+         double sh[4];for(int i=0;i<4;++i) sh[i]=rows_shear(pr[i],rows);
+         bool tied=false;int pick=pick_by_shear_eyes(sh,eyes,frames,4,1e-5,4.0,2e-6,tied);
+         if(pick<0) {
+             double gc[4][6],gp[4][6],score[4];bool oc[4],op[4];
+             for(int i=0;i<4;++i) {oc[i]=rows_gram(pr[i],rows,gc[i]);op[i]=rows_gram(pr[i],prev,gp[i]);}
+             for(int h=0;h<4;++h) {score[h]=1e30;if(oc[h]) for(int g=0;g<4;++g) if(op[g] && frames[g]<frames[h]) score[h]=std::min(score[h],gram_distance(gc[h],gp[g]));}
+             pick=pick_by_shear_eyes(score,eyes,frames,4,1e-5,4.0,2e-6,tied);by_gram+=pick>=0;
+         }
+         if(pick==2) {++right;right_skew+=skew;} else if(pick>=0) ++wrong;else ++fallback;
+     }
+     std::printf("full rule, realistic: %d right (%d of %d skewed; %d by Gram), %d wrong, %d fell back of 20000\n",right,right_skew,n_skew,by_gram,wrong,fallback);
+     CHECK(wrong==0 && right>=19800);}
     // v1202: one-view jitter. Renders alternate eyes (either eye first), each eye's phase counts from the same reset; over 10k renders no two
     // renders within 3 of each other share a sample, for the engine pattern (8) and every Halton owner length (8..32); each eye still visits
     // every phase in order (same coverage as before). Without the offset the neighbours share (the v1201 ties).

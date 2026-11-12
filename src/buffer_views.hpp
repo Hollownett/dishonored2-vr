@@ -106,6 +106,23 @@ inline int pick_by_shear_eyes(const double* shear,const unsigned* eye,const std:
     }
     return pick;
 }
+// v1203: models whose own axes are not orthogonal (a non-uniform scale between two rotations: v1202 sim, 10-20k draws with best shear
+// 1e-4..1e-3) cannot be named by the shear test, and a skew the size of a jitter step could even cancel the wrong render's shear. For a draw
+// with previous rows a skew-proof invariant exists: the Gram matrix of the model axes (A^T A) is unchanged by any rotation, of the camera
+// or of the object, and by any translation. Rebuilt from the current rows under the true render's projection and from the previous rows
+// under the render they were built with, the two Grams agree to float noise; under a wrong projection they differ by the jitter shear.
+inline bool rows_gram(const ProjectionXY& p,const float* rows,double g[6]) noexcept {
+    if(!p.ok) return false;
+    double axis[3][3];
+    for(int j=0;j<3;++j) {const double W=rows[12+j],z=-W;axis[j][0]=(rows[j]-p.b*z)/p.a;axis[j][1]=(rows[4+j]-p.d*z)/p.c;axis[j][2]=z;}
+    int k=0;for(int i=0;i<3;++i) for(int j=i;j<3;++j) g[k++]=axis[i][0]*axis[j][0]+axis[i][1]*axis[j][1]+axis[i][2]*axis[j][2];
+    return g[0]>1e-18 && g[3]>1e-18 && g[5]>1e-18;
+}
+inline double gram_distance(const double a[6],const double b[6]) noexcept {
+    const double scale=std::max({a[0],a[3],a[5]});double worst=0;
+    for(int i=0;i<6;++i) worst=std::max(worst,std::abs(a[i]-b[i]));
+    return worst/scale;
+}
 inline bool view_certain(bool own_valid,const void* own_buffer,const void* bound,std::uint64_t own_job,std::uint64_t job,bool immediate) noexcept {
     if(!own_valid || !own_buffer || own_buffer!=bound) return false;
     return immediate || (job!=0 && own_job==job);

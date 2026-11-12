@@ -331,8 +331,8 @@ print('PASS: v1199 certain one-view draw views, two-slice rig target, afw2 rig_t
 
 # v1200: the one-view draw's view by its rows' content (buffer_views.hpp rows_shear/pick_by_shear against every recorded eye view), the
 # Setup-end final snapshot feeds the candidates; content status under alternate_eye.object_motion.content; build/alt-view-content-tol
-assert 'const bool by_content=rows && content_view(rows,out);' in om and 'const bool certain=by_content;' in om  # v1201: content only
-assert 'early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);' in om and 'const bool have_view=current_view(s,view,content_wanted?early:nullptr);' in om
+assert 'const bool by_content=rows && content_view(rows,out,prev_rows);' in om and 'const bool certain=by_content;' in om  # v1201: content only
+assert 'early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);' in om and 'const bool have_view=current_view(s,view,content_wanted?early:nullptr,early_prev_ok?early_prev:nullptr);' in om
 assert 'd2vr::ObjectMotion::note_setup_final(reinterpret_cast<std::uintptr_t>(view));' in probe
 assert 'L"alt-view-content-tol"' in om and '\\"content\\":"+content_json()' in om
 bv = (root / 'src' / 'buffer_views.hpp').read_text(encoding='utf-8')
@@ -351,3 +351,9 @@ assert 'inline std::uint32_t alternate_jitter_index(std::uint32_t phase,int eye,
 assert 'if(alternate_taa_phase) counter=d2vr::alternate_jitter_index(*alternate_taa_phase,alt_eye,dlss_owned?jitter_phases.load(std::memory_order_relaxed):8u);' in probe
 assert '\\"none_fit_by_kind\\":{' in om
 print('PASS: v1202 one-view jitter offset per eye, none-fit diagnostics')
+
+# v1203: candidates = newest two renders per eye, shear fit 1e-5, Gram test (previous rows) for skewed models
+assert 'if(newer>=2) continue;' in om and 'content_fit_{1e-5}' in om
+assert 'inline bool rows_gram(const ProjectionXY& p,const float* rows,double g[6]) noexcept {' in bv
+assert 'const bool by_content=rows && content_view(rows,out,prev_rows);' in om and '\\"certain_gram\\":' in om
+print('PASS: v1203 newest-two candidates, fit 1e-5, Gram test for skewed models')
