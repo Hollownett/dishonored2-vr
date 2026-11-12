@@ -313,8 +313,10 @@ public:
                 for(unsigned k=0;k<cert_consumers;++k) {o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+','+std::to_string(alt_cert_[k][2].load())+']';
                     o+=",\""+std::string(names[k])+"_fallback_why\":[";for(unsigned w=0;w<5;++w) o+=(w?",":"")+std::to_string(alt_cert_why_[k][w].load());o+=']';}
                 return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"],\"rig_zero_why\":["+std::to_string(rig_zero_why_[0].load())+','+std::to_string(rig_zero_why_[1].load())+','+std::to_string(rig_zero_why_[2].load())+','+std::to_string(rig_zero_why_[3].load())+','+std::to_string(rig_zero_why_[4].load())+','+std::to_string(rig_zero_why_[5].load())+"],\"uncertain_zero\":"+std::to_string(alt_uncertain_.load())+",\"raw_rows\":{\"draws\":"+std::to_string(raw_total_.load())+",\"renders_over_16\":"+std::to_string(raw_renders_.load())+",\"worst\":"+std::to_string(raw_worst_.load())+",\"worst_frame\":"+std::to_string(raw_worst_frame_.load())+"}"
-            +",\"content\":"+content_json()+"},\"renders\":"+renders_json()+",\"probed\":"+probed_json()+",\"fallbacks\":"+fallback_json()
-            +",\"rig_wild_renders\":"+std::to_string(RigMask::wild_renders_.load())+"}";
+            +",\"content\":"+content_json()+"},\"renders\":"+renders_json()+",\"probed\":"+probed_json()+",\"fallbacks\":"+fallback_json()+",\"draw_views\":"+draw_views_json()
+            +",\"wild_forensics\":["+[] {std::lock_guard<std::mutex> lock(pin_mutex_);std::string o;for(unsigned i=0;i<forensics_n_;++i) o+=(i?",":"")+forensics_[i];return o;}()+"]"
+            +",\"rig_wild_renders\":"+std::to_string(RigMask::wild_renders_.load())
+            +",\"rig_guard\":{\"renders\":"+std::to_string(RigMask::wild_renders_.load())+",\"px\":"+std::to_string(RigMask::wild_px_.load())+",\"draws\":"+std::to_string(RigMask::guard_draws_.load())+",\"failures\":"+std::to_string(RigMask::guard_failures_.load())+"}}";
     }
     // v1206: one render's row (the probe adds it to its dump of that render), "null" when the ring no longer holds it
     static void pin(std::uint64_t display) noexcept { // v1207: the probe dumps this render
@@ -774,7 +776,10 @@ private:
         RenderRow& w=render_rows_[v.display%render_ring];
         if(w.display.load(std::memory_order_relaxed)==v.display) return; // a duplicate receipt
         {std::lock_guard<std::mutex> lock(pin_mutex_);const auto old=w.display.load(std::memory_order_relaxed);
-         if(old!=~0ull) for(unsigned i=0;i<pinned_n_;++i) if(pinned_[i]==old && pinned_json_[i].empty()) try {pinned_json_[i]=row_json(w);} catch(...) {}}
+         if(old!=~0ull) for(unsigned i=0;i<pinned_n_;++i) if(pinned_[i]==old && pinned_json_[i].empty()) try {pinned_json_[i]=row_json(w);} catch(...) {}
+         // v1209 forensics: a wild render (census), or the same eye's render just before one, is kept with its rig draws
+         std::uint32_t m[3]{},m2[3]{};const bool wild=old!=~0ull && RigMask::mask_counts(old,m) && m[2];const bool before=old!=~0ull && !wild && RigMask::mask_counts(old+2,m2) && m2[2];
+         if((wild || before) && forensics_n_<forensics_.size()) try {forensics_[forensics_n_++]=std::string("{\"wild\":")+(wild?"true":"false")+",\"row\":"+row_json(w)+",\"rig_draws\":"+rig_draws_json(old)+'}';} catch(...) {}}
         w.display.store(~0ull,std::memory_order_release);
         for(auto& k:w.n) k.store(0,std::memory_order_relaxed);
         w.frame=v.frame;w.prev_frame=v.prev_frame;w.phase=v.phase;w.eye=eye;w.reset=reset;w.has_prev=v.has_prev;w.src_known=src_jitter!=nullptr;
@@ -805,6 +810,7 @@ private:
         for(auto* x:r) if(x) {any=true;ID3D11Resource* res{};x->GetResource(&res);if(res) {for(const auto& m:mv_target_) writes=writes || m.load(std::memory_order_relaxed)==res;res->Release();}x->Release();}
         fallback_rt_[!any?0:writes?2:1].fetch_add(1,std::memory_order_relaxed);
         if(!any) writes=false;
+        if(writes) draw_view_note(c,0);
         if(writes) {int pass=-1;if(const auto source=pass_source_.load(std::memory_order_relaxed)) pass=source().pass;
             fallback_pass_[pass>=0 && pass<64?static_cast<unsigned>(pass):64u][rig?1:0].fetch_add(1,std::memory_order_relaxed);}
         return writes;
@@ -825,6 +831,52 @@ private:
         const int i=table_.prove_render(keys,n,prev);
         if(i<0) return false;
         corrections(eyes[i],*recs[i],out);return true;
+    }
+    // v1209 forensics: per render up to 16 rig draws (model, t1 buffer, slot index/tag/buffer bound at t0, row hashes, chain kind), frozen into
+    // the status when the census finds that render wild (and the same eye's render before a wild one, for a side-by-side)
+    struct RigDraw {std::uint32_t model,slot,tag,kind,own,chained,foreign,vs_w,vs_h;std::uint64_t t1,slot_buffer,t0,cur,raw,used;};
+    struct RigDraws {std::atomic<std::uint64_t> display{~0ull};std::atomic<unsigned> n{};std::array<RigDraw,16> d{};};
+    inline static std::array<RigDraws,render_ring> rig_draws_{};
+    inline static std::array<std::string,8> forensics_{};inline static unsigned forensics_n_{};
+    static std::uint64_t hash64(const float* m) noexcept {std::uint64_t h=0xcbf29ce484222325ull;for(int i=0;i<16;++i) {std::uint32_t w;std::memcpy(&w,m+i,4);h=(h^w)*0x100000001b3ull;}return h;}
+    static void rig_record(ID3D11DeviceContext* c,std::uint64_t display,const float* cur,const float* raw,const float* used,unsigned kind,bool own,bool chained) noexcept {
+        if(display==~0ull) return;
+        RigDraws& w=rig_draws_[display%render_ring];
+        auto at=w.display.load(std::memory_order_acquire);
+        if(at!=display) {if(!w.display.compare_exchange_strong(at,display)) return;w.n.store(0,std::memory_order_release);}
+        const unsigned i=w.n.fetch_add(1,std::memory_order_acq_rel);if(i>=w.d.size()) return;
+        RigDraw& r=w.d[i];r={};r.model=RigMask::draw_model();r.slot=RigMask::tl_bound_slot_;r.tag=RigMask::tl_bound_tag_;r.slot_buffer=RigMask::tl_bound_buffer_;
+        r.kind=kind;r.own=own;r.chained=chained;r.foreign=RigMask::draw_foreign_t0();r.t1=RigMask::draw_current();
+        ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0);if(t0) {ID3D11Resource* res{};t0->GetResource(&res);r.t0=reinterpret_cast<std::uintptr_t>(res);if(res) res->Release();t0->Release();}
+        UINT n=1;D3D11_VIEWPORT vp{};c->RSGetViewports(&n,&vp);r.vs_w=static_cast<std::uint32_t>(vp.Width);r.vs_h=static_cast<std::uint32_t>(vp.Height);
+        r.cur=hash64(cur);r.raw=hash64(raw);r.used=hash64(used);
+    }
+    static std::string rig_draws_json(std::uint64_t display) {
+        const RigDraws& w=rig_draws_[display%render_ring];if(w.display.load()!=display) return "[]";
+        std::ostringstream o;o<<std::hex;o<<'[';const unsigned n=std::min<unsigned>(w.n.load(),static_cast<unsigned>(w.d.size()));
+        for(unsigned i=0;i<n;++i) {const auto& r=w.d[i];o<<(i?",":"")<<"{\"model\":"<<std::dec<<r.model<<",\"slot\":"<<static_cast<int>(r.slot)<<",\"tag\":"<<static_cast<int>(r.tag)<<",\"kind\":"<<r.kind
+            <<",\"own\":"<<r.own<<",\"chained\":"<<r.chained<<",\"foreign_t0\":"<<r.foreign<<",\"viewport\":["<<r.vs_w<<','<<r.vs_h<<"]"<<std::hex
+            <<",\"t1\":\""<<r.t1<<"\",\"slot_buffer\":\""<<r.slot_buffer<<"\",\"t0\":\""<<r.t0<<"\",\"cur\":\""<<r.cur<<"\",\"raw\":\""<<r.raw<<"\",\"used\":\""<<r.used<<"\"}";}
+        o<<']';return o.str();
+    }
+    // v1209: the views draws record into, by state signature: fallback draws that write an MV texture vs certain rig draws
+    struct DrawView {std::atomic<std::uint64_t> key{};std::uint32_t vp_w{},vp_h{};std::uintptr_t view{},dsv{},rtv0{};float near_w{};std::array<std::atomic<std::uint64_t>,2> n{};};
+    inline static std::array<DrawView,16> draw_views_{};
+    static void draw_view_note(ID3D11DeviceContext* c,unsigned certain) noexcept {
+        UINT nv=1;D3D11_VIEWPORT vp{};c->RSGetViewports(&nv,&vp);
+        ID3D11RenderTargetView* r0{};ID3D11DepthStencilView* d{};c->OMGetRenderTargets(1,&r0,&d);
+        const auto res=[](ID3D11View* v) {std::uintptr_t a=0;if(v) {ID3D11Resource* r{};v->GetResource(&r);a=reinterpret_cast<std::uintptr_t>(r);if(r) r->Release();v->Release();}return a;};
+        const std::uintptr_t rt=res(r0),ds=res(d);std::uintptr_t view=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) view=source().view;
+        const std::uint64_t key=(static_cast<std::uint64_t>(vp.Width)<<48)^(static_cast<std::uint64_t>(vp.Height)<<32)^ds^(rt<<7)^(view<<13)|1;
+        for(auto& e:draw_views_) {auto k=e.key.load(std::memory_order_acquire);
+            if(!k && e.key.compare_exchange_strong(k,key)) {e.vp_w=static_cast<std::uint32_t>(vp.Width);e.vp_h=static_cast<std::uint32_t>(vp.Height);e.view=view;e.dsv=ds;e.rtv0=rt;k=key;}
+            if(k==key) {e.n[certain].fetch_add(1,std::memory_order_relaxed);return;}}
+    }
+    static std::string draw_views_json() {
+        std::ostringstream o;o<<"{\"alt_view\":\""<<std::hex<<alt_view_.load()<<"\",\"views\":[";bool first=true;
+        for(const auto& e:draw_views_) if(e.key.load()) {o<<(first?"":",")<<"{\"viewport\":["<<std::dec<<e.vp_w<<','<<e.vp_h<<"],\"view\":\""<<std::hex<<e.view<<"\",\"dsv\":\""<<e.dsv<<"\",\"rtv0\":\""<<e.rtv0
+            <<"\",\"fallback\":"<<std::dec<<e.n[0].load()<<",\"certain\":"<<e.n[1].load()<<'}';first=false;}
+        o<<"]}";return o.str();
     }
     static void render_note(std::uint64_t display,RenderCount k) noexcept {
         if(display==~0ull) return;
@@ -1161,7 +1213,10 @@ private:
             if(have_render && view.has_prev) kind=table_.fix_render(view.eye,view.frame,view.prev_frame,cur,prev,false);
             else if(have_content && view.receipt) table_.insert(view.eye,view.frame,cur,prev); // a history reset: recorded for the next render
             const bool rows_own=kind==PrevMvpTable::other_last;
+            RigMask::tl_bound_slot_=~0u;RigMask::tl_bound_tag_=~0u;RigMask::tl_bound_buffer_=0;
             const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);
+            if(have_render) rig_record(c,view.display,cur,engine,own?prev:cur,static_cast<unsigned>(kind),own,chained);
+            draw_view_note(c,have_render?1u:0u);
             // status rig_zero_why: [first frame (cur == prev), chain miss, chain unproven (the second hop), palette (no slot tagged with the
             // previous render), no content view (or no receipt record), history reset]
             // v1208: an unnamed rig draw that does not write the eye's motion-vector target (another view's depth pass) is not applicable

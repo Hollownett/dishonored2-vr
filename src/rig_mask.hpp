@@ -34,6 +34,9 @@ namespace d2vr {
 // that test > 0 see all three as rig); u1 counters: [0] mask pixels, [1] near misses (rig depth present,
 // eps < |difference| <= 64 eps: an eps too tight shows here), [2] own-motion pixels, [3] (v1207) rig pixels whose engine motion vector (t2, the
 // TAA's MV input, UV of the render rectangle; unbound reads 0) is not finite or longer than 256 px. k.xy eps = x + y * depth, k.zw the render rectangle.
+// v1209: the bound is a quarter of the render width (no hand or body point crosses a quarter of the eye's view between two renders of that eye:
+// 5 m/s at 0.3 m is ~340 px of 1922; the measured wild vectors are 40,000+ px). Such a pixel is marked 252 (rig, no own motion) and
+// RigMask::guard rewrites its motion vector to zero before the motion pass and the upscaler read it.
 inline constexpr char rig_mask_copy_source[]=
     "Texture2D<float> z:register(t0);Texture2D<float2> r:register(t1);Texture2D<float2> mv:register(t2);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
     "cbuffer C:register(b0){float4 k;};groupshared uint g[4];"
@@ -44,7 +47,7 @@ inline constexpr char rig_mask_copy_source[]=
     "o[i.xy]=held?253:own?255:rig?254:0;"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
     "if(own) InterlockedAdd(g[2],1);"
-    "const float2 m=mv.Load(int3(i.xy,0))*k.zw;if(rig && !(dot(m,m)<=65536.0)) InterlockedAdd(g[3],1);"
+    "const float2 m=mv.Load(int3(i.xy,0))*k.zw;const float b=0.25*k.z;const bool wild=rig && !held && !(dot(m,m)<=b*b);if(wild) {o[i.xy]=252;InterlockedAdd(g[3],1);}"
     "GroupMemoryBarrierWithGroupSync();if(t<4 && g[t]) n.InterlockedAdd(t*4,g[t]);}";
 // eps for a depth view format: D24 one step is 2^-24 (the replay's float z vs the stored 24-bit value: half a step + rounding); float: 4 ulp.
 inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) noexcept {
@@ -254,14 +257,60 @@ public:
     static void note_mask(std::uint64_t display,std::uint32_t rig,std::uint32_t own,std::uint32_t wild) noexcept {
         auto& m=mask_census_[display%mask_census_.size()];m.display.store(~0ull,std::memory_order_release);
         m.n[0].store(rig,std::memory_order_relaxed);m.n[1].store(own,std::memory_order_relaxed);m.n[2].store(wild,std::memory_order_relaxed);m.display.store(display,std::memory_order_release);
-        if(wild) wild_renders_.fetch_add(1,std::memory_order_relaxed);
+        if(wild) {wild_renders_.fetch_add(1,std::memory_order_relaxed);wild_px_.fetch_add(wild,std::memory_order_relaxed);}
     }
     static bool mask_counts(std::uint64_t display,std::uint32_t (&out)[3]) noexcept {
         const auto& m=mask_census_[display%mask_census_.size()];if(m.display.load(std::memory_order_acquire)!=display) return false;
         for(unsigned i=0;i<3;++i) out[i]=m.n[i].load(std::memory_order_relaxed);
         return m.display.load(std::memory_order_acquire)==display;
     }
-    inline static std::atomic<std::uint64_t> wild_renders_{};
+    inline static std::atomic<std::uint64_t> wild_renders_{},wild_px_{},guard_draws_{},guard_failures_{};
+    // v1209 same-render guard (immediate context, in FsrTaa's job right after the mask copy/compare): every mask pixel marked 252 gets motion
+    // vector (0,0) in `mv` (the TAA's motion input) = the zero-motion pair (current rows + current palette give exactly 0 since v1178).
+    // The touched pipeline state is saved and restored. False: not drawn (counted).
+    static bool guard(ID3D11DeviceContext* c,ID3D11Resource* mv,ID3D11ShaderResourceView* mask,UINT w,UINT h) noexcept {
+        if(!c || !mv || !mask || !w || !h) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        Microsoft::WRL::ComPtr<ID3D11Device> dev;c->GetDevice(&dev);
+        if(guard_.device!=dev.Get()) {guard_={};guard_.device=dev.Get();}
+        if(!guard_.vs && !guard_.failed) {
+            static const char vs[]="float4 main(uint i:SV_VertexID):SV_Position{const float2 u=float2((i<<1)&2,i&2);return float4(u*float2(2,-2)+float2(-1,1),0,1);}";
+            static const char ps[]="Texture2D<uint> m:register(t0);float2 main(float4 p:SV_Position):SV_Target{if(m.Load(int3(p.xy,0))!=252) discard;return float2(0,0);}";
+            Microsoft::WRL::ComPtr<ID3DBlob> a,b;D3D11_BLEND_DESC bd{};bd.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED|D3D11_COLOR_WRITE_ENABLE_GREEN;
+            D3D11_DEPTH_STENCIL_DESC dd{};D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;
+            guard_.failed=FAILED(D3DCompile(vs,sizeof vs-1,nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&a,nullptr)) || FAILED(D3DCompile(ps,sizeof ps-1,nullptr,nullptr,nullptr,"main","ps_5_0",0,0,&b,nullptr)) ||
+                FAILED(dev->CreateVertexShader(a->GetBufferPointer(),a->GetBufferSize(),nullptr,&guard_.vs)) || FAILED(dev->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&guard_.ps)) ||
+                FAILED(dev->CreateBlendState(&bd,&guard_.blend)) || FAILED(dev->CreateDepthStencilState(&dd,&guard_.depth)) || FAILED(dev->CreateRasterizerState(&rd,&guard_.raster));
+        }
+        if(guard_.failed) {guard_failures_.fetch_add(1,std::memory_order_relaxed);return false;}
+        if(guard_.rtv_of!=mv) {
+            guard_.rtv.Reset();guard_.rtv_of=nullptr;Microsoft::WRL::ComPtr<ID3D11Texture2D> t;D3D11_TEXTURE2D_DESC td{};
+            if(FAILED(mv->QueryInterface(IID_PPV_ARGS(&t)))) {guard_failures_.fetch_add(1);return false;}
+            t->GetDesc(&td);D3D11_RENDER_TARGET_VIEW_DESC v{};v.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+            v.Format=td.Format==DXGI_FORMAT_R16G16_TYPELESS?DXGI_FORMAT_R16G16_FLOAT:td.Format==DXGI_FORMAT_R32G32_TYPELESS?DXGI_FORMAT_R32G32_FLOAT:
+                td.Format==DXGI_FORMAT_R16G16B16A16_TYPELESS?DXGI_FORMAT_R16G16B16A16_FLOAT:td.Format;
+            if(!(td.BindFlags&D3D11_BIND_RENDER_TARGET) || td.SampleDesc.Count!=1 || FAILED(dev->CreateRenderTargetView(mv,&v,&guard_.rtv))) {guard_failures_.fetch_add(1);return false;}
+            guard_.rtv_of=mv;
+        }
+        // save
+        ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};ID3D11DepthStencilView* dsv{};c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,rtvs,&dsv);
+        ID3D11BlendState* blend{};float factor[4]{};UINT sample{};c->OMGetBlendState(&blend,factor,&sample);ID3D11DepthStencilState* ds{};UINT ref{};c->OMGetDepthStencilState(&ds,&ref);
+        ID3D11RasterizerState* rs{};c->RSGetState(&rs);UINT nvp=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;D3D11_VIEWPORT vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};c->RSGetViewports(&nvp,vps);
+        ID3D11VertexShader* vs{};c->VSGetShader(&vs,nullptr,nullptr);ID3D11PixelShader* ps{};c->PSGetShader(&ps,nullptr,nullptr);ID3D11ShaderResourceView* t0{};c->PSGetShaderResources(0,1,&t0);
+        ID3D11InputLayout* il{};c->IAGetInputLayout(&il);D3D11_PRIMITIVE_TOPOLOGY topo{};c->IAGetPrimitiveTopology(&topo);
+        // draw
+        ID3D11RenderTargetView* out=guard_.rtv.Get();c->OMSetRenderTargets(1,&out,nullptr);c->OMSetBlendState(guard_.blend.Get(),nullptr,0xffffffff);c->OMSetDepthStencilState(guard_.depth.Get(),0);
+        c->RSSetState(guard_.raster.Get());const D3D11_VIEWPORT vp{0,0,float(w),float(h),0,1};c->RSSetViewports(1,&vp);
+        c->VSSetShader(guard_.vs.Get(),nullptr,0);c->PSSetShader(guard_.ps.Get(),nullptr,0);c->PSSetShaderResources(0,1,&mask);
+        c->IASetInputLayout(nullptr);c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);c->Draw(3,0);
+        // restore
+        ID3D11ShaderResourceView* none{};c->PSSetShaderResources(0,1,&none);
+        c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,rtvs,dsv);c->OMSetBlendState(blend,factor,sample);c->OMSetDepthStencilState(ds,ref);c->RSSetState(rs);if(nvp) c->RSSetViewports(nvp,vps);
+        c->VSSetShader(vs,nullptr,0);c->PSSetShader(ps,nullptr,0);c->PSSetShaderResources(0,1,&t0);c->IASetInputLayout(il);c->IASetPrimitiveTopology(topo);
+        for(auto* x:rtvs) if(x) x->Release();
+        for(IUnknown* x:{static_cast<IUnknown*>(dsv),static_cast<IUnknown*>(blend),static_cast<IUnknown*>(ds),static_cast<IUnknown*>(rs),static_cast<IUnknown*>(vs),static_cast<IUnknown*>(ps),static_cast<IUnknown*>(t0),static_cast<IUnknown*>(il)}) if(x) x->Release();
+        guard_draws_.fetch_add(1,std::memory_order_relaxed);return true;
+    }
     static void begin_epoch() noexcept {epoch_.fetch_add(1,std::memory_order_relaxed);for(auto& r:ring_) {r.run.store(0,std::memory_order_relaxed);r.last.store(~0u,std::memory_order_relaxed);for(auto& t:r.tag) t.store(~0u,std::memory_order_relaxed);}}
     // FsrTaa's copy: draws of the alternate view seen since the last call (0: no one-view render, the mask is not live), and the rig target
     // of this scene depth (empty: none yet / another depth).
@@ -360,6 +409,9 @@ private:
     inline static std::atomic<std::uint64_t> uploads_{},no_upload_{},layout_refused_{};
     struct MaskCensus {std::atomic<std::uint64_t> display{~0ull};std::array<std::atomic<std::uint32_t>,3> n{};};
     inline static std::array<MaskCensus,128> mask_census_{};
+    struct Guard {ID3D11Device* device{};Microsoft::WRL::ComPtr<ID3D11VertexShader> vs;Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;Microsoft::WRL::ComPtr<ID3D11BlendState> blend;
+        Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth;Microsoft::WRL::ComPtr<ID3D11RasterizerState> raster;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;ID3D11Resource* rtv_of{};bool failed{};};
+    inline static Guard guard_{};
     inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};
     inline static std::atomic<std::uint64_t> held_draws_{};
     inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{},ring_late_{},ring_young_{};
@@ -381,12 +433,20 @@ private:
             D3D11_SHADER_RESOURCE_VIEW_DESC vd{};tl_current_->GetDesc(&vd);
             if(FAILED(device->CreateShaderResourceView(r.slot[k].Get(),&vd,&r.view[k]))) failures_.fetch_add(1,std::memory_order_relaxed);
         }
+        tl_bound_slot_=k;tl_bound_tag_=frame;tl_bound_buffer_=reinterpret_cast<std::uintptr_t>(r.slot[k].Get());
         tl_held_view_=r.view[k];return tl_held_view_.Get();
     }
     // the unpaired draws' binding pattern (t0..t3: 0 none, 1 this model wrapper 0, 2 wrapper 1, 3 another rig model's, 4 another resource)
     inline static std::array<std::atomic<std::uint64_t>,625> unpaired_patterns_{},depth_only_patterns_{};
     inline static std::atomic<std::uint64_t> depth_only_{};inline static std::atomic<int> unpaired_pass_{-2},depth_only_pass_{-2};inline static std::atomic<unsigned> unpaired_targets_{};
     inline static thread_local int tl_pass_{-1};inline static thread_local bool tl_foreign_t0_{};
+public:
+    // v1209 forensics (ObjectMotion's per-draw record): the last ring slot bound on this thread, the draw's model and current palette view
+    inline static thread_local unsigned tl_bound_slot_{~0u};inline static thread_local std::uint32_t tl_bound_tag_{~0u};inline static thread_local std::uintptr_t tl_bound_buffer_{};
+    static unsigned draw_model() noexcept {return tl_model_;}
+    static bool draw_foreign_t0() noexcept {return tl_foreign_t0_;}
+    static std::uintptr_t draw_current() noexcept {ID3D11Resource* r{};if(tl_current_) tl_current_->GetResource(&r);const auto a=reinterpret_cast<std::uintptr_t>(r);if(r) r->Release();return a;}
+private:
     // v1169 diagnostic: the last foreign t0 buffer seen (see is_rig) and how many distinct ones
     inline static std::atomic<std::uint64_t> foreign_t0_{};inline static std::atomic<UINT> foreign_bytes_{},foreign_current_bytes_{},foreign_bind_{},foreign_misc_{},foreign_stride_{},
         foreign_usage_{},foreign_cpu_{},foreign_format_{},foreign_dimension_{},foreign_elements_{},foreign_distinct_{},foreign_count_{};

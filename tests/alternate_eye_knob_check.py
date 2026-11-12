@@ -392,7 +392,7 @@ assert 'if((!have_content || !view.receipt) && std::memcmp(cur,prev,64)) chained
 assert 'int prove_render(const RenderKey* r,int n,const float* prev) const noexcept {' in om and 'd2vr::ObjectMotion::pin(receipt->key.display);' in probe
 rm3 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 fsr3 = (root / 'src' / 'fsr_taa.hpp').read_text(encoding='utf-8')
-assert 'if(rig && !(dot(m,m)<=65536.0)) InterlockedAdd(g[3],1);' in rm3 and 'RigMask::note_mask(d,n[0],n[2],n[3]);' in fsr3
+assert 'if(wild) {o[i.xy]=252;InterlockedAdd(g[3],1);}' in rm3  # v1209 (was v1207 256 px) and 'RigMask::note_mask(d,n[0],n[2],n[3]);' in fsr3
 print('PASS: v1207 rig render by chain, pinned probe rows, wild rig MV census')
 
 # v1208: rig slots from the uploaded CPU palette (never copied from a dynamic wrapper), wrapper fingerprint, MV-target applicability
@@ -400,3 +400,11 @@ rm4 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 assert 'c->UpdateSubresource(r.slot[k].Get(),0,nullptr,r.upload.data(),0,0);' in rm4 and 'CopyResource(r.slot' not in rm4
 assert 'd2vr::ObjectMotion::note_mv_texture(b.res[1]);' in probe and 'cpu_ok?bytes.data():nullptr,cpu_ok?bd.ByteWidth:0u,copied!=0,' in probe
 print('PASS: v1208 rig palette slots from the uploaded CPU palette, fingerprint, MV-target applicability')
+
+# v1209: same-render guard of wild rig vectors (mask 252 -> zero MV before the motion pass and the upscaler), rig draw forensics, draw views
+rm5 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+fsr5 = (root / 'src' / 'fsr_taa.hpp').read_text(encoding='utf-8')
+assert 'static bool guard(ID3D11DeviceContext* c,ID3D11Resource* mv,ID3D11ShaderResourceView* mask,UINT w,UINT h) noexcept {' in rm5
+assert 'if(e.mv_key==job.motion.p) RigMask::guard(c,job.motion.p,e.rig_srv.p,depth_w,depth_h);' in fsr5
+assert fsr5.index('RigMask::guard(c,job.motion.p') < fsr5.index('dispatched=motion_pass_.dispatch(')
+print('PASS: v1209 rig guard, forensics, draw views')

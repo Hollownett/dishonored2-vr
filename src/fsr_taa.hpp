@@ -1155,6 +1155,8 @@ private:
                 c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
                 ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no_uav[2]{};ID3D11Buffer* no_cb{};
                 c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,2,no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
+                // v1209: rig pixels marked wild (252) get zero motion in the TAA's motion input, before the motion pass and the upscaler
+                if(e.mv_key==job.motion.p) RigMask::guard(c,job.motion.p,e.rig_srv.p,depth_w,depth_h);
                 const float far_value[4]{};c->ClearRenderTargetView(rig_target.Get(),far_value); // the next render's rig depth starts empty
                 e.rig_count_display[e.rig_count_serial%e.rig_count_staging.size()]=job.receipt?job.receipt->key.display:0;
                 c->CopyResource(e.rig_count_staging[e.rig_count_serial%e.rig_count_staging.size()].p,e.rig_count.p);++e.rig_count_serial;++rig_live_renders;

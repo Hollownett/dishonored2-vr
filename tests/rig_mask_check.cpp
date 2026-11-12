@@ -160,10 +160,18 @@ static void run(bool d24,int mode) {
     float k[4]{0,0,float(N),float(N)};d2vr::rig_mask_eps(read_format,k[0],k[1]);
     D3D11_BUFFER_DESC kb{};kb.ByteWidth=16;kb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;D3D11_SUBRESOURCE_DATA kd{k,0,0};ComPtr<ID3D11Buffer> kbuf;dev->CreateBuffer(&kb,&kd,&kbuf);
     c->OMSetRenderTargets(0,nullptr,nullptr); // the depth is read now
-    ID3D11ShaderResourceView* in[2]{depth_srv.Get(),rig_srv.Get()};ID3D11UnorderedAccessView* outs[2]{mask_uav.Get(),counts_uav.Get()};
-    c->CSSetShader(cs.Get(),nullptr,0);c->CSSetShaderResources(0,2,in);c->CSSetUnorderedAccessViews(0,2,outs,nullptr);c->CSSetConstantBuffers(0,1,kbuf.GetAddressOf());
+    // v1209: the TAA's motion input (UV): wild (20 = 20 render widths) left of x = N/4, a real small motion (0.001) elsewhere
+    std::vector<float> mvi(N*N*2);for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) mvi[(y*N+x)*2]=x<N/4?20.f:.001f;
+    D3D11_TEXTURE2D_DESC mvd=t;mvd.Format=DXGI_FORMAT_R32G32_FLOAT;mvd.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;D3D11_SUBRESOURCE_DATA mvs{mvi.data(),N*8,0};
+    ComPtr<ID3D11Texture2D> mvt;dev->CreateTexture2D(&mvd,&mvs,&mvt);ComPtr<ID3D11ShaderResourceView> mv_srv;dev->CreateShaderResourceView(mvt.Get(),nullptr,&mv_srv);
+    ID3D11ShaderResourceView* in[3]{depth_srv.Get(),rig_srv.Get(),mv_srv.Get()};ID3D11UnorderedAccessView* outs[2]{mask_uav.Get(),counts_uav.Get()};
+    c->CSSetShader(cs.Get(),nullptr,0);c->CSSetShaderResources(0,3,in);c->CSSetUnorderedAccessViews(0,2,outs,nullptr);c->CSSetConstantBuffers(0,1,kbuf.GetAddressOf());
     c->Dispatch(N/8,N/8,1);
-    ID3D11ShaderResourceView* none[2]{};ID3D11UnorderedAccessView* no[2]{};c->CSSetShaderResources(0,2,none);c->CSSetUnorderedAccessViews(0,2,no,nullptr);
+    ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no[2]{};c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,2,no,nullptr);
+    D3D11_SHADER_RESOURCE_VIEW_DESC msd{};msd.Format=DXGI_FORMAT_R8_UINT;msd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;msd.Texture2D.MipLevels=1;
+    ComPtr<ID3D11ShaderResourceView> mask_srv;dev->CreateShaderResourceView(mask.Get(),&msd,&mask_srv);
+    const bool guarded=d2vr::RigMask::guard(c.Get(),mvt.Get(),mask_srv.Get(),N,N);CHECK(guarded);
+    const auto mvo=read_back(dev.Get(),c.Get(),mvt.Get(),8);
     const auto m=read_back(dev.Get(),c.Get(),mask.Get(),1),zb=read_back(dev.Get(),c.Get(),depth.Get(),4),c1=read_back(dev.Get(),c.Get(),colour[1].Get(),4);
     ComPtr<ID3D11Resource> rig_res;rig_srv->GetResource(&rig_res);ComPtr<ID3D11Texture2D> rig_tex;rig_res.As(&rig_tex);
     const auto rb=read_back(dev.Get(),c.Get(),rig_tex.Get(),8);
@@ -172,7 +180,11 @@ static void run(bool d24,int mode) {
     for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) {
         const double nx=(x+.5)/N*2-1,ny=1-(y+.5)/N*2;
         const bool inside=nx>-.8 && nx<.4 && ny>-.6 && ny<.6,want=inside && nx<0;
-        const bool got=m[y*N+x]>=253;CHECK(m[y*N+x]==0 || m[y*N+x]==(mode==1?255:mode==3?253:254));
+        // v1209: a rig (not held) pixel with a wild vector is 252 and its vector is zero after the guard; every other vector is untouched
+        const bool wild_rig=mode!=3 && m[y*N+x]==252;float mvx;std::memcpy(&mvx,&mvo[(y*N+x)*8],4);
+        if(wild_rig) {CHECK(x<N/4);CHECK(mvx==0.f);} else CHECK(mvx==(x<N/4?20.f:.001f));
+        const bool got=m[y*N+x]>=252;CHECK(m[y*N+x]==0 || wild_rig || m[y*N+x]==(mode==1?255:mode==3?253:254));
+        if(got && mode!=3 && x<N/4) CHECK(wild_rig);
         if(got!=want && std::abs(nx+.8)>.04 && std::abs(nx-.4)>.04 && std::abs(nx)>.04 && std::abs(std::abs(ny)-.6)>.04) ++wrong; // edges: rasterization rule
         if(got) {
             ++rig_px;std::uint32_t raw;std::memcpy(&raw,&zb[(y*N+x)*4],4);float rv;std::memcpy(&rv,&rb[(y*N+x)*8],4);
