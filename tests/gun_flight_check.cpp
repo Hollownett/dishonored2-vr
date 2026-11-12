@@ -85,6 +85,31 @@ struct GunCopiesFixture {
             NWH::anim_pin_=-1;
             assert(NWH::gun_status().find("\"anim\":[-1,-1,0,0,0,-1,-1]")!=std::string::npos);
         }
+        {   // v1214 (headset v1209 log, 179922343-179924546): the left hand threw its pistol copy, the right caught it, threw it away. The drop hands
+            // the held entity over to the lying gun (gun_drop reuse) without held_hide; the left's draw note named it still, and the draw-time placement
+            // (one-view frames, v1198) kept drawing the lying pistol in the left hand, over every weapon the left drew next.
+            const std::uintptr_t base=0x140000000ull,game=0x200000000ull,ent=0x300000000ull;const std::uint32_t id=0x00050007u;
+            auto alive=[&](std::uintptr_t a,void* out,std::size_t n) {   // just enough engine for alive_entity: game, entity table slot, entity id
+                std::uint64_t v{};
+                if(a==base+0x39a5290 && n==8) v=game;else if(a==game+0x3130b0+(id>>16)*8ull && n==8) v=ent;else if(a==ent+0xa8 && n==4) v=id;else return false;
+                std::memcpy(out,&v,n);return true;};
+            const char* def=NWH::intern(NWH::mirror_def_names[3]);
+            NWH::pool_[0]=PoolEnt{def,ent,id,true,true};
+            const held_copy::Pose hand{{.3,-.6,.4},{Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}}};
+            auto& h=NWH::held_[0];h.pe=0;h.shown=true;h.have_cmd=true;h.cmd=hand;NWH::held_bits|=1u;
+            NWH::note_copy_draw(0,ent,id,hand,hand,3);   // service_held: the left hand draws its copy
+            {std::lock_guard<std::mutex> l(NWH::feed_m_);NWH::held_pub_[0]=HeldPub{true,hand,NWH::steady_ms(),ent,id};}
+            assert(NWH::copy_draw(0).valid && NWH::copy_draw(0).entity==ent);
+            NWH::Request r{};r.op=NWH::Op::gun_drop;r.side=0;r.decl=def;r.vel={0,0,3};
+            assert(NWH::gun_drop(base,alive,r));                                   // let go away from the hip: the held entity becomes the lying gun
+            assert(NWH::lying_[0].present && NWH::lying_[0].pe==0 && NWH::held_[0].pe<0);
+            assert(!NWH::copy_draw(0).valid);                                     // the fix: the left hand no longer draws it
+            assert(!(NWH::held_bits.load()&1u) && !NWH::held_copy_pose(0));
+            NWH::note_copy_draw(1,ent,id,hand,hand,3);                            // the right hand caught it (adopt -> its service_held note)
+            assert(NWH::copy_draw(1).valid && NWH::copy_draw(1).entity==ent && !NWH::copy_draw(0).valid); // one hand draws it, the one holding it
+            NWH::clear_copy_draw();NWH::lying_={};NWH::held_={};NWH::pool_={};NWH::held_bits=0;
+            {std::lock_guard<std::mutex> l(NWH::feed_m_);NWH::held_pub_={};}
+        }
         // flag off and nothing live: the service does nothing, even with no game at all
         NWH::dual_wield(false);
         auto read=[](std::uintptr_t,void*,std::size_t){return false;};

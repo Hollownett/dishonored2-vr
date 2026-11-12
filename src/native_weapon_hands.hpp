@@ -1494,7 +1494,10 @@ private:
             if(!equip(base,read,0x20,64)) {pool_release(base,read,pe);return false;}
             auto& c=copies_[s1.def]; // a mirrored copy of this gun in the other hand goes now, not at the mirror's next look
             if(mirror_slots_[1].native==s1.entity && c.ent && c.shown && alive_entity(base,read,c.ent,c.id) && visible(base,read,c.ent,false)) c.shown=false;
-        } else if(reuse) {held_[side]=HeldSide{};++handovers;}
+        } else if(reuse) { // v1214 (headset v1209: a pistol thrown hand to hand stayed drawn in the left hand over every later weapon): the entity leaves this
+            // hand without held_hide, so its bookkeeping goes here: a draw note left naming it made the draw-time placement keep drawing the lying gun in this hand
+            clear_copy_draw(pool_[pe].ent);held_bits&=~(1u<<side);{std::lock_guard<std::mutex> l(feed_m_);held_pub_[side].valid=false;}
+            held_[side]=HeldSide{};++handovers;}
         // v1041: held_want_ is the caller's alone. The drop used to null it, which erased the copy the caller had just asked for in the same hand
         // (a wheel choice or same-item copy that displaced this one: "selected, not shown until I release and squeeze again"); a drop of the
         // copy the hand released has its want cleared by the caller already.
