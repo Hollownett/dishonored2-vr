@@ -52,6 +52,14 @@ inline FrameFallback choose_frame_fallback(const FallbackFacts& f) noexcept {
     return f.blank_ready?FrameFallback::black_quad:FrameFallback::none;
 }
 
+// v1244 (user, Timepiece: black screen): gameplay frames without a native eye pair re-sent the last projection for up to 3 s and then
+// submitted BLACK for as long as the pair stayed missing. After a short run the game's own image goes on the flat panel instead (the
+// cutscene theater path: no unpaired image is ever shown as stereo); without a re-sendable projection that happens after a few frames.
+inline constexpr unsigned unpaired_flat_after_frames=45,unpaired_flat_black_frames=3;
+inline bool unpaired_gameplay_flat(unsigned run,bool last_projection_usable) noexcept {
+    return run>(last_projection_usable?unpaired_flat_after_frames:unpaired_flat_black_frames);
+}
+
 // G2 cutscene hold (hold 0 none, 1 black, 2 replay): may an empty frame re-send the last good projection? Not on a black hold; on a replay
 // hold only when that projection was this cutscene's own immersive layer (scene ids match, nonzero). Without a hold: as before.
 inline bool scene_hold_replays(unsigned hold,std::uint64_t hold_scene,std::uint64_t last_good_scene) noexcept {

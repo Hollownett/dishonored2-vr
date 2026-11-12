@@ -2214,6 +2214,9 @@ static LONG diagnostic_separation{};
 // build/perf-mono-view (diagnostic only): XR asks the engine for ONE centre view per frame and copies that image to both eye swapchains.
 // State: 0 off, 1 on, 2 fallback to the paired path for the rest of the session (never present garbage). Read once in StartProbe.
 static std::atomic<int> mono_view_state{0};
+// v1244 unpaired gameplay (Timepiece black screen): frames shown flat instead of black, runs that went flat, and why a stereo gameplay frame had no
+// pair [views!=2, no eye-0 begin matched, pair order invalid, eye 1 never begun, left copy missing]
+static std::atomic<UINT64> unpaired_flat_frames{},unpaired_flat_runs{};static std::array<std::atomic<UINT64>,5> unpaired_reason{};static unsigned unpaired_gameplay_run{};static bool unpaired_flat_last{};
 static std::atomic<UINT64> mono_eye_frame{0},mono_view_frames{0},mono_view_misses{0},mono_view_unexpected{0}; // eye-0 begin matched for Present N; frames presented; consecutive misses; unexpected 2-view frames
 void mono_view_fallback(const char* reason) noexcept;
 // build/alternate-eye (plan F task 1, opt-in): on top of the mono-view path the engine renders ONE eye per displayed frame, alternating by frame
@@ -6477,7 +6480,7 @@ void observe_eye_begin(void* view) noexcept {
         // render thread before the left eye records, outside our own locks.
         if(taa_history_installed && eye==0) {try {taa_history.maintain();} catch(...) {}}
         std::lock_guard<std::mutex> lock(log_mutex);
-        if(eye_boundary_requested && capturing.load() && eye_boundary_rows<1500) {
+        if(eye_boundary_requested && capturing.load() && stereo_active.load() && eye_boundary_rows<1500) { // v1244: the paired phase only (mono rows filled the budget before stereo began)
             ++eye_boundary_rows;
             eye_boundary_csv << "begin," << frames.load() << ',' << GetCurrentThreadId() << ',' << address
                              << ',' << eye << ',' << bindings << ',' << (same_context?1:0) << '\n';
@@ -10868,11 +10871,15 @@ std::string feedback_status_json() {    std::ostringstream out;
              <<",\"info_zero\":"<<(d2vr::NativeInteractionAim::clamp_exclude_info_zero_.load()?"true":"false")<<'}';
             return o.str();}() << "}"  << ",\"corpse\":" << corpse_diagnostics.json() << ",\"grab_focus\":" << native_grab.grab_focus_json(GetTickCount64())
                << [&]{const auto los=native_grab.hover_los();std::ostringstream o;o<<",\"grab_los\":{\"obstruction_required\":"<<(los.required?"true":"false")
-                   <<",\"hover_requests\":"<<los.requests<<",\"hover_verdicts\":"<<los.verdicts<<",\"hover_used\":"<<los.used<<'}';
+                   <<",\"hover_requests\":"<<los.requests<<",\"hover_verdicts\":"<<los.verdicts<<",\"hover_used\":"<<los.used<<",\"press_rehovers\":"<<los.press_rehovers<<",\"press_rehover_clear\":"<<los.press_rehover_clear<<'}';
                    const auto lv=native_grab.living_counters();o<<",\"grab_living\":{\"enabled\":"<<(native_grab.living_enabled()?"true":"false")
                    <<",\"pull\":"<<(d2vr::NativeWeaponHands::living_pull_enabled?"true":"false")<<",\"holds\":"<<lv.holds<<",\"hard_pulls\":"<<lv.hard_pulls
                    <<",\"releases\":"<<lv.releases<<",\"shoves\":"<<d2vr::NativeWeaponHands::living_shoves.load()<<'}';return o.str();}() << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"pacer\":" << (game_xr?game_xr->pacer_status_json():std::string("null")) << ",\"frame_split\":" << frame_split_status_json()
                << ",\"mono_view\":\"" << (mono_view_state.load()==1?"on":mono_view_state.load()==2?"fallback":"off") << "\",\"mono_view_frames\":" << mono_view_frames.load()
+               << ",\"unpaired_gameplay\":{\"flat_frames\":" << unpaired_flat_frames.load() << ",\"flat_runs\":" << unpaired_flat_runs.load() << ",\"run\":" << unpaired_gameplay_run
+               << ",\"reason\":[" << unpaired_reason[0].load() << ',' << unpaired_reason[1].load() << ',' << unpaired_reason[2].load() << ',' << unpaired_reason[3].load() << ',' << unpaired_reason[4].load()
+               << "],\"pair_repeats\":" << native_eye_pair.repeats << ",\"pair_invalidations\":" << native_eye_pair.invalidations << ",\"strict_pair\":" << (native_eye_pair.tolerate_repeat?"false":"true")
+               << ",\"eye_begin_calls\":" << eye_begin_calls.load() << ",\"eye_begin_matches\":" << eye_begin_matches.load() << ",\"native_eye_pairs\":" << native_eye_pairs << ",\"eye_copies\":" << native_eye_copy_count << '}'
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
                << ",\"paired\":" << alt_paired.load() << ",\"scope_held\":" << alt_scope_held.load() << ",\"fallbacks\":" << alt_fallbacks.load()
                << ",\"parity_flip\":" << (d2vr::alternate_parity_flip.load()?"true":"false") << ",\"band_bursts\":" << alt_band_bursts
@@ -12384,7 +12391,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         }
                         // alternate-eye: authored / settings state is read here, at this Present (the plan lags a frame); a one-view frame in it is dropped
                         const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());
-                        bool pair_ready{},mono_path{};
+                        bool pair_ready{},mono_path{},unpaired_flat{};
                         std::optional<d2vr::PendingViews<XrView>::Slot> alt_slot;int alt_fresh=-1; // alternate-eye: the Setup views this Present shows, the one eye they refresh
                         {
                             std::lock_guard<std::mutex> gpu_lock(gpu_mutex);
@@ -12423,8 +12430,16 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                             if(pair_ready && native_eye_capture_requested && !mono_path) ++native_eye_pairs;
                             if(pair_ready && mono_path) ++mono_view_frames;
+                            if(gameplay && !pair_ready && stereo_active.load() && !mono_path)
+                                ++unpaired_reason[views.size()!=2?0:native_eye_pair.phase()==0 && !native_eye_pair.invalid()?1:native_eye_pair.invalid()?2:native_eye_pair.phase()<2?3:4];
+                            unpaired_gameplay_run=pair_ready || !gameplay?0:unpaired_gameplay_run+1;
                             if(pair_ready) {completed_left=mono_path?paired_backbuffer:paired_left;completed_right=paired_backbuffer;}
                             else if(!gameplay) {completed_left=paired_backbuffer;completed_right=paired_backbuffer;}
+                            else if(game_xr && d2vr::unpaired_gameplay_flat(unpaired_gameplay_run,game_xr->last_projection_usable())) { // v1244: flat, never black
+                                completed_left=paired_backbuffer;completed_right=paired_backbuffer;unpaired_flat=true;
+                                ++unpaired_flat_frames;if(!unpaired_flat_last) ++unpaired_flat_runs;
+                            }
+                            unpaired_flat_last=unpaired_flat;
                             ++paired_bind_histogram[std::min<UINT>(paired_buffer_binds,15)];
                             paired_buffer_binds=0;paired_left_ready=false;native_eye_pair.reset();
                         }
@@ -13106,7 +13121,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                             native_note_input_live=false;
                             game_xr->present(completed_left.Get(),completed_right.Get(),
-                                views.empty()?1.4f:views[0].pose->horizontal_fov,views.empty()?.88f:views[0].pose->vertical_fov,gameplay,authored_camera || cutscene_immersive,game_logic_mask()==4,
+                                views.empty()?1.4f:views[0].pose->horizontal_fov,views.empty()?.88f:views[0].pose->vertical_fov,gameplay && !unpaired_flat,authored_camera || cutscene_immersive,game_logic_mask()==4,
                                 pair_ready?completed_right.Get():nullptr,mirror_view(desc.OutputWindow),game_logic_mask()==32,cutscene_immersive); // G2: the immersive cutscene is an authored scene render (raw gameplay stays false)
                             native_note_pose_epoch=game_xr->pose_epoch();native_note_reference_epoch=game_xr->reference_epoch();
                             // v830: the engine uploads the next image's arms before that image's Setup: give them the sample just located (the one its
@@ -16200,6 +16215,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 shadow_share.set_installed(false); // build/shadow-share degrades to normal rendering
             } else {
                 if(eye_boundary_requested) {
+                    native_eye_pair.tolerate_repeat=!fs::exists(root/L"build"/L"strict-eye-pair"); // v1244: Timepiece lens pass (game_stereo.hpp)
                     eye_boundary_csv.open(output/L"native-eye-boundary.csv",std::ios::trunc);
                     if(d2vr::diag::on() && (!eye_boundary_csv)) throw std::runtime_error("Cannot open native eye boundary log");
                     eye_boundary_csv << "event,present,thread,view,eye,bindings,same_render_thread\n";

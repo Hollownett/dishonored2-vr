@@ -20,13 +20,20 @@ class NativeEyePair {
     int phase_{};
     bool invalid_{};
 public:
+    // v1244 (Timepiece, hypothesis): an eye view begun again right after itself in one frame (a second render of the same view
+    // object, e.g. the lens's other-timeline pass) is not a new eye. Off = the strict v1243 rule (any repeat invalidates).
+    bool tolerate_repeat=true;
+    std::uint64_t repeats{},invalidations{};
     bool begin(int eye) noexcept {
         if(eye<0) return false; // Auxiliary view, no eye identity.
-        if(eye>1 || invalid_ || (eye==0?phase_!=0:phase_!=1)) {invalid_=true;return false;}
+        if(tolerate_repeat && !invalid_ && eye>=0 && eye<=1 && phase_==eye+1) {++repeats;return false;}
+        if(eye>1 || invalid_ || (eye==0?phase_!=0:phase_!=1)) {if(!invalid_) ++invalidations;invalid_=true;return false;}
         ++phase_;
         return eye==1;
     }
     bool complete() const noexcept {return phase_==2 && !invalid_;}
+    bool invalid() const noexcept {return invalid_;}
+    int phase() const noexcept {return phase_;}
     void reset() noexcept {phase_=0;invalid_=false;}
 };
 

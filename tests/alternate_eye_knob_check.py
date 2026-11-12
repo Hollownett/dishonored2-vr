@@ -586,3 +586,15 @@ assert 'd2vr::weapon_draw::HandLock::note_copy(slot,d2vr::weapon_draw::Place::la
 assert 'weapon_draw::HandLock::on_draw(lf,weapon_draw::mul(hv->inv[pass_eye],weapon_draw::widen(cur)));' in om43
 assert '<<",\\"hand_lock\\":"<<weapon_draw::HandLock::json()' in om43 and 'view.frame==frame+1?1:view.frame+1==frame?2:3' in om43
 print('PASS: v1243 hand_lock measurement and placed_view_frame split')
+# v1244: Timepiece black screen - an unpaired gameplay run goes flat (theater path), never black; a same-eye repeated Begin (lens pass hypothesis)
+# no longer breaks the pair (build/strict-eye-pair: v1243 rule); pair-failure census. Body grab: an aged hover press re-asks as a hover request.
+gs44 = (root / 'src' / 'game_stereo.hpp').read_text(encoding='utf-8')
+fh44 = (root / 'src' / 'xr_frame_hardening.hpp').read_text(encoding='utf-8')
+ng44 = (root / 'src' / 'native_grab.hpp').read_text(encoding='utf-8')
+assert 'if(tolerate_repeat && !invalid_ && eye>=0 && eye<=1 && phase_==eye+1) {++repeats;return false;}' in gs44
+assert 'native_eye_pair.tolerate_repeat=!fs::exists(root/L"build"/L"strict-eye-pair");' in probe
+assert 'inline bool unpaired_gameplay_flat(unsigned run,bool last_projection_usable) noexcept {' in fh44
+assert 'else if(game_xr && d2vr::unpaired_gameplay_flat(unpaired_gameplay_run,game_xr->last_projection_usable())) {' in probe
+assert 'gameplay && !unpaired_flat,authored_camera || cutscene_immersive,' in probe and ',\\"unpaired_gameplay\\":{\\"flat_frames\\":' in probe
+assert 'request_obstruction(side,*body,true);++press_rehovers_;' in ng44 and '<<",\\"press_rehovers\\":"<<los.press_rehovers' in probe
+print('PASS: v1244 unpaired gameplay flat fallback, eye pair repeat tolerance, aged hover press re-ask')

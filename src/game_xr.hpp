@@ -2372,6 +2372,7 @@ public:
         return view;
     }
     std::int64_t locate_cpu_time() const noexcept {return locate_cpu_time_;}
+    bool last_projection_usable() const {return last_good_projection_.usable(chains_,GetTickCount64(),pose_epoch());} // v1244: an empty frame would re-send it, not black
     bool rendered_pair_ready() const {return tracked_pair_();} // both eyes have a recorded rendered view for this Present (an authored scene requires it)
     XrView recorded_rendered_view(UINT eye) const {return rendered_views_[eye];} // diagnostic (alt-pose-trace): what the layer of `eye` will carry
     void record_rendered_view(UINT eye,const XrView& view,XrTime display_time,std::int64_t locate_cpu) {

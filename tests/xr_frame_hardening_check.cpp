@@ -51,6 +51,9 @@ int main() {
     a.reason=EmptyFrameReason::tracked_pair_missing;a.state=XR_SESSION_STATE_VISIBLE;require(choose_frame_fallback(a)==FrameFallback::last_projection,"VISIBLE counts");
     a.state=XR_SESSION_STATE_READY;require(choose_frame_fallback(a)==FrameFallback::none,"READY/idle states may stay empty");a.state=XR_SESSION_STATE_FOCUSED;
     a.should_render=false;require(choose_frame_fallback(a)==FrameFallback::none,"shouldRender false: nothing to show");a.should_render=true;
+    // v1244 Timepiece: an unpaired gameplay run goes flat (never black for long): after 45 frames with a re-sendable projection, after 3 without
+    require(!unpaired_gameplay_flat(0,true) && !unpaired_gameplay_flat(45,true) && unpaired_gameplay_flat(46,true),"usable projection: re-sent for 45 frames, then flat");
+    require(!unpaired_gameplay_flat(3,false) && unpaired_gameplay_flat(4,false),"no projection to re-send: flat after 3 frames, not black");
     a.layer_count=2;require(choose_frame_fallback(a)==FrameFallback::none,"a frame that has layers is never touched");
     // last good projection
     std::array<XrCompositionLayerProjectionView,2> views;auto p=good_projection(views);

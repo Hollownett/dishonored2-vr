@@ -630,7 +630,7 @@ private:
         if(lane.hover_request_tick && now>=lane.hover_request_tick && now-lane.hover_request_tick<hover_request_every_ms) return;
         request_obstruction(side,body,true);lane.hover_request_tick=now;++hover_requests_;
     }
-    std::atomic<UINT64> hover_requests_{},hover_used_{},hover_verdicts_{};
+    std::atomic<UINT64> hover_requests_{},hover_used_{},hover_verdicts_{},press_rehovers_{},press_rehover_clear_{};   // v1244: bind-time LOS re-asks of a granted press / their clear verdicts
     enum class VelocityWrite {written,rejected,faulted};
     // The native velocity setter validates nothing (a stale world or handle can fault, a NaN reaches the simulation), and /EHsc
     // does not turn an access violation into a C++ exception, so the call runs under an SEH guard and non-finite input never
@@ -1070,7 +1070,12 @@ private:
                     <<lane.candidates.size()<<','<<(body?body->entity_id:0)<<','<<distance<<'\n';acquisitions_.flush();
             }
             if(body && obstruction_required_ && !cleared(lane,*body,now)) {
-                request_obstruction(side,*body);lane.decision_deferred=true;lane.gate=Gate::obstruction_pending;return;
+                // v1244 (user, v1239: "grab works only from the second click"): a press granted on a hover verdict that aged out (100 ms) before
+                // its bind asked again HERE, after this frame's sensor pass; a press request must match the exact publication, so the next
+                // frame's hand made it stale before it was ever served and the press sat in physical_reserved until release (log: 600 ms, no
+                // query; the re-press queried at its decision and held at once). Ask it as a hover request, which survives new publications;
+                // its verdict re-opens the bind at once (service_obstruction).
+                request_obstruction(side,*body,true);++press_rehovers_;lane.decision_deferred=true;lane.gate=Gate::obstruction_pending;return;
             }
             const auto contact=body?acquisition_contact(lane,*body,now):std::nullopt;
             // The sphere grip: a prop is held with its bounds centre in the ball the fingers wrap (palm + palm direction * (radius + skin depth)), keeping its own
@@ -1537,8 +1542,8 @@ public:
     // G3 (Task 8): the stage-0 hit owners' registry indices for this hand's discovery (taken within 250 ms), from NativeInteractionAim::hint_indices.
     void hints(unsigned side,const std::array<unsigned,8>& indices,UINT64 tick) {if(side>=2) return;std::lock_guard<std::mutex> lock(mutex_);lanes_[side].hints=indices;lanes_[side].hint_tick=tick;}
     // Status: is the LOS (obstruction) query required (on whenever the physical grab is attached to the interaction aim), and the hover LOS counters.
-    struct HoverLos {bool required{};UINT64 requests{},verdicts{},used{};};
-    HoverLos hover_los() {bool required{};{std::lock_guard<std::mutex> lock(mutex_);required=obstruction_required_;}return {required,hover_requests_.load(),hover_verdicts_.load(),hover_used_.load()};}
+    struct HoverLos {bool required{};UINT64 requests{},verdicts{},used{},press_rehovers{},press_rehover_clear{};};
+    HoverLos hover_los() {bool required{};{std::lock_guard<std::mutex> lock(mutex_);required=obstruction_required_;}return {required,hover_requests_.load(),hover_verdicts_.load(),hover_used_.load(),press_rehovers_.load(),press_rehover_clear_.load()};}
     // The palm probe last published for this hand (the one its physical pick was scored with), for the grip-alone decision (Task 6).
     PalmProbe published_palm(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);return lanes_[side].published.palm;}
     PalmProbe published_hand_sphere(unsigned side) {if(side>=2) return {};std::lock_guard<std::mutex> lock(mutex_);return hand_sphere_probe(lanes_[side].published.hand.position);}
@@ -1747,7 +1752,9 @@ public:
                    !after || !same_body(*after,obstruction_request->body) || !after_owner || after_owner->authored_view() ||
                    after_owner->camera_identity!=obstruction_request->owner.camera_identity || logic_()!=2 ||
                    length(after->contact(obstruction_request->hand.position)-obstruction_request->body.contact(obstruction_request->hand.position))>=hover_contact_m || !verdict) continue;
-                lane.obstruction->clear=*verdict;lane.obstruction->verdict_tick=GetTickCount64();++hover_verdicts_;continue;
+                lane.obstruction->clear=*verdict;lane.obstruction->verdict_tick=GetTickCount64();++hover_verdicts_;
+                if(*verdict && lane.owner.physical() && p.grip>=.35f && lane.grab.pressed()) {lane.attempted=false;++press_rehover_clear_;}   // v1244: a held press binds on the next pass
+                continue;
             }
             if(!active_ || !lane.obstruction || lane.obstruction->request.token!=obstruction_request->token ||
                !request_current(*obstruction_request,p,GetTickCount64()) || p.grip<.35f || p.occupied || lane.held ||

@@ -151,7 +151,7 @@ def check(probe: str, xr: str) -> None:
     assert "bool cutscene_paired_path() noexcept {return xr_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && (mono_view_state.load()!=1 || alternate_on());}" in probe
     call = block[block.index("game_xr->present(completed_left.Get(),completed_right.Get(),"):]
     call = call[:call.index(";")]
-    assert "gameplay,authored_camera || cutscene_immersive,game_logic_mask()==4," in call and call.endswith("game_logic_mask()==32,cutscene_immersive)"), call
+    assert "gameplay && !unpaired_flat,authored_camera || cutscene_immersive,game_logic_mask()==4," in call  # v1244: an unpaired gameplay run goes flat and call.endswith("game_logic_mask()==32,cutscene_immersive)"), call
     # the raw native buttons (skip) still pass: the controls block forwards the XR input whatever the cutscene; its pointer is GameXr's
     controls = probe[probe.index("if(controller_requested) {\n                                CpuSpan controls_span{controls_cpu_ns};"):]
     controls = controls[:controls.index("const auto chord=menu_chord.update(")]

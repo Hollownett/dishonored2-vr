@@ -24,10 +24,18 @@ int main() {
     if(!require(!pair.begin(-1) && pair.complete())) return 1;
     pair.reset();
     if(!require(!pair.complete() && !pair.begin(1) && !pair.begin(0) && !pair.complete())) return 1;
+    pair.tolerate_repeat=false; // v1243 strict rule
     pair.reset();pair.begin(0);pair.begin(0);pair.begin(1);
     if(!require(!pair.complete())) return 1;
     pair.reset();pair.begin(0);pair.begin(1);pair.begin(1);
     if(!require(!pair.complete())) return 1;
+    pair.tolerate_repeat=true; // v1244 default: a view begun again right after itself (Timepiece lens pass) is not a new eye
+    pair.reset();pair.begin(0);pair.begin(0);
+    if(!require(pair.begin(1) && !pair.begin(1) && pair.complete() && pair.repeats==2)) return 1; // the copy fires once, at the first eye-1 begin
+    pair.reset();pair.begin(0);pair.begin(1);pair.begin(0);
+    if(!require(!pair.complete() && pair.invalid())) return 1; // 0,1,0 (both lens passes first, then both eyes) stays invalid
+    pair.reset();pair.begin(1);
+    if(!require(!pair.complete() && pair.invalid())) return 1;
     pair.reset();pair.begin(0);pair.reset();pair.begin(1);
     if(!require(!pair.complete())) return 1; // Never combine different frames.
     pair.reset();pair.begin(2);
