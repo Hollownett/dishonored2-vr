@@ -442,7 +442,15 @@ public:
     static int placing_mode() noexcept {return placing_mode(weapon_mode_.load(std::memory_order_relaxed),held_placing_.load(std::memory_order_relaxed));}
     // v1101: the render pass a draw hook runs in. `view` is the pass job's view (item+0x70, src/render_pass_map.hpp): one of the eye
     // views for every pass that renders that eye (the exact eye, no cache certificate), a light/other view for a pass that does not.
-    struct DrawPass {int pass{-1};std::uintptr_t view{0};std::uint64_t job{0};}; // v1199: job = RenderPassMap::current_job()
+    struct DrawPass {int pass{-1};std::uintptr_t view{0};std::uint64_t job{0};bool secondary{false};}; // v1199: job = RenderPassMap::current_job(); v1259: a secondary pass's job
+    // v1259 (user, v1257 headset: a held prop "sits at a different position in one eye the whole time the Timepiece is open"; status: placed in eye 0
+    // 7599 times, eye 1 69, no refusal stage for eye 1): the eye-1 lens pass runs inside eye 1's Begin on eye 1's view object, so its per-view writes
+    // were classified, its draws processed and the borrowed object (holding the lens camera) snapshotted as eye 1's view of the render, and eye 1's
+    // draws were then read through the lens camera and matched no held frame. While a secondary pass borrows a view (dxgi_probe lens_pass, until
+    // its replay re-created the eye): that view is never snapshotted, its jobs' per-view writes classify nothing, and its draws are left as the
+    // engine made them. Counts: [draws left, per-view writes not classified, eye snapshots skipped].
+    static void note_borrowed_view(std::uintptr_t view) noexcept {borrowed_view_.store(view,std::memory_order_release);}
+    static std::array<std::uint64_t,3> secondary_counts() noexcept {return {secondary_draws_.load(),secondary_writes_.load(),borrowed_skips_.load()};}
     using PassSource=DrawPass(*)() noexcept;
     static void set_pass_source(PassSource source) noexcept {pass_source_.store(source,std::memory_order_relaxed);}
     static void set_pass_name(const char* (*name)(unsigned)) noexcept {pass_name_.store(name,std::memory_order_relaxed);} // status: pass id -> ARK_RENDERPASS_* name
@@ -565,6 +573,8 @@ private:
     inline static std::atomic<bool> weapon_probe_on_{};
     // v1101: the draw's render pass (src/render_pass_map.hpp). No pass map installed: the v931 certificate path runs unchanged.
     inline static std::atomic<PassSource> pass_source_{};
+    inline static std::atomic<std::uintptr_t> borrowed_view_{};inline static std::atomic<std::uint64_t> secondary_draws_{},secondary_writes_{},borrowed_skips_{}; // v1259
+    static bool secondary_job() noexcept {const auto source=pass_source_.load(std::memory_order_relaxed);return source && source().secondary;}
     inline static std::atomic<const char* (*)(unsigned)> pass_name_{};
     // Status: draws that reached the weapon placement ("near": a held weapon's part is at most near_w deep) and the ones placed, by pass
     // (index render_pass_count = a draw outside any pass), and per hand. Skipped = near - placed; the stage counters say why.
@@ -716,6 +726,7 @@ private:
     // Eye views: snapshots of view (+0x7450) and view-projection (+0x7510) at engine frame +0x77B4.
     static void snapshot(unsigned eye,std::uintptr_t view) noexcept {
         if(!read_) return;
+        if(view && view==borrowed_view_.load(std::memory_order_acquire)) {borrowed_skips_.fetch_add(1,std::memory_order_relaxed);return;} // v1259: it holds the lens camera
         EyeView v{};
         if(!read_(view+0x77b4,&v.frame,4) || !read_(view+0x7450,v.m[0],64) || !read_(view+0x7510,v.m[2],64) || !complete_record(v)) return;
         store(eye,v);
@@ -1176,6 +1187,8 @@ private:
         if(s && kind==cb2_kind && desc.ByteWidth>max_floats*4) {count(oversize);oversize_kb_[std::min<UINT>(desc.ByteWidth/1024,16u)].fetch_add(1,std::memory_order_relaxed);}
         else if(s && kind==cb2_kind) {
             Shadow& sh=s->shadow(r);sh.buffer=r;sh.size=desc.ByteWidth;std::memcpy(sh.data,data,desc.ByteWidth);count(shadow_writes);
+        } else if(s && kind==view_kind && secondary_job()) {   // v1259: a secondary pass's per-view constants name no eye view
+            s->view=View{};s->view_valid=false;s->view_buffer=nullptr;s->view_frame=0;s->view_job=0;secondary_writes_.fetch_add(1,std::memory_order_relaxed);
         } else if(s && kind==view_kind) {
             View view{};const bool valid=classify(static_cast<const float*>(data),desc.ByteWidth,view);
             count(view_writes);s->view=view;s->view_valid=valid;if(valid) buffer_views_.store(r,view); /* v1193 */ s->view_buffer=valid?r:nullptr; /* v1194 */ s->view_frame=valid?view.frame:newest_frame_.load(std::memory_order_acquire);
@@ -1214,6 +1227,7 @@ private:
     // is not an eye view (shadow maps) are left at the engine's tick frame and counted (docs/WEAPON-DRAW-PLACE-TEMPORAL.md).
     static bool prepare(ID3D11DeviceContext* c,ContextState& s) noexcept {
         count(layout_draws);
+        if(secondary_job()) {secondary_draws_.fetch_add(1,std::memory_order_relaxed);return false;}   // v1259: a secondary pass's draw: the engine's rows
         const Shadow* sh=s.cb[1]?&s.shadow(s.cb[1]):nullptr;
         if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);return false;}
         // v1040: no previous rows and no weapon placement: the draw ends in no_rows below whatever the view says. Skip the view lookup,
@@ -1412,7 +1426,7 @@ private:
                 // another engine frame than the publish they were placed from (the two eyes of one render on different hand poses)
                 if(r.side<0 && r.near_side>=0) weapon_pass_near_unplaced_[pass_index][r.near_like?0:1].fetch_add(1,std::memory_order_relaxed);
                 if(r.side>=0 && have_view) placed_view_frame_[view.frame==frame?0:view.frame==frame+1?1:view.frame+1==frame?2:3].fetch_add(1,std::memory_order_relaxed); // v1243: [same, label +1, label -1, other]
-                if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev); // v1248: restored as code (v1243 left it inside the comment)
+                if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev,frame); // v1248: restored as code (v1243 left it inside the comment); v1259: + the publish (per-eye census)
                 weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,pass_index);   // v1240: a held severed part's placed draws
                 // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven). v1226: else the predicted previous
                 // (prevVP(eye) * B_prev * L: the thing moved rigidly with the hand, exact with v1223's rigid L), never camera-only (a held thing is not

@@ -92,6 +92,7 @@ enum class Reason {
     unpublished,
     prologue,
     setup_unavailable,
+    secondary_view,
 };
 
 inline const char* reason_name(Reason reason) noexcept {
@@ -107,6 +108,7 @@ inline const char* reason_name(Reason reason) noexcept {
     case Reason::unpublished: return "unpublished";
     case Reason::prologue: return "prologue_mismatch";
     case Reason::setup_unavailable: return "setup_unavailable";
+    case Reason::secondary_view: return "secondary_view";
     }
     return "unknown";
 }
@@ -135,6 +137,9 @@ struct Counters {
     std::uint64_t light_restores{};   // second-view TLFLIGHTCULL links written from the capture
     std::uint64_t light_misses{};     // second-view lights the first view did not capture
     std::uint64_t light_record_restores{}; // v1011: entry+0x18 record counts written with the links
+    // v1257: jobs of a secondary pass (Timepiece lens) inside its window. secondary_actions (a suppress, redirect or light restore applied
+    // to one of them) must stay 0; secondary_own_frames counts frames whose second eye drew its own shadows after a pass between the eyes.
+    std::uint64_t secondary_writer_jobs{}, secondary_prepare_jobs{}, secondary_reader_jobs{}, secondary_actions{}, secondary_own_frames{};
 };
 
 // The effect the runtime applies to one job item.
@@ -184,6 +189,8 @@ public:
         frame_serial_ = 0;
         light_capture_count_ = 0;
         clear_captures();
+        secondary_open_ = false;
+        secondary_ = 0;
         reason_ = enabled_ ? Reason::none : Reason::disabled;
     }
 
@@ -231,6 +238,32 @@ public:
         }
         fail(Reason::third_view);
         return false;
+    }
+
+    // v1257: a secondary pass began (engine secondary-view render 0x366590, the Timepiece lens).  It borrows the LAST view object, which in
+    // paired stereo is the second eye's, and runs before the first eye (frame start) or, for the per-eye lens, inside the second eye's Begin.
+    // Views are told apart by address, so before v1257 its jobs were the previous frame's second view: its five writers were skipped and
+    // its readers/light links fed the first eye's shadow setup (another camera, the other timeline 600 m away).  None of its jobs belongs
+    // to an eye pair; between the eyes it also rewrites the shared setup and atlas, so that frame's second eye draws its own shadows.
+    // isolate=false (build/lens-shared-shadows) keeps the v1256 behaviour and only opens the accounting window.
+    void on_secondary_begin(std::uintptr_t view, bool between_eyes, bool isolate = true) noexcept {
+        if (!enabled_) return;
+        if (isolate) {
+            if (between_eyes) {fail(Reason::secondary_view); ++counters.secondary_own_frames;}
+            frame_started_ = false;
+            paired_ = false;
+        }
+        secondary_ = view;
+        secondary_open_ = view != 0;
+    }
+    void on_secondary_end() noexcept {secondary_open_ = false;}
+    // One job's accounting while a secondary pass is open (acted = a suppress/redirect/restore was applied to it).
+    void note_job(int pass, std::uintptr_t view, bool acted) noexcept {
+        if (!enabled_ || !secondary_open_ || !view || view != secondary_) return;
+        if (mutating_shadow_pass(pass)) ++counters.secondary_writer_jobs;
+        if (pass == pass_prepare) ++counters.secondary_prepare_jobs;
+        if (shadow_reader_pass(pass)) ++counters.secondary_reader_jobs;
+        if (acted) ++counters.secondary_actions;
     }
 
     // Called for every first-view shadow-reading job with the value of its shadowMapsInfos
@@ -502,6 +535,8 @@ private:
     bool second_prepare_suppressed_{};
     bool mode_decided_{};
     bool canonical_valid_{};
+    bool secondary_open_{};
+    std::uintptr_t secondary_{};
     Mode mode_{Mode::atlas};
     Reason reason_{Reason::disabled};
     ViewSignature first_{}, second_{};

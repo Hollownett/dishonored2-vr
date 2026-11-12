@@ -120,8 +120,20 @@ public:
         model_.observe_shadow_param(pass, view, has_shadow_maps_infos, shadow_maps_infos);
         action.suppress = model_.should_suppress(pass, view, cached_list);
         if (!action.suppress) action.redirect = model_.redirect_shadow_param(pass, view, action.redirect_value);
+        model_.note_job(pass, view, action.suppress || action.redirect);
         return action;
     }
+    // v1257: a secondary pass (Timepiece lens) is no eye view; see Model::on_secondary_begin.
+    void on_secondary_begin(std::uintptr_t view, bool between_eyes, bool isolate) noexcept {
+        if (!active_.load(std::memory_order_acquire)) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        model_.on_secondary_begin(view, between_eyes, isolate);
+    }
+    void on_secondary_end() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        model_.on_secondary_end();
+    }
+    Counters stats() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return model_.stats();}
     // Kept for the model lab and for callers that only need the suppression answer.
     bool should_suppress(int pass, std::uintptr_t view, bool cached_list) noexcept {
         if (!active_.load(std::memory_order_acquire)) return false;
@@ -139,7 +151,9 @@ public:
     LightAction light_action(int pass, std::uintptr_t view) noexcept {
         if (!active_.load(std::memory_order_acquire)) return LightAction::none;
         std::lock_guard<std::mutex> lock(mutex_);
-        return model_.light_action(pass, view);
+        const auto action = model_.light_action(pass, view);
+        model_.note_job(pass, view, action != LightAction::none);
+        return action;
     }
     void capture_light(std::uintptr_t light, std::uintptr_t info, std::uint32_t records = 0) noexcept {
         if (!active_.load(std::memory_order_acquire)) return;
@@ -294,6 +308,8 @@ public:
             << ",\"probe_lines\":" << probe_lines_
             << ",\"probe_dropped\":" << probe_dropped_
             << ",\"fallbacks\":" << stats.fallbacks
+            << ",\"secondary_writer_prepare_reader_actions_own\":[" << stats.secondary_writer_jobs << ',' << stats.secondary_prepare_jobs << ','
+            << stats.secondary_reader_jobs << ',' << stats.secondary_actions << ',' << stats.secondary_own_frames << ']'   // v1257
             << ",\"reason\":\"" << reason_name(model_.reason()) << "\"}";
         return out.str();
     }

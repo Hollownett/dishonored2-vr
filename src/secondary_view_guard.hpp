@@ -43,6 +43,38 @@ inline std::array<float,3> centre(const std::array<float,3>& a,const std::array<
     std::array<float,3> c{};for(std::size_t i=0;i<3;++i) c[i]=.5f*(a[i]+b[i]);return c;
 }
 
+// v1257 (user, v1256 headset: "has depth but is misaligned between the eyes"): the glass (rendering/timetravelportal) samples the secondary
+// image by SCREEN position (no projective lookup), so the image an eye composites must be rendered with that eye's own head window (pose,
+// FOV, forced projection) moved by the secondary camera's translation; one mono image cannot be right for both eyes. The engine runs the
+// secondary pass once, at the frame start (0x361fc2), and the eyes render serially (eye 0's lists are executed before eye 1's Begin: the
+// paired eye capture copies eye 0's finished image there). So the frame-start pass is drawn for eye 0 and the pass is run again inside eye
+// 1's Begin, drawn for eye 1: the portal target then holds each eye's own image when that eye's glass samples it.
+// build/lens-mono: one pass from the head centre (v1256); build/lens-eye0-camera: one pass from eye 0 (v1246).
+enum class LensMode : unsigned {per_eye,centre,eye0};
+// The record slot whose head window draws a pass: per_eye uses the pass's own eye, the one-pass modes eye 0's window.
+inline unsigned pass_record(LensMode mode,unsigned pass_eye) noexcept {return mode==LensMode::per_eye && pass_eye<2?pass_eye:0u;}
+// Why a lens frame gets no eye-1 pass (status order): a one-pass mode, an independent camera (a camera feed is mono by nature) or none, a
+// missing eye record, or no lens Begin in the frame-start pass.
+enum class SecondRefusal : unsigned {none,mode,camera,record,no_first};
+inline SecondRefusal second_pass_refusal(LensMode mode,bool camera_valid,bool camera_follows,bool eye0_record,bool eye1_record,bool first_began) noexcept {
+    if(mode!=LensMode::per_eye) return SecondRefusal::mode;
+    if(!camera_valid || !camera_follows) return SecondRefusal::camera;
+    if(!eye0_record || !eye1_record) return SecondRefusal::record;
+    if(!first_began) return SecondRefusal::no_first;
+    return SecondRefusal::none;
+}
+// The render (0x366590) consumes its request: it clears renderer+0x88 (0x36674c). The eye-1 pass re-arms it with the image the frame-start
+// pass consumed; if the game thread already posted the next frame's request (+0x88 set again), that request is used and put back after.
+struct Rearm {std::uintptr_t before,after;};
+inline Rearm rearm(std::uintptr_t current,std::uintptr_t consumed) noexcept {return {current?current:consumed,current};}
+// A pass drew with the camera it was given: the view's render copy (what the Begin draws and the shadow PREPARE of the same view reads)
+// holds the written position and basis (Setup re-orthonormalises the basis, so a tolerance, not bit equality).
+inline bool camera_matches(const std::array<float,3>& written_p,const std::array<float,9>& written_b,const std::array<float,3>& copy_p,const std::array<float,9>& copy_b) noexcept {
+    for(std::size_t i=0;i<3;++i) if(!(std::abs(written_p[i]-copy_p[i])<=1e-3f)) return false;
+    for(std::size_t i=0;i<9;++i) if(!(std::abs(written_b[i]-copy_b[i])<=1e-3f)) return false;
+    return true;
+}
+
 // Begin classification (status timepiece.begins).
 enum class Kind : unsigned {eye0,eye1,secondary,null_view,other};
 inline Kind classify(std::uintptr_t view,bool secondary_active,std::uintptr_t secondary_view,std::uintptr_t eye0,std::uintptr_t eye1) noexcept {
