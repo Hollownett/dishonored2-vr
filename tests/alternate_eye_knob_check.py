@@ -436,7 +436,13 @@ print('PASS: v1212 rig pair from one draw, wild-render dumps, no-render draws n/
 # v1213: VR arms never show the engine pose after a tick fallback (kind 3: image or held image), VR-pose switch = zero motion, wild bound = render width
 rm9 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om9 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
-assert 'image_slot<2 && full && tracked_arms_requested && !full_body_stopping.load()?3:0;' in probe and 'd2vr::image_skin_plan(kind,full_body.image_fresh(now),true);' in probe
+assert 'd2vr::image_skin_plan(kind,full_body.image_fresh(now),true);' in probe
 assert 'r.vr[n]!=r.vr[k]) {skin_switch_.fetch_add(1,std::memory_order_relaxed);return nullptr;}' in rm9 and 'const float b=k.z;' in rm9
 assert om9.index('RigMask::capture_drawn(c,view.frame,hash64(cur)|1u);') < om9.index('const bool own=RigMask::previous_palette(')
 print('PASS: v1213 held VR arms, skin switch zero motion, wild bound')
+# v1214: no hold over an arm the game owns on purpose (authored clip / player state) or outside arm-tracking logic; guard renders filed by cause
+rm10 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+assert '!((authored_arm_bits.load(std::memory_order_relaxed)>>image_slot)&1u) && d2vr::rig::wheel_tracks_arms(upload_logic,dual_wield_on());' in probe
+assert 'const int kind=submitted!=source?image_kind:vr_gap?3:0;' in probe and probe.index('static std::atomic<unsigned> authored_arm_bits{};') < probe.index('const bool vr_gap=')
+assert 'guard_cause_[b&1u?0:b&6u?1:2].fetch_add(1,std::memory_order_relaxed);' in rm10
+print('PASS: v1214 hold only over unintended refusals, guard causes')

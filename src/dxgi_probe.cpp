@@ -1634,9 +1634,10 @@ static bool attachment_pose_installed=false;
 // v861: the arms and the body are drawn from the image's own publication (Driver::begin_image at the eye-0 begin, rewritten into the skin array at
 // the render's GPU skin copy). Per slot (0/1 arm, 2 body): the model and whether its last upload submitted the plain tracked palette (only those
 // are rewritten: hidden, contact or native palettes stay the upload's).
+static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame (v1214: declared before the arm upload hook)
 struct ImageSkinSlot {std::atomic<std::uintptr_t> model{};std::atomic<int> kind{};std::atomic<bool> uploading{};};   // v864 kind: 0 keep the upload, 1 tracked palette, 2 contact raw palette
 static std::array<ImageSkinSlot,3> image_skin_slots{};
-static std::atomic<std::uint64_t> image_skin_writes[3]{},image_skin_misses[3]{},image_skin_busy{},image_skin_kinds[3][4]{},image_skin_gaps[3]{};   // kinds: per slot, uploads of each kind (v1213: 3 = VR arms held over a tick fallback); gaps: held, intended, unheld
+static std::atomic<std::uint64_t> image_skin_writes[3]{},image_skin_misses[3]{},image_skin_busy{},image_skin_kinds[3][4]{},image_skin_gaps[3]{},image_skin_fallback_causes[3]{};   // kinds: per slot, uploads of each kind (v1213: 3 = VR arms held over a tick fallback); gaps: held, intended, unheld
 static bool weapon_place_enabled{};   // v864: build/weapon-image-place: held weapons moved to the image's hand at the render's begin (opt-in until a sim shows the render reads it)
 static std::atomic<std::uint64_t> weapon_place_writes{},weapon_place_skips{};
 // v930 (weapon_draw_place.hpp; default on, opt-out build/no-weapon-draw-place): a held weapon is placed in the hand each render draws, at its draw.
@@ -1716,7 +1717,7 @@ static std::string arm_flicker_json() {
         ",\"image_skin\":{\"enabled\":"+(image_skin_enabled?"true":"false")+",\"hooked\":"+(skin_gpu_hooked?"true":"false")+",\"begins\":"+std::to_string(full_body.image_begins())+",\"writes\":["+std::to_string(image_skin_writes[0].load())+","+std::to_string(image_skin_writes[1].load())+","+std::to_string(image_skin_writes[2].load())+
         "],\"misses\":["+std::to_string(image_skin_misses[0].load())+","+std::to_string(image_skin_misses[1].load())+","+std::to_string(image_skin_misses[2].load())+"],\"busy\":"+std::to_string(image_skin_busy.load())+",\"rig_turns\":"+std::to_string(full_body.rig_turns())+
         ",\"kinds\":[["+std::to_string(image_skin_kinds[0][0].load())+","+std::to_string(image_skin_kinds[0][1].load())+","+std::to_string(image_skin_kinds[0][2].load())+","+std::to_string(image_skin_kinds[0][3].load())+"],["+std::to_string(image_skin_kinds[1][0].load())+","+std::to_string(image_skin_kinds[1][1].load())+","+std::to_string(image_skin_kinds[1][2].load())+","+std::to_string(image_skin_kinds[1][3].load())+"],["+std::to_string(image_skin_kinds[2][0].load())+","+std::to_string(image_skin_kinds[2][1].load())+","+std::to_string(image_skin_kinds[2][2].load())+","+std::to_string(image_skin_kinds[2][3].load())+"]]"+
-        ",\"skin_gaps\":{\"held\":"+std::to_string(image_skin_gaps[0].load())+",\"intended\":"+std::to_string(image_skin_gaps[1].load())+",\"unheld\":"+std::to_string(image_skin_gaps[2].load())+"}"+ // v1213 per arm upload
+        ",\"skin_gaps\":{\"held\":"+std::to_string(image_skin_gaps[0].load())+",\"intended\":"+std::to_string(image_skin_gaps[1].load())+",\"unheld\":"+std::to_string(image_skin_gaps[2].load())+",\"fallback_causes\":["+std::to_string(image_skin_fallback_causes[0].load())+","+std::to_string(image_skin_fallback_causes[1].load())+","+std::to_string(image_skin_fallback_causes[2].load())+"]}"+ // v1213 per arm upload
         ",\"weapon_place\":["+std::to_string(weapon_place_writes.load())+","+std::to_string(weapon_place_skips.load())+"]}"+weapon_draw_json()+"}";
     return text;
 }
@@ -4335,7 +4336,15 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
     if(image_slot>=0) {auto& slot=image_skin_slots[static_cast<unsigned>(image_slot)];slot.model.store(reinterpret_cast<std::uintptr_t>(model));slot.uploading.store(true);}
     original_arm_upload(model,submitted,count);
     // v1213: an arm upload of the full body (VR arms in use) that fell back to the engine pose is kind 3: the image skin draws the image over it
-    if(image_slot>=0) {auto& slot=image_skin_slots[static_cast<unsigned>(image_slot)];const int kind=submitted!=source?image_kind:image_slot<2 && full && tracked_arms_requested && !full_body_stopping.load()?3:0;
+    // v1214 (user headset v1209: 158 of 177 fallbacks were publish_refused, the attachment policy mask): never over an arm the game owns on
+    // purpose (an authored clip / player state: carry, takedown, scripted scene: authored_arm_bits) or outside the logic that tracks arms (menus,
+    // the head-front wheel); a refusal because that hand's tracking dropped out for a moment (policy mask without the hand) is held
+    const bool vr_gap=image_slot<2 && full && tracked_arms_requested && !full_body_stopping.load() &&
+        !((authored_arm_bits.load(std::memory_order_relaxed)>>image_slot)&1u) && d2vr::rig::wheel_tracks_arms(upload_logic,dual_wield_on());
+    // v1214 status skin_gaps.fallback_causes: full-body arm uploads that fell back to the engine pose [held (vr_gap), authored arm, logic without arm tracking]
+    if(image_slot>=0 && image_slot<2 && full && tracked_arms_requested && submitted==source)
+        ++image_skin_fallback_causes[vr_gap?0:(authored_arm_bits.load(std::memory_order_relaxed)>>image_slot)&1u?1:2];
+    if(image_slot>=0) {auto& slot=image_skin_slots[static_cast<unsigned>(image_slot)];const int kind=submitted!=source?image_kind:vr_gap?3:0;
         slot.kind.store(kind);slot.uploading.store(false);++image_skin_kinds[static_cast<unsigned>(image_slot)][static_cast<unsigned>(kind)];}
     if(image_slot>=0 && d2vr::frame_order::on.load(std::memory_order_relaxed)) d2vr::frame_order::note('W',static_cast<std::uint8_t>(image_slot),{skin_row_hash(model)});
     if(diagnostic) {
@@ -4611,7 +4620,6 @@ static bool dual_wield_enabled=false;static d2vr::arm::ArmSet arm_set;static std
 static bool npc_trigger_enabled=true;static std::array<bool,2> npc_trigger_consume{};static std::array<bool,2> npc_trigger_interact{};static std::array<bool,2> npc_owns_frame{};static std::array<d2vr::NpcTriggerOwner,2> npc_trigger_owner{}; // v963: Talk/Pickpocket on the hand's trigger
 static std::atomic<UINT64> npc_trigger_uses{},npc_prompt_frames{}; // v966 diagnostics: trigger Use frames, native prompts painted "Trig"
 bool dual_wield_on() noexcept {return dual_wield_enabled;}
-static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame
 static std::atomic<unsigned> extra_kinds{}; // status mirror of each arm's copy: 4 bits per hand (d2vr::arm::Held, numbered as the old HandLoadout::Extra)
 static std::array<bool,2> extra_owns{};      // control thread: the hand's grip holds its mod-owned weapon
 static std::array<std::string,2> extra_guard_def; // the guard weapon's def a hand holds (NpcWeaponPickup)

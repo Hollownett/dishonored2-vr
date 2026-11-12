@@ -316,7 +316,8 @@ public:
             +",\"content\":"+content_json()+"},\"renders\":"+renders_json()+",\"probed\":"+probed_json()+",\"fallbacks\":"+fallback_json()+",\"draw_views\":"+draw_views_json()
             +",\"wild_forensics\":["+[] {std::lock_guard<std::mutex> lock(pin_mutex_);std::string o;for(unsigned i=0;i<forensics_n_;++i) o+=(i?",":"")+forensics_[i];return o;}()+"]"
             +",\"rig_wild_renders\":"+std::to_string(RigMask::wild_renders_.load())
-            +",\"rig_guard\":{\"renders\":"+std::to_string(RigMask::wild_renders_.load())+",\"px\":"+std::to_string(RigMask::wild_px_.load())+",\"draws\":"+std::to_string(RigMask::guard_draws_.load())+",\"failures\":"+std::to_string(RigMask::guard_failures_.load())+"}}";
+            +",\"rig_guard\":{\"renders\":"+std::to_string(RigMask::wild_renders_.load())+",\"px\":"+std::to_string(RigMask::wild_px_.load())+",\"draws\":"+std::to_string(RigMask::guard_draws_.load())+",\"failures\":"+std::to_string(RigMask::guard_failures_.load())
+            +",\"cause\":{\"after_engine_pose\":"+std::to_string(RigMask::guard_cause_[0].load())+",\"held_image\":"+std::to_string(RigMask::guard_cause_[1].load())+",\"motion\":"+std::to_string(RigMask::guard_cause_[2].load())+"}}}"; // v1214
     }
     // v1206: one render's row (the probe adds it to its dump of that render), "null" when the ring no longer holds it
     static void pin(std::uint64_t display) noexcept { // v1207: the probe dumps this render
@@ -1257,7 +1258,7 @@ private:
             if(have_render && rows_own && !own) render_note(view.display,rr_rig_palette_miss);
             if(have_view) view_use(use_rig_motion);
             certainty(cert_previous_rows,own || have_content?cert_certain:content_na() || !applicable?cert_na:cert_fallback);
-            if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
+            if(own) {alt_rig_own_.fetch_add(1,std::memory_order_relaxed);if(have_render) RigMask::note_pair(view.display);} // v1214: what the pair was made of
             if(!own) std::memcpy(prev,cur,64);
             if(own && have_render && RigMask::probe_on.load(std::memory_order_relaxed)) { // v1210: the b2 bytes bind_pool writes, for the draw-time probe
                 static thread_local float want[max_floats];std::memcpy(want,sh->data,sh->size);scatter(s.layout,prev,want);RigMask::probe_arm(view.display,want,sh->size,view.frame,view.eye,s.layout);

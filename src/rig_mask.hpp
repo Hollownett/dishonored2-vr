@@ -212,7 +212,7 @@ public:
     // v1213: `vr` = this upload draws a VR pose (image skin wrote, or the tick's tracked palette): kept per model for capture_drawn
     static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame,const void* cpu,UINT cpu_bytes,bool uploaded,ID3D11Buffer* other=nullptr,bool commit=true,bool race=false,unsigned why=7,bool vr=true) noexcept {
         if(!c || !current || model>=ring_.size() || !motion.load(std::memory_order_relaxed)) return;
-        skin_vr_[model].store(vr,std::memory_order_relaxed);
+        skin_vr_[model].store(vr,std::memory_order_relaxed);skin_held_[model].store(why==5,std::memory_order_relaxed); // v1214: 5 = the image skin drew the held image
         Ring& r=ring_[model];
         D3D11_BUFFER_DESC d{};current->GetDesc(&d);
         ID3D11Device* owner{};current->GetDevice(&owner);if(owner) owner->Release(); // identity only
@@ -256,6 +256,7 @@ public:
         if(r.bytes!=d.ByteWidth || r.device!=device.Get()) {capture_refused_.fetch_add(1,std::memory_order_relaxed);return;}
         r.tag[k].store(~0u,std::memory_order_release);
         c->CopyResource(r.slot[k].Get(),cur.Get());r.rows[k]=rows;r.vr[k]=skin_vr_[tl_model_].load(std::memory_order_relaxed); // v1213
+        r.src[k]=static_cast<std::uint8_t>((r.vr[k]?0u:1u)|(skin_held_[tl_model_].load(std::memory_order_relaxed)?2u:0u)); // v1214
         r.tag[k].store(frame,std::memory_order_release);r.last.store(frame,std::memory_order_relaxed);rotations_.fetch_add(1,std::memory_order_relaxed);
     }
     // v1208 diagnostic: every 32nd uploading frame, both engine wrappers are read back and compared with the CPU palette just uploaded (status
@@ -287,7 +288,9 @@ public:
     static void note_mask(std::uint64_t display,std::uint32_t rig,std::uint32_t own,std::uint32_t wild) noexcept {
         auto& m=mask_census_[display%mask_census_.size()];m.display.store(~0ull,std::memory_order_release);
         m.n[0].store(rig,std::memory_order_relaxed);m.n[1].store(own,std::memory_order_relaxed);m.n[2].store(wild,std::memory_order_relaxed);m.display.store(display,std::memory_order_release);
-        if(wild) {wild_renders_.fetch_add(1,std::memory_order_relaxed);wild_px_.fetch_add(wild,std::memory_order_relaxed);}
+        if(wild) {wild_renders_.fetch_add(1,std::memory_order_relaxed);wild_px_.fetch_add(wild,std::memory_order_relaxed);
+            const PairSrc& p=pair_src_[display%pair_src_.size()];const unsigned b=p.display.load(std::memory_order_acquire)==display?p.bits.load(std::memory_order_relaxed):0u;
+            guard_cause_[b&1u?0:b&6u?1:2].fetch_add(1,std::memory_order_relaxed);} // v1214
     }
     static bool mask_counts(std::uint64_t display,std::uint32_t (&out)[3]) noexcept {
         const auto& m=mask_census_[display%mask_census_.size()];if(m.display.load(std::memory_order_acquire)!=display) return false;
@@ -452,7 +455,7 @@ private:
     // v1206: rig_ring_slots palettes per model, slot frame%rig_ring_slots written once by that render's skin copy and tagged with its frame
     struct Ring {std::vector<std::uint8_t> upload;std::array<bool,rig_ring_slots> from_upload{}; // v1208: the last uploaded CPU palette
         std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,rig_ring_slots> slot;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,rig_ring_slots> view;
-        std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};std::array<std::uint64_t,rig_ring_slots> rows{};std::array<bool,rig_ring_slots> vr{};UINT bytes{}; // v1212 rows: the capturing draw's current-rows hash (under mutex_)
+        std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};std::array<std::uint64_t,rig_ring_slots> rows{};std::array<bool,rig_ring_slots> vr{};std::array<std::uint8_t,rig_ring_slots> src{};UINT bytes{}; // v1212 rows: the capturing draw's current-rows hash (under mutex_)
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};
         void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);from_upload[i]=false;}upload.clear();run.store(0);last.store(~0u);}};
     // v1210 draw-time probe (diagnostics): for the first own rig draw of each model in a render, right after the engine's draw and on its
@@ -467,7 +470,19 @@ private:
     struct SkinFrame {std::uint32_t frame{~0u};std::uint8_t calls[3]{},uploads[3]{},commits[3]{},why[3]{};std::uint64_t turns{};};
     inline static std::array<SkinFrame,64> skin_log_{};
     inline static unsigned dumps_wild_{},dumps_clean_{};inline static std::uint64_t dump_clean_display_{~0ull},probes_seen_{};
-    inline static std::atomic<std::uint64_t> pair_rows_mismatch_{},skin_switch_{};inline static std::array<std::atomic<bool>,3> skin_vr_{}; // v1213
+    inline static std::atomic<std::uint64_t> pair_rows_mismatch_{},skin_switch_{};inline static std::array<std::atomic<bool>,3> skin_vr_{},skin_held_{}; // v1213, v1214
+    // v1214: per render, what its own rig pairs were made of (OR over its draws): 1 the previous render drew an engine pose (no VR pose), 2 it drew
+    // the held image, 4 this render draws the held image. A wild census of that render is filed by it (guard_cause: engine pose / held / motion).
+    struct PairSrc {std::atomic<std::uint64_t> display{~0ull};std::atomic<unsigned> bits{};};inline static std::array<PairSrc,128> pair_src_{};
+    inline static thread_local unsigned tl_pair_src_{};
+public:
+    inline static std::array<std::atomic<std::uint64_t>,3> guard_cause_{}; // v1214: wild renders [after an engine-pose render, held image involved, neither = true motion]
+    static void note_pair(std::uint64_t display) noexcept { // ObjectMotion, after an own pair (previous_palette true)
+        if(display==~0ull) return;PairSrc& p=pair_src_[display%pair_src_.size()];
+        if(auto d=p.display.load(std::memory_order_acquire);d!=display && p.display.compare_exchange_strong(d,display)) p.bits.store(0,std::memory_order_relaxed);
+        p.bits.fetch_or(tl_pair_src_,std::memory_order_relaxed);
+    }
+private:
     static std::string skin_json(std::uint32_t from,std::uint32_t to) { // under mutex_
         std::ostringstream o;o<<'[';bool first=true;
         for(std::uint32_t f=from;f<=to && f-from<16;++f) {const SkinFrame& s=skin_log_[f%skin_log_.size()];if(s.frame!=f) continue;
@@ -628,6 +643,7 @@ private:
             D3D11_SHADER_RESOURCE_VIEW_DESC vd{};tl_current_->GetDesc(&vd);
             if(FAILED(device->CreateShaderResourceView(r.slot[k].Get(),&vd,&r.view[k]))) failures_.fetch_add(1,std::memory_order_relaxed);
         }
+        tl_pair_src_=r.src[k];if(const unsigned n=now%rig_ring_slots;now!=~0u && r.tag[n].load(std::memory_order_relaxed)==now) tl_pair_src_|=static_cast<unsigned>(r.src[n]&2u)<<1; // v1214
         tl_bound_slot_=k;tl_bound_tag_=frame;tl_bound_buffer_=reinterpret_cast<std::uintptr_t>(r.slot[k].Get());
         tl_held_view_=r.view[k];return tl_held_view_.Get();
     }
