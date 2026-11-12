@@ -491,3 +491,16 @@ om26b = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 assert '(frame==newest && record_view(static_cast<unsigned>(key),frame,out));' in om26b and 'static bool record_view(unsigned eye,std::uint32_t frame,View& out) noexcept {' in om26b
 assert '<<",\\"paired_eyes\\":{\\"left\\":["' in om26b
 print('PASS: v1226 paired right-eye draws tagged from the eye record (paired_eyes, record_views)')
+# v1231: RigidLocal settles by consensus (a value recurring 3 times in a window, most hits), follows only when the settled value stopped recurring;
+# status in_step per publisher path (physical / use / bind)
+wd31 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+assert 'static constexpr unsigned settle_n=3,early_n=2,cands=6,window=45,' in wd31 and 'if(c.renders-c.settled_last>window)' in wd31
+assert probe.count('d2vr::weapon_draw::RigidLocal::set_path(hand,d2vr::weapon_draw::RigidLocal::path_') == 3
+print('PASS: v1231 rigid local by consensus, in_step per publisher path')
+# v1232: a held grip whose press went to a Use (or a living hold) takes a choke offer that appears later (combat: the guard turns chokeable only
+# once vulnerable); an offer refused at the press (a weapon's squeeze, v920) stays refused for that squeeze
+vc32 = (root / 'src' / 'vr_controls.hpp').read_text(encoding='utf-8')
+assert 'if((role_==Role::ready || (role_==Role::other && offered_victim!=refused_)) && use && started) {' in vc32
+assert 'else if(role_==Role::ready) {role_=Role::other;refused_=offered_victim;}' in vc32 and '{role_=Role::ready;victim_=refused_=0;return {};}' in vc32
+assert 'const std::uint32_t entry=role_==Role::ready && !offered_victim?active_victim:offered_victim;' in vc32 and '{role_=Role::choke;victim_=entry;}' in vc32
+print('PASS: v1232 combat choke: a still-held grip takes a later offer')

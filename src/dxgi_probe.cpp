@@ -3804,7 +3804,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         if(t-ex.since<.12) b=d2vr::weapon_draw::HeldBind::eased(d2vr::weapon_draw::model_of(raw[hand].data()),b,(t-ex.since)/.12);
                         if(d2vr::weapon_draw::finite(b)) {
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
-                            ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);
+                            ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);d2vr::weapon_draw::RigidLocal::set_path(hand,d2vr::weapon_draw::RigidLocal::path_physical); // v1231
                             continue;
                         }
                     }
@@ -3827,14 +3827,14 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         const auto b=d2vr::weapon_draw::mul(d2vr::weapon_draw::pose_mat(now_target),*u.k);
                         if(d2vr::weapon_draw::finite(b) && d2vr::weapon_draw::distance(b,f)<1.) {
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
-                            ++held_draw_placed[hand];++held_use_exact[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);
+                            ++held_draw_placed[hand];++held_use_exact[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);d2vr::weapon_draw::RigidLocal::set_path(hand,d2vr::weapon_draw::RigidLocal::path_use); // v1231
                             continue;
                         }
                     }
                 }
                 const double track_mps=game_xr?static_cast<double>(game_xr->grip_speeds[hand]):-1.;   // the hand's own motion: walking is not a moving hand
                 if(!held_bind.frame(hand,thing[hand],weapon_mat(*image),d2vr::weapon_draw::model_of(raw[hand].data()),t,bound[hand],track_mps,player_speed)) continue;
-                raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];++held_draw_placed[hand];held_bound_entity[hand].store(thing[hand]);
+                raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];++held_draw_placed[hand];held_bound_entity[hand].store(thing[hand]);d2vr::weapon_draw::RigidLocal::set_path(hand,d2vr::weapon_draw::RigidLocal::path_bind); // v1231
             }
             d2vr::ObjectMotion::set_held_placing((thing[0] && raw_ptr[0] && place_ids[0]==thing[0]) || (thing[1] && raw_ptr[1] && place_ids[1]==thing[1]));
         } else d2vr::ObjectMotion::set_held_placing(false);

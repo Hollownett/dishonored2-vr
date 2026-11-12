@@ -1,7 +1,8 @@
-// v1223 pure check of the held thing's rigid local transform (src/weapon_draw_place.hpp RigidLocal, Place::place_one_view on a held side):
-// a carried prop's draws are composed from F_draw, which is not always the F the publisher read; the measured L = inverse(F_read) * M then
-// wobbles. Settles on 3 agreeing renders, rejects a single outlier, follows 4 agreeing renders of a new value, resets on a new held thing,
-// and every draw of one render (both eyes) uses the same L, so the part sits at B * L exactly.
+// v1223/v1231 pure check of the held thing's rigid local transform (src/weapon_draw_place.hpp RigidLocal, Place::place_one_view on a held side).
+// A carried physics prop's draws are composed from F_draw, often one or two ticks away from the F the publisher read; the measured
+// L = inverse(F_read) * M is then off by the body's motion over that time. The true L recurs whenever they are in step. Consensus: settles on a
+// value that recurred 3 times (not necessarily consecutively), never on a scattered mismatched one, keeps it while it still recurs, follows a
+// genuine change (old value gone for a window), resets on a new held thing, and every draw of one render (both eyes) uses the same L.
 #include <cmath>
 #include <cstdio>
 #include "../src/weapon_draw_place.hpp"
@@ -9,6 +10,10 @@ using namespace d2vr::weapon_draw;
 static int failures=0;
 #define CHECK(x) do {if(!(x)) {std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#x);++failures;}} while(0)
 static Mat rigid(double yaw,double x,double y,double z) {Mat m=identity();const double c=std::cos(yaw),s=std::sin(yaw);m[0]=c;m[1]=-s;m[4]=s;m[5]=c;m[3]=x;m[7]=y;m[11]=z;return m;}
+static Mat axis_angle(double ax,double ay,double az,double a) { // Rodrigues, unit axis
+    const double c=std::cos(a),s=std::sin(a),t=1-c;Mat m=identity();
+    m[0]=t*ax*ax+c;m[1]=t*ax*ay-s*az;m[2]=t*ax*az+s*ay;m[4]=t*ax*ay+s*az;m[5]=t*ay*ay+c;m[6]=t*ay*az-s*ax;m[8]=t*ax*az-s*ay;m[9]=t*ay*az+s*ax;m[10]=t*az*az+c;return m;
+}
 static std::array<float,15> raw_of(const Mat& m) {
     std::array<float,15> r{};for(int i=0;i<3;++i) r[static_cast<std::size_t>(i)]=static_cast<float>(m[static_cast<std::size_t>(i*4+3)]);
     for(int c=0;c<3;++c) for(int k=0;k<3;++k) r[static_cast<std::size_t>(3+c*3+k)]=static_cast<float>(m[static_cast<std::size_t>(k*4+c)]);
@@ -16,50 +21,81 @@ static std::array<float,15> raw_of(const Mat& m) {
 }
 static double worst(const float* a,const Mat& b) {double w=0;for(int i=0;i<16;++i) w=std::max(w,std::abs(a[i]-b[static_cast<std::size_t>(i)]));return w;}
 static Mat vp_of(double eye_x) {Mat v=identity();v[0]=1.2;v[5]=0;v[6]=1.2;v[9]=0;v[10]=0;v[11]=0.01;v[12]=0;v[13]=1;v[14]=0;v[15]=0.4;v[3]=eye_x;return v;}
+static bool same(const Mat& a,const Mat& b) {return distance(a,b)<=RigidLocal::agree_m && angle(a,b)<=RigidLocal::agree_rad;}
+static unsigned rng=12345u;static double uni() {rng=rng*1664525u+1013904223u;return (rng>>8)*(1.0/16777216.0);}
+static Mat mismatch_of(const Mat& l) { // the body's motion over one or two 16 ms ticks at 0.5-3 m/s and up to 4 rad/s, in its own frame
+    const double dt=(uni()<.5?1:2)*.016,v=.5+2.5*uni(),w=4*uni();
+    double ax=uni()-.5,ay=uni()-.5,az=uni()-.5;const double n=std::sqrt(ax*ax+ay*ay+az*az)+1e-9;ax/=n;ay/=n;az/=n;
+    double dx=uni()-.5,dy=uni()-.5,dz=uni()-.5;const double dn=std::sqrt(dx*dx+dy*dy+dz*dz)+1e-9;
+    Mat e=axis_angle(ax,ay,az,w*dt);e[3]=dx/dn*v*dt;e[7]=dy/dn*v*dt;e[11]=dz/dn*v*dt;
+    return mul(e,l);
+}
 int main() {
     const Mat l_true=rigid(0,0.03,0,-0.02);
-    { // consensus on its own
-        Mat out{};const std::uint64_t key=7;
-        const auto sample=[&](std::uint32_t frame,const Mat& l) {const bool ok=RigidLocal::use(1,key,frame,l,out);RigidLocal::fold(1,0x55);return ok;};
-        RigidLocal::fold(1,0x55);
-        CHECK(!sample(1,l_true) && !sample(2,l_true));           // not settled yet: the caller keeps the measured L
-        CHECK(!sample(3,l_true));                                  // the third agreeing render settles at the fold
-        CHECK(sample(4,l_true) && distance(out,l_true)<1e-12);
-        Mat off=l_true;off[3]+=0.012;                               // one render composed from another frame: 12 mm
-        CHECK(sample(5,off) && distance(out,l_true)<1e-12);
-        CHECK(sample(6,l_true) && distance(out,l_true)<1e-12);    // the outlier was rejected
-        Mat moved=l_true;moved[7]+=0.004;                           // a genuine change: 4 renders agree on it
-        for(std::uint32_t f=7;f<11;++f) {CHECK(sample(f,moved));CHECK(distance(out,l_true)<1e-12);}
-        CHECK(sample(11,moved) && distance(out,moved)<1e-12);     // followed
-        RigidLocal::fold(1,0x66);                                   // a new held thing
-        CHECK(!RigidLocal::use(1,key,12,l_true,out));
-        const auto j=RigidLocal::json();
-        CHECK(j.find("\"outliers\":5")!=std::string::npos && j.find("\"follows\":1")!=std::string::npos && j.find("\"resets\":1")!=std::string::npos);
-        std::printf("%s\n",j.c_str());
+    Mat out{};const std::uint64_t key=7;std::uint32_t frame=1;
+    const auto sample=[&](const Mat& l,bool& ok) {ok=RigidLocal::use(1,key,frame,l,out);RigidLocal::fold(1,0x55);++frame;return out;};
+    bool ok=false;
+    { // rules
+        RigidLocal::clear();RigidLocal::fold(1,0x55);
+        Mat off1=l_true;off1[3]+=.012;Mat off2=l_true;off2[7]-=.02;
+        sample(l_true,ok);CHECK(!ok);sample(off1,ok);CHECK(!ok);
+        sample(l_true,ok);CHECK(!ok);                                     // 2 hits now, folded after this draw
+        sample(off2,ok);CHECK(ok && same(out,l_true));                     // early: the best candidate (2 hits), not the raw sample
+        sample(l_true,ok);                                                  // third non-consecutive hit: settled at this fold
+        sample(off1,ok);CHECK(ok && same(out,l_true));
+        // a steady mismatched stretch while the true value keeps recurring: never followed
+        for(int r=0;r<30;++r) {sample(r%5==4?l_true:off2,ok);CHECK(ok && same(out,l_true));}
+        // a genuine change: the old value stops recurring; followed only after a whole window without it
+        Mat moved=l_true;moved[7]+=.004;
+        unsigned followed_at=0;
+        for(unsigned r=0;r<RigidLocal::window+10;++r) {sample(moved,ok);if(!followed_at && same(out,moved)) followed_at=r;}
+        CHECK(followed_at>=RigidLocal::window && followed_at<=RigidLocal::window+3);
+        RigidLocal::fold(1,0x66);CHECK(!RigidLocal::use(1,key,frame,l_true,out)); // a new held thing
+        std::printf("%s\n",RigidLocal::json().c_str());
     }
-    { // through the one-view placement of a held side: renders whose draws come from F_draw != F_read, both eyes of each render
+    { // streams with 30 / 60 / 85 % mismatched samples, several seeds: settle on the true L within ~0.5 s (45 renders at 90 Hz), never on another value
+        const double shares[3]={.30,.60,.85};
+        for(const double share:shares) {
+            unsigned worst_settle=0,wrong=0,never=0;
+            for(unsigned seed=1;seed<=20;++seed) {
+                rng=seed*2654435761u;RigidLocal::clear();RigidLocal::fold(1,0x80+seed);
+                unsigned settled_at=0;const auto settles0=RigidLocal::settles();
+                for(unsigned r=1;r<=180;++r) {
+                    Mat s=l_true;if(uni()<share) s=mismatch_of(l_true);else s[3]+=1e-7*(uni()-.5);
+                    sample(s,ok);
+                    if(ok && !same(out,l_true)) ++wrong;
+                    if(!settled_at && RigidLocal::settles()>settles0) settled_at=r;
+                }
+                if(!settled_at) ++never;else worst_settle=std::max(worst_settle,settled_at);
+            }
+            std::printf("mismatch %.0f%%: slowest settle %u renders (20 seeds), never settled %u, draws placed with a wrong L %u\n",share*100,worst_settle,never,wrong);
+            CHECK(never==0 && wrong==0);
+            CHECK(worst_settle<=(share>.8?70u:45u));
+        }
+    }
+    { // through the one-view placement of a held side: both eyes of each render at B * L, the read frame off in some renders
         RigidLocal::clear();
-        double v1222_worst=0,v1223_worst=0;
+        double before=0,after=0;
         for(std::uint32_t n=0;n<12;++n) {
-            const Mat b=rigid(0.02*n,0.02*n,0.3,0.05);                     // the drawn hand's binding
-            const Mat f_draw=rigid(0.02*n-0.05,0.02*n-0.04,0.3,0.05);       // what the engine composed this render from
-            Mat f_read=f_draw;f_read[3]+=(n==1 || n==7 || n==10)*0.01;      // the publisher read a frame 1 cm off in renders 1, 7, 10
+            const Mat b=rigid(0.02*n,0.02*n,0.3,0.05);
+            const Mat f_draw=rigid(0.02*n-0.05,0.02*n-0.04,0.3,0.05);
+            Mat f_read=f_draw;f_read[3]+=(n==1 || n==7 || n==10)*0.01;
             const auto raw=raw_of(f_read);const std::array<const float*,2> raws{nullptr,raw.data()};const std::array<const Mat*,2> bounds{nullptr,&b};
             Place::publish_bound(200+n,raws,bounds,{0,0.5},{0,0x77});
             for(int eye=0;eye<2;++eye) {
                 const Mat vp=vp_of(eye?0.032:-0.032);const Mat drawn=mul(mul(vp,f_draw),l_true);
-                float cur[16],now[16],before[16];for(int i=0;i<16;++i) cur[i]=static_cast<float>(drawn[static_cast<std::size_t>(i)]);
-                bool own=false;const auto r=Place::place_one_view(vp,vp,cur,now,before,own,nullptr,42);
+                float cur[16],now[16],prev[16];for(int i=0;i<16;++i) cur[i]=static_cast<float>(drawn[static_cast<std::size_t>(i)]);
+                bool own=false;const auto r=Place::place_one_view(vp,vp,cur,now,prev,own,nullptr,42);
                 CHECK(r.side==1);
                 const double e=worst(now,mul(mul(vp,b),l_true));
-                (n>=5?v1223_worst:v1222_worst)=std::max(n>=5?v1223_worst:v1222_worst,e); // settles at the fold after render 4
+                (n>=2?after:before)=std::max(n>=2?after:before,e);
             }
         }
-        std::printf("held part vs VP*B*L: before settling (v1222 placement) %.4f, settled %.2g\n",v1222_worst,v1223_worst);
-        CHECK(v1222_worst>1e-3);   // the measured L carried the 1 cm read error
-        CHECK(v1223_worst<1e-5);   // both eyes of every settled render: exactly B * L, the outlier renders included
+        std::printf("held part vs VP*B*L: first renders %.4f, from the early candidate on %.2g\n",before,after);
+        CHECK(before>1e-3);   // render 1 had only raw samples (one in step, one 1 cm off)
+        CHECK(after<1e-5);    // both eyes of every later render: exactly B * L, the off renders included
     }
     if(failures) {std::printf("rigid_local_check: %d failure(s)\n",failures);return 1;}
-    std::printf("PASS: rigid_local_check (settle, outlier, follow, reset, both eyes at B*L)\n");
+    std::printf("PASS: rigid_local_check (consensus settle, early candidate, steady mismatch not followed, genuine change, reset, 30/60/85%% mismatch, both eyes)\n");
     return 0;
 }

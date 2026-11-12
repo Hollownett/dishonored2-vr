@@ -521,7 +521,7 @@ private:
         for(auto m=placed_resid_[mode][2].load(std::memory_order_relaxed);v>m && !placed_resid_[mode][2].compare_exchange_weak(m,v);) {}
     }
     // v1223: a placed draw's identity for its rigid local transform (weapon_draw::RigidLocal): its vertex shader and cb2 size
-    // ponytail: two parts of one held thing with the same shader and size are told apart only by L (nearest within 5 cm); add the index range if that ever mixes them
+    // ponytail: two parts of one held thing with the same shader and size are told apart only by L (nearest within 12 cm); add the index range if that ever mixes them
     static std::uint64_t draw_key(const ContextState& s,const Shadow& sh) noexcept {return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(s.vs))^(std::uint64_t{sh.size}<<48);}
     static std::string resid_json(unsigned mode) {
         const auto n=placed_resid_[mode][1].load();

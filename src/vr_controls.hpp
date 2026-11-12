@@ -284,7 +284,7 @@ public:
 class OfferedChokeGrip {
     enum class Role {ready,other,choke,drain};
     Role role_=Role::drain;
-    std::uint32_t victim_{};
+    std::uint32_t victim_{},refused_{};   // refused_: the victim offered when this squeeze became `other` (v1232)
     std::uint64_t epoch_{};
 public:
     struct Result {bool consume_use{},rb{};};
@@ -294,10 +294,21 @@ public:
         std::uint32_t offered_victim,std::uint32_t active_victim,bool occupied,bool trigger_held=false) noexcept {
         if(epoch_!=epoch || !allowed || !epoch) {role_=Role::drain;victim_=0;}
         epoch_=epoch;
-        if(!use && !held && !trigger_held) {role_=Role::ready;victim_=0;return {};}
-        if(role_==Role::ready && use && started) {
-            if(allowed && epoch && held && !occupied && offered_victim) {role_=Role::choke;victim_=offered_victim;}
-            else role_=Role::other;
+        if(!use && !held && !trigger_held) {role_=Role::ready;victim_=refused_=0;return {};}
+        // v1232 (user, headset: "when I grab an enemy in combat and I only click grip, the choke animation never read grip ... I cannot choke the guardian.
+        // This is applicable only for combat, stealth work fine"). Cause: only a READY squeeze could take an offer. Behind an unaware guard the offer is
+        // already there at the press, so the press itself chokes. An aware guard in combat is offered only once vulnerable (parried/staggered), and the
+        // grip pressed on him before that went to a Use (grip alone with the kill sensor's target or a drawn gun is a Use, decide_grip_alone) and turned
+        // the squeeze to `other`, so the still-held grip never took the offer that appeared later (the caller's stealth_held had no effect).
+        // Now a held squeeze in `other` takes an offer that appears later (use+started from the caller: the raw grip held while offered), unless that
+        // squeeze already refused this same victim at the press (refused_: it held a weapon, v920 - a later flicker of `occupied` must not turn a sword's
+        // hold-to-hold squeeze into a choke). A finished or dropped choke (drain) never restarts on the same squeeze; occupied still blocks every case.
+        // Second cause ("click grip ... never read grip again"): a click started the game's choke, then the press again found no OFFER (the game offers
+        // nobody already in its choke), so it went `other`. A ready press while the game's choke runs takes that victim (active_victim, same spawn ids).
+        const std::uint32_t entry=role_==Role::ready && !offered_victim?active_victim:offered_victim;
+        if((role_==Role::ready || (role_==Role::other && offered_victim!=refused_)) && use && started) {
+            if(allowed && epoch && held && !occupied && entry) {role_=Role::choke;victim_=entry;}
+            else if(role_==Role::ready) {role_=Role::other;refused_=offered_victim;}
         }
         if(role_!=Role::choke) return {role_==Role::drain,false};
         if(!held || !use || occupied || (offered_victim!=victim_ && active_victim!=victim_)) {

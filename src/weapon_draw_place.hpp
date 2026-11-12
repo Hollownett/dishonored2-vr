@@ -426,19 +426,24 @@ struct Slot {std::atomic<std::uint32_t> ready{};std::array<Side,2> side{};};
 
 // v1223 (user: "I need loose props behave same as bodies (zero ghosting)"): a held thing's draw is placed at B * L, L = inverse(F) * M its
 // transform in the thing's frame. For a rigid part L is a constant, but measured per draw it is inverse(F_read) * F_draw * L: a carried physics
-// prop's draws are not always composed from the frame the publisher read (and the v1072 previous-read alternative is a guess between two), so
-// the measured L - and the drawn prop - wobbled against the hand by that difference, differently per render and per eye. Per held side and draw
-// (key: vertex shader + cb2 size, then the nearest L within 5 cm) the measured L of each render is a sample; L settles when 3 consecutive
-// renders agree within 0.5 mm / 0.2 deg, a single disagreeing render is an outlier (rejected, its size counted), 4 consecutive renders agreeing
-// on a new value are a genuine change (followed). Samples are folded only at the next publish, so every draw of one render - both eyes, every
-// pass - uses the same L. No settled L yet: the measured one (v1222). A new held thing (publish id) resets the side. build/no-rigid-local: off.
+// prop's draws are not always composed from the frame the publisher read, so the measured L - and the drawn prop - wobbled against the hand.
+// v1231: consensus, not consecutiveness. A physically held prop is velocity-driven (headset: 1.8-2.6 m/s median), so a draw composed one tick
+// away from the read frame is off by centimetres and that may be the common case. The true L recurs exactly whenever read and draw are in step;
+// mismatched samples scatter with the body's motion. Per draw (key: vertex shader + cb2 size, then the nearest L within 12 cm) up to 6 candidate
+// values with hit counts; a candidate unseen for `window` renders expires. L settles on the candidate with the most hits once it has >= 3
+// (non-consecutive); the settled value is replaced only when it has stopped recurring for `window` renders and another candidate has >= 3 hits
+// (a genuine change: new model, non-rigid part). Before settling, a candidate with >= 2 hits is used over the raw sample. Samples are folded at
+// the next publish, so every draw of one render (both eyes, every pass) uses the same L. A new held thing (publish id) resets the side.
+// Status per publisher path (set_path): samples agreeing with the settled L vs not = how often read and draw are out of step. build/no-rigid-local: off.
 class RigidLocal {
 public:
     inline static std::atomic<bool> on{true};
-    static constexpr double agree_m=.0005,agree_rad=.0035,gate_m=.05;
-    static constexpr unsigned settle_n=3,follow_n=4,clusters=8,max_age=240;
+    static constexpr double agree_m=.0005,agree_rad=.0035,gate_m=.12; // gate: a draw one or two 16 ms ticks off at 3 m/s is still the same draw
+    static constexpr unsigned settle_n=3,early_n=2,cands=6,window=45,clusters=8,max_age=240,paths=4; // window: ~0.5 s at 90 Hz
+    enum Path:unsigned {path_unknown,path_physical,path_use,path_bind};
     static constexpr unsigned bins=11; // deviation histogram edges in mm: .05 .1 .2 .5 1 2 5 10 20 50, then above
-    // Draw time: the L to place this draw with; false = none settled (place with the measured one). Records the render's sample.
+    static void set_path(unsigned side,unsigned path) noexcept {if(side<2) path_[side].store(path<paths?path:0u,std::memory_order_relaxed);}
+    // Draw time: the L to place this draw with; false = none (place with the measured one). Records the render's sample.
     static bool use(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& measured,Mat& out) noexcept {
         if(side>1 || !on.load(std::memory_order_relaxed)) return false;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -446,44 +451,59 @@ public:
         for(auto& c:cs) {
             if(!c.active) {if(!free_slot) free_slot=&c;continue;}
             if(c.key!=key) continue;
-            const Mat& ref=c.settled_ok?c.settled:c.cand_n?c.cand:c.pending;
-            const double d=distance(ref,measured);
+            const double d=distance(c.anchor,measured);
             if(d<best_d) {best_d=d;best=&c;}
         }
-        if(!best) {if(!free_slot) {++unsettled_;return false;} *free_slot=Cluster{};free_slot->active=true;free_slot->key=key;best=free_slot;}
+        if(!best) {if(!free_slot) {++unsettled_;return false;} *free_slot=Cluster{};free_slot->active=true;free_slot->key=key;free_slot->anchor=measured;best=free_slot;}
         best->age=0;
         if(best->pending_frame!=frame+1) {best->pending=measured;best->pending_frame=frame+1;}
-        if(!best->settled_ok) {++unsettled_;return false;}
-        out=best->settled;++settled_uses_;return true;
+        if(best->settled_ok) {out=best->settled;++settled_uses_;return true;}
+        if(const Cand* c=best->top();c && c->hits>=early_n) {out=c->value;++early_uses_;return true;}
+        ++unsettled_;return false;
     }
     // Publish time (render boundary): the last render's samples into each cluster's consensus; a changed held thing resets the side.
     static void fold(unsigned side,std::uintptr_t id) noexcept {
         if(side>1) return;
         std::lock_guard<std::mutex> lock(mutex_);
         if(id!=id_[side]) {if(id_[side]) ++resets_;id_[side]=id;side_[side]={};return;}
+        const unsigned path=path_[side].load(std::memory_order_relaxed);
         for(auto& c:side_[side]) {
             if(!c.active) continue;
+            ++c.renders;
             if(!c.pending_frame) {if(++c.age>max_age) c=Cluster{};continue;}
             const Mat s=c.pending;c.pending_frame=0;++samples_;
-            if(!c.settled_ok) {
-                if(c.cand_n && agree(s,c.cand)) ++c.cand_n;else {c.cand=s;c.cand_n=1;}
-                if(c.cand_n>=settle_n) {c.settled=c.cand;c.settled_ok=true;c.cand_n=0;++settles_;}
+            for(auto& k:c.cand) if(k.hits && c.renders-k.last>window) k=Cand{};   // not seen for a window: expired
+            Cand* hit=nullptr;for(auto& k:c.cand) if(k.hits && agree(s,k.value)) {hit=&k;break;}
+            if(hit) {++hit->hits;hit->last=c.renders;}
+            else {Cand* slot=&c.cand[0];for(auto& k:c.cand) if(!k.hits || k.hits<slot->hits || (k.hits==slot->hits && k.last<slot->last)) {slot=&k;if(!k.hits) break;}
+                  *slot=Cand{s,1,c.renders};hit=slot;}
+            if(c.settled_ok) {
+                const bool in_step=agree(s,c.settled);
+                ++step_seen_[path][in_step?0:1];
+                note(dev_,dev_max_um_,dev_max_mdeg_,s,c.settled);   // how far the measured (v1222) placement was from the rigid one
+                if(in_step) {c.settled_last=c.renders;continue;}
+                ++outliers_;
+                // a genuine change: the settled value stopped recurring for a whole window and another value recurs
+                if(c.renders-c.settled_last>window) if(const Cand* t=c.top();t && t->hits>=settle_n && !agree(t->value,c.settled)) {
+                    note(step_,step_max_um_,step_max_mdeg_,t->value,c.settled);c.settled=t->value;c.anchor=t->value;c.settled_last=t->last;++follows_;
+                }
                 continue;
             }
-            note(dev_,dev_max_um_,dev_max_mdeg_,s,c.settled);   // how far the measured (v1222) placement was from the rigid one
-            if(agree(s,c.settled)) {c.cand_n=0;continue;}
-            ++outliers_;
-            if(c.cand_n && agree(s,c.cand)) {
-                if(++c.cand_n>=follow_n) {note(step_,step_max_um_,step_max_mdeg_,c.cand,c.settled);c.settled=c.cand;c.cand_n=0;++follows_;}
-            } else {c.cand=s;c.cand_n=1;}
+            if(const Cand* t=c.top();t && t->hits>=settle_n) {c.settled=t->value;c.anchor=t->value;c.settled_ok=true;c.settled_last=t->last;++settles_;}
+            else if(const Cand* t2=c.top()) c.anchor=t2->value;
         }
     }
     static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};}
+    static std::uint64_t settles() noexcept {std::lock_guard<std::mutex> lock(mutex_);return settles_;}
     static std::string json() {
         std::lock_guard<std::mutex> lock(mutex_);
         std::string o="{\"on\":"+std::string(on.load()?"true":"false")+",\"samples\":"+std::to_string(samples_)+",\"settles\":"+std::to_string(settles_)
-            +",\"settled_draws\":"+std::to_string(settled_uses_)+",\"unsettled_draws\":"+std::to_string(unsettled_)+",\"outliers\":"+std::to_string(outliers_)
-            +",\"follows\":"+std::to_string(follows_)+",\"resets\":"+std::to_string(resets_);
+            +",\"settled_draws\":"+std::to_string(settled_uses_)+",\"early_draws\":"+std::to_string(early_uses_)+",\"unsettled_draws\":"+std::to_string(unsettled_)
+            +",\"outliers\":"+std::to_string(outliers_)+",\"follows\":"+std::to_string(follows_)+",\"resets\":"+std::to_string(resets_);
+        static constexpr const char* path_names[paths]={"unknown","physical","use","bind"};
+        o+=",\"in_step\":{";   // per publisher path: samples [agreeing with the settled L, not] = read and draw in step / out of step
+        for(unsigned p=0;p<paths;++p) o+=std::string(p?",":"")+"\""+path_names[p]+"\":["+std::to_string(step_seen_[p][0])+","+std::to_string(step_seen_[p][1])+"]";
+        o+="}";
         const auto hist=[&](const char* name,const std::array<std::uint64_t,bins>& h,std::uint64_t um,std::uint64_t mdeg) {
             std::uint64_t n=0;for(auto v:h) n+=v;
             static constexpr double edge[bins]={.05,.1,.2,.5,1,2,5,10,20,50,1e9};
@@ -497,7 +517,12 @@ public:
         return o+'}';
     }
 private:
-    struct Cluster {bool active{},settled_ok{};std::uint64_t key{};Mat settled{},cand{},pending{};unsigned cand_n{},age{};std::uint32_t pending_frame{};};
+    struct Cand {Mat value{};unsigned hits{},last{};};
+    struct Cluster {
+        bool active{},settled_ok{};std::uint64_t key{};Mat anchor{},settled{},pending{};std::array<Cand,cands> cand{};
+        unsigned renders{},settled_last{},age{};std::uint32_t pending_frame{};
+        const Cand* top() const noexcept {const Cand* t=nullptr;for(const auto& k:cand) if(k.hits && (!t || k.hits>t->hits || (k.hits==t->hits && k.last>t->last))) t=&k;return t;}
+    };
     static bool agree(const Mat& a,const Mat& b) noexcept {return distance(a,b)<=agree_m && angle(a,b)<=agree_rad;}
     static void note(std::array<std::uint64_t,bins>& h,std::uint64_t& max_um,std::uint64_t& max_mdeg,const Mat& a,const Mat& b) noexcept {
         static constexpr double edge[bins]={.05,.1,.2,.5,1,2,5,10,20,50,1e9};
@@ -509,7 +534,9 @@ private:
     inline static std::mutex mutex_;
     inline static std::array<std::array<Cluster,clusters>,2> side_{};
     inline static std::array<std::uintptr_t,2> id_{};
-    inline static std::uint64_t samples_{},settles_{},settled_uses_{},unsettled_{},outliers_{},follows_{},resets_{};
+    inline static std::array<std::atomic<unsigned>,2> path_{};
+    inline static std::array<std::array<std::uint64_t,2>,paths> step_seen_{};
+    inline static std::uint64_t samples_{},settles_{},settled_uses_{},early_uses_{},unsettled_{},outliers_{},follows_{},resets_{};
     inline static std::array<std::uint64_t,bins> dev_{},step_{};
     inline static std::uint64_t dev_max_um_{},dev_max_mdeg_{},step_max_um_{},step_max_mdeg_{};
 };
