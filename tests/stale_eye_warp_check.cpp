@@ -1140,7 +1140,7 @@ static void gpu_afw2() {
     const WarpFov fov{-std::atan(T), std::atan(T), std::atan(T), -std::atan(T)};
     enum {sky_kind, wall_kind, object_kind, pole_kind, hand_kind, guard_kind, beam_kind, stick_kind};
     // slant: the object's sides lean (x shifts by slant * y); aa: colour anti-aliased (4x4 samples a pixel, as the game's edges are)
-    struct Scene {double object = std::nan(""), pole = std::nan(""), hand = std::nan(""), guard = std::nan(""); Vec3 walk{}; int lift = 0; double slant = 0; bool aa = false; double beam = std::nan(""), bar = std::nan(""), stick = std::nan(""), plate = std::nan("");};  // plate: a 60 cm board 0.6 m away whose right edge is at x = plate (90)  // stick: a held 2 cm stick 1 m away (rig, 200)  // bar: a 2 cm post 0.3 m away (before the hand)  // beam: a striped plate seen nearly edge-on, from x = beam at 0.2 m away
+    struct Scene {double object = std::nan(""), pole = std::nan(""), hand = std::nan(""), guard = std::nan(""); Vec3 walk{}, hand_walk{}; int lift = 0; double slant = 0; bool aa = false; double beam = std::nan(""), bar = std::nan(""), stick = std::nan(""), plate = std::nan("");};  // plate: a 60 cm board 0.6 m away whose right edge is at x = plate (90)  // stick: a held 2 cm stick 1 m away (rig, 200)  // bar: a 2 cm post 0.3 m away (before the hand)  // beam: a striped plate seen nearly edge-on, from x = beam at 0.2 m away
     struct Frame {ComPtr<ID3D11Texture2D> image, depth, rig, motion; std::vector<int> grey, kind; std::vector<double> ahead;};
     // what camera c (position, looking down -z) sees through uv: kind, colour, distance ahead
     const auto look = [&](Vec3 c, const Scene& s, double u, double v, int& kind, double& ahead) {
@@ -1181,8 +1181,9 @@ static void gpu_afw2() {
         for (UINT y = 0; y < RH; ++y) for (UINT x = 0; x < RW; ++x) {
             int k; double a; look(c, s, (x + 0.5) / RW, (y + 0.5) / RH, k, a);
             d[y * RW + x] = static_cast<float>(0.01 / a); mask[y * RW + x] = k == hand_kind || k == stick_kind ? 255 : 0;
-            if (k == guard_kind && length(s.walk) > 0) {
-                const float v[4]{static_cast<float>(s.walk.x), static_cast<float>(s.walk.y), static_cast<float>(s.walk.z), 8.f};
+            const Vec3 mv = k == guard_kind ? s.walk : k == hand_kind ? s.hand_walk : Vec3{};
+            if (length(mv) > 0) {
+                const float v[4]{static_cast<float>(mv.x), static_cast<float>(mv.y), static_cast<float>(mv.z), 8.f};
                 for (int i = 0; i < 4; ++i) m[(y * RW + x) * 4 + i] = half_float(v[i]);
             }
         }
@@ -1525,6 +1526,28 @@ static void gpu_afw2() {
         CHECK(st[0] == 1 && st[1] > 20 && st[2] * 50 <= st[1]);
     }
 #endif
+    // Q. (v1206 room 14-16: AFW v2's hands 1.14/1.01/1.45 vs the old warp's 0.41/0.83/1.00) a hand moves 5 cm with the rig target known; its
+    // own rig motion and its rigid layer disagree. Q1: its own motion right, the layer says still. Q2: its own motion 3 cm short, the layer
+    // right. Either way the hand lands in this eye's own shading (the source whose outline lands on the target's), not the fresh eye's
+    for (const int q : {1, 2}) {
+        Scene ks; ks.hand = -0.05; ks.hand_walk = q == 1 ? Vec3{0.1, 0, 0} : Vec3{0.04, 0, 0}; Scene ns = ks; ns.hand = 0.0; Scene lit = ns; lit.lift = 50;   // (the fresh render carries the same rig motion: the chain reads it)
+        const Vec3 kc = here;
+        const Frame k = render(kc, ks), f = render(fresh_at, lit), truth = render(here, ns);
+        const auto rt = target_rig(here, ns.hand); rig_target = rt.Get();
+        const auto a = run(true, kc, here, fresh_at, k, f, -0.05, q == 1 ? -0.05 : 0.0, true, true);
+        rig_target = nullptr;
+        int hand = 0, own = 0;
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const int i = y * W + x, o = a.out[i * 4];
+            bool inner = true; int lo = 255, hi = 0;
+            for (int d = -2; d <= 2; ++d) inner = inner && truth.kind[i + d] == hand_kind && truth.kind[i + d * W] == hand_kind;
+            if (!inner) continue;
+            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {lo = std::min(lo, truth.grey[i + dy * W + dx]); hi = std::max(hi, truth.grey[i + dy * W + dx]);}
+            ++hand; own += o >= lo - 6 && o <= hi + 6;
+        }
+        std::printf("afw2 Q%d. hand 5 cm, %s: %d of %d hand px in this eye's own shading at the right place\n", q, q == 1 ? "own motion right, layer still" : "own motion 3 cm short, layer right", own, hand);
+        CHECK(hand > 300 && own * 100 >= hand * 95);
+    }
     // E. a guard 2.5 m away walking 20 cm a tick (motion textures, both eyes), the camera 2 cm sideways: at its new place in this eye's own
     // shading, the wall at its old place. E'. the kept eye's motion texture says nothing (a vector it lacks: the guard just started): the fresh
     // eye's motion is handed to the kept texels it came from (scatter) and confirmed the same way

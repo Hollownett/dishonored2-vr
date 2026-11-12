@@ -212,7 +212,7 @@ AppendStructuredBuffer<uint> tilesOut : register(u4);
 // v1197 cost: the crack writes landed and near into both fill buffers (no copy; it reads neither)
 RWStructuredBuffer<uint> landedOut0 : register(u0); RWStructuredBuffer<uint2> nearOut0 : register(u6); StructuredBuffer<uint> tilesIn : register(t12);
 // motion flags (w)
-static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128,kHeld=256;
+static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128,kHeld=256,kOwn=512;   // kOwn: a rig texel moved by its own rig motion
 // key low bits
 static const uint kKeyRig=1,kKeyMoving=2,kKeyFlags=7,kSkyKey=8;
 static const uint kFilled=0x80000000u,kSeed=0x40000000u;
@@ -367,6 +367,23 @@ bool KeptRigOutline(int2 i,float a) {
     }
     return false;
 }
+// a kept point moved to p (kept metres) lands on the rig target's outline (within 3 texels)
+bool OnTargetOutline(float3 p) {
+    const float3 t=Apply(KT,p);if(t.z<=1e-3) return false;
+    const int2 c=int2(Project(targetFov,t)*grid.xy);bool on=false;
+    if(RigTargetHas(c)) [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || !RigTargetHas(c+int2(round(dir*3)));}
+    else [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || RigTargetHas(c+int2(round(dir*3)));}
+    return on;
+}
+// the same against the fresh eye's rig (seen from its camera: the fresh render is of the target tick), for frames without a usable target
+bool OnFreshOutline(float3 p) {
+    const float3 f=Apply(KF,p);if(f.z<=1e-3) return false;
+    const float2 uv=Project(freshFov,f);if(!InFresh(uv)) return false;
+    const int2 c=clamp(int2(uv*freshGrid.xy),int2(3,3),int2(freshGrid.xy)-4);bool on=false;
+    if(FreshRigAt(c)) [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || !FreshRigAt(c+int2(round(dir*3)));}
+    else [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || FreshRigAt(c+int2(round(dir*3)));}
+    return on;
+}
 // Motion: per kept texel the displacement d (kept metres) from the kept tick to the target tick, before the world (camera) map.
 [numthreads(8,8,1)] void Motion(uint3 id : SV_DispatchThreadID) {
     if(any(id.xy>=uint2(grid.xy))) return;
@@ -397,10 +414,10 @@ bool KeptRigOutline(int2 i,float a) {
         w|=kRig;
         const bool moving=owner==2?parts.z>0:owner==3?parts.w>0:false;
         int r=-2;
-        if(KeptRigMoves(i)) {d=KeptStep(own.xyz,parts.y);float3 c=d;r=Chain(p,c,true,true);if(r==1) d=c;}  // (a) its own rig motion
+        if(KeptRigMoves(i)) {d=KeptStep(own.xyz,parts.y);float3 c=d;r=Chain(p,c,true,true);if(r==1) {d=c;w|=kOwn;}}  // (a) its own rig motion
         if(r!=1) {                                                                                     // (b) its owner's rigid motion
             const float3 l=LayerStep(owner,p);float4 fm;const int s=Look(p,l,true,fm);
-            if(s==1 || r==-2) {d=l;r=s;}
+            if(s==1 || r==-2) {d=l;r=s;w&=~kOwn;}
         }
         const bool any_moving=parts.z>0 || parts.w>0;   // the head's rig (owner 1: a forearm nearer the eye than its palm) votes while a hand moves too
         if((owner>=2?moving:any_moving) && (r==1 || r==-1)) InterlockedAdd(handVotes[owner*2+(r==1?0:1)],1);
@@ -408,15 +425,20 @@ bool KeptRigOutline(int2 i,float a) {
         if(flags.x>0 && keptRig.Load(int3(i,0))<253.5/255) w|=kHeld;   // v1191: a held item (253) votes and stands down apart from the arm
         // v1190 outline votes: with the rig target, the rig's own outline moved by its motion must land on the target's outline (within 2
         // texels; 3 for a sword's thin blade): a flat hand confirms any wrong shift texel by texel, its outline does not (an exact silhouette, same grid, same tick)
+        // v1206: without the target (or one TargetOn will ignore), the two motion sources are voted on against the fresh eye's rig outline
+        if(flags.x>0 && !(keptRig.Load(int3(i,0))<253.5/255) && KeptRigOutline(i,a)) {
+            if(KeptRigMoves(i)) InterlockedAdd(handVotes[44+owner*4+(OnFreshOutline(p+KeptStep(own.xyz,parts.y))?0:1)],1);
+            InterlockedAdd(handVotes[46+owner*4+(OnFreshOutline(p+LayerStep(owner,p))?0:1)],1);
+        }
         if(rigMode.x>0 && KeptRigOutline(i,a)) {
-            const float3 t=Apply(KT,p+d);bool on=false;
-            if(t.z>1e-3) {
-                const int2 c=int2(Project(targetFov,t)*grid.xy);
-                if(RigTargetHas(c)) [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || !RigTargetHas(c+int2(round(dir*3)));}
-                else [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || RigTargetHas(c+int2(round(dir*3)));}
-            }
             const bool held=keptRig.Load(int3(i,0))<253.5/255;
-            InterlockedAdd(handVotes[(held?18:10)+owner*2+(on?0:1)],1);
+            InterlockedAdd(handVotes[(held?18:10)+owner*2+(OnTargetOutline(p+d)?0:1)],1);
+            // v1206: the same vote for each motion source on its own (the arm only): its own rig motion and its hand's rigid layer; Repair
+            // keeps the one whose outline lands on the target's (room 14-16: the layer; street 4, an 87 mm swing: the rig motion)
+            if(!held) {
+                if(KeptRigMoves(i)) InterlockedAdd(handVotes[28+owner*4+(OnTargetOutline(p+KeptStep(own.xyz,parts.y))?0:1)],1);
+                InterlockedAdd(handVotes[30+owner*4+(OnTargetOutline(p+LayerStep(owner,p))?0:1)],1);
+            }
         }
         if(r==1) w|=kConfirmed;
         if(r==2) w|=kOutside;
@@ -426,7 +448,24 @@ bool KeptRigOutline(int2 i,float a) {
     if(dot(d,d)>0 && !(w&kDrop)) {const float3 m=p+d;if(m.z>1e-3) InterlockedMax(handVotes[8],uint(length((Project(keptFov,m)-Project(keptFov,p))*grid.xy))+1);}
     motionOut[Index(i)]=float4(d,w);
 }
-)HLSL" R"HLSL(// Repair (Metro's warp_repair): an unconfirmed texel takes the nearest confirmed motion of its class and surface within 4 texels (else
+)HLSL" R"HLSL(// v1197 (in-game street 4-9, room 3/4/6/10/12/14/15: the engine's rig target drawn ~290 texels off, as from a camera one IPD beyond the
+// fresh eye; with it trusted, every kept rig texel outside it was dropped and its pixels shown as the world: both hands striped floor): the
+// target is used only while the fresh eye confirms it: of its texels (every 4th across and down) the fresh eye sees (not hidden behind
+// something nearer there), at least half land on the fresh eye's rig at their depth (TargetVote in Motion: [26] on, [27] off). Not this
+// eye's rig moved by its motion: that is what the target corrects (lab R, a grip that says still). Otherwise the pass runs as without one.
+// v1206: the arm of hand `owner` moves by its rigid layer rather than its own rig motion (its outline votes on the target's, Motion)
+bool TargetOn();
+bool LayerWins(uint owner) {
+    const uint b=(TargetOn()?28:44)+owner*4;   // (the fresh eye's outline votes without a usable target)
+    const float ona=handVotesIn[b],offa=handVotesIn[b+1],onb=handVotesIn[b+2],offb=handVotesIn[b+3];
+    return onb+offb>=16 && onb/(onb+offb)>(ona+offa>0?ona/(ona+offa):0)+0.05;
+}
+bool TargetOn() {
+    if(rigMode.x<=0) return false;
+    const uint on=handVotesIn[26],off=handVotesIn[27];
+    return on+off<32 || on>=off;
+}
+// Repair (Metro's warp_repair): an unconfirmed texel takes the nearest confirmed motion of its class and surface within 4 texels (else
 // keeps its own); a confirmed moving texel outvoted by its 5x5 same-surface neighbours (>= 3 voters, fewer than half within a texel of
 // it) takes the motion most of them agree with.
 [numthreads(8,8,1)] void Repair(uint3 id : SV_DispatchThreadID) {
@@ -478,17 +517,19 @@ bool KeptRigOutline(int2 i,float a) {
             }
         }
     }
+    // v1206: with the target, a hand's arm moves by the source whose outline lands on the target's in more of its texels (ties: as Motion
+    // chose); its own rig motion is 1-3 texels off on small moves (room 14-16), its rigid layer misses a swing that bends the wrist
+    if((w&kRig) && !(w&(kHeld|kOutside)) && flags.x>0) {
+        const uint owner=(w>>5)&3,b=(TargetOn()?30:46)+owner*4;
+        if(handVotesIn[b]+handVotesIn[b+1]>=16) {
+            const bool layer=LayerWins(owner);
+            float a;const float3 p=KeptPointAt(i,a);
+            if(layer && (w&kOwn)) o.xyz=LayerStep(owner,p);
+            else if(!layer && !(w&kOwn) && KeptRigMoves(i)) o.xyz=KeptStep(keptMotion.Load(int3(i,0)).xyz,parts.y);
+            o.w=float((uint(o.w)&~(kOwn|kMoving))|(layer?0:kOwn)|(dot(o.xyz,o.xyz)>0?kMoving:0));
+        }
+    }
     motionOut[Index(i)]=o;
-}
-// v1197 (in-game street 4-9, room 3/4/6/10/12/14/15: the engine's rig target drawn ~290 texels off, as from a camera one IPD beyond the
-// fresh eye; with it trusted, every kept rig texel outside it was dropped and its pixels shown as the world: both hands striped floor): the
-// target is used only while the fresh eye confirms it: of its texels (every 4th across and down) the fresh eye sees (not hidden behind
-// something nearer there), at least half land on the fresh eye's rig at their depth (TargetVote in Motion: [26] on, [27] off). Not this
-// eye's rig moved by its motion: that is what the target corrects (lab R, a grip that says still). Otherwise the pass runs as without one.
-bool TargetOn() {
-    if(rigMode.x<=0) return false;
-    const uint on=handVotesIn[26],off=handVotesIn[27];
-    return on+off<32 || on>=off;
 }
 // rig group `owner` (1 the head's, 2 left, 3 right) moved some other way than its motions say: while its hand moves, its look-ups refute more
 // than a tenth of its texels (a flat hand confirms any shift within its own outline texel by texel, so only a clear majority counts)
@@ -496,7 +537,9 @@ bool StandsDown(uint owner,bool held=false) {
     if(owner<1 || owner>3) return false;
     // v1190: with the rig target, its outline votes decide, moving or not (a hand whose grip stood still while the drawn hand moved): a
     // half of its outline off the target's stands it down (a third stood a sword hand down that had moved 3.6 mm: swing 8)
-    if(TargetOn()) {const uint b=(held?18:10)+owner*2,on=handVotesIn[b],off=handVotesIn[b+1];return on+off>=16 && off*2>on+off;}
+    if(TargetOn()) {
+        // (v1206: an arm's votes are those of the motion source Repair kept)
+        const uint b=held?18+owner*2:handVotesIn[30+owner*4]+handVotesIn[31+owner*4]>=16?(LayerWins(owner)?30:28)+owner*4:10+owner*2,on=handVotesIn[b],off=handVotesIn[b+1];return on+off>=16 && off*2>on+off;}
     const bool moving=owner==1?parts.z>0 || parts.w>0:owner==2?parts.z>0:parts.w>0;
     return moving && handVotesIn[owner*2+1]*10>handVotesIn[owner*2]+handVotesIn[owner*2+1];
 }
@@ -973,7 +1016,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     checked(device_->CreateSamplerState(&s,&sampler_),"sampler");
     D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;checked(device_->CreateRasterizerState(&r,&raster_),"rasterizer");
     D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthFunc=D3D11_COMPARISON_ALWAYS;checked(device_->CreateDepthStencilState(&ds,&depth_),"depth state");
-    votes_=buffer(28,4);stats_=buffer(4,4);
+    votes_=buffer(60,4);stats_=buffer(4,4);
     {D3D11_BUFFER_DESC a{};a.ByteWidth=12;a.Usage=D3D11_USAGE_DEFAULT;a.MiscFlags=D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
      const UINT one[3]{0,1,1};D3D11_SUBRESOURCE_DATA i{one,0,0};checked(device_->CreateBuffer(&a,&i,&fill_args_),"fill arguments");}
     D3D11_BUFFER_DESC h{};h.ByteWidth=4;h.Usage=D3D11_USAGE_STAGING;h.CPUAccessFlags=D3D11_CPU_ACCESS_READ;h.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;h.StructureByteStride=4;
@@ -1050,7 +1093,7 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     }
     mark(1);
     bind({motion_[1].srv.Get()},{motion_[0].uav.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,votes_.uav.Get()});go(motion,kw,kh);mark(2);
-    bind({motion_[0].srv.Get()},{motion_[1].uav.Get()});go(repair,kw,kh);mark(3);
+    bind({motion_[0].srv.Get(),nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{motion_[1].uav.Get()});go(repair,kw,kh);mark(3);
     // 3 splat (keys 0), 4 origins (origins 0); fresh rig keys
     context_->ClearUnorderedAccessViewUint(keys_[0].uav.Get(),zero);context_->ClearUnorderedAccessViewUint(origins_[0].uav.Get(),zero);
     context_->ClearUnorderedAccessViewUint(fresh_keys_.uav.Get(),zero);context_->ClearUnorderedAccessViewUint(holes_.uav.Get(),zero);
