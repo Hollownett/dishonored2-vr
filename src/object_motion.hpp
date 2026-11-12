@@ -1358,6 +1358,7 @@ private:
                 rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
                 const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh));
                 if(!RigMask::draw_is_rig()) weapon_draw::Place::census(r,r.side>=0 && have_prev); // v1237
+                weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,63); // v1240: one-view draws counted under pass bit 63
                 // v1218: this eye's previous render's submitted rows of the draw (receipt chain). v1226: else the predicted previous (this eye's
                 // previous binding * L: moved rigidly with the hand) when that render's binding exists, camera-only on the current binding only without it
                 if(r.side>=0 && have_prev && view.receipt && placed_history.load(std::memory_order_relaxed)) {
@@ -1407,6 +1408,7 @@ private:
                 if(r.side<0 && r.near_side>=0) weapon_pass_near_unplaced_[pass_index][r.near_like?0:1].fetch_add(1,std::memory_order_relaxed);
                 if(r.side>=0 && have_view) placed_view_frame_[view.frame==frame?0:1].fetch_add(1,std::memory_order_relaxed);
                 if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev);
+                weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,pass_index);   // v1240: a held severed part's placed draws
                 // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven). v1226: else the predicted previous
                 // (prevVP(eye) * B_prev * L: the thing moved rigidly with the hand, exact with v1223's rigid L), never camera-only (a held thing is not
                 // world-fixed). Counted per pass and eye.
@@ -1749,6 +1751,7 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<",\"v1216_prev_error\":"<<resid_json(0)<<",\"v1216_prev_error_alt\":"<<resid_json(1)
        <<",\"rigid_local\":"<<weapon_draw::RigidLocal::json() // v1223
        <<",\"held_census\":"<<weapon_draw::Place::census_json() // v1237
+       <<",\"severed_draws\":"<<weapon_draw::Place::severed_json() // v1240
        <<",\"placed_view_frame\":["<<placed_view_frame_[0].load()<<','<<placed_view_frame_[1].load()<<']'
        <<",\"shadow_place\":["<<shadow_place_[0].load()<<','<<shadow_place_[1].load()<<','<<shadow_place_[2].load()<<','<<shadow_place_[3].load()<<']' // v1238
        <<",\"skip\":[";

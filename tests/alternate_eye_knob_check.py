@@ -552,4 +552,13 @@ assert 'static Prediction predict(unsigned side,std::uint64_t key,std::uint32_t 
 assert 'out.gate_m=std::min(.05+mps*.05,out.reach);' in wd39 and wd39.count('predict_place(*slot,full(') == 2
 assert 'const Mat x=predicted?predicted_x:rigid_part(' in wd39 and '\\"match\\":"+match_json(k)' in wd39
 print('PASS: v1239 held things matched through the read ring and the predicted rigid match')
-
+# v1240: a finite oversized hand-body speed/spin read-back retires and re-creates the body (wild_motion; max_wild_motion then the latch);
+# a held severed part's placed draws per key / pass with the placed L's rigidity and the per-render L spread between keys (severed_draws)
+hb40 = (root / 'src' / 'hand_body.hpp').read_text(encoding='utf-8')
+assert 'count(side,&Counters::wild_motion);' in hb40 and 'static constexpr std::uint64_t max_wild_motion=8;' in hb40
+assert hb40.index('count(side,&Counters::wild_motion);') < hb40.index('servo_step(s.servo,')
+wd40 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+om40 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert wd40.count('note_l(matched,') == 2 and om40.count('weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,') == 2
+assert '<<",\\"severed_draws\\":"<<weapon_draw::Place::severed_json()' in om40
+print('PASS: v1240 hand-body wild-motion recovery and the severed_draws diagnostic')

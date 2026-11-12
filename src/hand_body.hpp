@@ -119,7 +119,8 @@ struct DriveStatus {double gap_m{};double speed{},feedforward_mps{};bool root_ga
                     // fix round 1: thread CPU time of this side's drive (QueryThreadCycleTime; 0 when unavailable), and the positive control for
                     // the drift proof: ticks where the root moved under locomotion input, and the largest such root travel in one locomotion window
                     std::uint64_t cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{};
-                    std::uint64_t held_ticks{},discontinuities{},stuck_releases{};};   // B16: drive ticks while holding (snaps suppressed unless a native hold's object is free, P2-1)
+                    std::uint64_t held_ticks{},discontinuities{},stuck_releases{};
+                    std::uint64_t wild_motion{},wild_speed_mmps{},wild_spin_mrads{};};   // v1240: finite oversized read-backs retired (not latched); the largest speed / spin seen (x1000)   // B16: drive ticks while holding (snaps suppressed unless a native hold's object is free, P2-1)
 // Fix round 1 (proof d, controller ruling): per-tick drive cost (both hands summed) as wall time (QPC) and thread CPU time, a fixed wall
 // histogram, the ticks over budget, and the phase split of the slowest tick (read-back, servo, write, the rest). hist edges in us:
 // [0,10) [10,20) [20,50) [50,100) [100,150) [150,200) [200,300) [300,500) [500,1000) [1000,inf).
@@ -293,6 +294,7 @@ public:
     static constexpr std::uint64_t create_retry_ms=1000;   // after a refused create, wait before the next attempt (owner resolution is not free)
     static constexpr unsigned max_destroy_retries=240;     // a queued destroy refused this many times latches the fault
     static constexpr unsigned max_wake_tries=30;           // a refused wake write (busy, unreadable) is retried on the next ticks, this many times
+    static constexpr std::uint64_t max_wild_motion=8;      // v1240: finite oversized speed/spin read-backs per side retired and re-created before the latch
     static constexpr unsigned max_filter_misses=5;         // B16 fix round 2: a filter word not read back as written this many ticks in a row latches
                                                            // HandBodyFault: both hand bodies go and stay off for the session (the fallback is B4, review N-1)
     explicit HandBody(HandBodyEngine engine,bool enabled=true):engine_(std::move(engine)),enabled_(enabled) {}
@@ -470,11 +472,20 @@ public:
         cost.read=clock_us();
         if(!m) {count(side,&Counters::skipped);return;}                                      // not our body: service()'s read-back handles it
         const auto& dc=drive_cfg_;
-        if(!finite(m->position) || !finite(m->velocity) || !finite(m->spin) || length(m->position)>dc.garbage_position ||
-           length(m->velocity)>dc.garbage_speed || length(m->spin)>dc.garbage_speed) {   // Review Focus 3: never reaches the servo or a record
+        if(!finite(m->position) || !finite(m->velocity) || !finite(m->spin) || length(m->position)>dc.garbage_position) {   // Review Focus 3: never reaches the servo or a record
             count(side,&Counters::garbage);latch(side,"read-back garbage (position/velocity/spin)",true);publish_pose(side,std::nullopt);return;
         }
         auto& c=counters_[side];
+        // v1240 (user v1235 + sim: one read latched the hand body off for the session): a FINITE oversized speed or spin of a body own_state has just
+        // verified as ours is physics (a 5 cm sphere rolling at 5 m/s spins 100 rad/s; a squeeze ejects it), not memory garbage. Never servoed or
+        // written: the body is retired like a discontinuity and the lifecycle re-creates it at a free palm. Repeats past max_wild_motion latch.
+        if(length(m->velocity)>dc.garbage_speed || length(m->spin)>dc.garbage_speed) {
+            count(side,&Counters::wild_motion);
+            store_max(c.wild_speed_mmps,static_cast<std::uint64_t>(std::min(length(m->velocity),1e9)*1000));store_max(c.wild_spin_mrads,static_cast<std::uint64_t>(std::min(length(m->spin),1e9)*1000));
+            reset_drive(side);s.pending_destroy=true;publish_pose(side,std::nullopt);
+            if(c.wild_motion.load(std::memory_order_relaxed)>=max_wild_motion) {count(side,&Counters::garbage);latch(side,"read-back speed/spin oversized repeatedly",true);}
+            return;
+        }
         const double gap=length(in.target.position-m->position);
         c.gap_m.store(std::isfinite(gap)?gap:-1,std::memory_order_relaxed);c.speed.store(length(m->velocity),std::memory_order_relaxed);
         // A finite world-space discontinuity beyond the servo's supported domain cannot
@@ -552,6 +563,7 @@ public:
         d.drives=c.drives.load();d.drive_writes=c.drive_writes.load();d.yields=c.yields.load();d.skipped=c.skipped.load();
         d.snap_requests=c.snap_requests.load();d.snap_blocked=c.snap_blocked.load();d.garbage=c.garbage.load();d.second_drives=c.second_drives.load();d.root_jumps=c.root_jumps.load();d.pressed_ticks=c.pressed_ticks.load();
         d.cpu_us=c.cpu_us.load();d.cpu_max_us=c.cpu_max_us.load();d.root_moved_ticks=c.root_moved_ticks.load();d.root_travel_um=c.root_travel_um.load();d.held_ticks=c.held_ticks.load();d.discontinuities=c.discontinuities.load();d.stuck_releases=c.stuck_releases.load();
+        d.wild_motion=c.wild_motion.load();d.wild_speed_mmps=c.wild_speed_mmps.load();d.wild_spin_mrads=c.wild_spin_mrads.load();
         return d;
     }
     // The largest drive cost of one tick, both hands summed (proof (d): <= 200 us), and the last tick's sum.
@@ -595,7 +607,8 @@ private:
             wake_writes{},create_refusals{},writes{},releases{},lost{},unverified{},misplaced_writes{},reentrant_writes{},filter_writes{},filter_refused{},filter_stranded{},filter_readback_mismatches{};
         std::atomic<std::uint32_t> filter{R1Recipe::filter};   // B16: the body's filter word as last written (the R1 default from each creation)
         std::atomic<std::uint64_t> contact_frames{},snaps{},cost_us{},cost_max_us{},player_drift_um{},drives{},drive_writes{},yields{},skipped{},
-            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{},discontinuities{},stuck_releases{};
+            snap_requests{},snap_blocked{},garbage{},second_drives{},root_jumps{},pressed_ticks{},cpu_us{},cpu_max_us{},root_moved_ticks{},root_travel_um{},held_ticks{},discontinuities{},stuck_releases{},
+            wild_motion{},wild_speed_mmps{},wild_spin_mrads{};
         std::atomic<double> gap_m{},speed{},dt_s{},feedforward_mps{};std::atomic<bool> capped{},contact_now{},root_gate{};std::atomic<std::uint64_t> contact_ms{};
         std::atomic<int> state{};std::atomic<std::uint32_t> handle{};
     };

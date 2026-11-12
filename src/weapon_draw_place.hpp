@@ -772,6 +772,48 @@ public:
             if(r.near_like) bits_[static_cast<unsigned>(s)].fetch_or(4u,std::memory_order_relaxed);
         }
     }
+    // v1240 diagnostic (user v1233: a carried severed head drew with BLACK skin): per distinct placed draw of a held severed part (first 8 keys):
+    // vertex shader, cb2 size, reflected layout, placed draws per pass, and the frame it was placed with relative to the thing (L = inverse(F) * x):
+    // its axis lengths / orthogonality (a degenerate or non-rigid L) and, per render, the largest spread between the L of different keys
+    // (depth pass vs colour pass placed apart: the colour pass then fails the depth test the placed depth pass wrote).
+    static void severed_draw(const Result& r,std::uint64_t key,std::uint64_t layout,unsigned size,unsigned pass) noexcept {
+        if(r.side<0 || r.side>1 || kind_[static_cast<unsigned>(r.side)].load(std::memory_order_relaxed)!=kind_severed) return;
+        const Mat l=last_l_;
+        std::lock_guard<std::mutex> lock(sev_mutex_);
+        SevDraw* d=nullptr;
+        for(unsigned i=0;i<sev_n_;++i) if(sev_[i].key==key) d=&sev_[i];
+        if(!d && sev_n_<sev_.size()) {d=&sev_[sev_n_++];d->key=key;d->layout=layout;d->size=size;}
+        if(d) {
+            d->passes|=pass<64?1ull<<pass:1ull<<63;++d->placed;
+            double n[3]{};
+            for(int c=0;c<3;++c) {for(int k=0;k<3;++k) n[c]+=l[static_cast<std::size_t>(k*4+c)]*l[static_cast<std::size_t>(k*4+c)];n[c]=std::sqrt(n[c]);}
+            for(int c=0;c<3;++c) {d->scale_min=std::min(d->scale_min,n[c]);d->scale_max=std::max(d->scale_max,n[c]);}
+            for(int x=0;x<3;++x) for(int y=x+1;y<3;++y) {
+                double dot=0;for(int k=0;k<3;++k) dot+=l[static_cast<std::size_t>(k*4+x)]*l[static_cast<std::size_t>(k*4+y)];
+                const double e=n[x]*n[y]>1e-12?std::abs(dot/(n[x]*n[y])):1.;if(!(e<=d->ortho_max)) d->ortho_max=e;
+            }
+            d->l_mm={l[3]*1000.,l[7]*1000.,l[11]*1000.};
+        }
+        const std::uint32_t f=sev_frame_;   // per render: the spread of L between different keys
+        if(last_frame_l_!=f+1) {last_frame_l_=f+1;sev_first_=l;sev_first_key_=key;}
+        else if(key!=sev_first_key_ && !r.extra) {const double um=distance(l,sev_first_)*1e6;++sev_pairs_;if(um>50) ++sev_apart_;if(um>sev_spread_um_) sev_spread_um_=um;}
+    }
+    static std::string severed_json() {
+        std::lock_guard<std::mutex> lock(sev_mutex_);
+        char b[64];
+        std::string o="{\"pairs\":"+std::to_string(sev_pairs_)+",\"pairs_apart_50um\":"+std::to_string(sev_apart_)+",\"spread_um_max\":"+std::to_string(sev_spread_um_)+",\"draws\":[";
+        for(unsigned i=0;i<sev_n_;++i) {
+            const auto& d=sev_[i];
+            std::snprintf(b,sizeof b,"%016llx",static_cast<unsigned long long>(d.key));
+            o+=std::string(i?",":"")+"{\"key\":\""+b+"\",\"cb2\":"+std::to_string(d.size);
+            std::snprintf(b,sizeof b,"%016llx",static_cast<unsigned long long>(d.layout));
+            o+=",\"layout\":\""+std::string(b)+"\"";
+            std::snprintf(b,sizeof b,"%016llx",static_cast<unsigned long long>(d.passes));
+            o+=",\"pass_bits\":\""+std::string(b)+"\",\"placed\":"+std::to_string(d.placed)+",\"scale\":["+std::to_string(d.scale_min)+","+std::to_string(d.scale_max)
+              +"],\"ortho_max\":"+std::to_string(d.ortho_max)+",\"l_mm\":["+std::to_string(d.l_mm[0])+","+std::to_string(d.l_mm[1])+","+std::to_string(d.l_mm[2])+"]}";
+        }
+        return o+"]}";
+    }
     static std::string census_json() {
         static constexpr const char* names[kinds]={"none","weapon","prop","use","bind","severed"};
         std::string o="{";
@@ -907,6 +949,7 @@ public:
         const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:w.delta;
         const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:use_hist?hist_prev:w.prev_eye[static_cast<unsigned>(eye)];
         const Mat x=predicted?predicted_x:rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,m,h);   // v1223: F_used * settled L (else M); v1239: predicted = F * L
+        note_l(matched,x,frame);   // v1240 severed diagnostic (L relative to the matched frame)
         const Mat now=mul(mul(vp,delta),x);
         const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],prev_eye),x):mul(mul(vp,prev_eye),x);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
@@ -1031,6 +1074,7 @@ public:
         if(use_hist && !rebase(w,hit,0,hist_delta,hist_prev)) {result.stage=rejected;return result;}
         const Mat model=predicted?predicted_x:rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,full(m),hit);
         const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:w.delta; // v1223
+        note_l(matched,model,frame);   // v1240 severed diagnostic (L relative to the matched frame)
         const Mat now=mul(mul(vp,delta),model);
         Mat before=mul(mul(prev_vp,delta),model);
         if(still_out) for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(before[i]); // v1218: camera-only, the current binding
@@ -1052,6 +1096,12 @@ public:
         return mul(f,l);
     }
 private:
+    // v1240 severed diagnostic state (the placing thread's last L; the table under its own mutex)
+    static void note_l(const Mat& f,const Mat& x,std::uint32_t frame) noexcept {Mat inv_f{};last_l_=inverse(f,inv_f)?mul(inv_f,x):Mat{};sev_frame_=frame;}
+    inline static thread_local Mat last_l_{};inline static thread_local std::uint32_t sev_frame_{};
+    struct SevDraw {std::uint64_t key{},layout{},passes{},placed{};unsigned size{};double scale_min{1e9},scale_max{},ortho_max{};std::array<double,3> l_mm{};};
+    inline static std::mutex sev_mutex_;inline static std::array<SevDraw,8> sev_{};inline static unsigned sev_n_{};
+    inline static std::uint32_t last_frame_l_{};inline static Mat sev_first_{};inline static std::uint64_t sev_first_key_{},sev_pairs_{},sev_apart_{};inline static double sev_spread_um_{};
     struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};};
     inline static std::array<Staged,2> staged_{};
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};

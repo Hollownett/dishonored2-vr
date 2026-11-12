@@ -880,6 +880,7 @@ static void b14_checks() {
     {   // readback_garbage_latches_body_off (Review Focus 3): NaN velocity, huge velocity, non-finite position: HandBodyFault, no further
         // write, available false; the body is then destroyed once
         for(int kind=0;kind<4;++kind) {   // 3: the service read-back's position only (DeepSeek: that path was not exercised)
+            if(kind==1) continue;   // v1240: a finite oversized speed is retired and re-created (wild_motion_recovers below), not latched
             HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.tick();
             const int applies=r.w.applies;
             if(kind==0) r.w.garbage_nan=true;else if(kind==1) r.w.garbage_huge=true;else if(kind==2) r.w.garbage_pos=true;else r.w.position_garbage=true;
@@ -890,6 +891,21 @@ static void b14_checks() {
             for(int i=0;i<30;++i) r.tick();
             CHECK(r.w.applies==after);CHECK(r.w.destroys==2);CHECK(!r.hb.any_alive());CHECK(r.w.creates==2);
         }
+    }
+    {   // wild_motion_recovers (v1240): one finite oversized speed read retires the body without a write or a latch, a new body comes at the free
+        // palm and is driven again; max_wild_motion repeats latch HandBodyFault
+        HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();r.tick();
+        const int applies=r.w.applies;
+        r.w.garbage_huge=true;r.tick();r.w.garbage_huge=false;
+        CHECK(!HandBodyFault::tripped());CHECK(r.hb.status(0).available);CHECK(r.hb.status(0).faults==0);
+        CHECK(r.hb.drive_status(0).wild_motion==1 && r.hb.drive_status(1).wild_motion==1);CHECK(r.hb.drive_status(0).garbage==0);
+        CHECK(r.hb.drive_status(0).wild_speed_mmps==500000);
+        CHECK(r.w.applies==applies);   // the wild tick wrote nothing
+        for(int i=0;i<30;++i) r.tick();
+        CHECK(r.w.destroys==2 && r.w.creates==4);CHECK(r.hb.ready(0) && r.hb.ready(1));CHECK(r.w.applies>applies);
+        for(std::uint64_t k=1;k<HandBody::max_wild_motion;++k) {r.w.garbage_huge=true;r.tick();r.w.garbage_huge=false;for(int i=0;i<30;++i) r.tick();}
+        CHECK(HandBodyFault::tripped());CHECK(!r.hb.status(0).available);CHECK(r.hb.drive_status(0).wild_motion==HandBody::max_wild_motion);
+        HandBodyFault::reset_for_tests();
     }
     {   // yield_writes_zero_velocity_and_holds: an authored arm / a lost track: zero velocity plus the gravity term, the body holds still
         HandBodyFault::reset_for_tests();DriveRig r;r.tick();r.tick();

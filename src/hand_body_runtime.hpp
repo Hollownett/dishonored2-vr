@@ -203,7 +203,8 @@ public:
              <<",\"cost_max_us\":"<<d.cost_max_us<<",\"player_drift_um\":"<<d.player_drift_um<<",\"dt_s\":"<<d.dt_s<<",\"drives\":"<<d.drives
              <<",\"drive_writes\":"<<d.drive_writes<<",\"yields\":"<<d.yields<<",\"skipped\":"<<d.skipped<<",\"garbage\":"<<d.garbage
              <<",\"second_drives\":"<<d.second_drives<<",\"root_jumps\":"<<d.root_jumps<<",\"pressed_ticks\":"<<d.pressed_ticks
-             <<",\"cpu_us\":"<<d.cpu_us<<",\"cpu_max_us\":"<<d.cpu_max_us<<",\"root_moved_ticks\":"<<d.root_moved_ticks<<",\"root_travel_um\":"<<d.root_travel_um<<",\"held_ticks\":"<<d.held_ticks<<",\"discontinuities\":"<<d.discontinuities<<",\"stuck_releases\":"<<d.stuck_releases<<'}';
+             <<",\"cpu_us\":"<<d.cpu_us<<",\"cpu_max_us\":"<<d.cpu_max_us<<",\"root_moved_ticks\":"<<d.root_moved_ticks<<",\"root_travel_um\":"<<d.root_travel_um<<",\"held_ticks\":"<<d.held_ticks<<",\"discontinuities\":"<<d.discontinuities<<",\"stuck_releases\":"<<d.stuck_releases
+             <<",\"wild_motion\":"<<d.wild_motion<<",\"wild_speed_mmps\":"<<d.wild_speed_mmps<<",\"wild_spin_mrads\":"<<d.wild_spin_mrads<<'}';
             o<<",\"pose\":";
             if(p) o<<'['<<p->position.x<<','<<p->position.y<<','<<p->position.z<<']';else o<<"null";
             o<<'}';
@@ -516,6 +517,7 @@ private:
             changed=changed || now.creates>was.creates || now.destroys>was.destroys || now.abandons>was.abandons || now.faults>was.faults || now.lost>was.lost;
             if(drive.snaps>drive_was.snaps) note_event(side,"snap",now.handle);
             if(drive.garbage>drive_was.garbage) note_event(side,"readback_garbage",was.handle);
+            if(drive.wild_motion>drive_was.wild_motion) note_event(side,"wild_motion_retire",was.handle);
             if(drive.snap_blocked>drive_was.snap_blocked && drive_was.snap_blocked<16) note_event(side,"snap_blocked",now.handle);
             if(drive.stuck_releases>drive_was.stuck_releases) note_event(side,"stuck_release",now.handle);
             drive_was=drive;
