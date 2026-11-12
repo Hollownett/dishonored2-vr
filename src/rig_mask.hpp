@@ -153,7 +153,8 @@ public:
     // the current palette (zero motion; the caller then uses the current rows too). True: the own pair is in place; the mask replay of this
     // draw then marks its pixels as own motion (255). Restored in after(). `eye`/`frame` are only diagnostics now (eye < 0: no view).
     // A draw whose palette bindings are not the prepass form cannot be paired (its pixels stay 254: the engine's vectors).
-    static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t,bool rows_own) noexcept {
+    // v1205: `frame` = the draw's own render (engine frame, content-certain; ~0u unknown): the ring must have rotated for exactly that render
+    static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own) noexcept {
         tl_own_=false;
         if(!tl_rig_ || !c) return false;
         if(!tl_prepass_ || !tl_current_) {
@@ -169,7 +170,7 @@ public:
         }
         ID3D11ShaderResourceView* bind=tl_current_;bool own=false;
         if(rows_own && eye>=0) {
-            if(ID3D11ShaderResourceView* v=ring_view(c,tl_model_)) {bind=v;own=true;}
+            if(ID3D11ShaderResourceView* v=ring_view(c,tl_model_,frame)) {bind=v;own=true;}
             else no_history_.fetch_add(1,std::memory_order_relaxed);
         }
         if(!tl_saved_set_) {c->VSGetShaderResources(tl_prev_slot_,1,&tl_saved_t0_);tl_saved_set_=true;tl_saved_slot_=tl_prev_slot_;}
@@ -292,12 +293,14 @@ private:
     inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{},ring_late_{},ring_young_{};
     // P's view (made like the draw's current palette view) when the model's ring holds this eye's previous render, else null
     // Held by the caller's thread until the draw's Scope ends (a reset may release the ring meanwhile). ~13 rig draws a render: the lock is cheap.
-    static ID3D11ShaderResourceView* ring_view(ID3D11DeviceContext* c,unsigned model) noexcept {
+    static ID3D11ShaderResourceView* ring_view(ID3D11DeviceContext* c,unsigned model,std::uint32_t frame) noexcept {
         if(model>=ring_.size()) return nullptr;
         Ring& r=ring_[model];
         if(!r.ready.load(std::memory_order_acquire) || !rig_ring_valid(r.run.load(std::memory_order_acquire))) return nullptr;
         if(r.run.load(std::memory_order_acquire)<rig_ring_proven) {ring_young_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
-        if(const auto fn=frame_fn.load(std::memory_order_relaxed);fn && fn()!=r.last.load(std::memory_order_acquire)) {ring_late_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
+        // v1205 (v1203 probe: a mid-run render of 41,000 px rig vectors): the engine frame counter NOW can already be the next render's (its skin
+        // copy rotated the ring while this render's late draws record: P is then the other eye's palette). The draw's own render must match.
+        if(frame==~0u || frame!=r.last.load(std::memory_order_acquire)) {ring_late_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
         std::lock_guard<std::mutex> lock(mutex_);
         if(!r.ready.load(std::memory_order_relaxed)) return nullptr;
         ID3D11Device* device{};c->GetDevice(&device);if(device) device->Release();

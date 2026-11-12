@@ -209,7 +209,7 @@ assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fres
 assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
 assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
 assert '(mvScale.z>0?(rig==0 || (mvScale.w>0 && rig==255)):proj.y/(d+proj.x)>=proj.z)' in mp  # v1179: 255 = own motion, 254 = rig without
-assert 'const bool own=RigMask::previous_palette(c,static_cast<int>(label_eye),label_frame,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1204: no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
+assert 'const bool own=RigMask::previous_palette(c,static_cast<int>(label_eye),have_content?view.frame:~0u,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1204: no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
 assert 'restore_t0(); // v1166' in rig and 'k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}' in fsr
 assert 'd2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame);' in probe and 'o[i.xy]=held?253:own?255:rig?254:0;' in rig  # v1179 ring + per-pixel validity; v1183 held class 253
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
@@ -353,12 +353,20 @@ assert '\\"none_fit_by_kind\\":{' in om
 print('PASS: v1202 one-view jitter offset per eye, none-fit diagnostics')
 
 # v1203: candidates = newest two renders per eye, shear fit 1e-5, Gram test (previous rows) for skewed models
-assert 'if(newer>=2) continue;' in om and 'content_fit_{1e-5}' in om
+assert 'if(newer>=2) continue;' in om and 'content_fit_{1e-4}' in om  # v1205: back to 1e-4
 assert 'inline bool rows_gram(const ProjectionXY& p,const float* rows,double g[6]) noexcept {' in bv
 assert 'const bool by_content=rows && content_view(rows,out,prev_rows);' in om and '\\"certain_gram\\":' in om
 print('PASS: v1203 newest-two candidates, fit 1e-5, Gram test for skewed models')
 
 # v1204: every rig draw is chained and recorded (fix_any) whether or not its view is certain; rig_zero_why status
-assert 'const auto kind=table_.fix_any(label_eye,label_frame,cur,prev);' in om and 'const bool own=RigMask::previous_palette(c,static_cast<int>(label_eye),label_frame,rows_own);' in om
+assert 'const auto kind=table_.fix_any(label_eye,label_frame,cur,prev);' in om and 'const bool own=RigMask::previous_palette(c,static_cast<int>(label_eye),have_content?view.frame:~0u,rows_own);' in om
 assert '\\"rig_zero_why\\":[' in om
 print('PASS: v1204 rig motion independent of the per-draw view, rig_zero_why')
+
+# v1205: uncertain draws keep the v1197 heuristic view as the chain label (flagged); render-identity consumers need have_content; ring
+# palette only for the draw's own render; raw-rows per-render status
+assert 'tl_view_heuristic_=!certain;' in om and 'const bool have_content=have_view && !(alternate() && tl_view_heuristic_);' in om
+assert 'if(near_draw && one_view_place && have_content) {' in om and 'if(alt && !apply && kind!=PrevMvpTable::same) note_raw();' in om
+rm2 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+assert 'if(frame==~0u || frame!=r.last.load(std::memory_order_acquire))' in rm2
+print('PASS: v1205 heuristic chain labels for uncertain draws, content-only render consumers, ring per own render, raw-row status')

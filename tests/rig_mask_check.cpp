@@ -107,7 +107,10 @@ static void run(bool d24,int mode) {
         if(rig && mode==3) {CHECK(!d2vr::RigMask::draw_is_rig());d2vr::RigMask::mark_held();}
         if(rig && ring) {
             CHECK(d2vr::RigMask::draw_is_rig());
-            const bool own=d2vr::RigMask::previous_palette(c.Get(),0,3,mode==1);CHECK(own==(mode==1));
+            // v1205: the draw's own render must be the ring's last rotation (8): a late draw of render 7 (the ring already rotated for 8) or an
+            // unknown render gets no palette
+            if(mode==1) {CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,7,true));CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,~0u,true));}
+            const bool own=d2vr::RigMask::previous_palette(c.Get(),0,8,mode==1);CHECK(own==(mode==1));
             ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0); // what the draw reads as its previous palette
             if(t0) {ComPtr<ID3D11Resource> r;t0->GetResource(&r);ComPtr<ID3D11Buffer> b;r.As(&b);
                 D3D11_BUFFER_DESC sd{};b->GetDesc(&sd);sd.Usage=D3D11_USAGE_STAGING;sd.BindFlags=0;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Buffer> st;
