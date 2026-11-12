@@ -7617,9 +7617,10 @@ void prepare_head_view(void* view) noexcept {
             // The forced projection carries no TAA jitter; add the engine's own sub-pixel sample
             // (same index as its cb_jittervectors), shifting NDC by (2jx/W, 2jy/H).
             std::uint32_t counter{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&counter,sizeof counter);
-            if(alternate_taa_phase) counter=*alternate_taa_phase;
-            jitter_counter[eye_slot]=counter;
             const bool dlss_owned=dlss_jitter_mode.load(std::memory_order_relaxed);jitter_owner_dlss[eye_slot]=dlss_owned;
+            // v1202: eye 1 starts half a sequence later (dlss_jitter.hpp alternate_jitter_index): neighbouring renders never share a sample
+            if(alternate_taa_phase) counter=d2vr::alternate_jitter_index(*alternate_taa_phase,alt_eye,dlss_owned?jitter_phases.load(std::memory_order_relaxed):8u);
+            jitter_counter[eye_slot]=counter;
             const auto j=d2vr::taa_sample_uv(counter,dlss_owned,static_cast<float>(taa_width.load()),static_cast<float>(taa_height.load()),jitter_phases.load(std::memory_order_relaxed));
             auto pj=j;pj.x*=taa_jitter_scale[0];pj.y*=taa_jitter_scale[1];d2vr::apply_taa_jitter(*optical,pj);taa_view_jitter={j.x*taa_jitter_scale[2],j.y*taa_jitter_scale[3]};
         } else jitter_owner_dlss[eye_slot]=false; // no forced jitter this frame: the TAA replacement must not assume the Halton pattern

@@ -5,6 +5,9 @@
 #include <cstdio>
 #include "../src/buffer_views.hpp"
 #include "../src/rig_target.hpp"
+#include "../src/dlss_jitter.hpp"
+#include <set>
+#include <vector>
 using namespace d2vr;
 static int failures=0;
 #define CHECK(x) do {if(!(x)) {std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#x);++failures;}} while(0)
@@ -108,6 +111,21 @@ int main() {
       const double clear[3]{3e-4,1e-7,4e-4};CHECK(pick_by_shear_eyes(clear,eyes,frames,3,1e-4,4.0,2e-6,tied)==1 && !tied);
       const double nofit[3]{.3,.2,.4};CHECK(pick_by_shear_eyes(nofit,eyes,frames,3,1e-4,4.0,2e-6,tied)==-1);}
     }
+    // v1202: one-view jitter. Renders alternate eyes (either eye first), each eye's phase counts from the same reset; over 10k renders no two
+    // renders within 3 of each other share a sample, for the engine pattern (8) and every Halton owner length (8..32); each eye still visits
+    // every phase in order (same coverage as before). Without the offset the neighbours share (the v1201 ties).
+    for(int first=0;first<2;++first) for(std::uint32_t phases=8;phases<=32;++phases) for(int dlss=0;dlss<2;++dlss) {
+        if(!dlss && phases!=8) continue;
+        std::vector<std::array<float,2>> s_new,s_old;
+        for(int n=0;n<10000;++n) {const int eye=(n+first)&1;const std::uint32_t phase=static_cast<std::uint32_t>(n/2);
+            s_new.push_back(taa_sample_px(alternate_jitter_index(phase,eye,phases),dlss!=0,phases));s_old.push_back(taa_sample_px(phase,dlss!=0,phases));}
+        int clash=0,clash_old=0;
+        for(int n=0;n<10000;++n) for(int d=1;d<=3 && n+d<10000;++d) {clash+=s_new[static_cast<std::size_t>(n)]==s_new[static_cast<std::size_t>(n+d)];clash_old+=s_old[static_cast<std::size_t>(n)]==s_old[static_cast<std::size_t>(n+d)];}
+        std::set<std::array<float,2>> eye0,eye1;for(int n=0;n<static_cast<int>(2*phases);++n) ((n+first)&1?eye1:eye0).insert(s_new[static_cast<std::size_t>(n)]);
+        CHECK(clash==0 && clash_old>0 && eye0.size()==phases && eye1.size()==phases);
+        if(clash || eye0.size()!=phases) std::printf("jitter phases %u dlss %d: clash %d (old %d), coverage %zu/%zu\n",phases,dlss,clash,clash_old,eye0.size(),eye1.size());
+    }
+    std::printf("one-view jitter: no neighbour within 3 renders shares a sample (8..32 phases), each eye covers every phase\n");
     // eviction keeps the newest buffers
     int more[4]{};for(auto& b:more) views.store(&b,View{});CHECK(!views.find(&b_r,got) && views.find(&more[3],got));
     if(failures) {std::printf("buffer_views_check: %d failure(s)\n",failures);return 1;}

@@ -37,6 +37,15 @@ inline std::array<float,2> taa_sample_px(std::uint32_t counter,bool dlss,std::ui
     const auto& p=engine_taa_pattern[counter%8];
     return {p[0]/16.f,p[1]/16.f};
 }
+// v1202 alternate (one-view) frames: each eye counts its own renders from the same reset (alternate_taa_state.hpp History: phase = the
+// eye's previous phase + 1), so eye 0's k-th render and eye 1's k-th render, which are NEIGHBOURS, had the same sample: with symmetric
+// frusta their projections were identical and a draw's rows could not name its render (v1201 sim: half the draws tied across eyes). Eye 1
+// is offset by half the sequence: each eye still walks every phase in order (its TAA/FSR coverage is unchanged), and renders within three
+// of each other differ by 1, half or half+-1 phases, never 0 mod the phase count (`phases` >= 5). `phases`: the pattern's length (8 for
+// the engine's own pattern, jitter_phases for the Halton owner).
+inline std::uint32_t alternate_jitter_index(std::uint32_t phase,int eye,std::uint32_t phases) noexcept {
+    return eye==1?phase+(phases>=2?phases/2:0u):phase;
+}
 // The engine-side jitter (UV of the render size) for the forced projection and the view's stored vector.
 inline TaaJitter taa_sample_uv(std::uint32_t counter,bool dlss,float width,float height,std::uint32_t phases=dlss_jitter_phase_count) noexcept {
     const auto s=taa_sample_px(counter,dlss,phases);

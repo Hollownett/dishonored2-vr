@@ -344,3 +344,10 @@ assert 'const int pick=pick_by_shear_eyes(shear,eyes,frames,tl_cand_n_,' in om a
 assert 'enum CertOutcome : unsigned {cert_certain,cert_fallback,cert_na,cert_outcomes};' in om and '_fallback_why' in om
 assert 'certainty(cert_placement,held_any()?cert_fallback:cert_na);' in om
 print('PASS: v1201 same-eye ties, content-only certainty, applicable-draw certainty counts')
+
+# v1202: one-view eye 1 jitter starts half a sequence later (neighbouring renders never share a projection); none-fit diagnostics
+jit = (root / 'src' / 'dlss_jitter.hpp').read_text(encoding='utf-8')
+assert 'inline std::uint32_t alternate_jitter_index(std::uint32_t phase,int eye,std::uint32_t phases) noexcept {' in jit
+assert 'if(alternate_taa_phase) counter=d2vr::alternate_jitter_index(*alternate_taa_phase,alt_eye,dlss_owned?jitter_phases.load(std::memory_order_relaxed):8u);' in probe
+assert '\\"none_fit_by_kind\\":{' in om
+print('PASS: v1202 one-view jitter offset per eye, none-fit diagnostics')

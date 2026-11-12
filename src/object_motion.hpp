@@ -697,6 +697,11 @@ private:
     inline static std::array<std::atomic<std::uint64_t>,2> content_tick_{}; // tick: picked the newest of its eye / an older one
     // v1201: content vs the v1199 same-job b1 view: agree, other eye, same eye and content's render newer, same eye and content's older
     inline static std::array<std::atomic<std::uint64_t>,4> content_vs_job_{};
+    // v1202: the draws no candidate fits, named: by kind (0 rig, 1 near non-rig, 2 far with previous rows) x best-shear decade, and the
+    // engine frames they occurred in (first, last) to tell a start-up burst from a steady class
+    inline static thread_local unsigned tl_draw_kind_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,11>,3> none_fit_kind_{};
+    inline static std::atomic<std::uint32_t> none_fit_first_{~0u},none_fit_last_{};
     static unsigned decade(double x) noexcept {if(!(x>0)) return 0;const int d=static_cast<int>(std::floor(std::log10(x)))+10;return static_cast<unsigned>(std::clamp(d,0,10));}
     // The view this draw's rows were built with, by content; false = ambiguous / not this form (counted). `rows`: the draw's engine rows.
     static bool content_view(const float* rows,View& out) noexcept {
@@ -714,6 +719,12 @@ private:
         for(int i=0;i<tl_cand_n_;++i) if(i!=best && eyes[i]!=eyes[best] && (second<0 || shear[i]<shear[second])) second=i; // the best of the OTHER eye
         content_hist_[0][decade(shear[best])].fetch_add(1,std::memory_order_relaxed);
         if(second>=0) content_hist_[1][decade(shear[second])].fetch_add(1,std::memory_order_relaxed);
+        if(pick==-1) {
+            none_fit_kind_[tl_draw_kind_<3?tl_draw_kind_:2][decade(shear[best])].fetch_add(1,std::memory_order_relaxed);
+            const auto f=newest_frame_.load(std::memory_order_relaxed);
+            for(auto m=none_fit_first_.load();f<m && !none_fit_first_.compare_exchange_weak(m,f);) {}
+            for(auto m=none_fit_last_.load();f>m && !none_fit_last_.compare_exchange_weak(m,f);) {}
+        }
         if(pick<0) {content_outcome_[pick==-1?content_none_fit:content_ambiguous].fetch_add(1,std::memory_order_relaxed);tl_content_why_=pick==-1?2u:1u;return false;}
         out=tl_cand_[static_cast<std::size_t>(pick)].view;content_outcome_[tied?content_tie_same_eye:content_certain].fetch_add(1,std::memory_order_relaxed);
         bool newest=true;for(int i=0;i<tl_cand_n_;++i) if(tl_cand_[static_cast<std::size_t>(i)].view.eye==out.eye && tl_cand_[static_cast<std::size_t>(i)].view.frame>out.frame) newest=false;
@@ -727,6 +738,10 @@ private:
         for(unsigned h=0;h<2;++h) {o+=h?",\"second_log10\":[":",\"best_log10\":[";for(unsigned k=0;k<11;++k) o+=(k?",":"")+std::to_string(content_hist_[h][k].load());o+="]";}
         o+=",\"tick\":["+std::to_string(content_tick_[0].load())+','+std::to_string(content_tick_[1].load())+"],\"vs_job\":["+std::to_string(content_vs_job_[0].load())+','+std::to_string(content_vs_job_[1].load())
             +','+std::to_string(content_vs_job_[2].load())+','+std::to_string(content_vs_job_[3].load())+"]";
+        o+=",\"none_fit_frames\":["+std::to_string(none_fit_first_.load())+','+std::to_string(none_fit_last_.load())+"],\"none_fit_by_kind\":{";
+        {static constexpr const char* kinds[3]{"rig","near","far"};
+         for(unsigned k=0;k<3;++k) {o+=std::string(k?",":"")+'"'+kinds[k]+"\":[";for(unsigned d=0;d<11;++d) o+=(d?",":"")+std::to_string(none_fit_kind_[k][d].load());o+=']';}}
+        o+="}";
         o+=",\"tol\":["+std::to_string(content_fit_.load())+','+std::to_string(content_ratio_.load())+','+std::to_string(content_floor_.load())+"]}";
         return o;
     }
@@ -888,6 +903,7 @@ private:
         // v1201: only draws a consumer can use are tested: previous rows, near (held / placement), rig (rig motion, rig target)
         const float near_w0=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool content_wanted=early_ok && (has_previous(s.layout,sh->size) || (early[15]>0.01f && early[15]<near_w0) || RigMask::draw_is_rig());
+        tl_draw_kind_=RigMask::draw_is_rig()?0u:early_ok && early[15]>0.01f && early[15]<near_w0?1u:2u; // v1202 diagnostics
         const bool have_view=current_view(s,view,content_wanted?early:nullptr);
         // The pass this draw is recorded in, when build/native-gpu-timing or build/shadow-share (or the weapon placement itself, which
         // installs the pass map) is on: its id and the eye its view names. A v1101 pass job's view is one of the eye views for a view pass.
