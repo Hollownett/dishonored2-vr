@@ -3490,6 +3490,7 @@ static bool image_skin_commit(void* model) noexcept {
         }
         else {const auto pose=full_body.image_body(live,frames.load());if(!pose) {++image_skin_misses[slot];image_skin_why=4;return false;}pack(*pose);}
         reinterpret_cast<void(__fastcall*)(void*,const float*)>(image_base+0x25f200)(model,packed.data());
+        if(slot<2) d2vr::weapon_draw::HandLock::note_copy(slot,d2vr::weapon_draw::Place::latest_frame(),d2vr::weapon_draw::model_of(live.data()));   // v1243 hand_lock: the frame this palette is in
         ++image_skin_writes[slot];if(image_skin_why!=5) image_skin_why=0;return true;
     } catch(...) {return false;}
 }
@@ -3638,6 +3639,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
         std::array<d2vr::weapon_draw::Mat,2> bound{};
         std::array<const float*,2> raw_ptr{};std::array<const d2vr::weapon_draw::Mat*,2> bound_ptr{};
         std::array<std::uintptr_t,2> place_ids{};
+        std::array<unsigned,2> hand_kind{};   // v1243 hand_lock: the census kind each hand was placed as
         const auto in_frame=[](const d2vr::fullbody::Xf& frame,const d2vr::Vec3& point) {return rotated(d2vr::body::conj(frame.q),point-frame.p);};
         // v1018: one copy entity published for BOTH hands is the dual-wield failure: two sides share one engine model frame, every
         // draw of it matches both sides within the 1 cm tie, and the placement drops it as `ambiguous`, leaving the weapon at the
@@ -3749,7 +3751,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             if(!d2vr::weapon_draw::Binder::frame(hand,hand_mat,bound_frame)) {skip(3);continue;}
             d2vr::weapon_draw::Binder::note_sanity(hand,live,bound_frame);   // report-only: engine F vs the bound frame
             raw_ptr[hand]=raw[hand].data();bound[hand]=bound_frame;bound_ptr[hand]=&bound[hand];place_ids[hand]=identity;
-            d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon);   // v1237 census
+            d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon);hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;   // v1237 census
             const auto source=d2vr::weapon_draw::Binder::state(hand).source;
             if(source<4) ++weapon_draw_source[hand][source];
             weapon_wobble[hand][0].add(in_frame(*image,{raw[hand][0],raw[hand][1],raw[hand][2]}));
@@ -3797,7 +3799,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         if(d2vr::weapon_draw::finite(c) && d2vr::weapon_draw::distance(c,f)<=.6) kids[n++]=c;
                     }
                 }
-                d2vr::weapon_draw::Place::stage(hand,kind,kids.data(),n);
+                d2vr::weapon_draw::Place::stage(hand,kind,kids.data(),n);hand_kind[hand]=kind;
             };
             for(unsigned hand=0;hand<2;++hand) {
                 if(raw_ptr[hand] || !thing[hand]) {held_bind.clear(hand);held_bound_entity[hand].store(0);continue;}
@@ -3866,6 +3868,21 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             }
             d2vr::ObjectMotion::set_held_placing((thing[0] && raw_ptr[0] && place_ids[0]==thing[0]) || (thing[1] && raw_ptr[1] && place_ids[1]==thing[1]));
         } else d2vr::ObjectMotion::set_held_placing(false);
+        {   // v1243 hand_lock (weapon_draw_place.hpp HandLock): per physical hand drawn by the image, the placed thing's B, else a native weapon's
+            // engine frame (the reference: weapons are not placed by default), with this render's image joint 59 and speeds
+            const double t_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            for(unsigned hand=0;hand<2;++hand) {
+                namespace wd=d2vr::weapon_draw;
+                const unsigned arm_side=(attachment_pose.cross_mask()&3u)==3u?hand^1u:hand;
+                const int sk=image_skin_slots[arm_side].kind.load();
+                const auto j=sk==1 || sk==3?full_body.image_world(hand,59,now):std::nullopt;
+                unsigned kind=0;wd::Mat thing{};std::uintptr_t id{};
+                if(j && bound_ptr[hand] && hand_kind[hand]) {kind=hand_kind[hand];thing=*bound_ptr[hand];id=place_ids[hand];}
+                else if(std::array<float,15> f{};j && models[arm_side] && read_self(models[arm_side]+0x1860,f.data(),sizeof f)) {kind=wd::Place::kind_weapon;thing=wd::model_of(f.data());id=models[arm_side];}
+                if(kind) wd::HandLock::note_publish(hand,arm_side,engine_frame,kind,id,weapon_mat(*j),thing,player_speed,game_xr?static_cast<double>(game_xr->grip_speeds[hand]):0.,t_s);
+                else wd::HandLock::idle(hand);
+            }
+        }
         d2vr::weapon_draw::Place::publish_bound(engine_frame,raw_ptr,bound_ptr,reach,place_ids);   // v1072: ids let a draw composed from the previous read F match
     } catch(...) {}
 }

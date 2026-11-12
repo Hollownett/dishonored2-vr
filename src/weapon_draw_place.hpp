@@ -44,6 +44,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -1187,5 +1188,91 @@ private:
     inline static std::atomic<std::uint64_t> published_{};
     inline static std::array<std::atomic<std::uint64_t>,2> published_side_{};
     inline static std::atomic<std::uint32_t> latest_frame_{};
+};
+// v1243 (user v1239: held props "not stable in movement", double image, still is fine; weapons fine): the decisive number for a hand-locked
+// thing. The arm's palette is the image (FullBodyDriver::begin_image, the same solve B is built from) re-expressed at the GPU skin copy in the
+// arm model's LIVE frame f (image_skin_commit), but the arm draw's cb2 carries the model frame M the engine composed for that draw, so the
+// drawn joint 59 is E * J59 with E = M * inverse(f) (identity unless the arm model moved between the composition and the copy). Per render and
+// held hand: rel = inverse(E * J59) * B (B = the placed thing's bound frame, or an unplaced weapon's engine frame), its deviation from the
+// hold's first drawn value (holds older than 0.15 s: after the bind ease), by player speed (HoldSync buckets) and hand speed (< / >= 0.5 m/s);
+// plus |E| at the hand by player speed. ponytail: an arm draw is any near draw within 0.15 m / 0.05 rad of f (both arm models share the
+// player frame); a match of another object would show as an outlier, never as a steady bias.
+class HandLock {
+public:
+    static constexpr unsigned kinds=6,speeds=3,hand_speeds=2,bins=10;
+    static constexpr double mm_edge[bins]={.1,.5,1,2,5,10,20,50,100,1e9},deg_edge[bins]={.05,.1,.25,.5,1,2,5,10,45,1e9};
+    static unsigned speed_of(double player_mps) noexcept {return !(player_mps>=.3)?0u:player_mps<2.5?1u:2u;}   // HoldSync::bucket
+    // GPU skin copy: the arm slot's palette was written in this live model frame for the render `frame` (Place::latest_frame()).
+    static void note_copy(unsigned slot,std::uint32_t frame,const Mat& live) noexcept {
+        if(slot>1 || !finite(live)) return;
+        std::lock_guard<std::mutex> l(m_);copy_[slot]={true,frame,live};
+    }
+    // Publisher (eye-0 begin): what this physical hand holds this render, drawn by arm `slot`. idle(): nothing held (the reference resets).
+    static void note_publish(unsigned hand,unsigned slot,std::uint32_t frame,unsigned kind,std::uintptr_t id,const Mat& j59,const Mat& thing,
+            double player_mps,double hand_mps,double now_s) noexcept {
+        if(hand>1 || slot>1 || !kind || kind>=kinds || !finite(j59) || !finite(thing)) {idle(hand);return;}
+        std::lock_guard<std::mutex> l(m_);Hand& h=hand_[hand];
+        if(h.id!=id || h.kind!=kind) {h=Hand{};h.id=id;h.kind=kind;h.since=now_s;}
+        h.frame=frame;h.slot=slot;h.j59=j59;h.thing=thing;h.player=speed_of(player_mps);h.fast=hand_mps>=.5;h.ready=now_s-h.since>=.15;h.sampled=false;
+        want_.store(frame+1,std::memory_order_release);
+    }
+    static void idle(unsigned hand) noexcept {if(hand>1) return;std::lock_guard<std::mutex> l(m_);hand_[hand]=Hand{};}
+    static bool wants(std::uint32_t frame) noexcept {return frame && want_.load(std::memory_order_acquire)==frame+1;}
+    // A near draw of the render `frame` in an eye pass: m = inverse(VP of that eye) * its cb2 rows.
+    static void on_draw(std::uint32_t frame,const Mat& m) noexcept {
+        if(want_.load(std::memory_order_acquire)!=frame+1) return;
+        std::lock_guard<std::mutex> l(m_);
+        for(Hand& h:hand_) {
+            if(!h.ready || h.sampled || h.frame!=frame) continue;
+            const Copy& c=copy_[h.slot];
+            if(!c.ok || c.frame!=frame || !(distance(m,c.live)<=.15 && frame_angle(m,c.live)<=.05)) continue;
+            Mat inv_live{},inv_drawn{};
+            if(!inverse(c.live,inv_live)) continue;
+            const Mat drawn=mul(mul(m,inv_live),h.j59);
+            if(!inverse(drawn,inv_drawn)) continue;
+            h.sampled=true;add(arm_[h.player],distance(drawn,h.j59)*1000.,mm_edge);
+            const Mat rel=mul(inv_drawn,h.thing);
+            if(!h.have_ref) {h.ref=rel;h.have_ref=true;continue;}
+            Cell& cell=cells_[h.kind][h.player][h.fast?1:0];
+            add(cell.mm,distance(rel,h.ref)*1000.,mm_edge);add(cell.deg,frame_angle(rel,h.ref)*57.29577951308232,deg_edge);
+        }
+    }
+    static std::string json() {
+        static constexpr const char* kn[kinds]={"none","weapon","prop","use","bind","severed"};
+        static constexpr const char* sn[speeds]={"still","walk","run"};
+        static constexpr const char* hn[hand_speeds]={"slow","fast"};
+        std::lock_guard<std::mutex> l(m_);
+        std::string o="{\"arm_e_mm\":{";
+        for(unsigned s=0;s<speeds;++s) o+=std::string(s?",":"")+"\""+sn[s]+"\":"+hist_json(arm_[s],mm_edge);
+        o+="}";
+        for(unsigned k=1;k<kinds;++k) {
+            o+=",\""+std::string(kn[k])+"\":{";
+            for(unsigned s=0;s<speeds;++s) for(unsigned f=0;f<hand_speeds;++f)
+                o+=std::string(s||f?",":"")+"\""+sn[s]+"_"+hn[f]+"\":{\"mm\":"+hist_json(cells_[k][s][f].mm,mm_edge)+",\"deg\":"+hist_json(cells_[k][s][f].deg,deg_edge)+"}";
+            o+="}";
+        }
+        return o+"}";
+    }
+    static void clear() noexcept {std::lock_guard<std::mutex> l(m_);hand_={};copy_={};cells_={};arm_={};want_.store(0);}
+private:
+    struct Hist {std::array<std::uint64_t,bins> n{};double max{};};
+    struct Cell {Hist mm{},deg{};};
+    struct Copy {bool ok{};std::uint32_t frame{};Mat live{};};
+    struct Hand {std::uintptr_t id{};unsigned kind{},slot{},player{};bool fast{},ready{},sampled{},have_ref{};std::uint32_t frame{};double since{};Mat j59{},thing{},ref{};};
+    static void add(Hist& h,double v,const double* edge) noexcept {
+        if(!std::isfinite(v)) return;unsigned i=0;while(i+1<bins && !(v<=edge[i])) ++i;++h.n[i];if(v>h.max) h.max=v;
+    }
+    static std::string hist_json(const Hist& h,const double* edge) {
+        std::uint64_t total=0;for(auto v:h.n) total+=v;
+        const auto q=[&](double p) {std::uint64_t run=0;for(unsigned i=0;i<bins;++i) {run+=h.n[i];if(total && static_cast<double>(run)>=p*static_cast<double>(total)) return edge[i];}return 0.;};
+        char b[96];std::snprintf(b,sizeof b,"{\"n\":%llu,\"p50_le\":%g,\"p90_le\":%g,\"max\":%.3f}",static_cast<unsigned long long>(total),q(.5),q(.9),h.max);
+        return b;
+    }
+    inline static std::mutex m_;
+    inline static std::atomic<std::uint32_t> want_{};
+    inline static std::array<Copy,2> copy_{};
+    inline static std::array<Hand,2> hand_{};
+    inline static std::array<std::array<std::array<Cell,hand_speeds>,speeds>,kinds> cells_{};
+    inline static std::array<Hist,speeds> arm_{};
 };
 } // namespace d2vr::weapon_draw

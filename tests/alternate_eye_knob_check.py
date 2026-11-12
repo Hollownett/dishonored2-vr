@@ -577,3 +577,12 @@ assert 'auto& k=body_kind_art[body_prompt_kind(owner,now)];' in probe and 'outpu
 assert 'inline std::optional<std::vector<PromptKindArt>> decode_prompt_kind_art(const std::vector<std::byte>& in) {' in hd36
 assert ',\\"kind_frames\\":' in probe and ',\\"kind_cache_loaded\\":' in probe and ',\\"kind_cache_saved\\":' in probe
 print('PASS: v1242 body prompt kind art, kind cache file, either hand focus in the hand-on pass')
+# v1243: hand_lock = a held thing's pose in the DRAWN hand's joint-59 frame per render (arm draw composition vs the GPU-copy frame its image
+# palette was written in), by player/hand speed, unplaced weapons as the reference; placed_view_frame split [same, +1, -1, other]
+wd43 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+om43 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'class HandLock {' in wd43 and 'const Mat drawn=mul(mul(m,inv_live),h.j59);' in wd43
+assert 'd2vr::weapon_draw::HandLock::note_copy(slot,d2vr::weapon_draw::Place::latest_frame(),' in probe and 'wd::HandLock::note_publish(hand,arm_side,engine_frame,kind,id,weapon_mat(*j),thing,' in probe
+assert 'weapon_draw::HandLock::on_draw(lf,weapon_draw::mul(hv->inv[pass_eye],weapon_draw::widen(cur)));' in om43
+assert '<<",\\"hand_lock\\":"<<weapon_draw::HandLock::json()' in om43 and 'view.frame==frame+1?1:view.frame+1==frame?2:3' in om43
+print('PASS: v1243 hand_lock measurement and placed_view_frame split')

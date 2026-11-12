@@ -574,7 +574,7 @@ private:
     // v1226: per pass and eye, placed draws [current-only, previous proven, previous predicted (not proven)]; why not proven (PrevMvpTable kind, 6 = no submitted record)
     inline static std::array<std::array<std::array<std::atomic<std::uint64_t>,3>,2>,pass_slots> weapon_pass_prev_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,2>,pass_slots> weapon_pass_near_unplaced_{}; // v1237: [same axes, other]
-    inline static std::array<std::atomic<std::uint64_t>,2> placed_view_frame_{}; // v1237: placed draws whose view frame [is, is not] the publish's
+    inline static std::array<std::atomic<std::uint64_t>,4> placed_view_frame_{}; // v1237: placed draws whose view frame [is, is not] the publish's; v1243: [same, +1, -1, other]
     inline static std::array<std::atomic<std::uint64_t>,4> shadow_place_{}; // v1238: held-shadow draws [not a held thing's, placed, near a held thing unplaced, VP unreadable]
 public:
     inline static std::atomic<bool> held_shadow_place{true}; // v1238: build/no-held-shadow-place
@@ -1380,6 +1380,11 @@ private:
                 certainty(cert_placement,cert_na); // v1201: certain view, not a held thing's part
             } else {alt_place_no_view_.fetch_add(1,std::memory_order_relaxed);certainty(cert_placement,held_any()?cert_fallback:cert_na);}
         }
+        // v1243 hand_lock (weapon_draw_place.hpp HandLock): every near eye-pass draw of the render the publisher noted, placed or not (the arm draws)
+        if(near_draw && !alt && pass_eye>=0) if(const std::uint32_t lf=weapon_draw::Place::latest_frame();weapon_draw::HandLock::wants(lf)) {
+            const auto* hv=any_cached_views(lf);if(!hv) hv=weapon_views(lf,0,0);
+            if(hv && hv->ok[pass_eye]) weapon_draw::HandLock::on_draw(lf,weapon_draw::mul(hv->inv[pass_eye],weapon_draw::widen(cur)));
+        }
         if(near_draw && !alt && weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);
             const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;
@@ -1406,8 +1411,7 @@ private:
                 // v1237 census: per pass, unplaced draws within a held thing's reach [same axes, other]; placed draws whose classified view is
                 // another engine frame than the publish they were placed from (the two eyes of one render on different hand poses)
                 if(r.side<0 && r.near_side>=0) weapon_pass_near_unplaced_[pass_index][r.near_like?0:1].fetch_add(1,std::memory_order_relaxed);
-                if(r.side>=0 && have_view) placed_view_frame_[view.frame==frame?0:1].fetch_add(1,std::memory_order_relaxed);
-                if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev);
+                if(r.side>=0 && have_view) placed_view_frame_[view.frame==frame?0:view.frame==frame+1?1:view.frame+1==frame?2:3].fetch_add(1,std::memory_order_relaxed); // v1243: [same, label +1, label -1, other]                if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev);
                 weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,pass_index);   // v1240: a held severed part's placed draws
                 // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven). v1226: else the predicted previous
                 // (prevVP(eye) * B_prev * L: the thing moved rigidly with the hand, exact with v1223's rigid L), never camera-only (a held thing is not
@@ -1752,7 +1756,8 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<",\"rigid_local\":"<<weapon_draw::RigidLocal::json() // v1223
        <<",\"held_census\":"<<weapon_draw::Place::census_json() // v1237
        <<",\"severed_draws\":"<<weapon_draw::Place::severed_json() // v1240
-       <<",\"placed_view_frame\":["<<placed_view_frame_[0].load()<<','<<placed_view_frame_[1].load()<<']'
+       <<",\"placed_view_frame\":["<<placed_view_frame_[0].load()<<','<<placed_view_frame_[1].load()<<','<<placed_view_frame_[2].load()<<','<<placed_view_frame_[3].load()<<']'
+       <<",\"hand_lock\":"<<weapon_draw::HandLock::json() // v1243
        <<",\"shadow_place\":["<<shadow_place_[0].load()<<','<<shadow_place_[1].load()<<','<<shadow_place_[2].load()<<','<<shadow_place_[3].load()<<']' // v1238
        <<",\"skip\":[";
     // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when
