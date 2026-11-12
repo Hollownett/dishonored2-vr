@@ -1,6 +1,7 @@
 // Contract breaks (an update without note_drawn, a repeated update) are counted here instead of asserting.
 static int contract_breaks=0;
 #define D2VR_HAND_CLAMP_CONTRACT(ok) do{if(!(ok))++contract_breaks;}while(0)
+#include "hand_reach.hpp"
 #include "hand_clamp.hpp"
 #include "native_world_trace.hpp"
 #include <cmath>
@@ -90,6 +91,7 @@ struct World {
 struct Rig {
     HandClamp clamp;World world;unsigned side=0;std::uint64_t epoch=1;double t0=0;unsigned frame=0;
     WorldTrackedPose root=level_frame({0,0,0},{1,0,0});
+    std::optional<WorldTrackedPose> play;     // v1195: ClampInput::play (the tracking -> world mapping)
     ClampProbe tip{};bool tip_enabled=false;
     ClampProbe wall_tip{};                     // ClampInput::wall_tip (radius 0: none)
     std::vector<ClampProbe> hand;              // ClampInput::hand (empty: planes hold only their own probe)
@@ -109,7 +111,7 @@ struct Rig {
     ClampOutput step_pose(const WorldTrackedPose& target,bool yield=false) {
         ClampInput in{};
         in.now=now();in.epoch=epoch;in.root=root;in.target=target;in.chest=world.chest;
-        in.strict_answers=strict_answers;
+        in.strict_answers=strict_answers;in.play=play;
         in.tip=tip;in.tip_enabled=tip_enabled;in.wall_tip=wall_tip;in.yield=yield;in.post=!post || post(frame);
         for(const auto e:loose) if(in.loose_count<ClampInput::loose_capacity) in.loose[in.loose_count++]=e;
         in.kick=kick;
@@ -154,6 +156,40 @@ struct Rig {
     }
 };
 const auto ignore=[](const ClampOutput&,Vec3){};
+
+// v1195 (sim-pose-hold truth dumps: the drawn hands moved 4-16 mm on the frame AFTER a head step, with the controllers held still): the head
+// moves, the tracking -> world mapping (ClampInput::play) moves with it, so a controller still in tracking space has a new world target. The
+// clamp used to hold last frame's world hand while this frame's sweep validated the new target (one frame late). Carried with the mapping,
+// the hand is right on the head-step frame and does not move on the next. Legacy (set_play_carry false) reproduces the lag.
+void play_mapping_step_has_no_lag() {
+    for(const bool legacy:{true,false}) {
+        Rig r;r.strict_answers=true;r.world.floor=false;r.world.wall_x=false;r.clamp.set_play_carry(!legacy);
+        const Vec3 hand{.45,.2,1.1};WorldTrackedPose map=pose_at({1,2,0});r.play=map;
+        for(int i=0;i<6;++i) r.step(hand);                                       // settled, free air
+        const Vec3 d{.06,-.01,.005};map.position=map.position+d;r.play=map;   // a 6 cm mapping step (a fast head move or turn at half rate): the mapping and the world target move together
+        const auto on=r.step(hand+d);const auto after=r.step(hand+d);
+        const double lag=length(on.drawn.position-(hand+d)),settle=length(after.drawn.position-on.drawn.position);
+        if(g_verbose) std::printf("  play mapping step (%s): drawn off target on the step frame %.2f mm, moves %.2f mm on the next\n",legacy?"legacy":"carried",lag*1000,settle*1000);
+        // the reach (v1195): the last solve's shoulder, carried with the camera root that moved with the head, keeps a hand at full reach
+        // unclamped on the step frame; the uncarried shoulder pulls it back by about the head step for that frame
+        {const WorldTrackedPose root0=level_frame({1,2,0},{1,0,0}),root1=level_frame(Vec3{1,2,0}+d,{1,0,0});
+         const Vec3 shoulder{.25,.2,1.25};ArmReach reach{shoulder,length(hand-shoulder),{},true};    // the hand sits at its full reach
+         ArmReach carried=reach;if(!legacy) carried.shoulder=HandClamp::carry_play(root0,root1,shoulder);
+         bool clamped=false;const auto drawn=reach_clamp(pose_at(hand+d),carried,&clamped);
+         const double reach_lag=length(drawn.position-(hand+d));
+         if(g_verbose) std::printf("  reach after the step (%s): %.2f mm off target\n",legacy?"legacy":"carried",reach_lag*1000);
+         if(legacy) CHECK(reach_lag>.005);else CHECK(reach_lag<1e-9 && !clamped);}
+        if(legacy) CHECK(lag>.01);                        // the bug: a frame late
+        else CHECK(lag<2e-4 && settle<2e-4 && r.clamp.play_carries(r.side)>0);
+        // a turn of the mapping (head-follow or a smooth turn) with the hand still in tracking space: also on the same frame
+        if(!legacy) {
+            const double a=.05;WorldTrackedPose turned=map;turned.basis={Vec3{std::cos(a),std::sin(a),0},Vec3{-std::sin(a),std::cos(a),0},Vec3{0,0,1}};
+            const Vec3 moved=HandClamp::carry_play(map,turned,hand+d);r.play=turned;
+            const auto t=r.step(moved);const auto t2=r.step(moved);
+            CHECK(length(t.drawn.position-moved)<2e-4 && length(t2.drawn.position-t.drawn.position)<2e-4);
+        }
+    }
+}
 
 // Headset v638 ("the hand stopped obeying the controller" after a table / a corpse): in strict mode a hand that waits for a sweep to
 // validate its target used to wait without end, so answers that stop arriving, or a palm sweep that keeps starting inside a body, froze the
@@ -1939,6 +1975,7 @@ void refuted_touched_plane_gives_its_slot() {
 }
 
 int main() {
+    play_mapping_step_has_no_lag();
     strict_receipts_bind_geometry_and_generation();
     strict_auxiliary_receipts_and_chest_rearm();
     strict_async_game_cadence_covers_batched_root();

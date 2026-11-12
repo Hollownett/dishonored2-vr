@@ -59,6 +59,7 @@ inline bool world_hit_near_body(Vec3 body,const ClampHit* planes,std::size_t cou
 class HandVisualSource {
 public:
     static constexpr double blend_seconds=.15,snap_gap=.35,snap_seconds=.25,regain_gap=.30;
+    inline static bool agreement_draws_clamp=true; // v1195: build/legacy-body-agreement draws the body itself on agreement
     static constexpr double agree_gap=.02,agree_leave=.03;          // within this of the clamp pose the body is drawn without contact
     static constexpr double contact_gap=.10,contact_leave=.12;      // contact elects the body only while it is this close to the clamp pose (hysteresis)
     static constexpr double moving_speed=1.0,moving_leave=.6;      // Fix C: moving from 1.0 m/s, until it falls under 0.6 (hysteresis); free air then draws the clamp output
@@ -104,12 +105,17 @@ public:
         const double speed=std::isfinite(in.player_speed)?in.player_speed:0;
         s.moving=s.moving?speed>=moving_leave:speed>=moving_speed;
         const bool agrees=!anchor_active && !s.moving && out.gap_m<=(was_body?agree_leave:agree_gap);
-        const bool elected=sane && ((contact && out.gap_m<=(was_body?contact_leave:contact_gap)) || agrees);
+        const bool by_contact=contact && out.gap_m<=(was_body?contact_leave:contact_gap);
+        const bool elected=sane && (by_contact || agrees);
         out.snapped=latched || (present && in.body_behind_surface);
         const VisualSource want=pick(present && in.yield,elected,anchor_active);
         WorldTrackedPose target=in.clamp;
         if(want==VisualSource::controller) target=clamp_detail::finite_pose(in.controller)?in.controller:in.clamp;
-        else if(want==VisualSource::body) target.position=in.body->position;   // the orientation stays the clamp's (a sphere has none)
+        // v1195 (sim-pose-hold truth dumps: the drawn hand moved 5-21 mm on the frame after a head step at this stage): a body elected only by
+        // agreement (free air, within 2-3 cm) is drawn at the clamp pose. The physics body is a tick behind every move of the tracking -> world
+        // mapping (the head moving the body), so drawing it in free air drew last frame's hand; in contact it is drawn as before (the point).
+        // The source stays `body` (blends, the B16 coupling weight and the counters are unchanged); settled, the two agree within the gap.
+        else if(want==VisualSource::body) target.position=by_contact || !agreement_draws_clamp?in.body->position:in.clamp.position;   // the orientation stays the clamp's (a sphere has none)
         else if(want==VisualSource::anchor) target.position=*in.anchor;
         // Final review P3-3: a body that was the source and disappears (a menu press, a fault latch, a destroy, a snap) is blended away from
         // where the hand was drawn, like any source change, and that blend runs to its end; otherwise no body in play is phase 1 exactly.

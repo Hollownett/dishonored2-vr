@@ -19,7 +19,22 @@ struct Rig {
     VisualOutput run(double seconds,unsigned side=0) {VisualOutput o;for(double t=0;t<seconds-1e-9;t+=dt60) o=step(side);return o;}
 };
 }
+// v1195: a body elected only by agreement (free air) is drawn at the clamp pose: the physics body is a tick behind every move of the
+// tracking -> world mapping. A head step with the hand still in tracking space moves the clamp pose (the target) and leaves the body a frame
+// behind: the drawn hand is on the target on the step frame and does not move on the next. Contact still draws the body.
+static void agreement_draws_clamp_no_lag() {
+    HandVisualSource::agreement_draws_clamp=true;
+    Rig r;r.in.body=pose_at(.012);r.in.clamp=r.in.controller=pose_at(0);
+    auto o=r.run(.5);CHECK(o.source==VisualSource::body && bit_equal(o.drawn,r.in.clamp));   // settled agreement: the clamp pose
+    r.in.clamp=r.in.controller=pose_at(.013);                                                 // the head step: the target moves 13 mm, the body not yet
+    o=r.step();CHECK(near(o.drawn.position.x,.013) && o.source==VisualSource::body);
+    r.in.body=pose_at(.024);o=r.step();CHECK(near(o.drawn.position.x,.013));                  // the body catches up a tick later: no move
+    r.in.clamp_contact=true;o=r.run(.5);CHECK(o.source==VisualSource::body && near(o.drawn.position.x,.024));   // contact: the body, as before
+    std::printf("  v1195 agreement draws the clamp pose: step frame on target, no move on the next; contact draws the body\n");
+}
 int main() {
+    agreement_draws_clamp_no_lag();
+    HandVisualSource::agreement_draws_clamp=false; // the cases below pin the user-accepted policy as it was (build/legacy-body-agreement)
     {   // Walking and sprinting leave the standing body through the same 150 ms source transition.
         for(double speed:{1.4,2.,3.49,3.5,3.51,4.,7.}) {
             Rig r;r.in.body=pose_at(.015);CHECK(r.run(.5).source==VisualSource::body);

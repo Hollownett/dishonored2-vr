@@ -134,6 +134,7 @@
 #include "cross_eye_history.hpp"
 #include "rig_target.hpp"
 #include "sim_pose_hold.hpp"
+static bool reach_shoulder_carry=true; // v1195: build/legacy-reach-lag (the reach shoulders carried with the camera root)
 #include "taa_jitter_check.hpp"
 #include "vr_combat.hpp"
 #include "attack_intent.hpp"
@@ -1758,6 +1759,9 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     const bool legacy_hand_stuck=fs::exists(root/L"build"/L"legacy-hand-stuck");   // v639 (headset v638: a hand stopped following after a table / a corpse)
     hand_clamp.set_hold_seconds(legacy_hand_stuck?0.:d2vr::HandClampConfig{}.hold_seconds);
     hand_clamp.set_rig_turn_carry(!fs::exists(root/L"build"/L"legacy-clamp-world-hold"));   // v861: a held hand turns with the rig
+    hand_clamp.set_play_carry(!fs::exists(root/L"build"/L"legacy-clamp-play-lag"));   // v1195: last frame's hand carried with the play mapping
+    reach_shoulder_carry=!fs::exists(root/L"build"/L"legacy-reach-lag");   // v1195: the reach's shoulders carried with the camera root
+    d2vr::HandVisualSource::agreement_draws_clamp=!fs::exists(root/L"build"/L"legacy-body-agreement");   // v1195: a body elected by agreement draws the clamp pose
     run_root_gate=!fs::exists(root/L"build"/L"no-run-root-gate");
     spyglass_scope_enabled=!fs::exists(root/L"build"/L"spyglass-lens") && !fs::exists(root/L"build"/L"native-zoom");   // v1040: the scope is the default
     spyglass_fade_reset=fs::exists(root/L"build"/L"spyglass-fade-reset");
@@ -8323,7 +8327,14 @@ void prepare_head_view(void* view) noexcept {
                     const auto clamp_epoch=hands.epoch^(hands.reference_epoch<<32)^static_cast<std::uint64_t>(body->player);
                     // The arm's reach from the last visible solve (G2, C4): the clamp's target is reach-clamped so the clamp and the IK agree. One
                     // frame stale (Task 4): the palm can fall 15-46 mm short for a frame while walking.
-                    const auto arm_reach=full_body.diagnostic();
+                    auto arm_reach=full_body.diagnostic();
+                    { // v1195 (sim-pose-hold truth dumps: the drawn hand moved 4-16 mm on the frame after a head step at the clamp stage): the reach's
+                      // shoulders are the last solve's, made under last frame's camera root; carried with the root to this frame (the body solve
+                      // places the chest from the head), a hand at full reach is clamped against this frame's shoulder, not last frame's.
+                        static std::optional<d2vr::WorldTrackedPose> reach_root;
+                        if(reach_shoulder_carry && reach_root) for(auto& r:arm_reach.reach) if(r.valid) r.shoulder=d2vr::HandClamp::carry_play(*reach_root,clamp_root,r.shoulder);
+                        reach_root=clamp_root;
+                    }
                     const bool reach_fresh=full_body_requested && tracked_arms_requested && arm_reach.body_valid && arm_reach.output_age_seconds<.25;
                     unsigned carry_bits{}; // C9: a hand carrying a native object yields (the carried body is moved by physics, deviation 4)
                     {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);if(hand_holding_object && hand_state_tick && GetTickCount64()-hand_state_tick<=300) carry_bits=1u<<(hand_hold_side&1u);}
@@ -8407,6 +8418,7 @@ void prepare_head_view(void* view) noexcept {
                         d2vr::ClampOutput clamped{};const bool clamp_updated=clamp_live || clamp_yield;bool clamp_post=false;
                         if(clamp_updated) {
                             d2vr::ClampInput in{};in.now=clamp_now;in.epoch=clamp_epoch;in.root=clamp_root;in.target=target;in.chest=chest;in.yield=clamp_yield;
+                            try {in.play=d2vr::to_game_pose(d2vr::camera_relative_controller(d2vr::TrackedPose{{0,0,0},{0,0,0,1}},hand_centre,head_origin.position),head_origin,anchor,1.0);} catch(...) {} // v1195: this frame's tracking -> world mapping of the hands (the tracking origin through the hand chain)
                             in.post=d2vr::clamp_posts(clamp_alternate,hand_clamp_frame,side);in.tip_enabled=clamp_tip_on;
                             // Each completion identifies the exact request cached by HandClamp. No receipt is pending;
                             // a receipt with an empty hit is a completed clear cast, never an answer to a newer post.

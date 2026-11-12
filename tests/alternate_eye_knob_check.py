@@ -266,3 +266,13 @@ print('PASS: v1193 one-view draws tagged by their bound b1 view (rig target E, h
 # v1194: the recording context's own snapshot of its bound b1 wins on one-view frames; view source and per-consumer use counters
 assert 's->view_buffer=valid?r:nullptr;' in om2 and 'if(tl_view_src_==1) {out=s.view;ok=true;}' in om2 and '\\"view_use\\":[' in om2
 print('PASS: v1194 view source (own record-time b1 snapshot, b1 table, newest) and per-consumer counters')
+
+# v1195: the drawn hands follow a head step on the same frame (both stereo modes): clamp carried with the play mapping, reach shoulders
+# carried with the camera root, a body elected by agreement drawn at the clamp pose; legacy knobs restore each
+clamp_src=(root / 'src' / 'hand_clamp.hpp').read_text(encoding='utf-8');vis_src=(root / 'src' / 'hand_visual_source.hpp').read_text(encoding='utf-8')
+assert 's.drawn_world=carry_play(s.play,*in.play,s.drawn_world);' in clamp_src and 'carry_translation && !play_carry?' in clamp_src
+assert 'in.play=d2vr::to_game_pose(d2vr::camera_relative_controller(d2vr::TrackedPose{{0,0,0},{0,0,0,1}},hand_centre,head_origin.position),head_origin,anchor,1.0);' in probe
+assert 'r.shoulder=d2vr::HandClamp::carry_play(*reach_root,clamp_root,r.shoulder);' in probe
+assert 'by_contact || !agreement_draws_clamp?in.body->position:in.clamp.position' in vis_src
+for k in ('legacy-clamp-play-lag','legacy-reach-lag','legacy-body-agreement'): assert k in probe
+print('PASS: v1195 drawn hands without the one-frame head lag (clamp play carry, reach shoulder carry, agreement draws the clamp pose)')

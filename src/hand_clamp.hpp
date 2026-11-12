@@ -45,6 +45,10 @@ struct ClampInput {
     double now{};                       // monotonic seconds; per-side dt is derived from it
     std::uint64_t epoch{};              // pose_epoch ^ (reference_epoch<<32) ^ player; a change resets the side
     WorldTrackedPose root{};            // level player frame (C11, deviation 9)
+    // v1195: the tracking space's pose in the world this frame (the play mapping; the warp's play-space origin). When it moves (the head moves
+    // the body with it, an anchor settles, a turn), last frame's hand is carried with it: a controller held still in tracking space is drawn
+    // where it is on this frame, not where the old mapping put it while this frame's sweep validates (sim-pose-hold dumps: 4-16 mm, a frame late).
+    std::optional<WorldTrackedPose> play;
     WorldTrackedPose target{};          // calibrated, reach-clamped controller grip
     Vec3 chest{};                       // free-space re-acquire origin
     std::optional<ClampHit> palm_hit,tip_hit,chest_hit,wall_tip_hit; // results of the sweeps this side posted last frame
@@ -245,6 +249,7 @@ private:
         Vec3 chest_world{};   // the re-acquire origin of the last update (the end of a retreat)
         Vec3 drawn_world{},target_world{},root_position{};std::array<Vec3,3> basis_world{};     // last frame in the world
         Vec3 root_forward{};   // v861: the level root's heading last frame (a change is a rig turn)
+        WorldTrackedPose play{};bool has_play{};   // v1195: last frame's play mapping
         bool chest_pending{};  // v861: a snap re-acquire whose chest sweep was not cast yet
         std::array<double,8> frame_intervals{};unsigned interval_cursor{}; // recent render cadence, not player speed
         std::array<double,8> root_intervals{};unsigned root_interval_cursor{};
@@ -273,7 +278,7 @@ private:
     std::array<Side,2> sides_{};
     inline static std::atomic<std::uint64_t> next_request_id_{}; // process lifetime, including whole-object/session replacement
     std::array<std::uint64_t,2> squeeze_infeasible_{},snapbacks_{},contact_frames_{},missed_notes_{},repeated_updates_{},blocked_frames_{};
-    std::array<std::uint64_t,2> rig_turns_{};bool rig_turn_carry_{true};   // v861: build/legacy-clamp-world-hold keeps a held hand in the world on turns
+    std::array<std::uint64_t,2> rig_turns_{};bool rig_turn_carry_{true};bool play_carry_{true};std::array<std::uint64_t,2> play_carries_{}; // v1195: build/legacy-clamp-play-lag   // v861: build/legacy-clamp-world-hold keeps a held hand in the world on turns
     static constexpr double snap_turn_radians=.2;   // a rig turn this large in one frame (snap turns are 15-90 deg; smooth ones a few deg a frame) re-acquires
 
     std::size_t capacity() const {return std::clamp<std::size_t>(cfg_.max_planes,1,plane_capacity);}
@@ -283,6 +288,7 @@ private:
         s.prev_local=clamp_detail::local_point(in.root,drawn);
         for(std::size_t i=0;i<3;++i) s.prev_basis_local[i]=clamp_detail::local_vector(in.root,in.target.basis[i]);
         s.drawn_world=drawn;s.target_world=in.target.position;s.root_position=in.root.position;s.basis_world=in.target.basis;s.root_forward=in.root.basis[0];
+        s.has_play=in.play.has_value();if(in.play) s.play=*in.play; // v1195
     }
     void post_chest(Side& s,const ClampInput& in,ClampOutput& out) const {
         if(!in.post || !finite(in.chest)) return;
@@ -602,6 +608,14 @@ public:
     std::uint64_t missed_notes(unsigned side) const {return side<2?missed_notes_[side]:0;}
     std::uint64_t rig_turns(unsigned side) const {return side<2?rig_turns_[side]:0;}
     void set_rig_turn_carry(bool on) {rig_turn_carry_=on;}
+    void set_play_carry(bool on) {play_carry_=on;}
+    std::uint64_t play_carries(unsigned side) const {return side<2?play_carries_[side]:0;}
+    // v1195: a point carried from last frame's play mapping to this frame's (rigid: the point's coordinates in the old frame, placed in the new)
+    static Vec3 carry_play(const WorldTrackedPose& from,const WorldTrackedPose& to,Vec3 x) {
+        const Vec3 d=x-from.position;Vec3 out=to.position;
+        for(std::size_t i=0;i<3;++i) out=out+to.basis[i]*dot(d,from.basis[i]);
+        return out;
+    }
     std::uint64_t repeated_updates(unsigned side) const {return side<2?repeated_updates_[side]:0;}
     // Frames held released because the re-acquire could not run: the chest was not finite or began inside geometry.
     std::uint64_t reacquire_blocked_frames(unsigned side) const {return side<2?blocked_frames_[side]:0;}
@@ -676,7 +690,16 @@ public:
             return finish(s,out);
         }
         const double dt=std::min(elapsed,.1);
-        if(std::abs(rig_turn)>1e-7) {   // a smooth turn's step: the hand turns with the rig (the target's own world motion, the sweep's look-ahead, keeps it)
+        // v1195: the play mapping's step carries last frame's hand exactly (it includes the rig turn and the root's move), so neither carry
+        // below runs on top of it. Snap-sized steps re-acquired above; a step past snap_gap is not carried (a teleport: the old rules).
+        const bool play_carry=play_carry_ && in.play && s.has_play && clamp_detail::finite_pose(*in.play) &&
+            length(in.play->position-s.play.position)<=cfg_.snap_gap;
+        if(play_carry) {
+            s.drawn_world=carry_play(s.play,*in.play,s.drawn_world);
+            if(length(in.play->position-s.play.position)>1e-9 || std::abs(rig_turn)>1e-9) ++play_carries_[side];
+        }
+        s.has_play=in.play.has_value();if(in.play) s.play=*in.play;   // every later exit path draws in this frame's mapping
+        if(!play_carry && std::abs(rig_turn)>1e-7) {   // a smooth turn's step: the hand turns with the rig (the target's own world motion, the sweep's look-ahead, keeps it)
             const double c=std::cos(rig_turn),n=std::sin(rig_turn);const Vec3 p=s.root_position;const Vec3 v=s.drawn_world-p;
             s.drawn_world=p+Vec3{c*v.x-n*v.y,n*v.x+c*v.y,v.z};++rig_turns_[side];
         }
@@ -867,7 +890,7 @@ public:
         const Vec3 transported=s.drawn_world+in.root.position-s.root_position;
         const bool transport_swept=s.has_segment && segment_distance(transported,s.seg_from,s.seg_to)<=1e-9;
         const bool carry_translation=s.plane_count==0 && !s.seg_cut && transport_swept;
-        bool hold=false;Vec3 held=s.drawn_world+(carry_translation?in.root.position-s.root_position:Vec3{});
+        bool hold=false;Vec3 held=s.drawn_world+(carry_translation && !play_carry?in.root.position-s.root_position:Vec3{});
         // A hold waits for max_hold_frames casts: in C14 alternate mode a cast is answered every other frame.
         // Strict mode used to wait without end: answers that stop arriving (a busy or unmapped native cast, a probe that starts inside a body)
         // froze the drawn hand in free air while the controller moved on (headset v638). After hold_seconds the hand follows, kept out of the
