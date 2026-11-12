@@ -10589,6 +10589,8 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
+               << ",\"features\":{\"rig_motion\":" << (d2vr::RigMask::motion.load()?"true":"false") << ",\"skin_motion\":" << (d2vr::SkinMotion::enabled.load()?"true":"false") // v1198: effective state of the default-on stale-eye fixes
+               << ",\"held_mask\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"rig_target\":" << (rig_target_knob?"true":"false") << ",\"alt_weapon_place\":" << (d2vr::ObjectMotion::alt_weapon_place.load()?"true":"false") << '}'
                << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0) << '}' << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"stale_warp_error\":\"" << [] {std::string e=game_xr?game_xr->stale_warp_error:std::string{};for(auto& ch:e) if(ch=='"' || ch==92 || static_cast<unsigned char>(ch)<32) ch='/';return e;}() << '"' << ",\"perf_gpu_ms\":" << perf_spans_json() << ",\"sim_pose_hold\":{\"on\":" << (d2vr::sim_pose_hold::on.load()?"true":"false") << ",\"phase\":" << d2vr::sim_pose_hold::phase.load() << ",\"changes\":" << d2vr::sim_pose_hold::changes_n.load() << ",\"holds\":" << d2vr::sim_pose_hold::holds_n.load() << ",\"verified\":" << d2vr::sim_pose_hold::verified.load() << ",\"broken\":" << d2vr::sim_pose_hold::broken.load() << '}' << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
                << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
@@ -15677,8 +15679,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose
             stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion"); // v1151: motion textures + mover rules (design 2026-11-11)
             stale_eye_rig_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig");
-            stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion"); // v1167
-            d2vr::RigMask::motion=fs::exists(root/L"build"/L"stale-eye-rig-motion"); // v1171: rig motion vectors are opt-in (absent = v1165 rig draws) // v1162/v1163: the player-rig mask (rig_mask.hpp)
+            stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion"); // v1167; v1198: also RigMask::motion (set below, once alternate-eye is known)
             stale_eye_parallax_knob=!fs::exists(root/L"build"/L"no-stale-eye-parallax"); // v796: and its world pixels with parallax (walking)
             stale_near_range=d2vr::near_range_default; // v798: near content from the fresh eye within this many metres (0: off)
             {std::ifstream knob(root/L"build"/L"stale-near-range");double metres{};if(knob>>metres && metres>=0 && metres<=20) stale_near_range=metres;}
@@ -16278,14 +16279,19 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         taa_mv_dejitter.enabled=!fs::exists(root/L"build"/L"no-taa-mv-dejitter");
         d2vr::CrossEyeHistory::census=fs::exists(root/L"build"/L"cross-eye-census");d2vr::CrossEyeHistory::fix=fs::exists(root/L"build"/L"alt-eye-history"); // v1180
         d2vr::CrossEyeHistory::fix_paired=fs::exists(root/L"build"/L"eye-history");
-        d2vr::SkinMotion::enabled=fs::exists(root/L"build"/L"stale-eye-skin-motion"); // v1182
+        // v1198: the stale-eye hand/held fixes are on by default in performance mode (alternate-eye), each with a build/no-<name> opt-out;
+        // paired stereo keeps them off; the old opt-in files (stale-eye-rig-motion, stale-eye-skin-motion, stale-eye-held-mask,
+        // stale-eye-rig-target, alt-weapon-place) are accepted and do nothing
+        const bool alt_defaults=alt_eye_state.load()==1;
+        d2vr::RigMask::motion=alt_defaults && stale_eye_rig_motion_knob; // v1171 rig motion vectors; v1198 default on, build/no-stale-eye-rig-motion: off (with the warp's rig rules)
+        d2vr::SkinMotion::enabled=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-skin-motion"); // v1182
         stale_afw2_knob=fs::exists(root/L"build"/L"afw2"); // v1184: AFW v2 warp path (src/afw2.hpp), opt-in
         alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share"); // v1189
-        rig_target_knob=fs::exists(root/L"build"/L"stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob; // v1190
+        rig_target_knob=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob; // v1190
         d2vr::RigMask::target_bind=&d2vr::ObjectMotion::target_bind;d2vr::RigMask::target_restore=&d2vr::ObjectMotion::target_restore;
-        alt_weapon_place_knob=fs::exists(root/L"build"/L"alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191
+        alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191
         if(!rig_target_knob && !alt_weapon_place_knob) d2vr::rig_target::book().clear();
-        d2vr::ObjectMotion::held_mask=fs::exists(root/L"build"/L"stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames
+        d2vr::ObjectMotion::held_mask=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames
         d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {std::uint32_t v{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&v,4);return v;};
         d2vr::RigMask::frame_fn=d2vr::CrossEyeHistory::frame_fn.load(); // v1185: the rig ring gate
         // v1186: the census sees copies, clears and compute writes too (hooks installed with the device, census_hooks_device)

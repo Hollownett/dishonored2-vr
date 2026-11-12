@@ -216,13 +216,12 @@ assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_
 assert 'ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;' in rig and 'targets(c,rtv_count,rtvs.data(),dsv);' in rig
 print('PASS: v1163 rig mask routing (knob, one-view rig draws replayed, mask at the copy, both-or-none masks, motion arm rule, raw rig rows, status)')
 
-# v1171: rig motion vectors opt-in (build/stale-eye-rig-motion); off = the v1165 rig draws, no palette work, rig pixels zeroed
-assert 'd2vr::RigMask::motion=fs::exists(root/L"build"/L"stale-eye-rig-motion");' in probe
+# v1171: rig motion vectors (default on in alternate mode since v1198, see below); off = the v1165 rig draws, no palette work, rig pixels zeroed
 assert "if(mode_.load(std::memory_order_relaxed)<1 || !RigMask::motion.load(std::memory_order_relaxed)) return false;" in om
 assert 'const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed) && job.receipt' in fsr
 assert 'inline static std::atomic<bool> motion{false};' in rig
 assert 'pad_render_edge' not in fsr and 'edge_pad' not in fsr  # v1171: the v1168 FSR input edge replication is reverted
-print('PASS: v1171 rig motion opt-in (knob, off = v1165 rig draws), FSR input edge replication reverted')
+print('PASS: v1171 rig motion (off = v1165 rig draws), FSR input edge replication reverted')
 
 # v1184: AFW v2 opt-in (build/afw2 -> StaleLayers::afw2 after stale_eye_layers), status and dump meta; play spaces recorded with the cameras
 assert 'stale_afw2_knob=fs::exists(root/L"build"/L"afw2");' in probe and 'game_xr->stale_afw2=stale_afw2_knob;' in probe
@@ -237,7 +236,7 @@ assert 'alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share");' in
 print('PASS: v1189 no shadow sharing on one-view frames (knob alt-shadow-share)')
 
 # v1190: rig target (knob stale-eye-rig-target): retargeted rig/held replay, published per render for the stale eye, t15 of AFW v2
-assert 'rig_target_knob=fs::exists(root/L"build"/L"stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob;' in probe
+assert 'd2vr::RigMask::target_on=rig_target_knob;' in probe  # v1198: default on in alternate mode (pin below)
 assert 'game_xr->stale_eye_rig_target(other,target.Get(),tw,th,number,tv);' in probe and 'stale_layers_[eye]->rig_target=static_cast<bool>(stale_rig_target(eye).texture);' in xr
 assert 'd2vr::rig_target::book().publish(vp,e,has_e,prev_vp,frame);' in probe
 print('PASS: v1190 rig target routing (knob, E at Setup, replay, per-render hand-off to the stale eye)')
@@ -245,7 +244,7 @@ print('PASS: v1190 rig target routing (knob, E at Setup, replay, per-render hand
 # v1191: GPU spans (stale warp, rig target copy, motion pass), rectangle copy of the rig target, one-view weapon placement (knob alt-weapon-place)
 assert 'ModGpuScope warp_scope(context_.Get(),ModSpan::stale_warp);' in xr and 'ModSpan::rig_target' in fsr and 'ModSpan::eye_motion' in fsr
 assert 'RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h)' in fsr
-assert 'alt_weapon_place_knob=fs::exists(root/L"build"/L"alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe
+assert 'd2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe  # v1198: default on in alternate mode (pin below)
 assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev)' in om
 print('PASS: v1191 GPU spans, rig target rectangle copy, one-view weapon placement (knob alt-weapon-place)')
 
@@ -292,3 +291,22 @@ print('PASS: v1197 own view for unclassified b1 draws; reach root carry opt-in')
 assert 'try {stale_warp_error=std::string(e.what()).substr(0,300);} catch(...) {}' in xr and '\\"stale_warp_error\\":\\""' in probe
 assert '\\"afw2_stages\\":{' in probe and 'd2vr::Afw2Pass::stage_names[k]' in probe
 print('PASS: v1197 stale_warp_error and perf_gpu_ms.afw2_stages')
+
+# v1198: the stale-eye hand/held fixes default on in performance mode only (alt_eye_state==1), each with a no-<name> opt-out;
+# the old opt-in file names are no-ops; afw2 stays opt-in; the effective state is in alternate_eye.features
+assert 'const bool alt_defaults=alt_eye_state.load()==1;' in probe
+assert probe.index('{alt_eye_state=1;mono_view_state=1;}') < probe.index('const bool alt_defaults=alt_eye_state.load()==1;')
+assert 'd2vr::RigMask::motion=alt_defaults && stale_eye_rig_motion_knob;' in probe
+print('PASS: v1198 rig motion default on in alternate mode (no-stale-eye-rig-motion: off, with the warp rig rules)')
+assert 'd2vr::SkinMotion::enabled=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-skin-motion");' in probe
+print('PASS: v1198 skin motion default on in alternate mode (no-stale-eye-skin-motion)')
+assert 'd2vr::ObjectMotion::held_mask=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-held-mask");' in probe
+print('PASS: v1198 held mask default on in alternate mode (no-stale-eye-held-mask)')
+assert 'rig_target_knob=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob;' in probe
+print('PASS: v1198 rig target default on in alternate mode (no-stale-eye-rig-target)')
+assert 'alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe
+print('PASS: v1198 one-view weapon placement default on in alternate mode (no-alt-weapon-place)')
+for k in ('L"stale-eye-rig-motion"','L"stale-eye-skin-motion"','L"stale-eye-held-mask"','L"stale-eye-rig-target"','L"alt-weapon-place"'): assert k not in probe, k
+assert 'stale_afw2_knob=fs::exists(root/L"build"/L"afw2");' in probe
+assert '\\"features\\":{\\"rig_motion\\":' in probe and '\\"alt_weapon_place\\":' in probe
+print('PASS: v1198 old opt-in names are no-ops, afw2 opt-in, alternate_eye.features status')
