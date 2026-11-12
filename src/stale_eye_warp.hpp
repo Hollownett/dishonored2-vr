@@ -1108,7 +1108,8 @@ float4 WarpPS(Vertex v) : SV_TARGET {
             }
             if(target_view) {ID3D11ShaderResourceView* t=target_view.Get();context_->CSSetShaderResources(15,1,&t);context_->PSSetShaderResources(15,1,&t);++rig_target_passes;}
             ID3D11Texture2D* afw2_out=afw2->run(*layers,width_,height_,read,depth_read,depth.width,depth.height,fresh_read,fresh_depth_read,fresh_depth.width,fresh_depth.height,
-                             motion_ok?kept_motion_read:nullptr,motion_ok?fresh_motion_read:nullptr,rig_ok?kept_rig_read:nullptr,rig_ok?fresh_rig_read:nullptr);
+                             motion_ok?kept_motion_read:nullptr,motion_ok?fresh_motion_read:nullptr,rig_ok?kept_rig_read:nullptr,rig_ok?fresh_rig_read:nullptr,
+                             target_view!=nullptr);  // v1190: the rig target bound at t15
             if(target_view) {ID3D11ShaderResourceView* none{};context_->CSSetShaderResources(15,1,&none);context_->PSSetShaderResources(15,1,&none);}
             return afw2_out;
         }

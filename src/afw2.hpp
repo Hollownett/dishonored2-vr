@@ -16,6 +16,9 @@
 #include <string>
 
 namespace d2vr {
+// v1187: a texel moves by its own vector from this object motion (render px over the eye's two ticks): entity vectors are exact since
+// v1178 (still props p99 0.05 px), Metro's kMovingPixels
+inline constexpr double afw2_moving_px=.25;
 // A camera-to-camera rigid map in camera metres (x right, y up, z forward): P_from = r * P_to + t.
 struct Afw2Rigid {std::array<double,9> r{1,0,0,0,1,0,0,0,1};std::array<double,3> t{};};
 inline Afw2Rigid afw2_mul(const Afw2Rigid& a,const Afw2Rigid& b) { // a after b: P = a(b(P))
@@ -93,6 +96,7 @@ class Afw2Pass {
     }
 public:
     std::uint64_t passes{};
+    int rig_order{},rig_debug{};                                // v1190: inside the rig target, 0 this eye's kept rig first, 1 the fresh eye's first (tools)
     explicit Afw2Pass(ID3D11Device* device);
     // Holes left after the fill on the last pass (reads back and waits: tools and the lab only).
     std::uint32_t holes() {
@@ -124,7 +128,7 @@ public:
     ID3D11Texture2D* run(const StaleLayers& L,UINT width,UINT height,ID3D11ShaderResourceView* kept,ID3D11ShaderResourceView* kept_depth,UINT kw,UINT kh,
                          ID3D11ShaderResourceView* fresh,ID3D11ShaderResourceView* fresh_depth,UINT fw,UINT fh,
                          ID3D11ShaderResourceView* kept_motion,ID3D11ShaderResourceView* fresh_motion,
-                         ID3D11ShaderResourceView* kept_rig,ID3D11ShaderResourceView* fresh_rig);
+                         ID3D11ShaderResourceView* kept_rig,ID3D11ShaderResourceView* fresh_rig,bool rig_target=false);
 };
 
 inline Afw2Pass::Afw2Pass(ID3D11Device* device):device_(device) {
@@ -144,7 +148,8 @@ cbuffer Afw : register(b0) {
     float4 layersOn;   // carried, left, right on; still (identical cameras)
     float4 display;    // output w, h, 1/w, 1/h
     float4 validRect;  // kept u, v max, fresh u, v max
-    float4 fillStep;   // x step (texels), y last pass, z the camera's sideways step in texels per inverse metre
+    float4 fillStep;   // x step (texels), y last pass, z the camera's sideways step in texels per inverse metre, w the near-mover gate (px)
+    float4 rigMode;    // x the rig target (t15) is bound, y colour order inside it (0: this eye's kept rig first, 1: the fresh eye's first)
 }
 Texture2D keptColour : register(t0); Texture2D<float> keptDepth : register(t1);
 Texture2D freshColour : register(t2); Texture2D<float> freshDepth : register(t3);
@@ -158,8 +163,11 @@ RWStructuredBuffer<uint> freshKeysOut : register(u4); RWStructuredBuffer<uint> h
 // per drawn hand (2 left, 3 right): its rig texels' look-ups, [hand*2] confirmed, [hand*2+1] refuted (Motion counts, Splat reads)
 RWStructuredBuffer<uint> handVotes : register(u6); StructuredBuffer<uint> handVotesIn : register(t13);
 SamplerState linearSampler : register(s0);
+// v1190 (engine side, rig_target.hpp): the rig and held items of this tick drawn into THIS eye's target camera: x reverse-Z depth (0 none),
+// y class (255 rig, 253 held, 0 none); render-sized, the target grid's texels
+Texture2D<float2> rigTarget : register(t15);
 // motion flags (w)
-static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16;
+static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128;
 // key low bits
 static const uint kKeyRig=1,kKeyMoving=2,kKeyFlags=7,kSkyKey=8;
 static const uint kFilled=0x80000000u,kSeed=0x40000000u;
@@ -280,7 +288,21 @@ bool FreshMoverNear(float3 p) {
     const int2 c=int2(Project(freshFov,f)*freshGrid.xy);
     [unroll] for(int n=0;n<9;++n) {
         const int2 j=clamp(c+(int2(n%3,n/3)-1)*4,int2(0,0),int2(freshGrid.xy)-1);
-        if(freshMotion.Load(int3(j,0)).w>=flags.w) return true;
+        if(freshMotion.Load(int3(j,0)).w>=fillStep.w) return true;
+    }
+    return false;
+}
+// v1190: the rig target has rig at target texel i (Motion's outline votes; RigTargetAt below gives the depth)
+bool RigTargetHas(int2 i) {
+    if(rigMode.x<=0 || any(i<0) || any(i>=int2(grid.xy))) return false;
+    const float2 r=rigTarget.Load(int3(i,0));return r.x>1e-7 && r.y>0;
+}
+// kept rig texel i (depth a) lies on the rig's own outline: a texel 2 away is not rig and farther (not a scene occluder's edge)
+bool KeptRigOutline(int2 i,float a) {
+    [unroll] for(int n=0;n<8;++n) {
+        float2 dir;sincos(n*0.7853982,dir.y,dir.x);const int2 j=clamp(i+int2(round(dir*2)),int2(0,0),int2(grid.xy)-1);
+        const float b=KeptAhead(j);
+        if(!KeptRigAt(j) && (b<=0 || b>a+Tol(a))) return true;
     }
     return false;
 }
@@ -321,8 +343,20 @@ bool FreshMoverNear(float3 p) {
         const bool any_moving=parts.z>0 || parts.w>0;   // the head's rig (owner 1: a forearm nearer the eye than its palm) votes while a hand moves too
         if((owner>=2?moving:any_moving) && (r==1 || r==-1)) InterlockedAdd(handVotes[owner*2+(r==1?0:1)],1);
         w|=uint(owner)<<5;                          // the owner (bits 5-6): Splat drops a moving hand its look-ups refute as a whole
+        // v1190 outline votes: with the rig target, the rig's own outline moved by its motion must land on the target's outline (within 2
+        // texels; 3 for a sword's thin blade): a flat hand confirms any wrong shift texel by texel, its outline does not (an exact silhouette, same grid, same tick)
+        if(rigMode.x>0 && KeptRigOutline(i,a)) {
+            const float3 t=Apply(KT,p+d);bool on=false;
+            if(t.z>1e-3) {
+                const int2 c=int2(Project(targetFov,t)*grid.xy);
+                if(RigTargetHas(c)) [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || !RigTargetHas(c+int2(round(dir*3)));}
+                else [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || RigTargetHas(c+int2(round(dir*3)));}
+            }
+            InterlockedAdd(handVotes[10+owner*2+(on?0:1)],1);
+        }
         if(r==1) w|=kConfirmed;
-        else if(r==2 && moving) d=LayerStep(1,p);   // v1174: a moving hand outside the fresh view shows in place (moves with the head)
+        if(r==2) w|=kOutside;
+        if(r==2 && moving) d=LayerStep(1,p);   // v1174: a moving hand outside the fresh view shows in place (moves with the head)
         if(dot(d,d)>0) w|=kMoving;
     }
     if(dot(d,d)>0 && !(w&kDrop)) {const float3 m=p+d;if(m.z>1e-3) InterlockedMax(handVotes[8],uint(length((Project(keptFov,m)-Project(keptFov,p))*grid.xy))+1);}
@@ -373,12 +407,27 @@ bool FreshMoverNear(float3 p) {
 // than a tenth of its texels (a flat hand confirms any shift within its own outline texel by texel, so only a clear majority counts)
 bool StandsDown(uint owner) {
     if(owner<1 || owner>3) return false;
+    // v1190: with the rig target, its outline votes decide, moving or not (a hand whose grip stood still while the drawn hand moved): a
+    // half of its outline off the target's stands it down (a third stood a sword hand down that had moved 3.6 mm: swing 8)
+    if(rigMode.x>0) {const uint on=handVotesIn[10+owner*2],off=handVotesIn[11+owner*2];return on+off>=16 && off*2>on+off;}
     const bool moving=owner==1?parts.z>0 || parts.w>0:owner==2?parts.z>0:parts.w>0;
     return moving && handVotesIn[owner*2+1]*10>handVotesIn[owner*2]+handVotesIn[owner*2+1];
 }
 // The key a kept texel writes into the target grid and the target texels it covers: the texel's square (its depth and motion at its four
 // corners) projected into the target, every target texel whose centre lies in its bounds (half open: a still frame covers exactly its own
 // texel; a magnified view leaves no seams). false: no source (the band, dropped, behind the target camera, outside the target).
+// v1187 (v1183 street 11 and 21: a beam 16 cm from the eye and a sleeve seen edge-on came out as dots): corner n of kept texel i (its depth
+// a) at the depth its surface has there: the mean of the four texels around the corner that lie on this surface (15 % + 2 cm), so a slanted
+// surface's squares meet edge to edge after the move instead of shrinking to their centres' depth. (A local float[4] of these, indexed in
+// the unrolled projection loop, miscompiled under fxc: every splat moved; computed per corner instead.)
+float CornerAhead(int2 i,int n,float a) {
+    float sum=0,cnt=0;
+    [unroll] for(int k=0;k<4;++k) {
+        const float b=KeptAhead(clamp(i+int2(n&1,n>>1)-int2(k&1,k>>1),int2(0,0),int2(grid.xy)-1));
+        if(b>0 && abs(b-a)<0.02+0.15*a) {sum+=b;cnt+=1;}
+    }
+    return cnt>0?sum/cnt:a;
+}
 bool SplatOf(int2 i,out uint key,out int2 lo,out int2 hi) {
     key=0;lo=int2(0,0);hi=int2(-1,-1);
     const float2 uv=(float2(i)+0.5)*grid.zw;
@@ -389,26 +438,36 @@ bool SplatOf(int2 i,out uint key,out int2 lo,out int2 hi) {
     // any shift within its own outline texel by texel): the whole hand stands down for the fresh eye's (rig_from_fresh). Known gap (v1165
     // door 6): a large smooth forearm confirms texel by texel under a wrong grip motion (1 % refuted); an outline-only vote refuted every
     // hand (render-sized outlines); the real fix is the rig's own motion (mask 255) or the hand fit as a correction.
-    if((w&kRig) && StandsDown((w>>5)&3)) return false;
+    if((w&kRig) && !(w&kOutside) && rigMode.x<=0 && StandsDown((w>>5)&3)) return false;   // (v1187: what the fresh eye cannot see stays this eye's own)
     const bool sky=(w&kSky)!=0;
     float a=1;if(!sky) a=KeptAhead(i);
     float2 bmin=1e9,bmax=-1e9;float zc=0;
     [unroll] for(int n=0;n<5;++n) {
         const float2 c=n<4?(float2(i)+float2(n&1,n>>1))*grid.zw:uv;
-        const float3 t=sky?Turn(KT,Ray(keptFov,c)):Apply(KT,Ray(keptFov,c)*a+m.xyz);
+        const float3 t=sky?Turn(KT,Ray(keptFov,c)):Apply(KT,Ray(keptFov,c)*(n<4?CornerAhead(i,n,a):a)+m.xyz);
         if(t.z<=1e-3) return false;
         const float2 tv=Project(targetFov,t)*grid.xy;
         if(n<4) {bmin=min(bmin,tv);bmax=max(bmax,tv);} else zc=t.z;
     }
-    if(any(bmax-bmin>8)) return false;                              // a texel torn across the view (behind the camera's plane): none
+    if(any(bmax-bmin>16)) return false;                             // a texel torn across the view (behind the camera's plane): none
     lo=max(int2(ceil(bmin-0.5)),int2(0,0));hi=min(int2(ceil(bmax-0.5))-1,int2(grid.xy)-1);
-    key=sky?kSkyKey:(asuint(1/zc)&~kKeyFlags)|((w&kRig)?kKeyRig:0)|((w&kMoving)?kKeyMoving:0);
+    key=sky?kSkyKey:(asuint(1/zc)&~kKeyFlags)|((w&kRig)?kKeyRig:0)|((w&(kMoving|kRig))?kKeyMoving:0);
     return all(hi>=lo);
 }
+// v1190: the rig target has the player's rig and held items at target texel i (metres ahead in `ahead`)
+bool RigTargetAt(int2 i,out float ahead) {
+    ahead=0;if(rigMode.x<=0) return false;
+    const float2 r=rigTarget.Load(int3(clamp(i,int2(0,0),int2(grid.xy)-1),0));
+    if(!(r.x>1e-7) || !(r.y>0)) return false;
+    ahead=terms.y/(r.x+terms.x);return true;
+}
+// v1190 rule 3: with the rig target a kept rig texel lands only where the target has the rig (a hand carried there by a wrong or late motion
+// is no hand: the fill shows what lies behind)
+bool Lands(uint key,int2 j) {float a;return rigMode.x<=0 || !(key&kKeyRig) || RigTargetAt(j,a);}
 [numthreads(8,8,1)] void Splat(uint3 id : SV_DispatchThreadID) {
     if(any(id.xy>=uint2(grid.xy))) return;
     uint key;int2 lo,hi;
-    if(SplatOf(int2(id.xy),key,lo,hi)) for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) InterlockedMax(keysOut[Index(int2(x,y))],key);
+    if(SplatOf(int2(id.xy),key,lo,hi)) for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) if(Lands(key,int2(x,y))) InterlockedMax(keysOut[Index(int2(x,y))],key);
 }
 // Origins: a moving texel whose key won a target texel leaves its own index there (the resolve takes its motion back off)
 [numthreads(8,8,1)] void Origins(uint3 id : SV_DispatchThreadID) {
@@ -497,8 +556,8 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
     // the rig of a group that stood down (v1185: only then; the fresh eye's rim-lit fingers showed around a kept hand otherwise); a near
     // mover (within reach: its vector may be unusable, see Motion), never a far one (its own shading)
     const bool rig=FreshRigAt(i);
-    if(rig && !StandsDown(uint(Owner(Apply(TK,Apply(FT,Ray(freshFov,uv)*a)),true)))) return;
-    if(!rig && !(flags.y>0 && a<1.5 && freshMotion.Load(int3(i,0)).w>=flags.w)) return;
+    if(rig && (rigMode.x>0 || !StandsDown(uint(Owner(Apply(TK,Apply(FT,Ray(freshFov,uv)*a)),true))))) return;
+    if(!rig && !(flags.y>0 && a<1.5 && freshMotion.Load(int3(i,0)).w>=fillStep.w)) return;
     const float3 t=Apply(FT,Ray(freshFov,uv)*a);
     if(t.z<=1e-3) return;
     const float2 tv=Project(targetFov,t);
@@ -556,6 +615,23 @@ float4 Clean(float2 q,float ahead) {
     if(best>98) return Smooth(keptColour,q);
     return keptColour.Load(int3(clamp(i0+pick,int2(0,0),int2(display.xy)-1),0));
 }
+// v1190: the fresh eye's rig colour at fresh uv fu of a rig point fz metres ahead: the bilinear blend of the 2x2 colour pixels around fu
+// whose texel is rig at that depth (no colour of a post or wall beside the hand bleeds in); ok false: none of the four is
+// v1190 tools (rigMode.z): the source of a rig pixel as a colour code (1 kept, 2 fresh, 3 kept neighbour, 4 kept hidden-both, 5 fresh
+// neighbour, 6 fresh unmasked) instead of its colour
+float4 RigSource(float4 c,int code) {return rigMode.z>0?float4(code*40/255.0,0,0,1):c;}
+float4 FreshRigSample(float2 fu,float fz,out bool ok) {
+    const float2 p=fu*display.xy-0.5;const int2 i0=int2(floor(p));const float2 f=p-i0;
+    float4 sum=0;float weight=0;
+    [unroll] for(int n=0;n<4;++n) {
+        const int2 o=int2(n&1,n>>1);const int2 c=clamp(i0+o,int2(0,0),int2(validRect.zw*display.xy)-1);
+        const int2 j=clamp(int2((float2(c)+0.5)*display.zw*freshGrid.xy),int2(0,0),int2(freshGrid.xy)-1);
+        if(!FreshRigAt(j) || abs(FreshAhead(j)-fz)>=Tol(fz)) continue;
+        const float w=max((o.x?f.x:1-f.x)*(o.y?f.y:1-f.y),1e-4);
+        sum+=w*freshColour.Load(int3(c,0));weight+=w;
+    }
+    ok=weight>0;return ok?sum/weight:float4(0,0,0,0);
+}
 struct Vertex {float4 position : SV_POSITION; float2 uv : TEXCOORD0;};
 Vertex ResolveVS(uint id : SV_VertexID) {
     const float2 uv=float2((id<<1)&2,id&2);
@@ -576,6 +652,69 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             const float3 f=Apply(TF,Ray(targetFov,uv)*zf);
             const float2 fu=Project(freshFov,f);
             if(f.z>1e-3 && InFresh(fu)) return Smooth(freshColour,min(fu,validRect.zw-2*display.zw));
+        }
+    }
+    // v1190: the rig target decides the player's pixels. Rule 1: rig where the target has it and nothing of the world splatted here is
+    // nearer (3 % + 1 cm). Rule 2: its colour from (b) this eye's kept rig texel the splat put here at that depth, or (a) the fresh eye's rig
+    // at the exact reprojection of (pixel, target depth) where its mask and depth agree (rigMode.y picks the order); (c) the nearest kept rig
+    // texel of the target's rig within 2 texels, at this pixel's depth with its motion; last the fresh eye's sample there. Never background.
+    float zr;
+    if(RigTargetAt(i,zr)) {
+        const bool key_rig=key!=0 && (key&kKeyRig) && !(landed&kFilled);
+        if(key_rig || key==0 || zr<z-Tol(zr)) {
+            const float3 r=Ray(targetFov,uv);
+            float4 kept_c=0,fresh_c=0;bool kept_ok=false,fresh_ok=false;
+            // (b) only from a group the fresh eye's votes did not stand down: a flat hand confirms a wrong grip texel by texel
+            const bool down=(key&kKeyMoving) && StandsDown((uint(motionIn[originsIn[at]].w)>>5)&3);
+            float4 kept_any=0;bool kept_any_ok=false;   // (the same from a group that stood down: only before showing what covered the rig)
+            if(key_rig && abs(z-zr)<Tol(zr)) {
+                float3 pk=Apply(TK,r*z);if(key&kKeyMoving) pk-=motionIn[originsIn[at]].xyz;
+                // (and the kept frame showed that point: not hidden behind something nearer there, a post before the hand)
+                const float2 kq=pk.z>1e-4?clamp(Project(keptFov,pk),0.5*display.zw,validRect.xy-2*display.zw):float2(-1,-1);
+                if(pk.z>1e-4 && SameAt(kq,pk.z)) {kept_any=Clean(kq,pk.z);kept_any_ok=true;}   // (Clean: no colour of the post beside it)
+                if(!down) {kept_c=kept_any;kept_ok=kept_any_ok;}
+            }
+            const float3 f=Apply(TF,r*zr);const float2 fu=f.z>1e-3?Project(freshFov,f):float2(-1,-1);
+            if(InFresh(fu)) fresh_c=FreshRigSample(fu,f.z,fresh_ok);
+            if(rigMode.y<0.5) {if(kept_ok) return RigSource(kept_c,1);if(fresh_ok) return RigSource(fresh_c,2);}
+            else {if(fresh_ok) return RigSource(fresh_c,2);if(kept_ok) return RigSource(kept_c,1);}
+            float best=99;uint best_at=0;
+            [unroll] for(int n=0;n<25;++n) {
+                const int2 o=int2(n%5,n/5)-2;const int2 j=clamp(i+o,int2(0,0),int2(grid.xy)-1);const uint aj=Index(j);
+                const uint kj=keysIn[aj];float zj;
+                if(kj==0 || !(kj&kKeyRig) || (landedIn[aj]&kFilled) || !RigTargetAt(j,zj) || abs(KeyZ(kj)-zj)>=Tol(zj) || dot(o,o)>=best) continue;
+                if((kj&kKeyMoving) && StandsDown((uint(motionIn[originsIn[aj]].w)>>5)&3)) continue;
+                best=dot(o,o);best_at=aj;
+            }
+            if(best<99) {
+                float3 pk=Apply(TK,r*zr);if(keysIn[best_at]&kKeyMoving) pk-=motionIn[originsIn[best_at]].xyz;
+                const float2 kq=pk.z>1e-4?clamp(Project(keptFov,pk),0.5*display.zw,validRect.xy-2*display.zw):float2(-1,-1);
+                if(pk.z>1e-4 && SameAt(kq,pk.z)) return RigSource(Clean(kq,pk.z),3);
+                // hidden from both eyes there (behind a post in both views): the kept hand's own pixels nearest that place (Clean keeps
+                // to the hand's surface), not whatever covered it
+                if(pk.z>1e-4) {const float2 cq=kq;const int2 cc=int2(cq*grid.xy);bool hand_near=false;
+                    [unroll] for(int n=0;n<9;++n) hand_near=hand_near || SameAt((float2(cc+int2(n%3,n/3)-1)+0.5)*grid.zw,pk.z);
+                    if(hand_near) return RigSource(Clean(cq,pk.z),4);
+                    // else the hand's nearest own pixel within 8 render texels (16 directions)
+                    [loop] for(int r=2;r<=8;++r) [unroll] for(int n=0;n<16;++n) {
+                        float2 dir;sincos(n*0.3926991,dir.y,dir.x);const float2 u=cq+round(dir*r)*grid.zw;const int2 px=int2(u*display.xy);
+                        if(InKept(u) && SameAt((float2(px)+0.5)*display.zw,pk.z)) return RigSource(keptColour.Load(int3(px,0)),4);
+                    }}
+            }
+            if(f.z>1e-3) {
+                const float2 fc=clamp(fu,display.zw,validRect.zw-2*display.zw);bool any_rig;const float4 c=FreshRigSample(fc,f.z,any_rig);
+                if(any_rig) return RigSource(c,2);
+                // (c) in the fresh eye: hidden from both eyes here (behind a post in both views): the fresh eye's nearest rig pixel at this
+                // depth within 8 render texels, never what covered it
+                [loop] for(int rr=2;rr<=8;++rr) [unroll] for(int n=0;n<16;++n) {
+                    float2 dir;sincos(n*0.3926991,dir.y,dir.x);const float2 u=fc+round(dir*rr)*freshGrid.zw;
+                    const int2 px=int2(u*display.xy);   // the colour pixel there, judged by the texel under its centre
+                    const int2 j=clamp(int2((float2(px)+0.5)*display.zw*freshGrid.xy),int2(0,0),int2(freshGrid.xy)-1);
+                    if(InFresh(u) && FreshRigAt(j) && abs(FreshAhead(j)-f.z)<0.05+0.1*f.z) return RigSource(freshColour.Load(int3(px,0)),5);
+                }
+                if(kept_any_ok) return RigSource(kept_any,3);
+                return RigSource(Smooth(freshColour,fc),6);
+            }
         }
     }
     if(key==0) {                                                  // never black: the kept image by the camera turn alone
@@ -663,7 +802,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     checked(device_->CreateSamplerState(&s,&sampler_),"sampler");
     D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;checked(device_->CreateRasterizerState(&r,&raster_),"rasterizer");
     D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthFunc=D3D11_COMPARISON_ALWAYS;checked(device_->CreateDepthStencilState(&ds,&depth_),"depth state");
-    votes_=buffer(12,4);
+    votes_=buffer(20,4);
     D3D11_BUFFER_DESC h{};h.ByteWidth=4;h.Usage=D3D11_USAGE_STAGING;h.CPUAccessFlags=D3D11_CPU_ACCESS_READ;h.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;h.StructureByteStride=4;
     checked(device_->CreateBuffer(&h,nullptr,&holes_read_),"holes read-back");
 }
@@ -671,7 +810,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
 inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT height,ID3D11ShaderResourceView* kept,ID3D11ShaderResourceView* kept_depth,UINT kw,UINT kh,
                                       ID3D11ShaderResourceView* fresh,ID3D11ShaderResourceView* fresh_depth,UINT fw,UINT fh,
                                       ID3D11ShaderResourceView* kept_motion,ID3D11ShaderResourceView* fresh_motion,
-                                      ID3D11ShaderResourceView* kept_rig,ID3D11ShaderResourceView* fresh_rig) {
+                                      ID3D11ShaderResourceView* kept_rig,ID3D11ShaderResourceView* fresh_rig,bool rig_target) {
     grids(kw,kh,fw,fh);target(width,height);
     const auto fov_or=[&](const WarpFov& f) {return warp_fov_valid(f)?f:L.kept_fov;};
     const WarpFov kf=L.kept_fov,tf=fov_or(L.target_fov),ff=fov_or(L.fresh_fov);
@@ -690,14 +829,15 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     for(int i=0;i<3;++i) put(L.kept_axes[i*3],L.kept_axes[i*3+1],L.kept_axes[i*3+2],0);
     const bool masks=kept_rig && fresh_rig,motions=kept_motion && fresh_motion && L.motion_rules;
     const bool rig_motion=motions && masks && L.rig_motion_rules;  // per texel: mask 255 (engine 4bd8ad2), not the per-render flags
-    put(masks?1:0,motions?1:0,rig_motion?1:0,mover_px);
+    put(masks?1:0,motions?1:0,rig_motion?1:0,afw2_moving_px);
     const bool hands=masks && L.rig_from_fresh;
     put(L.fresh_part,L.kept_part,hands && L.hand_moving[0]?1:0,hands && L.hand_moving[1]?1:0);
     bool still=true;for(int i=0;i<9;++i) still=still && std::abs(TK.r[i]-(i%4==0?1:0))<1e-7;for(double t:TK.t) still=still && std::abs(t)<1e-7;
     put(L.carried?1:0,L.hand[0]?1:0,L.hand[1]?1:0,still?1:0);
     put(width,height,1./width,1./height);
     {const double u=1-std::clamp(L.border[0],0.,.25),v=1-std::clamp(L.border[1],0.,.25);put(u,v,u,v);}
-    const std::size_t step_at=at;put(0,0,std::hypot(TK.t[0],TK.t[1])*kw/(std::tan(kf.right)-std::tan(kf.left)),0);
+    const std::size_t step_at=at;put(0,0,std::hypot(TK.t[0],TK.t[1])*kw/(std::tan(kf.right)-std::tan(kf.left)),mover_px);
+    put(rig_target && kept_rig && fresh_rig?1:0,rig_order,rig_debug,0);   // (the rig target needs the masks: its colour comes from rig texels)
     const auto upload=[&](double step,bool last) {c[step_at]=float(step);c[step_at+1]=last?1.f:0.f;context_->UpdateSubresource(constants_.Get(),0,nullptr,c.data(),0,0);};
     upload(0,false);
     ID3D11Buffer* cb=constants_.Get();context_->CSSetConstantBuffers(0,1,&cb);context_->PSSetConstantBuffers(0,1,&cb);
@@ -745,16 +885,17 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     }
     bind({},{});ID3D11ShaderResourceView* none8[8]{};context_->CSSetShaderResources(0,8,none8);context_->CSSetShader(nullptr,nullptr,0);
     // 7 resolve at display size
-    ID3D11ShaderResourceView* ps_in[13]{kept,kept_depth,fresh,fresh_depth,nullptr,nullptr,nullptr,nullptr,motion_[1].srv.Get(),keys_[from].srv.Get(),landed_[from].srv.Get(),
-                                        origins_[from].srv.Get(),fresh_keys_.srv.Get()};
+    // (v1190: the resolve reads the rig masks and the hand votes too: the rig target's colour rules)
+    ID3D11ShaderResourceView* ps_in[14]{kept,kept_depth,fresh,fresh_depth,inputs[4],inputs[5],inputs[6],inputs[7],motion_[1].srv.Get(),keys_[from].srv.Get(),landed_[from].srv.Get(),
+                                        origins_[from].srv.Get(),fresh_keys_.srv.Get(),votes_.srv.Get()};
     const D3D11_VIEWPORT vp{0,0,float(width),float(height),0,1};
     context_->RSSetViewports(1,&vp);context_->RSSetState(raster_.Get());context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->OMSetDepthStencilState(depth_.Get(),0);context_->OMSetBlendState(nullptr,nullptr,0xffffffff);
     context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
-    context_->PSSetShaderResources(0,13,ps_in);
+    context_->PSSetShaderResources(0,14,ps_in);
     auto* rtv=output_rtv_.Get();context_->OMSetRenderTargets(1,&rtv,nullptr);
     context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);context_->Draw(3,0);
-    ID3D11ShaderResourceView* none13[13]{};context_->PSSetShaderResources(0,13,none13);context_->OMSetRenderTargets(0,nullptr,nullptr);
+    ID3D11ShaderResourceView* none13[14]{};context_->PSSetShaderResources(0,14,none13);context_->OMSetRenderTargets(0,nullptr,nullptr);
     ++passes;
     return output_.Get();
 }

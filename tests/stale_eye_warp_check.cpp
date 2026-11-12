@@ -1138,9 +1138,9 @@ static void gpu_afw2() {
     constexpr UINT W = 256, H = 160, RW = 192, RH = 120;
     const double T = 0.5;
     const WarpFov fov{-std::atan(T), std::atan(T), std::atan(T), -std::atan(T)};
-    enum {sky_kind, wall_kind, object_kind, pole_kind, hand_kind, guard_kind};
+    enum {sky_kind, wall_kind, object_kind, pole_kind, hand_kind, guard_kind, beam_kind};
     // slant: the object's sides lean (x shifts by slant * y); aa: colour anti-aliased (4x4 samples a pixel, as the game's edges are)
-    struct Scene {double object = std::nan(""), pole = std::nan(""), hand = std::nan(""), guard = std::nan(""); Vec3 walk{}; int lift = 0; double slant = 0; bool aa = false;};
+    struct Scene {double object = std::nan(""), pole = std::nan(""), hand = std::nan(""), guard = std::nan(""); Vec3 walk{}; int lift = 0; double slant = 0; bool aa = false; double beam = std::nan(""), bar = std::nan("");};  // bar: a 2 cm post 0.3 m away (before the hand)  // beam: a striped plate seen nearly edge-on, from x = beam at 0.2 m away
     struct Frame {ComPtr<ID3D11Texture2D> image, depth, rig, motion; std::vector<int> grey, kind; std::vector<double> ahead;};
     // what camera c (position, looking down -z) sees through uv: kind, colour, distance ahead
     const auto look = [&](Vec3 c, const Scene& s, double u, double v, int& kind, double& ahead) {
@@ -1156,6 +1156,12 @@ static void gpu_afw2() {
         if (std::isfinite(s.pole)) plane(-0.6, s.pole - 0.0075, s.pole + 0.0075, 10, pole_kind, 220);
         if (std::isfinite(s.object)) plane(-0.5, s.object - 0.06, s.object + 0.06, 0.06, object_kind, 0, s.slant);
         if (std::isfinite(s.hand)) plane(-0.45, s.hand - 0.05, s.hand + 0.05, 0.05, hand_kind, 0);
+        if (std::isfinite(s.bar)) plane(-0.3, s.bar - 0.01, s.bar + 0.01, 10, pole_kind, 230);
+        if (std::isfinite(s.beam)) {  // z = -0.2 - 2.5 (x - beam): it recedes steeply to the right (seen at a grazing angle)
+            const double k = 2.5, a = (c.z + 0.2 + k * (c.x - s.beam)) / (1 - k * tx);
+            const double x = c.x + a * tx, y = c.y + a * ty;
+            if (a > 0 && a < ahead && x >= s.beam && x <= s.beam + 0.3 && std::abs(y) <= 0.05) {ahead = a; kind = beam_kind; wx = x; g = (static_cast<int>(std::floor((x - s.beam) / 0.01)) & 1) ? 230 : 190;}
+        }
         if (kind == guard_kind) g = (static_cast<int>(std::floor((wx - s.guard) / 0.05)) & 1) ? 195 : 175;
         if (kind == object_kind) g = (static_cast<int>(std::floor((wx - s.object) / 0.02)) & 1) ? 170 : 140;
         if (kind == hand_kind) g = (static_cast<int>(std::floor((wx - s.hand) / 0.02)) & 1) ? 120 : 100;
@@ -1192,14 +1198,27 @@ static void gpu_afw2() {
     const auto id = *stale_eye_homography({}, fov, {}, fov);
     struct Run {std::vector<unsigned char> out; std::uint32_t holes;};
     // kept camera kc (hand drawn at kept_hand, its grip at grip now), target tc, fresh fc; masks and motion textures on or off
+    // v1190: the rig target the engine draws (this tick's rig, depth-only, in the target camera; no scene), emulated: the hand of `s` from c
+    ID3D11Texture2D* rig_target = nullptr;
+    const auto target_rig = [&](Vec3 c, double hand) {
+        std::vector<float> t(RW * RH * 2, 0.f); Scene only; only.hand = hand;
+        for (UINT y = 0; y < RH; ++y) for (UINT x = 0; x < RW; ++x) {
+            int k; double a; look(c, only, (x + 0.5) / RW, (y + 0.5) / RH, k, a);
+            if (k == hand_kind) {t[(y * RW + x) * 2] = static_cast<float>(0.01 / a); t[(y * RW + x) * 2 + 1] = 255.f;}
+        }
+        D3D11_TEXTURE2D_DESC desc{}; desc.Width = RW; desc.Height = RH; desc.MipLevels = 1; desc.ArraySize = 1; desc.SampleDesc.Count = 1;
+        desc.Format = DXGI_FORMAT_R32G32_FLOAT; desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        const D3D11_SUBRESOURCE_DATA data{t.data(), RW * 8, 0}; ComPtr<ID3D11Texture2D> tex; CHECK(SUCCEEDED(device->CreateTexture2D(&desc, &data, &tex)));
+        return tex;
+    };
     const auto run = [&](bool afw2, Vec3 kc, Vec3 tc, Vec3 fc, const Frame& k, const Frame& f, double kept_hand, double grip, bool masks, bool motion) {
         WarpCamera kcam = camera({}, kc), tcam = camera({}, tc), fcam = camera({}, fc);
         if (std::isfinite(kept_hand)) {kcam.hand_bits = tcam.hand_bits = 2u; kcam.hands[1] = pose(kept_hand); tcam.hands[1] = pose(grip);}
         auto l = *stale_eye_layers(kcam, fov, tcam, fov, &fcam, fov, 2.0);
-        l.afw2 = afw2;
+        l.afw2 = afw2; l.rig_target = rig_target != nullptr;
         const auto out = read_back(device.Get(), context.Get(), warp.apply(k.image.Get(), id, &l, {k.depth.Get(), RW, RH}, f.image.Get(), {f.depth.Get(), RW, RH},
             motion ? StaleMotion{k.motion.Get(), RW, RH} : StaleMotion{}, motion ? StaleMotion{f.motion.Get(), RW, RH} : StaleMotion{},
-            masks ? StaleRig{k.rig.Get(), RW, RH} : StaleRig{}, masks ? StaleRig{f.rig.Get(), RW, RH} : StaleRig{}));
+            masks ? StaleRig{k.rig.Get(), RW, RH} : StaleRig{}, masks ? StaleRig{f.rig.Get(), RW, RH} : StaleRig{}, StaleRig{rig_target, RW, RH}));
         return Run{out, afw2 && warp.afw2 ? warp.afw2->holes() : 0u};
     };
     // a scored run: wrong = outside the truth's 3x3 range +-12 (silhouettes within a pixel of a depth step skipped); uncovered = truth pixels
@@ -1331,6 +1350,96 @@ static void gpu_afw2() {
         std::printf("afw2 F. leaning anti-aliased edge, camera %.0f mm sideways and up: outline error AFW2 %.1f levels (%d px 30+ off) | today %.1f (%d)\n",
                     step * 1000, ma, sa, mb, sb);
         CHECK(ma < 12 && sa < 40);
+    }
+    // G. (v1183 street 11: a beam 16 cm from the eye splatted as dots) a striped plate seen nearly edge-on 0.2-1 m away, the camera 5 mm
+    // forward and sideways: every beam pixel of the truth shows the beam (no wall through it)
+    for (const bool forward : {false, true}) {
+        Scene s; s.beam = 0.05; Scene lit = s; lit.lift = 50;
+        const Vec3 kc = forward ? Vec3{0.032, 0, 0.005} : Vec3{0.027, 0, 0};
+        const Frame k = render(kc, s), f = render(fresh_at, lit), truth = render(here, s);
+        const auto a = run(true, kc, here, fresh_at, k, f, std::nan(""), 0, true, true);
+        int n = 0, through = 0;
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            bool inner = true; for (int d = -2; d <= 2; ++d) inner = inner && truth.kind[y * W + x + d] == beam_kind && truth.kind[(y + d) * W + x] == beam_kind;
+            if (!inner) continue;
+            ++n; through += a.out[(y * W + x) * 4] < 120;  // the wall (40/60) instead of the beam (190/230)
+        }
+        std::printf("afw2 G. plate seen edge-on, camera 5 mm %s: wall through the plate in %d of %d px\n", forward ? "forward" : "sideways", through, n);
+        CHECK(n > 200 && through == 0);
+    }
+    // H. (v1183 street 21) a hand at the rebuilt eye's right edge, where the fresh eye has no view, drawn 3 cm on, its grip 8 cm (it stands
+    // down): its pixels outside the fresh view stay this eye's own hand, not the wall behind it
+    {
+        Scene ks; ks.hand = 0.21; Scene ns = ks; ns.hand = 0.24; Scene lit = ns; lit.lift = 50;
+        const Frame k = render(here, ks), f = render(fresh_at, lit), truth = render(here, ns);
+        const auto a = run(true, here, here, fresh_at, k, f, 0.21, 0.29, true, false);
+        int n = 0, wall = 0;
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const double tx = (2 * (x + 0.5) / W - 1) * T, fresh_tx = (0.032 + 0.45 * tx + 0.032) / 0.45;  // the hand point, seen from the fresh eye
+            if (truth.kind[y * W + x] != hand_kind || k.kind[y * W + x] != hand_kind || std::abs(fresh_tx) <= T) continue;
+            ++n; wall += a.out[(y * W + x) * 4] < 80;
+        }
+        std::printf("afw2 H. moving hand outside the fresh view, grip over-moved: wall instead of the hand in %d of %d px\n", wall, n);
+        CHECK(n > 50 && wall == 0);
+    }
+    // I. (v1187 thresholds) a guard 2.5 m away walking 1.5 cm a tick (2.3 render px over the eye's two ticks, under the old 3 px gate),
+    // the camera still: at its new place, the wall at its old place
+    {
+        Scene ks; ks.guard = 0.015; ks.walk = {-0.03, 0, 0}; Scene ns = ks; ns.guard = 0.0; Scene lit = ns; lit.lift = 50;
+        const Frame k = render(here, ks), f = render(fresh_at, lit), truth = render(here, ns);
+        const auto a = run(true, here, here, fresh_at, k, f, std::nan(""), 0, true, true);
+        int n = 0, off = 0;
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const int i = y * W + x;
+            if (truth.kind[i] != guard_kind || truth.kind[i - 2] != guard_kind || truth.kind[i + 2] != guard_kind) continue;
+            int lo = 255, hi = 0; for (int d = -1; d <= 1; ++d) {lo = std::min(lo, truth.grey[i + d]); hi = std::max(hi, truth.grey[i + d]);}
+            ++n; off += a.out[i * 4] < lo - 6 || a.out[i * 4] > hi + 6;
+        }
+        std::printf("afw2 I. guard walking 1.5 cm a tick: %d of %d guard px off its stripes at its new place\n", off, n);
+        CHECK(n > 1000 && off * 100 <= n);
+    }
+    // R. (v1190) the rig target: a hand drawn 5 cm on (camera 2 cm sideways), its recorded grip right, over-moved (10 cm) or still, a post
+    // 0.3 m away before part of it; both colour orders. The hand where the target has it, in this eye's own shading where its kept texels
+    // are confirmed (order 0, grip right), no hand outside the target silhouette, the post in front, nothing of the wall inside the hand.
+    for (const int order : {0, 1}) for (const double grip : {0.0, 0.05, -0.05}) {
+        Scene ks; ks.hand = -0.05; ks.bar = -0.02; Scene ns = ks; ns.hand = 0.0; Scene lit = ns; lit.lift = 50;
+        const Vec3 kc{0.032 - 0.02, 0, 0};
+        const Frame k = render(kc, ks), f = render(fresh_at, lit), truth = render(here, ns), lifted = render(here, lit);
+        const auto rt = target_rig(here, ns.hand); rig_target = rt.Get();
+        if (!warp.afw2) run(true, kc, here, fresh_at, k, f, -0.05, grip, true, false);  // (makes the pass)
+        warp.afw2->rig_order = order;
+        const auto a = run(true, kc, here, fresh_at, k, f, -0.05, grip, true, false);
+        rig_target = nullptr; warp.afw2->rig_order = 0;
+        int hand = 0, wrong = 0, off = 0, own = 0, seen = 0, ghost = 0, bar = 0, bar_wrong = 0;
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const int i = y * W + x, o = a.out[i * 4];
+            int lo = 255, hi = 0, llo = 255, lhi = 0; bool clear = true, inner = true;
+            for (int d = -2; d <= 2; ++d) {clear = clear && truth.kind[i + d] != hand_kind && truth.kind[i + d * W] != hand_kind; inner = inner && truth.kind[i + d] == truth.kind[i] && truth.kind[i + d * W] == truth.kind[i];}
+            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                const int j = i + dy * W + dx; lo = std::min(lo, truth.grey[j]); hi = std::max(hi, truth.grey[j]); llo = std::min(llo, lifted.grey[j]); lhi = std::max(lhi, lifted.grey[j]);
+            }
+            if (truth.kind[i] == hand_kind && inner) {
+                ++hand; const bool kept_ok = o >= lo - 12 && o <= hi + 12, fresh_ok = o >= llo - 12 && o <= lhi + 12;
+                // wrong: not the hand at all (another surface's colour); off: the hand, but not its stripe here (where both eyes' views of
+                // this spot are hidden behind the post, the hand's nearest own pixels stand in)
+                const bool handish = (o >= 88 && o <= 132) || (o >= 138 && o <= 182);
+                wrong += !handish && !kept_ok && !fresh_ok; off += handish && !kept_ok && !fresh_ok;
+                // this hand point a tick ago (the hand 5 cm left), seen from the kept camera: did the kept frame show it?
+                const double tx = (2 * (x + 0.5) / W - 1) * T, ty = (1 - 2 * (y + 0.5) / H) * T;
+                const double px = here.x + 0.45 * tx - 0.05, py = 0.45 * ty;
+                int kk; double ka; look(kc, ks, ((px - kc.x) / 0.45 / T + 1) / 2, (1 - py / 0.45 / T) / 2, kk, ka);
+                if (kk == hand_kind) {++seen; own += kept_ok;}
+                if (!handish && !kept_ok && !fresh_ok && wrong <= 12 && std::getenv("AFW2_VERBOSE")) std::printf("   R wrong (%d,%d): %d truth %d kept %d\n", x, y, o, truth.grey[i], k.grey[i]);
+            }
+            if (clear && truth.kind[i] == wall_kind && o >= 95 && o <= 125) ++ghost;
+            if (truth.kind[i] == pole_kind && inner) {++bar; bar_wrong += o < 200;}
+        }
+        std::printf("afw2 R. rig target, order %s, grip %s: hand %d/%d not the hand (%d off its stripe), of %d the kept frame showed %d in this eye's shading; hand on the wall %d px; post in front %d/%d wrong\n",
+                    order ? "fresh first" : "kept first", grip > 0 ? "over-moved" : grip < 0 ? "still" : "right", wrong, hand, off, seen, own, ghost, bar_wrong, bar);
+        if (std::getenv("AFW2_VERBOSE")) for (int x = 90; x < 160; ++x) std::printf("   col %d: out %d truth %d (kind %d) lifted %d kept %d\n", x, a.out[(80 * W + x) * 4], truth.grey[80 * W + x], truth.kind[80 * W + x], lifted.grey[80 * W + x], k.grey[80 * W + x]);
+        // (over-moved: the hand stands down; where the post hides it from the fresh eye too, its nearest rig pixels stand in, stripes and all)
+        CHECK(hand > 300 && wrong == 0 && (off * 20 <= hand || grip != 0.0) && ghost == 0 && bar > 50 && bar_wrong == 0);
+        if (order == 0 && grip == 0.0) CHECK(seen > 300 && own * 100 >= seen * 95);
     }
     // E. a guard 2.5 m away walking 20 cm a tick (motion textures, both eyes), the camera 2 cm sideways: at its new place in this eye's own
     // shading, the wall at its old place. E'. the kept eye's motion texture says nothing (a vector it lacks: the guard just started): the fresh

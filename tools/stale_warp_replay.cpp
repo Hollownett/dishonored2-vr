@@ -214,6 +214,9 @@ int main(int argc, char** argv) {
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
     CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
     StaleEyeWarp warp(device.Get());
+    // v1190 STALE_REPLAY_RIG_ORDER=0|1: inside the rig target, this eye's kept rig first (0) or the fresh eye's first (1)
+    warp.afw2 = std::make_unique<Afw2Pass>(device.Get());
+    if (const char* o = std::getenv("STALE_REPLAY_RIG_ORDER")) warp.afw2->rig_order = std::atoi(o);
     ComPtr<ID3D11PixelShader> shipped = pixel_of(warp), paths;
     {
         const std::string src = path_variant(shader_source("src/stale_eye_warp.hpp"));
@@ -372,17 +375,30 @@ int main(int argc, char** argv) {
         };
         const StaleRig kept_rig = rig ? StaleRig{kr_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
         const StaleRig fresh_rig = rig ? StaleRig{fr_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleRig{};
-        // v1177 STALE_REPLAY_BORDER=auto: the eye image's bright band measured on the kept image (rows from the bottom, columns from the
-        // right, whose mean lies 8 levels over the mean 80-120 px inside; full-frame dumps only), as the game's caller passes it when it knows
-        if (const char* bd = std::getenv("STALE_REPLAY_BORDER"); bd && std::string(bd) == "auto" && kb.w == W && kb.h == H) {
-            const auto line = [&](bool row, int at) {double sum = 0; const int n = row ? W : H; for (int i = 0; i < n; ++i) {const std::size_t p = row ? (static_cast<std::size_t>(at) * W + i) : (static_cast<std::size_t>(i) * W + at); sum += (kept[p * 4] + kept[p * 4 + 1] + kept[p * 4 + 2]) / 3.0;} return sum / n;};
-            const auto band = [&](bool row) {
-                const int size = row ? H : W; double ref = 0; for (int i = 80; i < 120; ++i) ref += line(row, size - 1 - i); ref /= 40;
-                int b = 0; while (b < 79 && line(row, size - 1 - b) > ref + 8) ++b;
-                return b;
-            };
+        // v1190: the rig target (-target-rig.rg32f: RG32F rows under the kept depth box, raw or after a 16-byte header width, height, format,
+        // row bytes) placed in a render-sized texture; used by AFW2 unless STALE_REPLAY_RIGTARGET=0
+        ComPtr<ID3D11Texture2D> rt_t;
+        if (std::ifstream(stem + "target-rig.rg32f").good() && !(std::getenv("STALE_REPLAY_RIGTARGET") && std::string(std::getenv("STALE_REPLAY_RIGTARGET")) == "0")) {
+            auto raw = load(stem + "target-rig.rg32f");
+            const std::size_t plain = static_cast<std::size_t>(kdb.w) * kdb.h * 8;
+            std::vector<unsigned char> rows;
+            if (raw.size() == plain) rows = raw;
+            else if (raw.size() >= 16) {
+                std::uint32_t hdr[4]; std::memcpy(hdr, raw.data(), 16);
+                CHECK(hdr[0] == static_cast<std::uint32_t>(kdb.w) && hdr[1] == static_cast<std::uint32_t>(kdb.h) && raw.size() >= 16 + static_cast<std::size_t>(hdr[1]) * hdr[3]);
+                rows.resize(plain);
+                for (int y = 0; y < kdb.h; ++y) std::memcpy(&rows[static_cast<std::size_t>(y) * kdb.w * 8], &raw[16 + static_cast<std::size_t>(y) * hdr[3]], static_cast<std::size_t>(kdb.w) * 8);
+            }
+            if (!rows.empty()) rt_t = place(rows, kdb, 8, DXGI_FORMAT_R32G32_FLOAT, kdw, kdh);
+        }
+        const StaleRig rig_target_in = rt_t ? StaleRig{rt_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
+        // v1187 STALE_REPLAY_BORDER=auto: the eye image's band measured as the bottom rows / right columns the kept and fresh images share
+        // (mean difference under 1 level: the band is colour only and the same in both eyes; scene rows differ by parallax). None: no band.
+        if (const char* bd = std::getenv("STALE_REPLAY_BORDER"); bd && std::string(bd) == "auto" && kb.w == W && kb.h == H && fb.w == W && fb.h == H) {
+            const auto line = [&](bool row, int at) {double sum = 0; const int n = row ? W : H; for (int i = 0; i < n; ++i) {const std::size_t p = row ? (static_cast<std::size_t>(at) * W + i) : (static_cast<std::size_t>(i) * W + at); for (int c = 0; c < 3; ++c) sum += std::abs(kept[p * 4 + c] - fresh[p * 4 + c]);} return sum / (3.0 * n);};
+            const auto band = [&](bool row) {const int size = row ? H : W; int b = 0; while (b < 120 && line(row, size - 1 - b) < 1.0) ++b; return b;};
             const int bx = band(false), by = band(true);
-            layers.border = {std::max(layers.border[0], (bx + 2.0) / W), std::max(layers.border[1], (by + 2.0) / H)};
+            layers.border = {bx ? (bx + 1.0) / W : 0.0, by ? (by + 1.0) / H : 0.0};
             std::fprintf(stderr, "  dump %d: band %d px right, %d px bottom\n", n, bx, by);
         }
         // v1177 STALE_REPLAY_AFW2=1: on = the AFW v2 forward splat (src/afw2.hpp), off = today's warp, the mover rules on in both
@@ -394,15 +410,24 @@ int main(int argc, char** argv) {
         layers.target_fov = layers.fresh_fov = layers.kept_fov;  // the dumps carry one FOV (the eyes' are equal there)
         const auto run = [&](bool variant) {
             const bool rules = ab_rig || ab_rig_motion || ab_afw2 ? true : variant, masks = ab_rig ? variant : rig_live;
-            layers.afw2 = ab_afw2 && variant;  // v1160 stencils were not the rig: masks where the meta says rig_mask
+            layers.afw2 = ab_afw2 && variant; layers.rig_target = rt_t != nullptr;  // v1160 stencils were not the rig: masks where the meta says rig_mask
             if (!ab_afw2) layers.rig_motion_rules = ab_rig_motion ? variant : true;
             layers.motion_rules = rules;
             const auto t0 = std::chrono::steady_clock::now();
             auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
                                      motion ? StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleMotion{},
                                      motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleMotion{},
-                                     masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}));
+                                     masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}, rig_target_in));
             std::fprintf(stderr, "  dump %d rules %s, masks %s%s: %.1f s\n", n, rules ? "on" : "off", masks ? "on" : "off", layers.afw2 ? ", AFW2" : "", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            if (layers.afw2 && warp.afw2 && rt_t && std::getenv("STALE_REPLAY_RIGSRC")) {  // v1190: the rig pixels' sources (-rigsrc.rgba, red/40)
+                warp.afw2->rig_debug = 1;
+                const auto src = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
+                                                 motion ? StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleMotion{},
+                                                 motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleMotion{},
+                                                 masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}, rig_target_in));
+                warp.afw2->rig_debug = 0;
+                std::ofstream(out + "/stale-warp-" + std::to_string(n) + "-rigsrc.rgba", std::ios::binary).write(reinterpret_cast<const char*>(src.data()), static_cast<std::streamsize>(src.size()));
+            }
             if (layers.afw2 && warp.afw2) {const auto t = warp.afw2->hole_tiles(); std::printf("      afw2: %u target texels left empty after the fill; hole tiles %u of %u\n", warp.afw2->holes(), t[0], t[1]);}
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 votes (confirmed/refuted): head %u/%u left %u/%u right %u/%u; hands moving %d %d, masks %d\n", v[2], v[3], v[4], v[5], v[6], v[7], int(layers.hand_moving[0]), int(layers.hand_moving[1]), int(masks));}
             return c;
