@@ -409,6 +409,7 @@ int main(int argc, char** argv) {
         // without motion) marks 255 as "valid own motion"
         bool rig_codes = false; for (const auto v : kr) rig_codes = rig_codes || v == 254; for (const auto v : fr) rig_codes = rig_codes || v == 254;
         layers.rig_motion_rules = rig_codes || (layers.rig_motion[0] && layers.rig_motion[1]);  // v1183 dumps: valid rig motion (all 255)
+        if (const char* e = std::getenv("STALE_REPLAY_RIGMOTION")) layers.rig_motion_rules = std::atoi(e) != 0;  // v1198 A/B: 0 = the rigid hand layers only
         layers.target_fov = layers.fresh_fov = layers.kept_fov;  // the dumps carry one FOV (the eyes' are equal there)
         const auto run = [&](bool variant) {
             const bool rules = ab_rig || ab_rig_motion || ab_afw2 ? true : variant, masks = ab_rig ? variant : rig_live;

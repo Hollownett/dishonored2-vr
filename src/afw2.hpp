@@ -58,16 +58,16 @@ inline Afw2Rigid afw2_rigid(const StaleParallax& p,const WarpFov& from,const War
 class Afw2Pass {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     Ptr<ID3D11Device> device_;Ptr<ID3D11DeviceContext> context_;
-    enum Stage {motion,repair,splat,origins,crack,fill,fresh_splat,scatter,scatter_write,stages};
+    enum Stage {motion,repair,splat,origins,crack,fill,fresh_splat,scatter,scatter_write,decide,stages};
     std::array<Ptr<ID3D11ComputeShader>,stages> cs_{};
     Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_;
     Ptr<ID3D11Buffer> constants_;Ptr<ID3D11SamplerState> sampler_;
     Ptr<ID3D11RasterizerState> raster_;Ptr<ID3D11DepthStencilState> depth_;
     struct Buffer {Ptr<ID3D11Buffer> b;Ptr<ID3D11ShaderResourceView> srv;Ptr<ID3D11UnorderedAccessView> uav;};
-    std::array<Buffer,2> motion_{},keys_{},landed_{},origins_{},near_{};Buffer fresh_keys_{},holes_{},votes_{},stats_{};Ptr<ID3D11Buffer> holes_read_;
+    std::array<Buffer,2> motion_{},keys_{},landed_{},origins_{},near_{};Buffer fresh_keys_{},holes_{},votes_{},decisions_{},tiles_{},stats_{};Ptr<ID3D11Buffer> fill_args_;Ptr<ID3D11Buffer> holes_read_;
     UINT gw_{},gh_{},fw_{},fh_{};
 public:
-    static constexpr int profile_stages=9;
+    static constexpr int profile_stages=10;
 private:
     struct Probe {Ptr<ID3D11Query> disjoint;std::array<Ptr<ID3D11Query>,profile_stages+1> ts;Ptr<ID3D11Buffer> stats;bool waiting{};};
     std::array<Probe,3> probes_{};unsigned probe_next_{};
@@ -88,20 +88,20 @@ private:
     }
     Ptr<ID3D11Texture2D> output_;Ptr<ID3D11RenderTargetView> output_rtv_;UINT ow_{},oh_{};
     static void checked(HRESULT r,const char* what) {if(FAILED(r)) throw std::runtime_error(std::string("AFW2: ")+what+" ("+std::to_string(r)+")");}
-    Buffer buffer(UINT count,UINT stride) {
+    Buffer buffer(UINT count,UINT stride,bool append=false) {
         Buffer x;D3D11_BUFFER_DESC d{};d.ByteWidth=count*stride;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
         d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;d.StructureByteStride=stride;
         checked(device_->CreateBuffer(&d,nullptr,&x.b),"buffer");
         D3D11_SHADER_RESOURCE_VIEW_DESC s{};s.Format=DXGI_FORMAT_UNKNOWN;s.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;s.Buffer.NumElements=count;
         checked(device_->CreateShaderResourceView(x.b.Get(),&s,&x.srv),"buffer read view");
-        D3D11_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=DXGI_FORMAT_UNKNOWN;u.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=count;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=DXGI_FORMAT_UNKNOWN;u.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=count;u.Buffer.Flags=append?D3D11_BUFFER_UAV_FLAG_APPEND:0;
         checked(device_->CreateUnorderedAccessView(x.b.Get(),&u,&x.uav),"buffer write view");
         return x;
     }
     void grids(UINT gw,UINT gh,UINT fw,UINT fh) {
         if(gw!=gw_ || gh!=gh_) {
             for(int i=0;i<2;++i) {motion_[i]=buffer(gw*gh,16);keys_[i]=buffer(gw*gh,4);landed_[i]=buffer(gw*gh,4);origins_[i]=buffer(gw*gh,4);near_[i]=buffer(gw*gh,8);}
-            fresh_keys_=buffer(gw*gh,4);holes_=buffer(1+((gw+7)/8)*((gh+7)/8),4);gw_=gw;gh_=gh;
+            fresh_keys_=buffer(gw*gh,4);decisions_=buffer(gw*gh,8);tiles_=buffer(((gw+7)/8)*((gh+7)/8),4,true);holes_=buffer(1+((gw+7)/8)*((gh+7)/8),4);gw_=gw;gh_=gh;
         }
         fw_=fw;fh_=fh;
     }
@@ -118,7 +118,7 @@ public:
     std::uint64_t passes{};
     // v1191 per-pass GPU time: timestamp queries around each stage, read back a few passes late (never waits). stage_ms: the latest
     // complete measurement, in stage_names order; profile=false: no queries issued.
-    static constexpr const char* stage_names[profile_stages]{"scatter","motion","repair","splat","origins","fresh_splat","crack+copies","fill","resolve"};
+    static constexpr const char* stage_names[profile_stages]{"scatter","motion","repair","splat","origins","fresh_splat","crack+copies","fill","decide","resolve"};
     bool profile{true};
     std::array<double,profile_stages> stage_ms{};std::uint64_t profiled{};
     // tools: wait for this pass's timestamps (WARP replays)
@@ -205,6 +205,12 @@ SamplerState linearSampler : register(s0);
 // v1190 (engine side, rig_target.hpp): the rig and held items of this tick drawn into THIS eye's target camera: x reverse-Z depth (0 none),
 // y class (255 rig, 253 held, 0 none); render-sized, the target grid's texels
 Texture2D<float2> rigTarget : register(t15);
+// v1197: the resolve's decisions per target texel (Decide writes, ResolvePS reads)
+StructuredBuffer<uint2> decisionsIn : register(t16); RWStructuredBuffer<uint2> decisionsOut : register(u0);
+// v1197: the 8x8 tiles holding a hole after the crack (Crack appends, Fill runs over them)
+AppendStructuredBuffer<uint> tilesOut : register(u4);
+// v1197 cost: the crack writes landed and near into both fill buffers (no copy; it reads neither)
+RWStructuredBuffer<uint> landedOut0 : register(u0); RWStructuredBuffer<uint2> nearOut0 : register(u6); StructuredBuffer<uint> tilesIn : register(t12);
 // motion flags (w)
 static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128,kHeld=256;
 // key low bits
@@ -589,15 +595,19 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
         const int2 j=i+int2(round(dir));
         seed=seed || (all(j>=0) && all(j<int2(grid.xy)) && keysIn[Index(j)]==0);
     }
-    keysOut[at]=key;landedOut[at]=Pack(i,false)|(seed?kSeed:0);originsOut[at]=origin;nearOut[at]=uint2(asuint(key!=0?0.0:1e9),asuint(key!=0?((key&kKeyRig)?-KeyZ(key):KeyZ(key)):1e30));
-    if(key==0) InterlockedOr(holesOut[1+Tile(i)],1);
+    const uint l=Pack(i,false)|(seed?kSeed:0);const uint2 nr=uint2(asuint(key!=0?0.0:1e9),asuint(key!=0?((key&kKeyRig)?-KeyZ(key):KeyZ(key)):1e30));
+    keysOut[at]=key;landedOut[at]=l;landedOut0[at]=l;originsOut[at]=origin;nearOut[at]=nr;nearOut0[at]=nr;
+    if(key==0) {uint was;InterlockedOr(holesOut[1+Tile(i)],1,was);if(was==0) tilesOut.Append(Tile(i));}   // (v1197: the fill's tile list)
 }
 // Fill (jump flood, steps fillStep.x decreasing to 1): an empty or filled texel takes, among itself and its 8 neighbours fillStep.x
 // apart that are seeds or filled, the FARTHEST surface (smallest key): an uncovered strip is the background's, stretched from its edge.
-[numthreads(8,8,1)] void Fill(uint3 id : SV_DispatchThreadID) {
-    if(any(id.xy>=uint2(grid.xy))) return;
-    const int2 i=int2(id.xy);const uint at=Index(i);
-    if(holesOut[1+Tile(i)]==0) return;                            // a tile without holes: both buffers already hold it
+// v1197 cost: dispatched over the tiles that hold a hole only (the crack's list; DispatchIndirect): a tile without holes has the same
+// texels in both buffers already
+[numthreads(8,8,1)] void Fill(uint3 g : SV_GroupID,uint3 t : SV_GroupThreadID) {
+    const uint tile=tilesIn[g.x],across=(uint(grid.x)+7)/8;
+    const int2 i=int2((tile%across)*8+t.x,(tile/across)*8+t.y);
+    if(any(i>=int2(grid.xy))) return;
+    const uint at=Index(i);
     uint key=keysIn[at],landed=landedIn[at],origin=originsIn[at];const uint2 nr=nearIn[at];float nearest=asfloat(nr.x),zfore=abs(asfloat(nr.y));bool fore_rig=asfloat(nr.y)<0;
     if(key==0 || (landed&kFilled)) {
         // v1191: the nearest seed that lies BEHIND the nearest surface around the hole (the foreground that uncovered it, the player's rig
@@ -714,7 +724,7 @@ float4 Clean(float2 q,float ahead) {
 )HLSL" R"HLSL(// v1190 tools (rigMode.z): the source of a pixel as a colour code instead of its colour: rig 1 kept, 2 fresh, 3 kept neighbour, 4 kept
 // hidden-both, 5 fresh neighbour, 6 fresh unmasked; world 0 kept, 7 kept by the fill's stretch, 8 fresh beyond the kept view, 9 kept by
 // the turn (no key), 10 the fresh eye's near mover
-// v1197 safety net (rig_stats): every 16th pixel (4x4 grid) the rig target has: counted, and counted again when it resolved to the world
+// v1197 safety net (rig_stats, Decide): every 16th texel (4x4 grid) the rig target has: counted, and counted again when it resolved to the world
 // (codes 0, 7-10: a broken hand path shows as a share, not only in a picture). [0] the target: 1 used, 2 ignored (TargetOn), 0 none.
 RWStructuredBuffer<uint> rigStats : register(u1);
 static bool countRig=false;
@@ -739,13 +749,21 @@ Vertex ResolveVS(uint id : SV_VertexID) {
     const float2 uv=float2((id<<1)&2,id&2);
     Vertex v;v.uv=uv;v.position=float4(uv*float2(2,-2)+float2(-1,1),0,1);return v;
 }
-)HLSL" R"HLSL(// Resolve: the output pixel's target depth (its own texel's, or the fill's), the point on its ray (the filled texel's ray: the stretch),
-// back into the kept camera less the motion of the texel it came from, and this eye's own colour there.
-float4 ResolvePS(Vertex v) : SV_TARGET {
-    const float2 uv=min(v.uv,validRect.xy);                       // v1174: the band rebuilt from the clamped edge
-    const int2 i=min(int2(uv*grid.xy),int2(grid.xy)-1);const uint at=Index(i);
-    {const uint2 px=uint2(v.position.xy);float zt;countRig=all((px&3)==0) && RigTargetAt(i,zt);
-     if(all(px==0)) rigStats[0]=rigMode.x>0?(TargetOn()?1:2):0;}
+)HLSL" R"HLSL(// v1197 cost: the resolve decides per target texel (render size, Decide) and the display pass (ResolvePS) only samples. A decision:
+// x the source place q (uv of the image it reads, 2 x unorm16), y bits 0 the image (fresh), 1-2 how (smooth, clean, the fresh rig's
+// masked sample, one pixel), 3 q is the texel's whole (a fill's stretch, an inpaint pixel), 4 unclamped (the still frame), 5-8 the
+// RigSource code, 16-31 the surface's metres ahead (f16, Clean and the masked sample). Otherwise q is the texel centre's and each pixel
+// adds its own offset from that centre (smooth: the offsets of the 2x2 texels around it interpolated where they move as one).
+static const uint kImgFresh=1,kSmooth=0,kClean=2,kRigSample=4,kLoad=6,kHow=6,kWhole=8,kRaw=16;
+uint2 Rec(float2 q,uint how,int code,float ahead) {
+    const uint2 u=uint2(saturate(q)*65535+0.5);
+    return uint2(u.x|(u.y<<16),how|(uint(code)<<5)|(f32tof16(max(ahead,0))<<16));
+}
+float2 RecQ(uint x) {return float2(x&0xffff,x>>16)/65535.0;}
+// Decide (resolve, per target texel): the target depth (its own texel's, or the fill's), the point on its ray (the filled texel's ray: the
+// stretch), back into the kept camera less the motion of the texel it came from: where this eye's own colour is read.
+uint2 DecideAt(int2 i,float2 uv) {
+    const uint at=Index(i);
     const uint key=keysIn[at],landed=landedIn[at];
     const float z=key==0?1e30:KeyZ(key);
     // (c) rig_from_fresh: a moving hand no kept texel placed, nearer than what was splatted here
@@ -755,7 +773,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
         if(key==0 || zf<z-Tol(zf) || ((landed&kFilled) && zf<z)) {
             const float3 f=Apply(TF,Ray(targetFov,uv)*zf);
             const float2 fu=Project(freshFov,f);
-            if(f.z>1e-3 && InFresh(fu)) return RigSource(Smooth(freshColour,min(fu,validRect.zw-2*display.zw)),10);
+            if(f.z>1e-3 && InFresh(fu)) return Rec(fu,kImgFresh|kSmooth,10,0);
         }
     }
     // v1190: the rig target decides the player's pixels. Rule 1: rig where the target has it and nothing of the world splatted here is
@@ -767,22 +785,23 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
         const bool key_rig=key!=0 && (key&kKeyRig) && !(landed&kFilled);
         if(key_rig || key==0 || zr<z-Tol(zr)) {
             const float3 r=Ray(targetFov,uv);
-            float4 kept_c=0,fresh_c=0;bool kept_ok=false,fresh_ok=false;
+            bool kept_ok=false,fresh_ok=false;
             // (b) only from a group the fresh eye's votes did not stand down: a flat hand confirms a wrong grip texel by texel
             const uint wo=(key&kKeyMoving)?uint(motionIn[originsIn[at]].w):0;
             const bool down=(key&kKeyMoving) && StandsDown((wo>>5)&3,(wo&kHeld)!=0);
-            float4 kept_any=0;bool kept_any_ok=false;   // (the same from a group that stood down: only before showing what covered the rig)
+            uint2 kept_any=0;bool kept_any_ok=false;    // (the same from a group that stood down: only before showing what covered the rig)
             if(key_rig && abs(z-zr)<Tol(zr)) {
                 float3 pk=Apply(TK,r*z);if(key&kKeyMoving) pk-=motionIn[originsIn[at]].xyz;
                 // (and the kept frame showed that point: not hidden behind something nearer there, a post before the hand)
                 const float2 kq=pk.z>1e-4?clamp(Project(keptFov,pk),0.5*display.zw,validRect.xy-2*display.zw):float2(-1,-1);
-                if(pk.z>1e-4 && SameAt(kq,pk.z)) {kept_any=Clean(kq,pk.z);kept_any_ok=true;}   // (Clean: no colour of the post beside it)
-                if(!down) {kept_c=kept_any;kept_ok=kept_any_ok;}
+                if(pk.z>1e-4 && SameAt(kq,pk.z)) {kept_any=Rec(kq,kClean,1,pk.z);kept_any_ok=true;}   // (Clean: no colour of the post beside it)
+                kept_ok=kept_any_ok && !down;
             }
             const float3 f=Apply(TF,r*zr);const float2 fu=f.z>1e-3?Project(freshFov,f):float2(-1,-1);
-            if(InFresh(fu)) fresh_c=FreshRigSample(fu,f.z,fresh_ok);
-            if(rigMode.y<0.5) {if(kept_ok) return RigSource(kept_c,1);if(fresh_ok) return RigSource(fresh_c,2);}
-            else {if(fresh_ok) return RigSource(fresh_c,2);if(kept_ok) return RigSource(kept_c,1);}
+            if(InFresh(fu)) FreshRigSample(fu,f.z,fresh_ok);
+            const uint2 fresh_c=Rec(fu,kImgFresh|kRigSample,2,f.z);
+            if(rigMode.y<0.5) {if(kept_ok) return kept_any;if(fresh_ok) return fresh_c;}
+            else {if(fresh_ok) return fresh_c;if(kept_ok) return kept_any;}
             float best=99;uint best_at=0;
             [unroll] for(int n=0;n<25;++n) {
                 const int2 o=int2(n%5,n/5)-2;const int2 j=clamp(i+o,int2(0,0),int2(grid.xy)-1);const uint aj=Index(j);
@@ -794,30 +813,30 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             if(best<99) {
                 float3 pk=Apply(TK,r*zr);if(keysIn[best_at]&kKeyMoving) pk-=motionIn[originsIn[best_at]].xyz;
                 const float2 kq=pk.z>1e-4?clamp(Project(keptFov,pk),0.5*display.zw,validRect.xy-2*display.zw):float2(-1,-1);
-                if(pk.z>1e-4 && SameAt(kq,pk.z)) return RigSource(Clean(kq,pk.z),3);
+                if(pk.z>1e-4 && SameAt(kq,pk.z)) return Rec(kq,kClean,3,pk.z);
                 // hidden from both eyes there (behind a post in both views): the kept hand's own pixels nearest that place (Clean keeps
                 // to the hand's surface), not whatever covered it
                 if(pk.z>1e-4) {const float2 cq=kq;const int2 cc=int2(cq*grid.xy);bool hand_near=false;
                     [unroll] for(int n=0;n<9;++n) hand_near=hand_near || SameAt((float2(cc+int2(n%3,n/3)-1)+0.5)*grid.zw,pk.z);
-                    if(hand_near) return RigSource(Clean(cq,pk.z),4);
+                    if(hand_near) return Rec(cq,kClean,4,pk.z);
                     // else the hand's nearest own pixel within 8 render texels (16 directions)
-                    [loop] for(int r=2;r<=8;++r) [unroll] for(int n=0;n<16;++n) {
-                        float2 dir;sincos(n*0.3926991,dir.y,dir.x);const float2 u=cq+round(dir*r)*grid.zw;const int2 px=int2(u*display.xy);
-                        if(InKept(u) && SameAt((float2(px)+0.5)*display.zw,pk.z)) return RigSource(keptColour.Load(int3(px,0)),4);
+                    [loop] for(int kr=2;kr<=8;++kr) [loop] for(int nn=0;nn<16;++nn) {const int n=nn;
+                        float2 dir;sincos(n*0.3926991,dir.y,dir.x);const float2 u=cq+round(dir*kr)*grid.zw;const int2 px=int2(u*display.xy);
+                        if(InKept(u) && SameAt((float2(px)+0.5)*display.zw,pk.z)) return Rec((float2(px)+0.5)*display.zw,kLoad|kWhole,4,0);
                     }}
             }
             if(f.z>1e-3) {
-                const float2 fc=clamp(fu,display.zw,validRect.zw-2*display.zw);bool any_rig;const float4 c=FreshRigSample(fc,f.z,any_rig);
-                if(any_rig) return RigSource(c,2);
+                const float2 fc=clamp(fu,display.zw,validRect.zw-2*display.zw);bool any_rig;FreshRigSample(fc,f.z,any_rig);
+                if(any_rig) return Rec(fc,kImgFresh|kRigSample,2,f.z);
                 // (c) in the fresh eye: hidden from both eyes here (behind a post in both views): the fresh eye's nearest rig pixel at this
                 // depth within 8 render texels, never what covered it
-                [loop] for(int rr=2;rr<=8;++rr) [unroll] for(int n=0;n<16;++n) {
+                [loop] for(int rr=2;rr<=8;++rr) [loop] for(int nn=0;nn<16;++nn) {const int n=nn;   // ([unroll] here with the return inside: the Decide compute shader found nothing, lab R)
                     float2 dir;sincos(n*0.3926991,dir.y,dir.x);const float2 u=fc+round(dir*rr)*freshGrid.zw;
                     const int2 px=int2(u*display.xy);   // the colour pixel there, judged by the texel under its centre
                     const int2 j=clamp(int2((float2(px)+0.5)*display.zw*freshGrid.xy),int2(0,0),int2(freshGrid.xy)-1);
-                    if(InFresh(u) && FreshRigAt(j) && abs(FreshAhead(j)-f.z)<0.05+0.1*f.z) return RigSource(freshColour.Load(int3(px,0)),5);
+                    if(InFresh(u) && FreshRigAt(j) && abs(FreshAhead(j)-f.z)<0.05+0.1*f.z) return Rec((float2(px)+0.5)*display.zw,kImgFresh|kLoad|kWhole,5,0);
                 }
-                if(kept_any_ok) return RigSource(kept_any,3);
+                if(kept_any_ok) return uint2(kept_any.x,(kept_any.y&~(15u<<5))|(3u<<5));
                 // v1191 (in-game swing 8: a phantom second sword in the rig target): no eye has this class near here: not the rig; the
                 // world behind shows through (the resolve below), never noise or an inpaint over it
             }
@@ -825,7 +844,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     }
     if(key==0) {                                                  // never black: the kept image by the camera turn alone
         const float3 d=Turn(TK,Ray(targetFov,uv));
-        return RigSource(Smooth(keptColour,clamp(d.z>1e-6?Project(keptFov,d):uv,display.zw,validRect.xy-display.zw)),9);
+        return Rec(clamp(d.z>1e-6?Project(keptFov,d):uv,display.zw,validRect.xy-display.zw),kSmooth,9,0);
     }
     bool filled=(landed&kFilled)!=0;
     // beyond the kept frame's view (a turn, a step sideways at the edge): no texel of this eye's own ever saw it, and a stretch from the
@@ -847,7 +866,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
                 zf=max((a-TF[2].w)/k,1e-3);
             }
             const int2 fj=clamp(int2(fu*freshGrid.xy),int2(0,0),int2(freshGrid.xy)-1);
-            if(InFresh(fu) && (!wide || !FreshRigAt(fj))) return RigSource(Smooth(freshColour,min(fu,validRect.zw-2*display.zw)),8);
+            if(InFresh(fu) && (!wide || !FreshRigAt(fj))) return Rec(fu,kImgFresh|kSmooth,8,0);
         }
     }
     if(filled && z<1e29 && !(key&kKeyMoving)) {          // a filled texel whose own ray, at the background's depth, meets that surface in the
@@ -856,7 +875,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
         if(InKept(oq) && SameAt(oq,o.z)) filled=false;
     }
     const float2 ray=filled?(float2(Unpack(landed))+0.5)*grid.zw:uv;
-    if(layersOn.w>0 && !(key&kKeyMoving) && !(landed&kFilled)) return RigSource(Smooth(keptColour,uv),0);   // a still frame: this eye's own image, exactly
+    if(layersOn.w>0 && !(key&kKeyMoving) && !(landed&kFilled)) return Rec(uv,kSmooth|kRaw,0,0);   // a still frame: this eye's own image, exactly
     float2 q;float3 p=float3(0,0,0);
     // v1186 (in-game: silhouettes stair-stepped under a 7 mm step; lab F): the kept image's anti-aliased edge pixels are blends of both
     // surfaces. Where every surface within a render texel (the 3x3 target texels) goes back to within 0.75 px of the same kept place, the
@@ -895,7 +914,47 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             apart=apart || !here;
         }
     }
-    return RigSource(apart?Clean(qc,z>=1e29?0:p.z):Smooth(keptColour,qc),filled?7:0);
+    return Rec(qc,(apart?kClean:kSmooth)|(filled?kWhole:0),filled?7:0,z>=1e29?0:p.z);
+}
+[numthreads(8,8,1)] void Decide(uint3 id : SV_DispatchThreadID) {
+    if(any(id.xy>=uint2(grid.xy))) return;
+    const uint2 r=DecideAt(int2(id.xy),min((float2(id.xy)+0.5)*grid.zw,validRect.xy));
+    decisionsOut[Index(int2(id.xy))]=r;
+    float zt;
+    if(all((id.xy&3)==0) && RigTargetAt(int2(id.xy),zt)) {const uint code=(r.y>>5)&15;InterlockedAdd(rigStats[1],1);if(code==0 || code>=7) InterlockedAdd(rigStats[2],1);}
+    if(all(id.xy==0)) rigStats[0]=rigMode.x>0?(TargetOn()?1:2):0;
+}
+// the display pass: each pixel reads its texel's decision and samples there
+float2 Offset(float2 uv,uint how,float2 own) {        // smooth: the 2x2 texels' offsets interpolated where all four move as one (0.75 px)
+    const float2 p=uv*grid.xy-0.5;const int2 t0=int2(floor(p));const float2 f=p-float2(t0);
+    float2 sum=0;
+    [unroll] for(int n=0;n<4;++n) {
+        const int2 o=int2(n&1,n>>1);const int2 j=clamp(t0+o,int2(0,0),int2(grid.xy)-1);const uint2 r=decisionsIn[Index(j)];
+        const float2 off=RecQ(r.x)-(float2(j)+0.5)*grid.zw;
+        if((r.y&31)!=how || any(abs(off-own)*display.xy>0.75)) return own;
+        sum+=(o.x?f.x:1-f.x)*(o.y?f.y:1-f.y)*off;
+    }
+    return sum;
+}
+float4 ResolvePS(Vertex v) : SV_TARGET {
+    const float2 uv=min(v.uv,validRect.xy);                       // v1174: the band rebuilt from the clamped edge
+    const int2 i=min(int2(uv*grid.xy),int2(grid.xy)-1);
+    const uint2 r=decisionsIn[Index(i)];
+    const uint how=r.y&31;const int code=int((r.y>>5)&15);const float ahead=f16tof32(r.y>>16);
+    float2 q=RecQ(r.x);
+    if(how&kRaw) q=uv;                                            // the still frame: exactly its own pixel
+    else if(!(how&kWhole)) {const float2 own=q-(float2(i)+0.5)*grid.zw;q=uv+((how&kHow)==kSmooth?Offset(uv,how,own):own);}
+    if((how&kHow)==kLoad) return RigSource((how&kImgFresh)?freshColour.Load(int3(int2(q*display.xy),0)):keptColour.Load(int3(int2(q*display.xy),0)),code);
+    if(how&kImgFresh) {
+        q=min(q,validRect.zw-2*display.zw);
+        if((how&kHow)==kRigSample) {     // (the texel centre's sample found the rig: where this pixel's does not, the centre's)
+            bool ok;float4 c=FreshRigSample(q,ahead,ok);if(!ok) c=FreshRigSample(min(RecQ(r.x),validRect.zw-2*display.zw),ahead,ok);
+            if(ok) return RigSource(c,code);
+        }
+        return RigSource(Smooth(freshColour,q),code);
+    }
+    if(!(how&kRaw)) q=clamp(q,0.5*display.zw,validRect.xy-2*display.zw);
+    return RigSource((how&kHow)==kClean?Clean(q,ahead):Smooth(keptColour,q),code);
 }
 )HLSL";
     const auto compile=[&](const char* entry,const char* profile) {
@@ -904,7 +963,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             throw std::runtime_error(std::string("AFW2 shader ")+entry+": "+(errors?std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()):"compile failed"));
         return binary;
     };
-    const char* entries[stages]{"Motion","Repair","Splat","Origins","Crack","Fill","FreshSplat","Scatter","ScatterWrite"};
+    const char* entries[stages]{"Motion","Repair","Splat","Origins","Crack","Fill","FreshSplat","Scatter","ScatterWrite","Decide"};
     for(int s=0;s<stages;++s) {const auto b=compile(entries[s],"cs_5_0");checked(device_->CreateComputeShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&cs_[s]),"compute shader");}
     {const auto b=compile("ResolveVS","vs_5_0");checked(device_->CreateVertexShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&vs_),"vertex shader");}
     {const auto b=compile("ResolvePS","ps_5_0");checked(device_->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&ps_),"pixel shader");}
@@ -915,6 +974,8 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;checked(device_->CreateRasterizerState(&r,&raster_),"rasterizer");
     D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthFunc=D3D11_COMPARISON_ALWAYS;checked(device_->CreateDepthStencilState(&ds,&depth_),"depth state");
     votes_=buffer(28,4);stats_=buffer(4,4);
+    {D3D11_BUFFER_DESC a{};a.ByteWidth=12;a.Usage=D3D11_USAGE_DEFAULT;a.MiscFlags=D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+     const UINT one[3]{0,1,1};D3D11_SUBRESOURCE_DATA i{one,0,0};checked(device_->CreateBuffer(&a,&i,&fill_args_),"fill arguments");}
     D3D11_BUFFER_DESC h{};h.ByteWidth=4;h.Usage=D3D11_USAGE_STAGING;h.CPUAccessFlags=D3D11_CPU_ACCESS_READ;h.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;h.StructureByteStride=4;
     checked(device_->CreateBuffer(&h,nullptr,&holes_read_),"holes read-back");
 }
@@ -999,36 +1060,44 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     if(fresh_hands || motions) {bind({nullptr,nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,nullptr,fresh_keys_.uav.Get()});go(fresh_splat,fw,fh);}
     mark(6);
     // 5 crack (0 -> 1), 6 fill: jump flood 32 .. 1 (ping-pong)
-    bind({nullptr,keys_[0].srv.Get(),nullptr,origins_[0].srv.Get()},{nullptr,keys_[1].uav.Get(),landed_[1].uav.Get(),origins_[1].uav.Get(),nullptr,holes_.uav.Get(),nullptr,near_[1].uav.Get()});go(crack,kw,kh);
+    bind({nullptr,keys_[0].srv.Get(),nullptr,origins_[0].srv.Get()},{landed_[0].uav.Get(),keys_[1].uav.Get(),landed_[1].uav.Get(),origins_[1].uav.Get(),nullptr,holes_.uav.Get(),near_[0].uav.Get(),near_[1].uav.Get()});
+    {ID3D11UnorderedAccessView* t=tiles_.uav.Get();const UINT empty=0;context_->CSSetUnorderedAccessViews(4,1,&t,&empty);}   // (the tile list starts empty)
+    go(crack,kw,kh);
     bind({},{});
-    context_->CopyResource(keys_[0].b.Get(),keys_[1].b.Get());context_->CopyResource(landed_[0].b.Get(),landed_[1].b.Get());
-    context_->CopyResource(origins_[0].b.Get(),origins_[1].b.Get());context_->CopyResource(near_[0].b.Get(),near_[1].b.Get());
+    context_->CopyStructureCount(fill_args_.Get(),0,tiles_.uav.Get());   // the fill's groups: one per listed tile
+    context_->CopyResource(keys_[0].b.Get(),keys_[1].b.Get());   // (the crack reads these two around each texel: copied)
+    context_->CopyResource(origins_[0].b.Get(),origins_[1].b.Get());
     mark(7);
     int from=1;
-    for(int step=512;step>=1;step/=2) {      // ponytail: 10 passes cover a hole 1023 texels across; tile-skip them (Metro: hole tiles) if the GPU time asks
+    for(int step=512;step>=1;step/=2) {      // ponytail: 10 passes cover a hole 1023 texels across (v1197: over the hole tiles only); a GPU-side step bound if the fill still costs
         upload(step,step==1);
         const int to=1-from;
-        bind({nullptr,keys_[from].srv.Get(),landed_[from].srv.Get(),origins_[from].srv.Get(),nullptr,votes_.srv.Get(),near_[from].srv.Get()},
-             {nullptr,keys_[to].uav.Get(),landed_[to].uav.Get(),origins_[to].uav.Get(),nullptr,holes_.uav.Get(),nullptr,near_[to].uav.Get()});go(fill,kw,kh);
+        bind({nullptr,keys_[from].srv.Get(),landed_[from].srv.Get(),origins_[from].srv.Get(),tiles_.srv.Get(),votes_.srv.Get(),near_[from].srv.Get()},
+             {nullptr,keys_[to].uav.Get(),landed_[to].uav.Get(),origins_[to].uav.Get(),nullptr,holes_.uav.Get(),nullptr,near_[to].uav.Get()});
+        context_->CSSetShader(cs_[fill].Get(),nullptr,0);context_->DispatchIndirect(fill_args_.Get(),0);
         from=to;
     }
     mark(8);
-    bind({},{});ID3D11ShaderResourceView* none8[8]{};context_->CSSetShaderResources(0,8,none8);context_->CSSetShader(nullptr,nullptr,0);
-    // 7 resolve at display size
-    // (v1190: the resolve reads the rig masks and the hand votes too: the rig target's colour rules)
+    // 7 the resolve: its decisions per target texel (render size; v1190: the rig masks and the hand votes too, the rig target's colour rules)
+    bind({},{});
     ID3D11ShaderResourceView* ps_in[15]{kept,kept_depth,fresh,fresh_depth,inputs[4],inputs[5],inputs[6],inputs[7],motion_[1].srv.Get(),keys_[from].srv.Get(),landed_[from].srv.Get(),
                                         origins_[from].srv.Get(),fresh_keys_.srv.Get(),votes_.srv.Get(),near_[from].srv.Get()};
+    context_->CSSetShaderResources(0,15,ps_in);
+    context_->ClearUnorderedAccessViewUint(stats_.uav.Get(),zero);
+    {ID3D11UnorderedAccessView* u[2]{decisions_.uav.Get(),stats_.uav.Get()};context_->CSSetUnorderedAccessViews(0,2,u,nullptr);}
+    go(decide,kw,kh);mark(9);
+    bind({},{});ID3D11ShaderResourceView* none8[8]{};context_->CSSetShaderResources(0,8,none8);context_->CSSetShader(nullptr,nullptr,0);
+    // 8 the display pass: each pixel samples where its texel's decision says
     const D3D11_VIEWPORT vp{0,0,float(width),float(height),0,1};
     context_->RSSetViewports(1,&vp);context_->RSSetState(raster_.Get());context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->OMSetDepthStencilState(depth_.Get(),0);context_->OMSetBlendState(nullptr,nullptr,0xffffffff);
     context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
     context_->PSSetShaderResources(0,15,ps_in);
-    context_->ClearUnorderedAccessViewUint(stats_.uav.Get(),zero);
-    auto* rtv=output_rtv_.Get();ID3D11UnorderedAccessView* su=stats_.uav.Get();
-    context_->OMSetRenderTargetsAndUnorderedAccessViews(1,&rtv,nullptr,1,1,&su,nullptr);
+    {ID3D11ShaderResourceView* d=decisions_.srv.Get();context_->PSSetShaderResources(16,1,&d);}
+    auto* rtv=output_rtv_.Get();context_->OMSetRenderTargets(1,&rtv,nullptr);
     context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);context_->Draw(3,0);
-    mark(9);if(probe) {context_->CopyResource(probe->stats.Get(),stats_.b.Get());context_->End(probe->disjoint.Get());probe->waiting=true;}
-    ID3D11ShaderResourceView* none13[15]{};context_->PSSetShaderResources(0,15,none13);context_->OMSetRenderTargets(0,nullptr,nullptr);
+    mark(10);if(probe) {context_->CopyResource(probe->stats.Get(),stats_.b.Get());context_->End(probe->disjoint.Get());probe->waiting=true;}
+    ID3D11ShaderResourceView* none13[17]{};context_->PSSetShaderResources(0,17,none13);context_->OMSetRenderTargets(0,nullptr,nullptr);
     ++passes;
     return output_.Get();
 }
