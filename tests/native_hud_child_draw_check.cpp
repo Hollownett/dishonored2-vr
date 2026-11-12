@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include "../src/native_hud_child_draw.hpp"
 #include "../src/native_prompt_anchor.hpp"
+#include "../src/selection_policy.hpp"
 #include <cassert>
 #include <iostream>
 #include <limits>
@@ -107,6 +108,26 @@ int main(){
          assert(native_prompt_keep_grace(live,same,current,bound,offer,true,true)==0);     // takedown slot: another hint replaces at once, as before
          assert(native_prompt_keep_grace(live,same,current,bound,offer,false,false)==0);   // another window (node): replaced at once, as before
          assert(native_prompt_keep_grace(live,same,false,bound,offer,false,true)==0);}     // the new binding not current: nothing to hand over to
+        // v1228 NativeBodyPromptStats on the logged v1209 interval at 179860156 (4694 ms on one body, first shown at 78 ms, three
+        // retained->hand re-bind gaps of 15-63 ms): v1216 = one flicker interval; with the gap hold (no gaps) = clean; frames 11 ms.
+        const auto replay=[](bool gaps){NativeBodyPromptStats s;const std::uintptr_t body=0x7181600;
+            for(UINT64 t=0;t<=4694;t+=11) {const bool gap=gaps && ((t>=1000 && t<1063) || (t>=2500 && t<2515) || (t>=3700 && t<3747));
+                s.update(1000000+t,body,t>=78 && !gap);}
+            for(UINT64 t=4705;t<5400;t+=11) s.update(1000000+t,0,t<4900);   // hand leaves: the prompt fades once (no flicker)
+            return s;};
+        {const auto s=replay(true);assert(s.intervals==1 && s.flicker==1 && s.hides_total==3 && !s.never && !s.late);}
+        {const auto s=replay(false);assert(s.intervals==1 && s.flicker==0 && s.hides_total==0 && s.shown_ms*100>=s.target_ms*95);}
+        {NativeBodyPromptStats s;for(UINT64 t=0;t<=800;t+=11) s.update(5000+t,0x10,false);s.update(7000,0,false);   // never shown
+         assert(s.intervals==1 && s.never==1);}
+        {NativeBodyPromptStats s;for(UINT64 t=0;t<=800;t+=11) s.update(5000+t,0x10,t>=400);s.update(7000,0,false);  // first shown at 400 ms
+         assert(s.intervals==1 && s.late==1 && !s.never);}
+        {NativeBodyPromptStats s;for(UINT64 t=0;t<=200;t+=11) s.update(5000+t,0x10,true);s.update(7000,0,false);    // a 200 ms brush: not counted
+         assert(s.intervals==0);}
+        {NativeBodyPromptStats s;for(UINT64 t=0;t<=800;t+=11) s.update(5000+t,t<400?0x10:0x20,true);s.update(7000,0,false); // two bodies: two runs
+         assert(s.intervals==2);}
+        // The logged dropouts: the body leaves the hand query for 0.2-2.3 s; the LOS that dropped it is judged from the palm now for downed characters.
+        assert(hand_judged_los(true,false,0) && hand_judged_los(false,true,0x08) && hand_judged_los(false,true,0x20) &&
+               !hand_judged_los(false,true,0x80) && !hand_judged_los(false,false,0x28));   // loot, dead, unconscious; standing NPC and objects keep the eye
     }
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,true,false,false)); // target exists: never flat
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,false,false,true));

@@ -67,6 +67,28 @@ inline UINT64 native_prompt_keep_grace(bool live,bool live_same_element,bool liv
     if(!takedown_slot && !kept && live && !live_same_element && live_current && live_same_window) return 100;
     return kept;
 }
+// v1228: how well a body's carry prompt follows the hand. An interval is a run of frames whose prompt target is one body (a gap of up to
+// gap_ms without it continues the run); runs shorter than min_ms are not counted. Per counted run: never shown, first shown later than
+// late_ms, hidden again while the run lasted (flicker); plus the run time and the shown time. One thread (the HUD publish) updates it.
+struct NativeBodyPromptStats {
+    static constexpr UINT64 gap_ms=300,min_ms=300,late_ms=300;
+    std::uintptr_t body{};UINT64 start{},seen{},last{},run_ms{},run_shown{},first{};bool shown{},any{};unsigned hides{};
+    UINT64 intervals{},never{},late{},flicker{},target_ms{},shown_ms{},hides_total{};
+    void close() noexcept {
+        if(body && seen-start>=min_ms) {++intervals;never+=!any;late+=any && first-start>late_ms;flicker+=hides>0;target_ms+=run_ms;shown_ms+=run_shown;hides_total+=hides;}
+        body=0;
+    }
+    void update(UINT64 now,std::uintptr_t target_body,bool prompt_shown) noexcept {
+        if(body && (now<last || (target_body && target_body!=body) || (!target_body && now-seen>gap_ms))) close();
+        if(!body && target_body) {body=target_body;start=seen=last=now;run_ms=run_shown=0;any=false;hides=0;shown=prompt_shown;if(prompt_shown){any=true;first=now;}return;}
+        if(!body) return;
+        const UINT64 dt=now-last;last=now;if(target_body) seen=now;
+        run_ms+=dt;if(prompt_shown) run_shown+=dt;
+        if(prompt_shown && !any) {any=true;first=now;}
+        if(!shown && prompt_shown && any && first!=now) ++hides;   // a hide counts once the prompt comes back in the same run (the last fade is no flicker)
+        shown=prompt_shown;
+    }
+};
 // The flat prompt is allowed only when no interaction target exists and no world art is
 // committed or held. Other kinds keep the committed-image rule.
 inline bool native_hud_keep_flat(NativeHudChildKind kind,bool target_exists,bool replacement_ready,bool held) noexcept {

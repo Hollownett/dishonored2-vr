@@ -45,7 +45,8 @@ def problems(header, probe):
     need(helper != "", "loot_los_origin present")
     for cond in ("scope->stage!=0", "scope->side<0", "range!=0", "(caller!=base_+0x3b8b05 && caller!=base_+0x3b87b5)",
                  "reinterpret_cast<std::uintptr_t>(sensor)!=scope->sensor", "!fresh(*scope,GetTickCount64())",
-                 "!takeable(reinterpret_cast<std::uintptr_t>(entity))) return native;"):
+                 "const bool take=takeable(owner);", "if(!take && !body) return native;",
+                 "const bool body=!take && hand_judged_los(false,character_type(owner).value_or(false),"):  # v1228: downed characters too
         need(cond in helper, f"loot_los_origin gate: {cond}")
     need(GATE in helper, "the gate reads hand mode and the clamped palm")
     need("loot_los_origin_.data()" in helper and "return native;" in helper, "a thread-local copy or the native pointer")
@@ -71,7 +72,7 @@ def main():
     assert not real, real
     mutations = {
         "eye always": (header.replace(CALL, CALL.replace("los_origin,axis", "origin,axis"), 1), probe),
-        "non-loot swapped": (header.replace("!takeable(reinterpret_cast<std::uintptr_t>(entity))) return native;", ") return native;", 1), probe),
+        "non-loot swapped": (header.replace("if(!take && !body) return native;", "", 1), probe),
         "gaze swapped": (header.replace(GATE, "loot_los_hand_origin(true,true,scope->hand.clamped_palm,", 1), probe),
         "raw controller published": (header, probe.replace(SWEPT, SWEPT.replace("g.position;", "raw_grips[side].position;"), 1)),
         "released side published": (header, probe.replace(SWEPT, SWEPT.replace(" && clamped.state!=d2vr::ClampState::released", ""), 1)),

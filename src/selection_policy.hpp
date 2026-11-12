@@ -277,6 +277,11 @@ inline bool held_prompt_survives_cycle(std::uintptr_t held_owner,bool held_loot,
 // controller, so a controller pushed through a wall cannot take what is behind it. No clamped palm this cycle (no clamp, a yield, a
 // re-acquire, stale), not loot, gaze/reach mode, or a palm implausibly far from the hit point: the eye (nullopt). Walls, closed drawers
 // and doors between the hand and the item still block: the same sweep, filter and walk, only its start moves.
+// v1228: and so is a downed character's (+0xd1 & 0x28: dead or unconscious), which the hand carries; standing NPCs, doors and other
+// usables keep the eye.
+inline constexpr bool hand_judged_los(bool takeable,bool character,std::uint8_t character_flags) noexcept {
+    return takeable || (character && (character_flags&0x28u));
+}
 inline constexpr double loot_hand_los_max_m=1.0;   // the shared interaction volume is 0.45 m from the palm; a farther palm is not this hand's
 inline std::optional<Vec3> loot_los_hand_origin(bool takeable,bool hand_mode,const std::optional<Vec3>& clamped_palm,Vec3 point) noexcept {
     if(!takeable || !hand_mode || !clamped_palm || !finite(*clamped_palm) || !finite(point)) return std::nullopt;
