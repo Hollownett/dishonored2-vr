@@ -224,7 +224,7 @@ assert 'pad_render_edge' not in fsr and 'edge_pad' not in fsr  # v1171: the v116
 print('PASS: v1171 rig motion (off = v1165 rig draws), FSR input edge replication reverted')
 
 # v1184: AFW v2 opt-in (build/afw2 -> StaleLayers::afw2 after stale_eye_layers), status and dump meta; play spaces recorded with the cameras
-assert 'stale_afw2_knob=fs::exists(root/L"build"/L"afw2");' in probe and 'game_xr->stale_afw2=stale_afw2_knob;' in probe
+assert 'game_xr->stale_afw2=stale_afw2_knob;' in probe  # v1216: the knob is default-on now (pinned below)
 assert 'stale_layers_[eye]->afw2=stale_afw2; // v1184: knob build/afw2' in xr
 assert '\\"afw2\\":{\\"on\\":' in probe and 'meta<<",\\"afw2\\":"<<(layers.afw2?"true":"false");' in probe
 assert 'alt_play.record(alt_display,logical_eye,*play,game_xr->pose_epoch(),0,0);' in probe and 'game_xr->stale_eye_target_play(other,plays->companion[other]);' in probe
@@ -307,7 +307,7 @@ print('PASS: v1198 rig target default on in alternate mode (no-stale-eye-rig-tar
 assert 'alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe
 print('PASS: v1198 one-view weapon placement default on in alternate mode (no-alt-weapon-place)')
 for k in ('L"stale-eye-rig-motion"','L"stale-eye-skin-motion"','L"stale-eye-held-mask"','L"stale-eye-rig-target"','L"alt-weapon-place"'): assert k not in probe, k
-assert 'stale_afw2_knob=fs::exists(root/L"build"/L"afw2");' in probe
+assert 'stale_afw2_knob=alt_defaults && !fs::exists(root/L"build"/L"no-afw2");' in probe  # v1216: was opt-in
 assert '\\"features\\":{\\"rig_motion\\":' in probe and '\\"alt_weapon_place\\":' in probe
 print('PASS: v1198 old opt-in names are no-ops, afw2 opt-in, alternate_eye.features status')
 
@@ -414,7 +414,7 @@ rm6 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om6 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 assert 'nested_=tl_scope_depth_++>0;' in rm6 and '~Scope() {--tl_scope_depth_;if(nested_) return;' in rm6 and 'void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {\n            if(nested_) return;' in rm6
 assert 'nested_(RigMask::nested_draw()),s_(installed_ && !nested_?before(c):nullptr)' in om6 and 'if(nested_) return;\n            SkinMotion::restore(c_);' in om6
-assert 'probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on();' in probe and 'RigMask::probe_arm(view.display,want,sh->size,' in om6
+assert 'probe_on=rig_on && d2vr::RigMask::motion.load() && rig_forensics_knob;' in probe and 'RigMask::probe_arm(view.display,want,sh->size,' in om6  # v1216: was diag::on()
 assert 'v && v!=alt_view_.load(std::memory_order_relaxed)) {' in om6
 print('PASS: v1210 nested draw hooks, draw-time rig probe, other-view MV writers')
 
@@ -446,3 +446,14 @@ assert '!((authored_arm_bits.load(std::memory_order_relaxed)>>image_slot)&1u) &&
 assert 'const int kind=submitted!=source?image_kind:vr_gap?3:0;' in probe and probe.index('static std::atomic<unsigned> authored_arm_bits{};') < probe.index('const bool vr_gap=')
 assert 'guard_cause_[b&1u?0:b&6u?1:2].fetch_add(1,std::memory_order_relaxed);' in rm10
 print('PASS: v1214 hold only over unintended refusals, guard causes')
+# v1216: AFW v2 default on in performance mode (build/no-afw2: off; build/afw2 = no-op), effective state in alternate_eye.features;
+# the rig forensics (draw-time probe, rig-dump-*.bin, image-skin log) only with build/rig-forensics, never with diagnostics alone
+assert 'stale_afw2_knob=alt_defaults && !fs::exists(root/L"build"/L"no-afw2");' in probe and 'L"afw2"' not in probe
+assert probe.index('const bool alt_defaults=alt_eye_state.load()==1;') < probe.index('stale_afw2_knob=alt_defaults')
+assert '\\"alt_weapon_place\\":' in probe and '<< ",\\"afw2\\":" << (stale_afw2_knob?"true":"false") << \'}\'' in probe
+print('PASS: v1216 AFW v2 default on in performance mode (no-afw2), features.afw2')
+rm11 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+assert 'rig_forensics_knob=fs::exists(root/L"build"/L"rig-forensics");' in probe and 'diag::on(); // v1210' not in probe
+assert 'if(probe_on.load(std::memory_order_relaxed)) { // v1212 skin log' in rm11
+assert 'if(d2vr::RigMask::probe_on && d2vr::RigMask::dump_dir.empty())' in probe and 'if(!probe_on.load(std::memory_order_relaxed) || display==~0ull' in rm11
+print('PASS: v1216 rig forensics only with build/rig-forensics')

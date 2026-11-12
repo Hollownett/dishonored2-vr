@@ -2226,7 +2226,8 @@ static d2vr::AlternateMismatch alt_mismatch_run; // consecutive plan/observation
 static d2vr::PendingViews<XrView> alt_pending;
 static d2vr::PendingViews<d2vr::WarpCamera> alt_cameras; // v796: the game camera of each recorded view and companion (stale-eye parallax)
 static d2vr::PendingViews<d2vr::WarpPlaySpace> alt_play; // v1184: the play space of each, recorded with it (warp_play_space.hpp)
-static bool stale_afw2_knob=false; // v1184: build/afw2
+static bool stale_afw2_knob=false; // v1184: build/afw2; v1216: default on in performance mode, build/no-afw2
+static bool rig_forensics_knob=false; // v1216: build/rig-forensics (RigMask draw-time probe, rig-dump-*.bin, image-skin log; off even with diagnostics)
 static std::array<d2vr::WorldTrackedPose,2> warp_grips{};static unsigned warp_grip_bits{};
 // v1193 diagnostic (sim-pose-hold truth dumps: "hands move on the frame after the pose changed"): each Setup's hand positions per stage of the
 // drawn-hand pipeline, keyed by display frame: 0 the XR grip (tracking space), 1 in the world (raw), 2 the palm, 3 after the clamp, 4 after
@@ -10642,7 +10643,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
                << ",\"features\":{\"rig_motion\":" << (d2vr::RigMask::motion.load()?"true":"false") << ",\"skin_motion\":" << (d2vr::SkinMotion::enabled.load()?"true":"false") // v1198: effective state of the default-on stale-eye fixes
-               << ",\"held_mask\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"rig_target\":" << (rig_target_knob?"true":"false") << ",\"alt_weapon_place\":" << (d2vr::ObjectMotion::alt_weapon_place.load()?"true":"false") << '}'
+               << ",\"held_mask\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"rig_target\":" << (rig_target_knob?"true":"false") << ",\"alt_weapon_place\":" << (d2vr::ObjectMotion::alt_weapon_place.load()?"true":"false") << ",\"afw2\":" << (stale_afw2_knob?"true":"false") << '}'
                << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0)
                << ",\"rig_target_state\":{\"none\":" << afw2_rig.state[0].load() << ",\"used\":" << afw2_rig.state[1].load() << ",\"ignored\":" << afw2_rig.state[2].load() << '}' // v1199
                << ",\"rig_world_share\":{\"n\":" << afw2_rig.share_n.load() << ",\"mean\":" << (afw2_rig.share_n.load()?afw2_rig.share_sum_ppm.load()*1e-6/afw2_rig.share_n.load():0.) << ",\"max\":" << afw2_rig.share_max_ppm.load()*1e-6 << "}}" << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"stale_warp_error\":\"" << [] {std::string e=game_xr?game_xr->stale_warp_error:std::string{};for(auto& ch:e) if(ch=='"' || ch==92 || static_cast<unsigned char>(ch)<32) ch='/';return e;}() << '"' << ",\"perf_gpu_ms\":" << perf_spans_json() << ",\"sim_pose_hold\":{\"on\":" << (d2vr::sim_pose_hold::on.load()?"true":"false") << ",\"phase\":" << d2vr::sim_pose_hold::phase.load() << ",\"changes\":" << d2vr::sim_pose_hold::changes_n.load() << ",\"holds\":" << d2vr::sim_pose_hold::holds_n.load() << ",\"verified\":" << d2vr::sim_pose_hold::verified.load() << ",\"broken\":" << d2vr::sim_pose_hold::broken.load() << '}' << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
@@ -12286,7 +12287,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         { // v1162: the rig stencil mask (performance mode only; build/no-stale-eye-rig: inert)
                             const bool rig_on=alternate_on() && stale_eye_rig_knob;
                             if(!rig_on) d2vr::RigMask::view=0;
-                            d2vr::RigMask::probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on(); // v1210 draw-time probe (diagnostics only)
+                            d2vr::RigMask::probe_on=rig_on && d2vr::RigMask::motion.load() && rig_forensics_knob; // v1210 draw-time probe; v1216: only with build/rig-forensics
                             d2vr::RigMask::rig_turns_now=full_body.rig_turns(); // v1212 skin log
                             if(d2vr::RigMask::probe_on && d2vr::RigMask::dump_dir.empty()) try {d2vr::RigMask::dump_dir=output_directory.always().wstring();} catch(...) {} // v1212 wild-render dumps
                             d2vr::RigMask::enabled=rig_on;if(game_xr) {game_xr->stale_rig_masks=rig_on;game_xr->stale_rig_motion_rules=stale_eye_rig_motion_knob;}
@@ -16348,8 +16349,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         const bool alt_defaults=alt_eye_state.load()==1;
         d2vr::RigMask::motion=alt_defaults && stale_eye_rig_motion_knob; // v1171 rig motion vectors; v1198 default on, build/no-stale-eye-rig-motion: off (with the warp's rig rules)
         d2vr::SkinMotion::enabled=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-skin-motion"); // v1182
-        stale_afw2_knob=fs::exists(root/L"build"/L"afw2"); // v1184: AFW v2 warp path (src/afw2.hpp), opt-in
+        stale_afw2_knob=alt_defaults && !fs::exists(root/L"build"/L"no-afw2"); // v1184 AFW v2 warp path (src/afw2.hpp); v1216 default on in performance mode, build/no-afw2: off (build/afw2 = no-op)
         alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share"); // v1189
+        rig_forensics_knob=fs::exists(root/L"build"/L"rig-forensics"); // v1216: GPU copies/read-backs every render, so never on with diagnostics alone
         rig_target_knob=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob; // v1190
         d2vr::RigMask::target_bind=&d2vr::ObjectMotion::target_bind; /* v1199: per slice */d2vr::RigMask::target_restore=&d2vr::ObjectMotion::target_restore;
         alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191

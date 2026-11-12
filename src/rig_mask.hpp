@@ -217,7 +217,7 @@ public:
         D3D11_BUFFER_DESC d{};current->GetDesc(&d);
         ID3D11Device* owner{};current->GetDevice(&owner);if(owner) owner->Release(); // identity only
         std::lock_guard<std::mutex> lock(mutex_); // 3 calls a render; reset() and ring_view() take it too
-        { // v1212 skin log
+        if(probe_on.load(std::memory_order_relaxed)) { // v1212 skin log; v1216: only with the probe (build/rig-forensics)
             SkinFrame& s=skin_log_[frame%skin_log_.size()];
             if(s.frame!=frame) {s=SkinFrame{};s.frame=frame;s.turns=rig_turns_now.load(std::memory_order_relaxed);}
             ++s.calls[model];s.uploads[model]+=uploaded;s.commits[model]+=commit;s.why[model]|=static_cast<std::uint8_t>(1u<<(why&7u));
@@ -601,7 +601,7 @@ private:
         }
     }
 public:
-    inline static std::atomic<bool> probe_on{false}; // v1210: dxgi_probe, each Present: rig motion on and diagnostics on
+    inline static std::atomic<bool> probe_on{false}; // v1210: dxgi_probe, each Present: rig motion on and (v1216) build/rig-forensics
     // ObjectMotion, at an own rig draw: the b2 bytes it binds (its pool), for the draw-time probe of this render (display) and model
     // v1212: + the render's frame and eye and the draw's row layout (ObjectMotion layout byte), for the dumps
     static void probe_arm(std::uint64_t display,const void* cb,UINT bytes,std::uint32_t frame=0,unsigned eye=0,std::uint64_t layout=0) noexcept {
