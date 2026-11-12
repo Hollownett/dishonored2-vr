@@ -238,12 +238,12 @@ print('PASS: v1189 no shadow sharing on one-view frames (knob alt-shadow-share)'
 # v1190: rig target (knob stale-eye-rig-target): retargeted rig/held replay, published per render for the stale eye, t15 of AFW v2
 assert 'd2vr::RigMask::target_on=rig_target_knob;' in probe  # v1198: default on in alternate mode (pin below)
 assert 'game_xr->stale_eye_rig_target(other,target.Get(),tw,th,number,tv);' in probe and 'stale_layers_[eye]->rig_target=static_cast<bool>(stale_rig_target(eye).texture);' in xr
-assert 'd2vr::rig_target::book().publish(vp,e,has_e,prev_vp,frame);' in probe
+assert 'd2vr::rig_target::book().publish(vp,e,has_e,prev_vp,frame,pending_eye);' in probe  # v1199: + the eye
 print('PASS: v1190 rig target routing (knob, E at Setup, replay, per-render hand-off to the stale eye)')
 
 # v1191: GPU spans (stale warp, rig target copy, motion pass), rectangle copy of the rig target, one-view weapon placement (knob alt-weapon-place)
 assert 'ModGpuScope warp_scope(context_.Get(),ModSpan::stale_warp);' in xr and 'ModSpan::rig_target' in fsr and 'ModSpan::eye_motion' in fsr
-assert 'RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h)' in fsr
+assert 'RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h,static_cast<unsigned>(job.eye))' in fsr
 assert 'd2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe  # v1198: default on in alternate mode (pin below)
 assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev)' in om
 print('PASS: v1191 GPU spans, rig target rectangle copy, one-view weapon placement (knob alt-weapon-place)')
@@ -310,3 +310,21 @@ for k in ('L"stale-eye-rig-motion"','L"stale-eye-skin-motion"','L"stale-eye-held
 assert 'stale_afw2_knob=fs::exists(root/L"build"/L"afw2");' in probe
 assert '\\"features\\":{\\"rig_motion\\":' in probe and '\\"alt_weapon_place\\":' in probe
 print('PASS: v1198 old opt-in names are no-ops, afw2 opt-in, alternate_eye.features status')
+
+# v1199: one-view draws take a view only when certain (the b1 they bind was written in their own pass job: buffer_views.hpp view_certain),
+# else the draw-level consumers fall back; the rig target is two hypothesis slices taken by the render's eye; build/alt-view-heuristic = v1197
+om = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+rpm = (root / 'src' / 'render_pass_map.hpp').read_text(encoding='utf-8')
+rm = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+rt = (root / 'src' / 'rig_target.hpp').read_text(encoding='utf-8')
+assert 'const bool certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);' in om
+assert 'if(alt && !alt_view_heuristic.load(std::memory_order_relaxed)) {' in om and 'L"alt-view-heuristic"' in om
+assert 's->view_job=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) s->view_job=source().job;' in om
+assert 'current_job_=job_serial_.fetch_add(1,std::memory_order_relaxed)+1;' in rpm and rpm.count('current_job_=previous_job;') == 3
+assert 'd2vr::RenderPassMap::current_job()}' in probe
+assert 'ok[h]=rig_target::book().latest_of(h,e,vp);' in om and 'bool latest_of(unsigned eye,M4& e,float* vp=nullptr)' in rt
+assert 'd2vr::rig_target::book().publish(vp,e,has_e,prev_vp,frame,pending_eye);' in probe
+assert 'c->CopySubresourceRegion(out,0,0,0,0,trg.Get(),slice,&box);' in rm and 'a.ArraySize=2;' in rm
+assert '\\"certainty\\":{' in om and '\\"hypothesis_check\\":[' in om
+assert '\\"rig_target_state\\":{\\"none\\":' in probe and '\\"rig_world_share\\":{\\"n\\":' in probe
+print('PASS: v1199 certain one-view draw views, two-slice rig target, afw2 rig_target_state/rig_world_share status')

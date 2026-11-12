@@ -61,9 +61,17 @@ class Book {
 public:
     // v1191: also the render's previous view-projection (view+0x7590 after Setup: this eye's previous render on one-view frames); has_e false
     // when only that was wanted (alt-weapon-place without the rig target)
-    void publish(const float* vp,const M4& e,bool has_e,const float* prev_vp,std::uint32_t frame) noexcept {
+    // v1199: `eye` = the logical eye this Setup rendered (-1 unknown): latest_of() serves the rig target's per-eye hypotheses
+    void publish(const float* vp,const M4& e,bool has_e,const float* prev_vp,std::uint32_t frame,int eye=-1) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);Entry& x=ring_[next_++%ring_.size()];std::memcpy(x.vp,vp,64);x.e=e;x.has_e=has_e;
-        std::memcpy(x.prev_vp,prev_vp,64);x.frame=frame;x.valid=true;
+        std::memcpy(x.prev_vp,prev_vp,64);x.frame=frame;x.eye=eye;x.seq=next_;x.valid=true;
+    }
+    // v1199: E and VP of the latest Setup of `eye` that has an E (false: none yet)
+    bool latest_of(unsigned eye,M4& e,float* vp=nullptr) const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);const Entry* best=nullptr;
+        for(const auto& x:ring_) if(x.valid && x.has_e && x.eye==static_cast<int>(eye) && (!best || x.seq>best->seq)) best=&x;
+        if(!best) return false;
+        e=best->e;if(vp) std::memcpy(vp,best->vp,64);return true;
     }
     bool find(const float* vp,M4& e) const noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -81,7 +89,7 @@ public:
         if(!x.valid || !x.has_e) return false;e=x.e;frame=x.frame;return true;
     }
 private:
-    struct Entry {float vp[16]{},prev_vp[16]{};M4 e{};std::uint32_t frame{};bool valid{},has_e{};};
+    struct Entry {float vp[16]{},prev_vp[16]{};M4 e{};std::uint32_t frame{};int eye{-1};unsigned seq{};bool valid{},has_e{};};
     mutable std::mutex mutex_;std::array<Entry,4> ring_{};unsigned next_{};
 };
 inline Book& book() {static Book b;return b;}

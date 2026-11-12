@@ -71,10 +71,10 @@ int main() {
     const D3D11_VIEWPORT vp{0,0,float(N),float(N),0,1};c->RSSetViewports(1,&vp);c->RSSetState(rs.Get());c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     c->VSSetShader(vs.Get(),nullptr,0);c->PSSetShader(ps.Get(),nullptr,0);c->VSSetConstantBuffers(0,1,cb.GetAddressOf());c->OMSetDepthStencilState(prepass.Get(),0);
     const auto rows_of=[](const M4& m) {std::array<float,16> r{};for(int i=0;i<16;++i) r[static_cast<std::size_t>(i)]=static_cast<float>(m[static_cast<std::size_t>(i)]);return r;};
-    static std::array<float,16> drawn_rows{},target_rows{};static ID3D11DeviceContext* ctx{};static ID3D11Buffer* rows_cb{};
+    static std::array<float,16> drawn_rows{},target_rows{},target_rows1{};static bool dual=false;static ID3D11DeviceContext* ctx{};static ID3D11Buffer* rows_cb{};
     ctx=c.Get();rows_cb=cb.Get();
     d2vr::RigMask::target_on=true;d2vr::RigMask::enabled=true;d2vr::RigMask::view=1;
-    d2vr::RigMask::target_bind=+[](ID3D11DeviceContext* x) noexcept {x->UpdateSubresource(rows_cb,0,nullptr,target_rows.data(),0,0);return true;};
+    d2vr::RigMask::target_bind=+[](ID3D11DeviceContext* x,unsigned slice) noexcept {x->UpdateSubresource(rows_cb,0,nullptr,(dual && slice?target_rows1:target_rows).data(),0,0);return true;};
     d2vr::RigMask::target_restore=+[](ID3D11DeviceContext* x) noexcept {x->UpdateSubresource(rows_cb,0,nullptr,drawn_rows.data(),0,0);};
     const auto draw=[](ID3D11DeviceContext* x,const d2vr::RigMask::DrawArgs& a) noexcept {x->Draw(a.count,a.start);};
     const auto targets=[](ID3D11DeviceContext* x,UINT n,ID3D11RenderTargetView* const* r,ID3D11DepthStencilView* d) noexcept {x->OMSetRenderTargets(n,r,d);};
@@ -120,6 +120,47 @@ int main() {
      d2vr::RigMask::Scope scope(c.Get(),1);d2vr::RigMask::mark_target(false);c->Draw(36,0);scope.after({2,36,1,0,0,0},draw,targets);}
     c->OMSetRenderTargets(0,nullptr,nullptr);
     CHECK(!d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws));
+    // 2e (v1199). The draw's render is NOT known at record time (the next render's Setup may already have published). Book: eye 0 = A's
+    // Setup (E: A -> B), then eye 1 = the next render's Setup (B, E: B -> A) published before A's late draw is recorded. Slice h retargets
+    // with eye h's latest E (ObjectMotion::target_dual). The take of A's render (fresh eye 0) copies slice 0: exact; slice 1 is the wrong
+    // render's E (the v1193-v1198 failure: the rig one eye separation beyond the fresh eye) and is never used for this render.
+    {d2vr::rig_target::book().clear();M4 e_ba{};CHECK(d2vr::rig_target::retarget(vpb,vb,pb,wb,wa,al_,ar,au,ad,e_ba));
+     const auto fa=rows_of(vpa),fb=rows_of(vpb);
+     d2vr::rig_target::book().publish(fa.data(),e,true,fa.data(),100,0);d2vr::rig_target::book().publish(fb.data(),e_ba,true,fb.data(),101,1);
+     M4 got0{},got1{};float vp0[16]{},vp1[16]{};
+     CHECK(d2vr::rig_target::book().latest_of(0,got0,vp0) && d2vr::rig_target::book().latest_of(1,got1,vp1) && !std::memcmp(vp0,fa.data(),64) && !std::memcmp(vp1,fb.data(),64));
+     drawn_rows=rows_of(vpa);d2vr::rig_target::apply(got0,drawn_rows.data(),target_rows.data());d2vr::rig_target::apply(got1,drawn_rows.data(),target_rows1.data());dual=true;
+     c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());c->UpdateSubresource(cb.Get(),0,nullptr,drawn_rows.data(),0,0);
+     {ID3D11ShaderResourceView* s=rig_view.Get();c->VSSetShaderResources(0,1,&s);
+      d2vr::RigMask::Scope scope(c.Get(),1);d2vr::RigMask::mark_target(true,true);c->Draw(36,0);scope.after({2,36,1,0,0,0},draw,targets);}
+     c->OMSetRenderTargets(0,nullptr,nullptr);
+     const auto xor_vs_truth=[&](ID3D11Texture2D* o) {D3D11_MAPPED_SUBRESOURCE a{},b{};unsigned x=0;
+         if(FAILED(c->Map(o,0,D3D11_MAP_READ,0,&a)) || FAILED(c->Map(truth.Get(),0,D3D11_MAP_READ,0,&b))) return ~0u;
+         for(UINT y=0;y<N;++y) for(UINT k=0;k<N;++k) x+=(static_cast<const float*>(a.pData)[y*(a.RowPitch/4)+k*2+1]>0)!=(static_cast<const float*>(b.pData)[y*(b.RowPitch/4)+k]>0);
+         c->Unmap(o,0);c->Unmap(truth.Get(),0);return x;};
+     // the same replays twice (one per take: a take clears both slices)
+     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,0) && draws==1);const unsigned x0=xor_vs_truth(out.Get());
+     c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());c->UpdateSubresource(cb.Get(),0,nullptr,drawn_rows.data(),0,0);
+     {ID3D11ShaderResourceView* s=rig_view.Get();c->VSSetShaderResources(0,1,&s);
+      d2vr::RigMask::Scope scope(c.Get(),1);d2vr::RigMask::mark_target(true,true);c->Draw(36,0);scope.after({2,36,1,0,0,0},draw,targets);}
+     c->OMSetRenderTargets(0,nullptr,nullptr);
+     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,1));const unsigned x1=xor_vs_truth(out.Get());
+     std::printf("dual: slice of the fresh eye XOR %u px (%.3f%%), the other slice XOR %u px\n",x0,covered?100.0*x0/covered:0.,x1);
+     CHECK(x0*1000<=covered && x1*4>covered);dual=false;
+     // 2f. a render whose draws were counted into the previous take (CPU record overlap) is still valid; two in a row are not
+     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,0) && draws==0);
+     CHECK(!d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,0));
+     // 2g. a slice that missed its retarget invalidates only the take of that slice
+     c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());
+     {ID3D11ShaderResourceView* s=rig_view.Get();c->VSSetShaderResources(0,1,&s);
+      d2vr::RigMask::Scope scope(c.Get(),1);d2vr::RigMask::mark_target(true,false);c->Draw(36,0);scope.after({2,36,1,0,0,0},draw,targets);}
+     c->OMSetRenderTargets(0,nullptr,nullptr);
+     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,0) && draws==1);
+     c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());
+     {ID3D11ShaderResourceView* s=rig_view.Get();c->VSSetShaderResources(0,1,&s);
+      d2vr::RigMask::Scope scope(c.Get(),1);d2vr::RigMask::mark_target(true,false);c->Draw(36,0);scope.after({2,36,1,0,0,0},draw,targets);}
+     c->OMSetRenderTargets(0,nullptr,nullptr);
+     CHECK(!d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,1));}
     d2vr::RigMask::reset();
     if(failures) {std::printf("rig_target_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: rig_target_check (E math, retargeted replay = the other eye's render within 1 mm, held class, missing retarget invalid)\n");

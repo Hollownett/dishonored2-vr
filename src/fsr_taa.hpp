@@ -1163,7 +1163,7 @@ private:
                         }
                         std::uint64_t draws{};
                         {ModGpuScope target_scope(c,ModSpan::rig_target); // v1191 timing
-                         se.rig_target_valid=RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h) && se.rig_target.p;}
+                         se.rig_target_valid=RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h,static_cast<unsigned>(job.eye)) && se.rig_target.p;} // v1199: the slice of this render's eye
                         se.rig_target_draws=draws;
                         se.rig_target_w=depth_w;se.rig_target_h=depth_h;
                     }

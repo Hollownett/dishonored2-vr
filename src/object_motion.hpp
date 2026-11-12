@@ -252,10 +252,14 @@ public:
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
         return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_draws\":"+std::to_string(alt_rig_.load())+",\"rig_own\":"+std::to_string(alt_rig_own_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())
-            +",\"view_src\":["+[] {std::string o;for(unsigned i=0;i<6;++i) o+=(i?",":"")+std::to_string(alt_view_src_[i].load());return o;}()
+            +",\"view_src\":["+[] {std::string o;for(unsigned i=0;i<view_sources;++i) o+=(i?",":"")+std::to_string(alt_view_src_[i].load());return o;}()
             +"],\"newest_why\":["+std::to_string(alt_newest_why_[0].load())+','+std::to_string(alt_newest_why_[1].load())+','+std::to_string(alt_newest_why_[2].load())
-            +"],\"view_use\":["+[] {std::string o;for(unsigned i=0;i<6;++i) {o+=i?",[":"[";for(unsigned u=0;u<use_count;++u) o+=(u?",":"")+std::to_string(alt_view_use_[i][u].load());o+="]";}return o;}()+"]"
-            +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]}";
+            +"],\"view_use\":["+[] {std::string o;for(unsigned i=0;i<view_sources;++i) {o+=i?",[":"[";for(unsigned u=0;u<use_count;++u) o+=(u?",":"")+std::to_string(alt_view_use_[i][u].load());o+="]";}return o;}()+"]"
+            +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]"
+            +",\"view_mode\":\""+(alt_view_heuristic.load()?"heuristic":"certain")+"\",\"certainty\":{"+[] {std::string o; // v1199: per consumer [certain, fell back]
+                static constexpr const char* names[cert_consumers]{"rig_target","placement","previous_rows","held_mask"};
+                for(unsigned k=0;k<cert_consumers;++k) o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+']';
+                return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"]}}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -312,10 +316,20 @@ public:
     // v1194: where a one-view draw's view came from: 0 own newest write, 1 own older write of its bound b1, 2/3 another context's write of its
     // b1 (of the newest frame / older), 4 the newest view anywhere (the pre-v1193 fallback); and per source, what used it (view_use)
     inline static thread_local unsigned tl_view_src_{};
-    inline static std::array<std::atomic<std::uint64_t>,6> alt_view_src_{};
+    // v1199: 6 certain (the draw binds the b1 its own pass job wrote, buffer_views.hpp view_certain), 7 uncertain (no view: consumers fall back)
+    static constexpr unsigned view_sources=8;
+    inline static std::array<std::atomic<std::uint64_t>,view_sources> alt_view_src_{};
+    inline static std::atomic<bool> alt_view_heuristic{false}; // v1199 knob build/alt-view-heuristic: the v1197 timing rules instead (A/B only)
+    // v1199 status certainty: per consumer, draws it handled with a certain view (or, rig target: both hypothesis slices retargeted) / fell back
+    enum CertConsumer : unsigned {cert_rig_target,cert_placement,cert_previous_rows,cert_held_mask,cert_consumers};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,2>,cert_consumers> alt_cert_{};
+    static void certainty(CertConsumer k,bool certain) noexcept {alt_cert_[k][certain?0:1].fetch_add(1,std::memory_order_relaxed);}
+    // v1199: certain draws whose eye's latest published Setup VP equals their own view's VP (agree) / not (the rig target's hypothesis slice
+    // for that eye would have used another render's E: must stay 0)
+    inline static std::array<std::atomic<std::uint64_t>,2> alt_hyp_{};
     inline static std::array<std::atomic<std::uint64_t>,3> alt_newest_why_{}; // v1196: no b1 bound / own view of another buffer, b1 unknown / no own view, b1 unknown
     enum ViewUse : unsigned {use_held_mask,use_rig_target,use_rig_motion,use_place,use_fix,use_camera_only,use_near,use_count};
-    inline static std::array<std::array<std::atomic<std::uint64_t>,use_count>,6> alt_view_use_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,use_count>,view_sources> alt_view_use_{};
     static void view_use(ViewUse u) noexcept {alt_view_use_[tl_view_src_][u].fetch_add(1,std::memory_order_relaxed);}
     // v1101: the placement gate (the knob build/no-weapon-draw-place sets weapon_mode 0; object-motion-mode 0 is diagnostic only).
     static bool weapon_draw_on(int weapon_mode,int mode) noexcept {return weapon_mode>=1 && mode>=1;}
@@ -328,7 +342,7 @@ public:
     static int placing_mode() noexcept {return placing_mode(weapon_mode_.load(std::memory_order_relaxed),held_placing_.load(std::memory_order_relaxed));}
     // v1101: the render pass a draw hook runs in. `view` is the pass job's view (item+0x70, src/render_pass_map.hpp): one of the eye
     // views for every pass that renders that eye (the exact eye, no cache certificate), a light/other view for a pass that does not.
-    struct DrawPass {int pass{-1};std::uintptr_t view{0};};
+    struct DrawPass {int pass{-1};std::uintptr_t view{0};std::uint64_t job{0};}; // v1199: job = RenderPassMap::current_job()
     using PassSource=DrawPass(*)() noexcept;
     static void set_pass_source(PassSource source) noexcept {pass_source_.store(source,std::memory_order_relaxed);}
     static void set_pass_name(const char* (*name)(unsigned)) noexcept {pass_name_.store(name,std::memory_order_relaxed);} // status: pass id -> ARK_RENDERPASS_* name
@@ -381,6 +395,7 @@ private:
         ID3D11Buffer* pool{};bool pool_failed{};
         View view{};bool view_valid{};std::uint32_t view_frame{~0u}; // the last per-view write recorded here, and the newest frame then
         const void* view_buffer{}; // v1194: the buffer that write went to (the context's own record-time snapshot of that b1)
+        std::uint64_t view_job{};  // v1199: the pass job (command list) that write was recorded in (RenderPassMap::current_job, 0 outside one)
         // v1158: 256 slots (was 64, direct-mapped: two live cb2 buffers on one slot evict each other, the draw then counts no_shadow)
         std::array<Shadow,256> shadows{};
         Shadow& shadow(const void* b) noexcept {return shadows[(reinterpret_cast<std::uintptr_t>(b)>>4)*0x9e3779b97f4a7c15ull>>56];}
@@ -528,8 +543,9 @@ public:
     static std::uint64_t held_matches() noexcept {return held_matches_.load(std::memory_order_relaxed);}
 private:
     inline static std::mutex held_mutex_;inline static std::array<HeldFrames,2> held_{};inline static std::atomic<std::uint64_t> held_matches_{};
-    static bool held_match(const View& view,const float* cur) noexcept {
-        weapon_draw::Mat vp{},inv{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
+    static bool held_match(const View& view,const float* cur) noexcept {return held_match(view.vp,cur);}
+    static bool held_match(const float* view_vp,const float* cur) noexcept {
+        weapon_draw::Mat vp{},inv{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view_vp[i];
         if(!weapon_draw::inverse(vp,inv)) return false;
         const auto rows=weapon_draw::Place::model_rows(inv.data(),cur);
         const double tol=weapon_draw::Place::axes_tol.load(std::memory_order_relaxed);
@@ -541,12 +557,25 @@ private:
         return false;
     }
     // v1190: the draw's retargeted rows (prepare) and their binding for RigMask's target replay (same thread, right after the engine's draw)
-    inline static thread_local float tl_target_rows_[16]{};inline static thread_local ContextState* tl_target_s_{};inline static thread_local const Shadow* tl_target_sh_{};
+    // v1199: per hypothesis slice h (rig_mask.hpp): the drawn rows retargeted with E of eye h's latest Setup
+    inline static thread_local float tl_target_rows_[2][16]{};inline static thread_local ContextState* tl_target_s_{};inline static thread_local const Shadow* tl_target_sh_{};
+    // The rig target's two hypotheses for this draw's drawn rows (the engine's, or the placed ones). `view`: the draw's certain view, if any,
+    // only to check the hypothesis of its eye against it (status hypothesis_check). Both slices retargeted: certain for the target.
+    static void target_dual(ContextState& s,const Shadow* sh,const float* rows,const View* view,bool counted=true) noexcept {
+        bool ok[2]{};
+        for(unsigned h=0;h<2;++h) {
+            rig_target::M4 e{};float vp[16]{};
+            ok[h]=rig_target::book().latest_of(h,e,vp);
+            if(ok[h]) rig_target::apply(e,rows,tl_target_rows_[h]);
+            if(counted && ok[h] && view && view->eye==h) alt_hyp_[std::memcmp(vp,view->vp,64)?1:0].fetch_add(1,std::memory_order_relaxed);
+        }
+        tl_target_s_=&s;tl_target_sh_=sh;RigMask::mark_target(ok[0],ok[1]);if(counted) certainty(cert_rig_target,ok[0] && ok[1]);
+    }
 public:
-    static bool target_bind(ID3D11DeviceContext* c) noexcept {
+    static bool target_bind(ID3D11DeviceContext* c,unsigned slice) noexcept {
         ContextState* s=tl_target_s_;const Shadow* sh=tl_target_sh_;
-        if(!s || !sh || sh->buffer!=s->cb[1]) return false;
-        return bind_pool(c,*s,*sh,tl_target_rows_,nullptr); // previous rows as the engine wrote them (a depth-only replay never reads them)
+        if(!s || !sh || sh->buffer!=s->cb[1] || slice>1) return false;
+        return bind_pool(c,*s,*sh,tl_target_rows_[slice],nullptr); // previous rows as the engine wrote them (a depth-only replay never reads them)
     }
     static void target_restore(ID3D11DeviceContext* c) noexcept { // the engine's per-instance buffer again (DrawScope restores it too)
         ContextState* s=tl_target_s_;if(!s) return;
@@ -671,7 +700,15 @@ private:
         bool ok;
         // v1193/v1194 (buffer_views.hpp view_source): one-view frames never take the newest view anywhere while the draw's own context, or any
         // context, recorded what its bound b1 holds: the next render's Setup and view writes overlap this render's recording (the other eye)
-        View shared{};const bool alt=alternate(),b1_known=alt && !own && buffer_views_.find(s.cb[0],shared);
+        const bool alt=alternate();
+        if(alt && !alt_view_heuristic.load(std::memory_order_relaxed)) { // v1199: certain or nothing (buffer_views.hpp view_certain)
+            std::uint64_t job=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) job=source().job;
+            const bool certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);
+            tl_view_src_=certain?6u:7u;alt_view_src_[tl_view_src_].fetch_add(1,std::memory_order_relaxed);
+            if(certain) out=s.view;
+            return certain;
+        }
+        View shared{};const bool b1_known=alt && !own && buffer_views_.find(s.cb[0],shared);
         tl_view_src_=view_source(own,alt,s.view_valid,s.view_buffer,s.cb[0],b1_known);
         if(tl_view_src_==0) {out=s.view;ok=s.view_valid;}
         else if(tl_view_src_==1 || tl_view_src_==5) {out=s.view;ok=true;}
@@ -706,6 +743,7 @@ private:
         } else if(s && kind==view_kind) {
             View view{};const bool valid=classify(static_cast<const float*>(data),desc.ByteWidth,view);
             count(view_writes);s->view=view;s->view_valid=valid;if(valid) buffer_views_.store(r,view); /* v1193 */ s->view_buffer=valid?r:nullptr; /* v1194 */ s->view_frame=valid?view.frame:newest_frame_.load(std::memory_order_acquire);
+            s->view_job=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) s->view_job=source().job; // v1199
             if(valid) entry.misses.store(matched,std::memory_order_relaxed);
             else if(entry.misses.fetch_add(1,std::memory_order_relaxed)==15) entry.kind.store(ignored_kind,std::memory_order_relaxed);
         }
@@ -768,17 +806,24 @@ private:
         float cur[16],prev[16],engine[16];
         if(!gather_current(s.layout,sh->data,sh->size,z,cur)) {count(no_rows);return false;}
         // v1183 (knob stale-eye-held-mask): a near draw whose model frame is a held weapon's / held thing's engine frame joins the rig mask (253)
-        if(have_view && alternate() && held_mask.load(std::memory_order_relaxed) && cur[15]>0.01f && cur[15]<weapon_draw::Place::near_w.load(std::memory_order_relaxed) &&
-           held_match(view,cur)) {RigMask::mark_held();view_use(use_held_mask);}
+        // v1199: an uncertain draw is held when both eyes' latest views agree it is (the match tolerance is far wider than the eye separation;
+        // they disagree only at the edge of the reach: then not held, counted as a fallback)
+        if(alternate() && held_mask.load(std::memory_order_relaxed) && cur[15]>0.01f && cur[15]<weapon_draw::Place::near_w.load(std::memory_order_relaxed)) {
+            bool held=false,decided=true;
+            if(have_view) held=held_match(view,cur);
+            else {
+                bool m[2]{},any[2]{};
+                for(unsigned h=0;h<2;++h) {rig_target::M4 e{};float vp[16]{};any[h]=rig_target::book().latest_of(h,e,vp);m[h]=any[h] && held_match(vp,cur);}
+                decided=any[0] && any[1] && m[0]==m[1];held=decided && m[0];
+            }
+            if(held) {RigMask::mark_held();view_use(use_held_mask);}
+            if(held || !decided) certainty(cert_held_mask,decided);
+        }
         if(have_view && alternate() && cur[15]>0.01f && cur[15]<1.5f) view_use(use_near); // v1194: near draws (hands, held items, body) by view source
         // v1190 (rig_target.hpp, knob stale-eye-rig-target): a depth-writing rig/held draw of the one-view gets its rows for the stale eye's target
         // camera, E * rows, E found by this draw's view-projection (the per-view write it was classified by); the mask replay draws it with them
-        if(alternate() && RigMask::target_wanted()) {
-            rig_target::M4 e{};
-            const bool ok=have_view && rig_target::book().find(view.vp,e);
-            if(ok) {rig_target::apply(e,cur,tl_target_rows_);tl_target_s_=&s;tl_target_sh_=sh;view_use(use_rig_target);}
-            RigMask::mark_target(ok);
-        }
+        // v1199: both hypotheses (rig_mask.hpp); the view is not needed
+        if(alternate() && RigMask::target_wanted()) {target_dual(s,sh,cur,have_view?&view:nullptr);view_use(use_rig_target);}
         bool have_prev=gather_previous(s.layout,sh->data,sh->size,z,prev);
         count(motion);if(have_prev) std::memcpy(engine,prev,64);
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
@@ -802,12 +847,14 @@ private:
             }
             const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);
             if(have_view) view_use(use_rig_motion);
+            certainty(cert_previous_rows,have_view); // v1199: no certain view = zero motion (prev = cur, this render's palette)
             if(!have_view) RigMask::previous_palette(c,-1,newest_frame_.load(std::memory_order_relaxed),false); // zero palette; its render is not valid
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
             if(!own) std::memcpy(prev,cur,64);
             return bind_pool(c,s,*sh,nullptr,prev);
         }
         // v1191: one-view frames: the held weapon/prop placed in this render's drawn hand, previous rows from this eye's previous render
+        if(near_draw && one_view_place && !have_view && alt) certainty(cert_placement,false); // v1199: uncertain: the engine's pose, no placement
         if(near_draw && one_view_place && have_view) {
             rig_target::M4 prev_vp{};
             if(rig_target::book().find_prev(view.vp,prev_vp)) {
@@ -816,7 +863,8 @@ private:
                 const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev);
                 if(r.side>=0) {
                     alt_place_placed_.fetch_add(1,std::memory_order_relaxed);view_use(use_place);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
-                    if(RigMask::target_wanted()) {rig_target::M4 e{};const bool ok=rig_target::book().find(view.vp,e);if(ok) {rig_target::apply(e,placed,tl_target_rows_);tl_target_s_=&s;tl_target_sh_=sh;}RigMask::mark_target(ok);}
+                    certainty(cert_placement,true);
+                    if(RigMask::target_wanted()) target_dual(s,sh,placed,&view,false); // v1199: the placed rows, both hypotheses (counted above)
                     if(!bind_pool(c,s,*sh,placed,have_prev?placed_prev:nullptr)) return false;
                     count(view.eye?fixed_r:fixed_l);return true;
                 }
@@ -868,13 +916,13 @@ private:
         }
         // Not a placed weapon draw: the general per-eye previous-row correction (unchanged), which needs a classified view and this
         // draw's own previous rows.
-        if(!have_view) {count(untagged);if(alt) alt_untagged_.fetch_add(1,std::memory_order_relaxed);return false;}
+        if(!have_view) {count(untagged);if(alt) {alt_untagged_.fetch_add(1,std::memory_order_relaxed);if(have_prev) certainty(cert_previous_rows,false);}return false;}
         if(!have_prev) {count(no_rows);return false;}
         // The current rows must be this view's: a stale shadow or another view's constants never are.
         if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);return false;}
         const auto kind=table_.fix(view.eye,view.frame,cur,prev,alt?2u:1u);
         count(static_cast<Counter>((view.eye?kind_r:kind_l)+kind));
-        if(alt) {alt_kinds_[kind].fetch_add(1,std::memory_order_relaxed);view_use(use_fix);}
+        if(alt) {alt_kinds_[kind].fetch_add(1,std::memory_order_relaxed);view_use(use_fix);certainty(cert_previous_rows,true);}
         // Which draws stay unmatched (headset v832: ~20% per eye, sim ~5%): near ones (model origin closer than 1.5 m: hands,
         // held items, weapons) per kind, and the cb2 size of misses and unproven draws.
         if(cur[15]<1.5f) count(static_cast<Counter>((view.eye?near_r:near_l)+kind));
@@ -1052,6 +1100,7 @@ private:
         weapon_mode_.store(draw_place_knob && !no_draw_place_knob?1:0,std::memory_order_relaxed);
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
+        alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)
         if(std::ifstream tolerance{knobs_/L"weapon-draw-tol"}) { // "<orientation> <reach m> <identity>", for the model-matrix match
             double axes=0,reach=0,identity=0;
             if(tolerance>>axes>>reach>>identity && axes>0 && reach>0 && identity>0) {weapon_draw::Place::axes_tol.store(axes);weapon_draw::Place::reach.store(reach);weapon_draw::Place::identity_tol.store(identity);}

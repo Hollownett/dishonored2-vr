@@ -56,6 +56,10 @@ private:
     inline static thread_local int current_pass_=-1;
     inline static thread_local void* current_context_=nullptr;
     inline static thread_local void* current_view_=nullptr;   // item+0x70: the view the pass renders (an eye view for a view pass)
+    // v1199: a serial per pass job (one job = one command list: the executor finishes the list it recorded). A per-view constant write and a
+    // draw recorded in the same job on the same deferred context are in the same list, so the draw reads exactly what that write put in.
+    inline static thread_local std::uint64_t current_job_=0;
+    inline static std::atomic<std::uint64_t> job_serial_{};
     inline static std::atomic<shadow_share::Runtime*> shadow_share_{};
     // v1009: the per-light shadow-map-info link that GATHER_LIGHTS clears and PREPARE sets.
     //   GATHER_LIGHTS 0x31c074: [light+0x1a8] = 0 (rdi)
@@ -320,12 +324,12 @@ private:
                     }
                     const int previous_pass=current_pass_;
                     void* previous_context=current_context_;
-                    void* previous_view=current_view_;
+                    void* previous_view=current_view_;const std::uint64_t previous_job=current_job_;
                     if(deferred) {
                         ++self->pass_jobs_;
                         current_pass_=pass;
                         current_context_=deferred;
-                        current_view_=view;VisibilityStamp::next_job();
+                        current_view_=view;current_job_=job_serial_.fetch_add(1,std::memory_order_relaxed)+1;VisibilityStamp::next_job();
                     }
                     bool result=false;
                     __try {
@@ -342,7 +346,7 @@ private:
                         restore_saved_light_links();
                         current_pass_=previous_pass;
                         current_context_=previous_context;
-                        current_view_=previous_view;
+                        current_view_=previous_view;current_job_=previous_job;
                     }
                     return result;
                 }
@@ -380,7 +384,7 @@ private:
                 const std::uintptr_t previous=infos.value;
                 const int previous_pass=current_pass_;
                 void* previous_context=current_context_;
-                void* previous_view=current_view_;
+                void* previous_view=current_view_;const std::uint64_t previous_job=current_job_;
                 // This job records real work, so keep the pass attribution the executor would
                 // otherwise get (the redirected job still needs its gpu_passes eye1 row, and the
                 // weapon draw placement needs the pass view to name the eye of its draws).
@@ -388,7 +392,7 @@ private:
                     ++self->pass_jobs_;
                     current_pass_=pass;
                     current_context_=deferred;
-                    current_view_=view;VisibilityStamp::next_job();
+                    current_view_=view;current_job_=job_serial_.fetch_add(1,std::memory_order_relaxed)+1;VisibilityStamp::next_job();
                 }
                 bool result=false;
                 __try {result=original_(item);}
@@ -396,7 +400,7 @@ private:
                     write_shadow_maps_infos(infos.slot,previous);
                     current_pass_=previous_pass;
                     current_context_=previous_context;
-                    current_view_=previous_view;
+                    current_view_=previous_view;current_job_=previous_job;
                 }
                 return result;
             }
@@ -409,16 +413,16 @@ private:
         ++self->pass_jobs_;
         const int previous_pass=current_pass_;
         void* previous_context=current_context_;
-        void* previous_view=current_view_;
+        void* previous_view=current_view_;const std::uint64_t previous_job=current_job_;
         current_pass_=pass;
         current_context_=deferred;
-        current_view_=view;VisibilityStamp::next_job();
+        current_view_=view;current_job_=job_serial_.fetch_add(1,std::memory_order_relaxed)+1;VisibilityStamp::next_job();
         bool result=false;
         __try {result=original_(item);}
         __finally {
             current_pass_=previous_pass;
             current_context_=previous_context;
-            current_view_=previous_view;
+            current_view_=previous_view;current_job_=previous_job;
         }
         return result;
     }
@@ -427,6 +431,7 @@ public:
     // ObjectMotion::set_pass_source (src/dxgi_probe.cpp): a view pass's view is one of the eye views, which names the eye exactly.
     static int current_pass() noexcept {return current_pass_;}
     static std::uintptr_t current_view() noexcept {return reinterpret_cast<std::uintptr_t>(current_view_);}
+    static std::uint64_t current_job() noexcept {return current_job_;} // v1199: 0 outside a pass job
     // Called from the existing FinishCommandList observer, on the deferred job thread, before the
     // thread-local pass is cleared.
     void finished(ID3D11DeviceContext* context,ID3D11CommandList* list) noexcept {
@@ -479,7 +484,7 @@ public:
         enabled_.store(false,std::memory_order_release);
         current_pass_=-1;
         current_context_=nullptr;
-        current_view_=nullptr;
+        current_view_=nullptr;current_job_=0;
         lists_.clear();
         if(!target_) return true;
         const auto status=MH_DisableHook(target_);

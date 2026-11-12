@@ -105,11 +105,16 @@ public:
     // depth convention; y = class 255 rig / 253 held; 0 0 = none), its own D32 depth (GREATER: the nearest replayed draw wins). FsrTaa copies it
     // out per render (take_target) and clears it.
     inline static std::atomic<bool> target_on{false};
-    using TargetBind=bool (*)(ID3D11DeviceContext*) noexcept;using TargetRestore=void (*)(ID3D11DeviceContext*) noexcept;
+    // v1199: the target is two slices, one per hypothesis "this draw belongs to a render of eye h" (h = 0, 1): slice h gets the draw's
+    // rows retargeted with E of eye h's latest Setup (rig_target::Book::latest_of). For the render the draw really belongs to (eye f), eye f's
+    // latest Setup IS that render (eye f's next Setup is two renders away), so slice f is exact whatever thread timing did; the take copies
+    // slice f = the fresh eye of the render being taken (FsrTaa knows it from the render's receipt, in GPU order). No per-draw view needed.
+    using TargetBind=bool (*)(ID3D11DeviceContext*,unsigned slice) noexcept;using TargetRestore=void (*)(ID3D11DeviceContext*) noexcept;
     inline static std::atomic<TargetBind> target_bind{};inline static std::atomic<TargetRestore> target_restore{};
     static bool target_wanted() noexcept {return target_on.load(std::memory_order_relaxed) && tl_depth_ && (tl_rig_ || tl_held_);}
     static bool draw_is_held() noexcept {return tl_held_;}
-    static void mark_target(bool ok) noexcept {tl_target_=ok;} // false: no retarget for this render (counted at the replay)
+    static void mark_target(bool ok) noexcept {tl_target_[0]=tl_target_[1]=ok;} // false: no retarget for this render (counted at the replay)
+    static void mark_target(bool ok0,bool ok1) noexcept {tl_target_[0]=ok0;tl_target_[1]=ok1;} // v1199: per slice (hypothesis eye)
     // FsrTaa's copy (immediate/job context of the render's TAA pass): the target of this scene depth copied into `out` (same size and format;
     // created by the caller from target_desc) and cleared; true when this render replayed rig draws and none missed its retarget.
     static bool target_desc(ID3D11Resource* depth,D3D11_TEXTURE2D_DESC& d) {
@@ -118,20 +123,29 @@ public:
         target_.trg->GetDesc(&d);return true;
     }
     // v1191: only the render rectangle (w x h at the top left) is copied and cleared (was the whole target: 54 MB a render at 2496x2688)
-    static bool take_target(ID3D11DeviceContext* c,ID3D11Resource* depth,ID3D11Texture2D* out,std::uint64_t& draws,UINT w=0,UINT h=0) {
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
+    // v1199: `slice` = the fresh eye of the render whose target is taken (its rows were retargeted under that hypothesis); both slices are
+    // cleared. Valid: no draw missed that slice's retarget, and draws were replayed this render or the previous one. The draw and miss
+    // counters are CPU-side and a render's late draws can be recorded after the previous render's take (v1198: 907 of 5370 renders counted
+    // 0 draws while their neighbours counted ~2 renders' worth; the GPU target itself was complete), so one render of slack is allowed.
+    static bool take_target(ID3D11DeviceContext* c,ID3D11Resource* depth,ID3D11Texture2D* out,std::uint64_t& draws,UINT w=0,UINT h=0,unsigned slice=0) {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2> rtv;std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>,2> dsv;
         {std::lock_guard<std::mutex> lock(mutex_);if(!depth || target_.depth!=depth || !target_.trg) return false;trg=target_.trg;rtv=target_.trg_rtv;dsv=target_.trg_dsv;}
-        draws=target_draws_frame_.exchange(0,std::memory_order_relaxed);target_draws_last_.store(draws,std::memory_order_relaxed);const auto misses=target_misses_frame_.exchange(0,std::memory_order_relaxed);
+        slice&=1u;
+        draws=target_draws_frame_.exchange(0,std::memory_order_relaxed);const auto before=target_draws_last_.exchange(draws,std::memory_order_relaxed);
+        const auto misses=target_misses_frame_[slice].exchange(0,std::memory_order_relaxed);target_misses_frame_[slice^1u].store(0,std::memory_order_relaxed);
         D3D11_TEXTURE2D_DESC d{};trg->GetDesc(&d);
         const bool part=w && h && w<=d.Width && h<=d.Height && (w<d.Width || h<d.Height);
         const D3D11_BOX box{0,0,0,part?w:d.Width,part?h:d.Height,1};const D3D11_RECT rect{0,0,static_cast<LONG>(box.right),static_cast<LONG>(box.bottom)};
-        if(out) {if(part) c->CopySubresourceRegion(out,0,0,0,0,trg.Get(),0,&box);else c->CopyResource(out,trg.Get());}
+        if(out) c->CopySubresourceRegion(out,0,0,0,0,trg.Get(),slice,&box); // subresource `slice` = array slice `slice` (one mip)
         const float zero[4]{};
-        Microsoft::WRL::ComPtr<ID3D11DeviceContext1> c1;
-        if(part && SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c1)))) c1->ClearView(rtv.Get(),zero,&rect,1); // ClearView takes no depth views:
-        else c->ClearRenderTargetView(rtv.Get(),zero);
-        c->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0.f,0); // a depth clear stays whole (a fast clear on current GPUs)
-        const bool valid=draws>0 && misses==0;(valid?target_valid_:target_invalid_).fetch_add(1,std::memory_order_relaxed);
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext1> c1;const bool view_clear=part && SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c1)));
+        for(unsigned k=0;k<2;++k) {
+            if(view_clear) c1->ClearView(rtv[k].Get(),zero,&rect,1); // ClearView takes no depth views:
+            else c->ClearRenderTargetView(rtv[k].Get(),zero);
+            c->ClearDepthStencilView(dsv[k].Get(),D3D11_CLEAR_DEPTH,0.f,0); // a depth clear stays whole (a fast clear on current GPUs)
+        }
+        const bool valid=(draws>0 || before>0) && misses==0;(valid?target_valid_:target_invalid_).fetch_add(1,std::memory_order_relaxed);
+        if(!draws) (before?target_lent_:target_empty_).fetch_add(1,std::memory_order_relaxed);
         return valid;
     }
     // v1166, ObjectMotion at a rig draw (alternate): binds at the previous-palette slot (t0 in the prepass) this eye's own previous palette
@@ -215,7 +229,7 @@ public:
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"ring\":{\"rotations\":"<<rotations_.load()<<",\"restarts\":"<<ring_restarts_.load()
          <<",\"repeats\":"<<ring_repeats_.load()<<",\"late\":"<<ring_late_.load()<<",\"young\":"<<ring_young_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"held_draws\":"<<held_draws_.load()<<",\"target\":{\"on\":"<<(target_on.load()?"true":"false")<<",\"draws\":"<<target_draws_.load()
-         <<",\"misses\":"<<target_misses_.load()<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
+         <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
         return o.str();
     }
@@ -224,7 +238,7 @@ public:
     class Scope {
     public:
         Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass=-1) noexcept {
-            tl_rig_=false;tl_own_=false;tl_held_=false;tl_depth_=false;tl_target_=false;tl_pass_=pass;
+            tl_rig_=false;tl_own_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_pass_=pass;
             if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;
             view_draws_.fetch_add(1,std::memory_order_relaxed);
             ID3D11DepthStencilState* bound{};UINT ref{};c->OMGetDepthStencilState(&bound,&ref);
@@ -240,7 +254,7 @@ public:
             if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets);
             c_=nullptr;
         }
-        ~Scope() {restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_target_=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        ~Scope() {restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
             c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
@@ -252,9 +266,10 @@ public:
     };
 private:
     struct Target {ID3D11Resource* depth{};Microsoft::WRL::ComPtr<ID3D11Resource> hold;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;UINT w{},h{};
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> trg_rtv;Microsoft::WRL::ComPtr<ID3D11DepthStencilView> trg_dsv;}; // v1190
-    inline static thread_local bool tl_target_{};
-    inline static std::atomic<std::uint64_t> target_draws_{},target_draws_frame_{},target_draws_last_{},target_misses_{},target_misses_frame_{},target_valid_{},target_invalid_{};
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2> trg_rtv;std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>,2> trg_dsv;}; // v1190; v1199 two slices
+    inline static thread_local bool tl_target_[2]{};
+    inline static std::atomic<std::uint64_t> target_draws_{},target_draws_frame_{},target_draws_last_{},target_misses_{},target_valid_{},target_invalid_{},target_lent_{},target_empty_{};
+    inline static std::array<std::atomic<std::uint64_t>,2> target_misses_frame_{},target_slice_misses_{};
     inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_target_rig_,ps_target_held_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> nearest_;
     struct Entry {std::atomic<ID3D11DepthStencilState*> key{};std::atomic<bool> used{};bool writes{};};
     static constexpr unsigned slots=1024;
@@ -405,9 +420,15 @@ private:
         if(FAILED(device->CreateTexture2D(&t,nullptr,&tex)) || FAILED(device->CreateRenderTargetView(tex.Get(),nullptr,&n.rtv)) ||
            FAILED(device->CreateShaderResourceView(tex.Get(),nullptr,&n.srv))) return false;
         { // v1190: the rig target and its own depth (same size)
-            if(FAILED(device->CreateTexture2D(&t,nullptr,&n.trg)) || FAILED(device->CreateRenderTargetView(n.trg.Get(),nullptr,&n.trg_rtv))) return false;
-            D3D11_TEXTURE2D_DESC z=t;z.Format=DXGI_FORMAT_D32_FLOAT;z.BindFlags=D3D11_BIND_DEPTH_STENCIL;Microsoft::WRL::ComPtr<ID3D11Texture2D> zt;
-            if(FAILED(device->CreateTexture2D(&z,nullptr,&zt)) || FAILED(device->CreateDepthStencilView(zt.Get(),nullptr,&n.trg_dsv))) return false;
+            D3D11_TEXTURE2D_DESC a=t;a.ArraySize=2; // v1199: slice h = the hypothesis "the draw is a render of eye h"
+            if(FAILED(device->CreateTexture2D(&a,nullptr,&n.trg))) return false;
+            D3D11_TEXTURE2D_DESC z=a;z.Format=DXGI_FORMAT_D32_FLOAT;z.BindFlags=D3D11_BIND_DEPTH_STENCIL;Microsoft::WRL::ComPtr<ID3D11Texture2D> zt;
+            if(FAILED(device->CreateTexture2D(&z,nullptr,&zt))) return false;
+            for(UINT k=0;k<2;++k) {
+                D3D11_RENDER_TARGET_VIEW_DESC rv{};rv.Format=t.Format;rv.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2DARRAY;rv.Texture2DArray.FirstArraySlice=k;rv.Texture2DArray.ArraySize=1;
+                D3D11_DEPTH_STENCIL_VIEW_DESC dv{};dv.Format=z.Format;dv.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2DARRAY;dv.Texture2DArray.FirstArraySlice=k;dv.Texture2DArray.ArraySize=1;
+                if(FAILED(device->CreateRenderTargetView(n.trg.Get(),&rv,&n.trg_rtv[k])) || FAILED(device->CreateDepthStencilView(zt.Get(),&dv,&n.trg_dsv[k]))) return false;
+            }
         }
         n.depth=depth;n.hold=depth;n.w=dd.Width;n.h=dd.Height;target_=n;created=true;
         return true;
@@ -418,7 +439,7 @@ private:
         const auto release_targets=[&] {for(auto* r:rtvs) if(r) r->Release();if(dsv) dsv->Release();};
         if(!dsv) {no_dsv_.fetch_add(1,std::memory_order_relaxed);release_targets();return;}
         ID3D11RenderTargetView* rig{};Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal;Microsoft::WRL::ComPtr<ID3D11BlendState> opaque; // held: a reset cannot free them mid-replay
-        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> trg_rtv;Microsoft::WRL::ComPtr<ID3D11DepthStencilView> trg_dsv;Microsoft::WRL::ComPtr<ID3D11PixelShader> trg_ps;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> nearest; // v1190
+        std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2> trg_rtv;std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>,2> trg_dsv;Microsoft::WRL::ComPtr<ID3D11PixelShader> trg_ps;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> nearest; // v1190
         {
             ID3D11Resource* depth{};dsv->GetResource(&depth);
             D3D11_TEXTURE2D_DESC dd{};ID3D11Texture2D* dt{};
@@ -432,7 +453,7 @@ private:
                         trg_rtv=target_.trg_rtv;trg_dsv=target_.trg_dsv;trg_ps=tl_held_?ps_target_held_:ps_target_rig_;nearest=nearest_;}
                 } catch(...) {}
                 if(device) device->Release();
-                if(rig && created) {const float zero[4]{};c->ClearRenderTargetView(rig,zero);c->ClearRenderTargetView(trg_rtv.Get(),zero);c->ClearDepthStencilView(trg_dsv.Get(),D3D11_CLEAR_DEPTH,0.f,0);}
+                if(rig && created) {const float zero[4]{};c->ClearRenderTargetView(rig,zero);for(unsigned k=0;k<2;++k) {c->ClearRenderTargetView(trg_rtv[k].Get(),zero);c->ClearDepthStencilView(trg_dsv[k].Get(),D3D11_CLEAR_DEPTH,0.f,0);}}
                 if(!rig) failures_.fetch_add(1,std::memory_order_relaxed);
             }
             if(depth) depth->Release();
@@ -446,15 +467,20 @@ private:
         c->PSSetShader(ps.Get(),nullptr,0);c->OMSetDepthStencilState(equal.Get(),0);c->OMSetBlendState(opaque.Get(),nullptr,0xffffffff);
         draw(c,a);
         // v1190: the same draw in the stale eye's target camera (retargeted per-instance rows), nearest wins among the replayed draws
-        if(tl_target_ && trg_rtv && trg_dsv) {
+        if((tl_target_[0] || tl_target_[1]) && trg_rtv[0] && trg_rtv[1] && trg_dsv[0] && trg_dsv[1]) {
             const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);
-            ID3D11RenderTargetView* t=trg_rtv.Get();
-            if(bind && restore && bind(c)) {
-                targets(c,1,&t,trg_dsv.Get());c->PSSetShader(trg_ps.Get(),nullptr,0);c->OMSetDepthStencilState(nearest.Get(),0);
-                draw(c,a);restore(c);
-                target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);
-            } else {target_misses_.fetch_add(1,std::memory_order_relaxed);target_misses_frame_.fetch_add(1,std::memory_order_relaxed);}
-        } else if(target_on.load(std::memory_order_relaxed) && !tl_target_) target_misses_frame_.fetch_add(1,std::memory_order_relaxed); // a rig/held draw without its retarget
+            bool drew=false;
+            for(unsigned k=0;k<2;++k) { // v1199: one replay per hypothesis slice
+                ID3D11RenderTargetView* t=trg_rtv[k].Get();
+                if(tl_target_[k] && bind && restore && bind(c,k)) {
+                    targets(c,1,&t,trg_dsv[k].Get());c->PSSetShader(trg_ps.Get(),nullptr,0);c->OMSetDepthStencilState(nearest.Get(),0);
+                    draw(c,a);drew=true;
+                } else {target_slice_misses_[k].fetch_add(1,std::memory_order_relaxed);target_misses_frame_[k].fetch_add(1,std::memory_order_relaxed);}
+            }
+            if(drew && restore) restore(c);
+            if(drew) {target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
+            else target_misses_.fetch_add(1,std::memory_order_relaxed);
+        } else if(target_on.load(std::memory_order_relaxed)) for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed); // a rig/held draw without its retarget
         targets(c,rtv_count,rtvs.data(),dsv); // the engine's exact set again; the rig target is unbound
         c->PSSetShader(engine_ps,class_count?classes.data():nullptr,class_count);c->OMSetDepthStencilState(dss,ref);c->OMSetBlendState(blend,factor,mask);
         if(engine_ps) engine_ps->Release();

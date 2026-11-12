@@ -45,4 +45,16 @@ inline unsigned view_source(bool own_newest,bool alternate,bool own_valid,const 
     if(alternate && own_valid && own_buffer) return 5;
     return 4;
 }
+// v1199: the view a one-view draw was recorded for, by construction. The engine computes a draw's rows from the view object at record time
+// and fills its per-view constants (b1) with a Map(DISCARD) recorded into a command list; the next render's Setup and per-view writes can be
+// recorded on other job threads before this render's late draws, so no "newest"/"older" timing rule names the render (v1193-v1197 sims: both
+// failed, by thread timing). What is certain: a draw on a deferred context reads, at execution, the content its OWN command list last
+// Map(DISCARD)ed into the b1 it binds. So a draw's view is certain when its context's last classified per-view write went to the very buffer
+// it binds at b1 (whole-buffer bind) in the SAME pass job (= the same command list; `job` 0 = outside any pass job: never certain on a
+// deferred context), or on the immediate context, where writes and draws are in execution order. Anything else is uncertain: the
+// consumers that change a real draw (placement, previous rows, held mask) then leave it alone, and the rig target needs no view (rig_target.hpp).
+inline bool view_certain(bool own_valid,const void* own_buffer,const void* bound,std::uint64_t own_job,std::uint64_t job,bool immediate) noexcept {
+    if(!own_valid || !own_buffer || own_buffer!=bound) return false;
+    return immediate || (job!=0 && own_job==job);
+}
 } // namespace d2vr
