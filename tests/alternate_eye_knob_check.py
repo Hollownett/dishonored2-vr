@@ -251,3 +251,11 @@ print('PASS: v1191 GPU spans, rig target rectangle copy, one-view weapon placeme
 rm_src=(root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 assert 'if(pred) c->Begin(pred);' in rm_src and 'c->SetPredication(pred,FALSE);' in rm_src and 'c->SetPredication(engine_pred,engine_value);' in rm_src
 print('PASS: v1191 rig target replays only draws the mask replay saw (occlusion predicate)')
+
+# v1192: sim-pose-hold (simulated XR + gameplay script only): the script clock is sampled on eye-0-fresh frames, dumps only there, truth_next meta
+assert 'd2vr::sim_pose_hold::on=static_cast<bool>(knob.is_open() || fs::exists(root/L"build"/L"sim-pose-hold")) && simulated_vr_requested && simulated_gameplay_script_requested;' in probe
+assert 'return sim_pose_clock.sample(elapsed,change);}();' in probe and 'simulated_gameplay_script.poses(script_elapsed)' in probe and 'simulated_gameplay_script.sample(script_elapsed,' in probe
+assert 'const UINT64 display=d2vr::alternate_display_frame(number);' in probe
+assert 'if(d2vr::sim_pose_hold::on.load() && !d2vr::sim_pose_hold::changes(game_xr->alternate_frame,' in probe and 'if(stale_next.truth) stale_truth_next();' in probe
+assert 'd2vr::sim_pose_hold::on.load()?0.f:finger_touch_params.pose_smooth' in probe
+print('PASS: v1192 sim-pose-hold (sim script only, clock phase, dumps on change frames, truth_next, no finger spring)')

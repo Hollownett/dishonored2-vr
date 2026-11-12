@@ -1959,6 +1959,14 @@ public:
     // v1184: the play spaces recorded with those cameras (same frames); kept follows the kept camera. play_space(eye) = {kept, target} of the
     // eye's last rebuild (the warp engineer's input; the dump meta writes it)
     void record_rendered_play(UINT eye,const WarpPlaySpace& play) noexcept {if(eye<2) rendered_play_[eye]=play;}
+    // v1192 (sim-pose-hold dumps): the stale eye's target camera and this Present's rendered camera / play space / depth of an eye
+    WarpCamera stale_target_camera(UINT eye) const noexcept {return eye<2?stale_target_cameras_[eye]:WarpCamera{};}
+    WarpCamera rendered_camera(UINT eye) const noexcept {return eye<2 && rendered_camera_frame_[eye]==alternate_frame?rendered_cameras_[eye]:WarpCamera{};}
+    WarpPlaySpace rendered_play(UINT eye) const noexcept {return eye<2?rendered_play_[eye]:WarpPlaySpace{};}
+    StaleDepth stale_depth_now(UINT eye) const noexcept {
+        if(eye>1 || stale_depth_frame_[eye]!=alternate_frame || !stale_depth_[eye]) return {};
+        return {stale_depth_[eye].Get(),stale_depth_width_[eye],stale_depth_height_[eye]};
+    }
     void stale_eye_target_play(UINT eye,const WarpPlaySpace& play) noexcept {if(eye<2) stale_target_play_[eye]=play;}
     std::array<WarpPlaySpace,2> play_space(UINT eye) const noexcept {return eye<2?std::array<WarpPlaySpace,2>{kept_play_[eye],stale_target_play_[eye]}:std::array<WarpPlaySpace,2>{};}
     bool stale_afw2=false; // v1184: knob build/afw2 (src/afw2.hpp, opt-in): StaleLayers::afw2

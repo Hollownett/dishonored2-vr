@@ -133,6 +133,7 @@
 #include "taa_mv_dejitter.hpp"
 #include "cross_eye_history.hpp"
 #include "rig_target.hpp"
+#include "sim_pose_hold.hpp"
 #include "taa_jitter_check.hpp"
 #include "vr_combat.hpp"
 #include "attack_intent.hpp"
@@ -755,6 +756,7 @@ static UINT64 simulated_grab_focus_lost_tick{};
 static d2vr::SimulatedLoadConfirm simulated_load_confirm;
 static bool simulated_gameplay_script_requested=false,simulated_gameplay_last_gameplay=false,simulated_gameplay_last_focused=false;
 static d2vr::SimulatedGameplayScript simulated_gameplay_script;
+static d2vr::sim_pose_hold::Clock sim_pose_clock;static d2vr::sim_pose_hold::Check sim_pose_check;static std::mutex sim_pose_mutex; // v1192 (knob build/sim-pose-hold)
 static std::ofstream simulated_gameplay_csv;static fs::path simulated_gameplay_output;
 static int simulated_gameplay_last_index=-2;
 static UINT64 simulated_gameplay_rows{};
@@ -7493,6 +7495,10 @@ void prepare_head_view(void* view) noexcept {
             if(mismatch && mono) {native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();return;}
             if(mono) alt_eye=d2vr::AlternateEye::parity_eye(alt_display);
         }
+        if(d2vr::sim_pose_hold::on.load() && alt_eye>=0) { // v1192: did this held eye get its change frame's poses?
+            int r=0;{std::lock_guard<std::mutex> check_lock(sim_pose_mutex);r=sim_pose_check.setup(alt_display,alt_eye,alt_eye==static_cast<int>(d2vr::sim_pose_hold::phase.load()));}
+            if(r>0) d2vr::sim_pose_hold::verified.fetch_add(1);else if(r<0) d2vr::sim_pose_hold::broken.fetch_add(1);
+        }
         int eye=-1;
         for(int i=0;i<static_cast<int>(native.size());++i) {
             float difference{};
@@ -9187,7 +9193,7 @@ void prepare_head_view(void* view) noexcept {
                                 finger_drawn_angles[side]=d2vr::rig::finger_clamped_angles(contact,blended);finger_drawn_valid[side]=true;
                             }
                             if(wheel_point) {const auto straight=d2vr::rig::finger_turn_at(geometry->finger[1],1,0.);for(unsigned s=0;s<3;++s) finger_turn[side][1][s]=static_cast<float>(straight[s]);} // straight, below the free hand's relaxed floor
-                            finger_turn[side]=finger_pose_filter[side].step(finger_turn[side],fdt,finger_touch_params.pose_smooth); // the drawn pose eases (no jumps)
+                            finger_turn[side]=finger_pose_filter[side].step(finger_turn[side],fdt,d2vr::sim_pose_hold::on.load()?0.f:finger_touch_params.pose_smooth); // v1192: no spring under sim-pose-hold // the drawn pose eases (no jumps)
                             has_finger_turn[side]=true;
                             if(free_hand) { // G5 acceptance: the drawn tips against the probe shapes (not the palm stop)
                                 double deepest=0,thumb=0,palm_in=0;bool near_surface=false;
@@ -10522,7 +10528,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
-               << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0) << '}' << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"perf_gpu_ms\":" << perf_spans_json() << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
+               << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0) << '}' << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"perf_gpu_ms\":" << perf_spans_json() << ",\"sim_pose_hold\":{\"on\":" << (d2vr::sim_pose_hold::on.load()?"true":"false") << ",\"phase\":" << d2vr::sim_pose_hold::phase.load() << ",\"changes\":" << d2vr::sim_pose_hold::changes_n.load() << ",\"holds\":" << d2vr::sim_pose_hold::holds_n.load() << ",\"verified\":" << d2vr::sim_pose_hold::verified.load() << ",\"broken\":" << d2vr::sim_pose_hold::broken.load() << '}' << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
                << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
@@ -10936,12 +10942,44 @@ static std::vector<std::byte> readback_box(ID3D11Texture2D* texture,UINT x,UINT 
 }
 // v802: the eye's own frame right after a dump (-next.rgba, same box): the warped frame sits between the kept and this one, so offline
 // replays of the dump can be scored against the frames the eye really showed around it.
-static struct {std::wstring stem;UINT eye{},x{},y{},w{},h{};UINT64 frame{};} stale_next{};
+static struct {std::wstring stem;UINT eye{},x{},y{},w{},h{};UINT64 frame{};
+    bool truth{};std::array<UINT,4> depth_box{};d2vr::WarpCamera target{};d2vr::WarpPlaySpace play{};} stale_next{}; // v1192: sim-pose-hold truth
+// v1192 (sim-pose-hold): the `next` frame rendered the dump frame's poses: its depth and rig mask under the kept depth box, and how far its
+// camera, drawn hands and play space are from the warp's target ones (~0, else the dump is not truth), appended to the dump's meta.
+static void stale_truth_next() {
+    const UINT eye=stale_next.eye;const auto& b=stale_next.depth_box;
+    const auto save=[&](const wchar_t* suffix,const std::vector<std::byte>& bytes) {
+        if(!bytes.empty()) std::ofstream(stale_next.stem+suffix,std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));};
+    const auto d=game_xr->stale_depth_now(eye);
+    if(d.texture && b[2]) save(L"-next-depth.r32",readback_box4(d.texture,b[0],b[1],b[2],b[3]));
+    if(const auto rg=game_xr->stale_rig(eye);rg.texture && b[2]) save(L"-next-rig.r8",readback_box(rg.texture,b[0],b[1],b[2],b[3],1));
+    const auto now=game_xr->rendered_camera(eye);const auto& was=stale_next.target;
+    const auto& a=was.pose;const auto& c=now.pose;
+    const double step=d2vr::length(a.position-c.position),turn=std::acos(std::clamp(std::min(d2vr::dot(a.basis[0],c.basis[0]),d2vr::dot(a.basis[2],c.basis[2])),-1.,1.))*180/3.14159265358979;
+    const auto hands=d2vr::stale_hands_motion(was,now);
+    const auto play=game_xr->rendered_play(eye);double play_origin=-1,play_hands=-1;
+    if(play.valid && stale_next.play.valid) {
+        play_origin=d2vr::length(play.origin.position-stale_next.play.origin.position);play_hands=0;
+        for(unsigned s=0;s<2;++s) if((play.hand_bits&stale_next.play.hand_bits)>>s&1u) play_hands=std::max(play_hands,d2vr::length(play.hands[s].position-stale_next.play.hands[s].position));
+    }
+    const auto finite_or=[](double v) {return std::isfinite(v)?v:-1.;};
+    const auto path=stale_next.stem+L"-meta.json";std::string text;
+    {std::ifstream in(path);text.assign(std::istreambuf_iterator<char>(in),{});}
+    const auto end=text.rfind('}');if(end==std::string::npos) return;
+    std::ostringstream add;add.precision(9);
+    add<<",\"truth_next\":true,\"next_frame\":"<<game_xr->alternate_frame<<",\"next_camera_step_m\":"<<step<<",\"next_camera_turn_deg\":"<<turn
+       <<",\"next_hands_moved_m\":"<<finite_or(hands[0])<<",\"next_hands_turned_deg\":"<<finite_or(hands[1])
+       <<",\"next_play_origin_m\":"<<play_origin<<",\"next_play_hands_m\":"<<play_hands<<",\"next_depth\":"<<(d.texture?"true":"false")
+       <<",\"pose_hold\":{\"changes\":"<<d2vr::sim_pose_hold::changes_n.load()<<",\"holds\":"<<d2vr::sim_pose_hold::holds_n.load()
+       <<",\"verified\":"<<d2vr::sim_pose_hold::verified.load()<<",\"broken\":"<<d2vr::sim_pose_hold::broken.load()<<"}";
+    text.insert(end,add.str());std::ofstream(path,std::ios::trunc)<<text;
+}
 static void capture_stale_next(UINT eye,ID3D11Texture2D* image,std::uint64_t frame) noexcept {
     if(stale_next.stem.empty() || eye!=stale_next.eye || !image) return;
     if(frame==stale_next.frame+1) try {
         const auto bytes=readback_box4(image,stale_next.x,stale_next.y,stale_next.w,stale_next.h);
         if(!bytes.empty()) std::ofstream(stale_next.stem+L"-next.rgba",std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
+        if(stale_next.truth) stale_truth_next();
     } catch(...) {}
     if(frame>stale_next.frame) stale_next.stem.clear(); // taken, or the next frame of that eye was not its own
 }
@@ -10961,6 +10999,8 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
     const auto now=GetTickCount64();
     const bool moving=knob.on && (knob.moving_mm>=0 || knob.camera_mm>=0 || knob.turn_deg>=0); // v1165/v1177: triggered dumps
     const auto camera_motion=game_xr?game_xr->stale_camera_motion(eye):std::array<double,2>{};
+    // v1192: under sim-pose-hold only frames whose poses changed (the next frame renders them again: the truth)
+    if(d2vr::sim_pose_hold::on.load() && !d2vr::sim_pose_hold::changes(game_xr->alternate_frame,d2vr::alternate_parity_flip.load(),d2vr::sim_pose_hold::phase.load())) return;
     if(moving && !((knob.moving_mm>=0 && (layers.hands_motion[0]*1000>=knob.moving_mm || layers.hands_motion[1]>=1)) ||
                    (knob.camera_mm>=0 && camera_motion[0]*1000>=knob.camera_mm) || (knob.turn_deg>=0 && camera_motion[1]>=knob.turn_deg))) return; // nothing read back
     if(knob.on && !moving && !next) {next=now+static_cast<UINT64>(knob.delay*1000);return;}
@@ -10981,6 +11021,7 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
         save(L"-kept.rgba",readback_box4(kept,x,y,w,hgt));
         save(L"-warped.rgba",readback_box4(warped,x,y,w,hgt));
         stale_next={stem,eye,x,y,w,hgt,game_xr->alternate_frame}; // v802: and this eye's own frame after it
+        if(d2vr::sim_pose_hold::on.load()) {stale_next.truth=true;stale_next.target=game_xr->stale_target_camera(eye);stale_next.play=game_xr->play_space(eye)[1];}
         // the fresh eye sees near things up to ~300 px aside; v810: canted eyes turn 13 degrees apart (~260 px more) and the motion layers
         // check the fresh view above and below too: a wider and taller box
         const UINT fx=full?0:x>700?x-700:0,fw=full?desc.Width:std::min(desc.Width-fx,w+1400),fy=full?0:y>200?y-200:0,fh=full?desc.Height:std::min(desc.Height-fy,hgt+400);
@@ -10993,6 +11034,7 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
             const UINT dx=std::min(d.width-1,static_cast<UINT>(bx*sx)),dy=std::min(d.height-1,static_cast<UINT>(by*sy));
             boxes[n]={dx,dy,std::max(1u,std::min(d.width-dx,static_cast<UINT>(std::ceil(bw*sx)))),std::max(1u,std::min(d.height-dy,static_cast<UINT>(std::ceil(bh*sy))))};
             save(n?L"-fresh-depth.r32":L"-kept-depth.r32",readback_box4(d.texture,boxes[n][0],boxes[n][1],boxes[n][2],boxes[n][3]));
+            if(!n) stale_next.depth_box=boxes[0]; // v1192: the next frame's depth under the same box
             // v1151: that eye's motion texture under the same box (same render rectangle as its depth), when the warp had both
             const auto m=game_xr->stale_motion(n?static_cast<UINT>(game_xr->alternate_fresh_eye):eye);
             if(m.texture && m.width==d.width && m.height==d.height)
@@ -11051,7 +11093,7 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
         }
         meta<<",\"palms\":["; // v811: each drawn palm in the kept camera and the reach it owns
         for(unsigned side=0;side<2;++side) {const auto& p=layers.palms[side];meta<<(side?",":"")<<'['<<p[0]<<','<<p[1]<<','<<p[2]<<','<<p[3]<<']';}
-        meta<<"]}\n";
+        meta<<"],\"sim_pose_hold\":"<<(d2vr::sim_pose_hold::on.load()?"true":"false")<<"}\n"; // v1192: truth_next and the next-frame motion are appended when it arrives
     } catch(...) {}
 }
 // v808 diagnostic (alt-pose-trace sessions; headset: "during the climbing animation the left eye showed a strange picture"): in
@@ -12265,29 +12307,38 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     if(physical_grab_requested && grab_elapsed && *grab_elapsed>=9000 && *grab_elapsed<9200) input.menu=true;
                                 }
                                 if(simulated_gameplay_script_requested) {
+                                    // v1192 (knob build/sim-pose-hold): the script is sampled only on Presents whose next Setup renders eye 0 fresh, so
+                                    // the eye-1 frame after it renders the same poses (sim_pose_hold.hpp)
+                                    const UINT64 script_elapsed=[&] {
+                                        if(!d2vr::sim_pose_hold::on.load()) return static_cast<UINT64>(elapsed);
+                                        const UINT64 display=d2vr::alternate_display_frame(number);
+                                        const bool change=d2vr::sim_pose_hold::changes(display,d2vr::alternate_parity_flip.load(),d2vr::sim_pose_hold::phase.load());
+                                        (change?d2vr::sim_pose_hold::changes_n:d2vr::sim_pose_hold::holds_n).fetch_add(1);
+                                        {std::lock_guard<std::mutex> check_lock(sim_pose_mutex);sim_pose_check.stamp(display,change);}
+                                        return sim_pose_clock.sample(elapsed,change);}();
                                     const bool focused=game_xr->state==XR_SESSION_STATE_FOCUSED;int index=-1;
                                     float head_pitch_degrees{};
                                     const auto logic=game_logic_mask();
                                     const bool scripted_ui=logic==4 || d2vr::native_note_reader_logic(logic) || logic==128;
-                                    const auto command=simulated_gameplay_script.sample(elapsed,gameplay || x_wheel.wheel() || scripted_ui,focused,&index,&head_pitch_degrees);
+                                    const auto command=simulated_gameplay_script.sample(script_elapsed,gameplay || x_wheel.wheel() || scripted_ui,focused,&index,&head_pitch_degrees);
                                     const auto head_orientation=d2vr::SimulatedGameplayScript::pitch_orientation(head_pitch_degrees);
                                     d2vr::simxr::control.head.orientation={head_orientation[0],head_orientation[1],head_orientation[2],head_orientation[3]};
-                                    const auto offsets=simulated_gameplay_script.offsets(elapsed);
+                                    const auto offsets=simulated_gameplay_script.offsets(script_elapsed);
                                     d2vr::simxr::control.head.position={offsets[0],1.65f+offsets[1],offsets[2]};
                                     d2vr::simxr::control.grips[0].position={-.2f+offsets[3],1.3f+offsets[4],-.4f+offsets[5]};
                                     d2vr::simxr::control.grips[1].position={.2f+offsets[6],1.3f+offsets[7],-.4f+offsets[8]};
-                                    {const auto hand=d2vr::SimulatedGameplayScript::pitch_orientation(simulated_gameplay_script.hand_pitch(elapsed));
+                                    {const auto hand=d2vr::SimulatedGameplayScript::pitch_orientation(simulated_gameplay_script.hand_pitch(script_elapsed));
                                      for(auto& grip:d2vr::simxr::control.grips) grip.orientation={hand[0],hand[1],hand[2],hand[3]};}
-                                    {const auto poses=simulated_gameplay_script.poses(elapsed); // v5 absolute tracking-space poses (recorded trace) override the offsets and pitches
+                                    {const auto poses=simulated_gameplay_script.poses(script_elapsed); // v5 absolute tracking-space poses (recorded trace) override the offsets and pitches
                                      auto place=[&](XrPosef& out,unsigned bit,unsigned k) {if(poses.mask&bit) {const auto& p=poses.pose[k];out.position={p[0],p[1],p[2]};out.orientation={p[3],p[4],p[5],p[6]};}};
                                      place(d2vr::simxr::control.head,1,0);place(d2vr::simxr::control.grips[0],2,1);place(d2vr::simxr::control.grips[1],4,2);}
                                     d2vr::simxr::control.aims=d2vr::simxr::control.grips;
-                                    d2vr::simxr::control.touch=simulated_gameplay_script.touch(elapsed); // v7 capacitive touch (left, right)
+                                    d2vr::simxr::control.touch=simulated_gameplay_script.touch(script_elapsed); // v7 capacitive touch (left, right)
                                     if(gameplay || x_wheel.wheel() || scripted_ui || !focused || index>=0) d2vr::apply_simulated_controller_command(input,command); // index>=0 outside gameplay only for version 6 menu/always segments; Native pad gameplay remains gated; UI tests use the actual controller pointer.
                                     // v8: a segment's engine console line (the sim teleport, e.g. setviewpos) goes once through the 'console' test-command path;
                                     // the queue result follows in vr-command-result.txt, the request is logged in simulated-gameplay-console.txt.
-                                    for(const auto& line:simulated_gameplay_script.take_console(elapsed,gameplay)) {d2vr::NativeInteractionAim::request_console(line);
-                                        std::ofstream(simulated_gameplay_output/L"simulated-gameplay-console.txt",std::ios::app)<<elapsed<<' '<<line<<'\n';}
+                                    for(const auto& line:simulated_gameplay_script.take_console(script_elapsed,gameplay)) {d2vr::NativeInteractionAim::request_console(line);
+                                        std::ofstream(simulated_gameplay_output/L"simulated-gameplay-console.txt",std::ios::app)<<script_elapsed<<' '<<line<<'\n';}
                                     if(index!=simulated_gameplay_last_index || gameplay!=simulated_gameplay_last_gameplay || focused!=simulated_gameplay_last_focused) {
                                         simulated_gameplay_csv<<elapsed<<','<<index<<','<<gameplay<<','<<focused;
                                         for(float value:{command.move_x,command.move_y,command.turn_x,command.turn_y,command.left_trigger,command.right_trigger,command.left_grip,command.right_grip}) simulated_gameplay_csv<<','<<value;
@@ -15513,6 +15564,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             alt_pose_trace_rows=0;{std::lock_guard<std::mutex> trace_lock(alt_pose_trace_mutex);if(alt_pose_trace_csv.is_open()) alt_pose_trace_csv.close();}
             alt_pose_trace_state=fs::exists(root/L"build"/L"alt-pose-trace")?1:0; // diagnostic: alt-pose-trace.csv (every eye mode)
             stale_warp_dump_knob={}; // v1159 diagnostic (see capture_stale_warp)
+            { // v1192 build/sim-pose-hold ["phase=1"]: simulated XR with a gameplay script only (never a headset)
+                std::ifstream knob(root/L"build"/L"sim-pose-hold");std::string token;unsigned phase=0;
+                while(knob>>token) if(token=="phase=1") phase=1;
+                d2vr::sim_pose_hold::on=static_cast<bool>(knob.is_open() || fs::exists(root/L"build"/L"sim-pose-hold")) && simulated_vr_requested && simulated_gameplay_script_requested;
+                d2vr::sim_pose_hold::phase=phase;sim_pose_clock={};sim_pose_check={};
+            }
             shadow_stability=ShadowStability{}; // v1161 diagnostic (see capture_shadow_stability)
             if(std::ifstream knob{root/L"build"/L"shadow-stability"}) {
                 shadow_stability.on=true;unsigned n{},b{};double d{},i{};
