@@ -109,26 +109,28 @@ public:
         if(!transaction_valid()) {abort();failed_at(7);return false;}
         return true;
     }
-    void finish(std::uintptr_t view) {
-        if(!seeded_ || !pending_ || pending_->key.view!=view) {cancel_plan();return;}
-        if(!transaction_valid()) {abort();failed_at(8);return;}
+    // v1206: the published receipt (object motion records each render from it), nullopt when nothing was published
+    std::optional<Receipt> finish(std::uintptr_t view) {
+        if(!seeded_ || !pending_ || pending_->key.view!=view) {cancel_plan();return std::nullopt;}
+        if(!transaction_valid()) {abort();failed_at(8);return std::nullopt;}
         const auto p=*pending_;Snapshot current{};std::uint32_t stamp{};
-        if(!read_snapshot(read_,view,current) || !read_(view+stamp_offset,&stamp,4) || stamp!=p.key.native_counter) {abort();failed_at(9);return;}
+        if(!read_snapshot(read_,view,current) || !read_(view+stamp_offset,&stamp,4) || stamp!=p.key.native_counter) {abort();failed_at(9);return std::nullopt;}
         // Native reset copies current matrices/position, but does not reset jitter. Keep its own initialization coherent.
-        if(p.reset && !write_(view+previous_jitter_offset,current.jitter.data(),8)) {abort();failed_at(10);return;}
+        if(p.reset && !write_(view+previous_jitter_offset,current.jitter.data(),8)) {abort();failed_at(10);return std::nullopt;}
         const auto& expected=p.has_previous?p.previous:current;
         for(std::size_t i=0;i<3;++i) {
             std::array<float,16> previous{};
-            if(!read_(view+previous_matrix_offsets[i],previous.data(),64) || previous!=expected.matrices[i]) {abort();failed_at(11);return;}
+            if(!read_(view+previous_matrix_offsets[i],previous.data(),64) || previous!=expected.matrices[i]) {abort();failed_at(11);return std::nullopt;}
         }
         std::array<float,3> previous_position{};std::array<float,2> previous_jitter{};
         if(!read_(view+previous_position_offset,previous_position.data(),12) || previous_position!=expected.position ||
-            !read_(view+previous_jitter_offset,previous_jitter.data(),8) || previous_jitter!=expected.jitter) {abort();failed_at(12);return;}
+            !read_(view+previous_jitter_offset,previous_jitter.data(),8) || previous_jitter!=expected.jitter) {abort();failed_at(12);return std::nullopt;}
         const auto receipt=history_.complete(p,current);
         bool published=false;
         {std::lock_guard<std::mutex> lock(book_mutex_);published=transaction_valid() && receipt && book_.publish(*receipt);}
-        if(!published) {++rejected;abort();failed_at(13);return;}
+        if(!published) {++rejected;abort();failed_at(13);return std::nullopt;}
         ++completed;seeded_=false;pending_.reset();
+        return receipt;
     }
     void abort() {
         if(seeded_ && pending_) {

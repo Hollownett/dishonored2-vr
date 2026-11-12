@@ -94,7 +94,9 @@ void original_setup(const Key& k, const Snapshot& next) {
 }
 std::uint32_t setup(Runtime& runtime, const Key& k, const Snapshot& next) {
     const auto phase = runtime.plan(k); CHECK(phase); CHECK(runtime.seed(k.view));
-    original_setup(k, next); runtime.finish(k.view); CHECK(!runtime.failed); return *phase;
+    original_setup(k, next); const auto published = runtime.finish(k.view); CHECK(!runtime.failed);
+    CHECK(published && published->key.native_counter == k.native_counter && same_snapshot(published->current, next)); // v1206: finish hands the receipt over
+    return *phase;
 }
 Receipt admit(Runtime& runtime, const Key& k) {
     CHECK(runtime.begin(k.view, k.display, k.pose_epoch, k.reference_epoch));
@@ -112,6 +114,7 @@ void alternating_continuity() {
         CHECK(same_snapshot(receipt.current,current));
         CHECK(same_snapshot(receipt.previous,d < 12 ? current : last[static_cast<std::size_t>(eye)]));
         CHECK(same_snapshot(previous(k.view),receipt.previous));
+        CHECK(receipt.previous_counter == (d < 12 ? k.native_counter : k.native_counter - 2)); // v1206: the render `previous` came from
         last[static_cast<std::size_t>(eye)] = current;
     }
     CHECK(runtime.completed == 8 && runtime.admitted == 8);
@@ -140,7 +143,7 @@ void resets_and_admission() {
     k = key(1,13); ++k.owner[2]; CHECK(setup(runtime,k,sample(113)) == 0);
     CHECK(!runtime.begin(k.view,k.display,k.pose_epoch,k.reference_epoch+1));
     CHECK(!runtime.resolve(k.view));
-    auto r = admit(runtime,k); CHECK(r.reset && same_snapshot(r.previous,r.current));
+    auto r = admit(runtime,k); CHECK(r.reset && same_snapshot(r.previous,r.current) && r.previous_counter == r.key.native_counter); // v1206: a reset names itself
     put(k.view + jitter_offset,sample(999).jitter); CHECK(!runtime.resolve(k.view));
     put_current(k.view,r.current); CHECK(runtime.resolve(k.view));
     change_stamp_on_matrix_read = true; CHECK(!runtime.resolve(k.view));

@@ -46,6 +46,43 @@ int main() {
         if(frame>41) CHECK(kind==(eye?Kind::own_last:Kind::unproven));
         CHECK(prev==engine);
     }
+    // v1206 alternate (one eye per engine frame) through fix_render: each render's receipt names its previous render (own_frame). The engine's
+    // raw previous rows are the last render that DREW the object. Frame-counter skips (a render 3 frames after the other eye's), an object culled
+    // in the other eye (own_last), the rig (never own_last), and a wrong own_frame never yield any rows but own_frame's.
+    {
+        auto t=std::make_unique<d2vr::PrevMvpTable>();
+        struct R {unsigned eye;unsigned frame;};
+        const R renders[]{{0,100},{1,101},{0,102},{1,103},{0,104},{1,107},{0,108},{1,109},{0,112},{1,113},{0,114},{1,115}}; // skips at 105-106, 110-111
+        std::map<unsigned,M> raw;std::map<unsigned,unsigned> last_frame[2];
+        for(const R& r:renders) for(unsigned object=0;object<3;++object) {
+            if(r.eye==1 && object==1 && r.frame>103) continue; // object 1: culled in the right eye from 107
+            const M cur=mvp(r.eye,r.frame,object);const M engine=raw.count(object)?raw[object]:cur;raw[object]=cur;
+            const bool has_own=last_frame[r.eye].count(object)!=0;const unsigned own=has_own?last_frame[r.eye][object]:0;
+            // the receipt's previous render: this eye's previous render frame (independent of the object)
+            unsigned prev_render=0;for(const R& q:renders) if(q.eye==r.eye && q.frame<r.frame) prev_render=q.frame;
+            for(int pass=0;pass<2;++pass) {
+                M prev=engine;const bool rig=object==2;
+                const Kind kind=prev_render?t->fix_render(r.eye,r.frame,prev_render,cur.data(),prev.data(),!rig):Kind::miss;
+                if(!prev_render) {t->insert(r.eye,r.frame,cur.data(),engine.data());continue;}
+                CHECK(kind==Kind::same || prev==engine || prev==mvp(r.eye,prev_render,object)); // nothing but own_frame's rows (or unchanged)
+                if(kind==Kind::other_last || kind==Kind::own_last) CHECK(prev==mvp(r.eye,prev_render,object));
+                if(r.frame-prev_render>d2vr::PrevMvpTable::gens) {CHECK(kind==Kind::miss);continue;}       // older than the table: camera-only
+                if(has_own && own==prev_render && object!=1) CHECK(kind==Kind::other_last);                  // the 2- and 3-frame steps chain
+                if(object==1 && r.eye==0 && r.frame>=108) CHECK(kind==Kind::own_last);                        // culled in the other eye: already own
+                if(rig) CHECK(kind!=Kind::own_last);
+            }
+            last_frame[r.eye][object]=r.frame;
+        }
+        // A wrong own_frame (the slot reuse / timing label hazard: frame-4 instead of frame-2) never returns frame-2's rows, and a
+        // receipt naming frame-4 never takes frame-2's rows either
+        auto u=std::make_unique<d2vr::PrevMvpTable>();
+        for(unsigned f=200;f<=205;++f) {const unsigned e=f&1u;M prev=f>200?mvp(e^1u,f-1,5):mvp(e,f,5);u->fix_render(e,f,f-2,mvp(e,f,5).data(),prev.data(),true);}
+        M cur=mvp(0,206,5),prev=mvp(1,205,5);
+        CHECK(u->fix_render(0,206,202,cur.data(),prev.data(),true)==Kind::unproven && prev==mvp(1,205,5)); // receipt says 202: 204's rows refused
+        prev=mvp(1,205,5);CHECK(u->fix_render(0,206,204,cur.data(),prev.data(),true)==Kind::other_last && prev==mvp(0,204,5));
+        cur=mvp(1,209,5);prev=mvp(0,208,5); // the other eye's 208 was never recorded: a miss, rows unchanged (camera-only follows)
+        CHECK(u->fix_render(1,209,207,cur.data(),prev.data(),true)==Kind::miss && prev==mvp(0,208,5));
+    }
     // Generations are reused four frames later without stale hits.
     M prev=mvp(1,25,0);CHECK(!table->find(1,25+d2vr::PrevMvpTable::gens,mvp(1,25,0).data(),prev.data()));
     // Reflected layout (linux/proxy/vs_layouts.hpp): rows stored x,z,y,w, another constant, previous rows without z.

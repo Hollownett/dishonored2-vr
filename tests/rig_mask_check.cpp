@@ -107,10 +107,15 @@ static void run(bool d24,int mode) {
         if(rig && mode==3) {CHECK(!d2vr::RigMask::draw_is_rig());d2vr::RigMask::mark_held();}
         if(rig && ring) {
             CHECK(d2vr::RigMask::draw_is_rig());
-            // v1205: the draw's own render must be the ring's last rotation (8): a late draw of render 7 (the ring already rotated for 8) or an
-            // unknown render gets no palette
-            if(mode==1) {CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,7,true));CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,~0u,true));}
-            const bool own=d2vr::RigMask::previous_palette(c.Get(),0,8,mode==1);CHECK(own==(mode==1));
+            // v1206: the tagged ring. This draw is render 8's; its receipt's previous render is 6. The NEXT render's skin copy (9) is issued
+            // on the context before this draw executes (a late draw list): slot 6 is untouched, the draw still reads frame 6's palette. A frame
+            // whose slot was reused (1, now 9) or an unknown render gets no palette.
+            if(mode==1) {
+                const float v9[4]{9e-3f,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v9,0,0);d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),9);
+                const float z0[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,z0,0,0);
+                CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,1,true));CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,~0u,true));
+            }
+            const bool own=d2vr::RigMask::previous_palette(c.Get(),0,6,mode==1);CHECK(own==(mode==1));
             ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0); // what the draw reads as its previous palette
             if(t0) {ComPtr<ID3D11Resource> r;t0->GetResource(&r);ComPtr<ID3D11Buffer> b;r.As(&b);
                 D3D11_BUFFER_DESC sd{};b->GetDesc(&sd);sd.Usage=D3D11_USAGE_STAGING;sd.BindFlags=0;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Buffer> st;

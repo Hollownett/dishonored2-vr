@@ -67,6 +67,9 @@ inline constexpr unsigned rig_ring_run_needed=3;
 // engine frame the draw belongs to is already recorded (RigMask::frame_fn at the draw == the ring's last rotation) and the run has lasted
 // rig_ring_proven frames; otherwise zero motion (254). Counted: ring_late, ring_young.
 inline constexpr unsigned rig_ring_proven=8;
+// v1206: the tagged palette ring (RigMask::Ring): a slot is rewritten rig_ring_slots engine frames after its render, so a draw that reads this
+// eye's previous render (2 back) stays valid while its command list waits behind up to 5 later skin copies
+inline constexpr unsigned rig_ring_slots=8;
 // Pure: the run length after a rotation at engine frame `frame` (last = the frame of the previous rotation, ~0u none).
 inline unsigned rig_ring_run(std::uint32_t last,unsigned run,std::uint32_t frame) noexcept {
     if(last==frame) return run;                       // same engine frame: already rotated (a second call does nothing)
@@ -153,7 +156,7 @@ public:
     // the current palette (zero motion; the caller then uses the current rows too). True: the own pair is in place; the mask replay of this
     // draw then marks its pixels as own motion (255). Restored in after(). `eye`/`frame` are only diagnostics now (eye < 0: no view).
     // A draw whose palette bindings are not the prepass form cannot be paired (its pixels stay 254: the engine's vectors).
-    // v1205: `frame` = the draw's own render (engine frame, content-certain; ~0u unknown): the ring must have rotated for exactly that render
+    // v1206: `frame` = the render whose palette is this eye's previous one (the draw's receipt: previous render's engine frame; ~0u unknown)
     static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own) noexcept {
         tl_own_=false;
         if(!tl_rig_ || !c) return false;
@@ -187,21 +190,24 @@ public:
         ID3D11Device* owner{};current->GetDevice(&owner);if(owner) owner->Release(); // identity only
         std::lock_guard<std::mutex> lock(mutex_); // 3 calls a render; reset() and ring_view() take it too
         if(!r.ready.load(std::memory_order_relaxed) || r.bytes!=d.ByteWidth || r.device!=owner) {
-            r.ready.store(false,std::memory_order_release);r.view.Reset();r.p.Reset();r.a.Reset();r.b.Reset();r.run.store(0,std::memory_order_relaxed);r.last.store(~0u,std::memory_order_relaxed);
+            r.ready.store(false,std::memory_order_release);r.clear();
             d.Usage=D3D11_USAGE_DEFAULT;d.CPUAccessFlags=0;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-            const bool ok=owner && SUCCEEDED(owner->CreateBuffer(&d,nullptr,&r.p)) && SUCCEEDED(owner->CreateBuffer(&d,nullptr,&r.a)) && SUCCEEDED(owner->CreateBuffer(&d,nullptr,&r.b));
-            if(!ok) {failures_.fetch_add(1,std::memory_order_relaxed);return;}
+            bool ok=owner!=nullptr;for(auto& b:r.slot) ok=ok && SUCCEEDED(owner->CreateBuffer(&d,nullptr,&b));
+            if(!ok) {r.clear();failures_.fetch_add(1,std::memory_order_relaxed);return;}
             r.bytes=d.ByteWidth;r.device=owner;r.ready.store(true,std::memory_order_release);
         }
         const std::uint32_t last=r.last.load(std::memory_order_relaxed);
         if(last==frame) {ring_repeats_.fetch_add(1,std::memory_order_relaxed);return;}
         const unsigned run=rig_ring_run(last,r.run.load(std::memory_order_relaxed),frame);
         if(run==1 && last!=~0u) ring_restarts_.fetch_add(1,std::memory_order_relaxed);
-        c->CopyResource(r.p.Get(),r.b.Get());c->CopyResource(r.b.Get(),r.a.Get());c->CopyResource(r.a.Get(),current);
+        // v1206: written once, into this render's own slot, tagged with its frame (no in-place rotation: a draw list that executes after a
+        // later render's copy still reads the palette its tag names)
+        const unsigned k=frame%rig_ring_slots;r.tag[k].store(~0u,std::memory_order_release);
+        c->CopyResource(r.slot[k].Get(),current);r.tag[k].store(frame,std::memory_order_release);
         r.last.store(frame,std::memory_order_relaxed);r.run.store(run,std::memory_order_release);rotations_.fetch_add(1,std::memory_order_relaxed);
     }
     // dxgi_probe: the one-view mode (re)starts (the alternate view appears after paired frames or a mode change): every ring starts over.
-    static void begin_epoch() noexcept {epoch_.fetch_add(1,std::memory_order_relaxed);for(auto& r:ring_) {r.run.store(0,std::memory_order_relaxed);r.last.store(~0u,std::memory_order_relaxed);}}
+    static void begin_epoch() noexcept {epoch_.fetch_add(1,std::memory_order_relaxed);for(auto& r:ring_) {r.run.store(0,std::memory_order_relaxed);r.last.store(~0u,std::memory_order_relaxed);for(auto& t:r.tag) t.store(~0u,std::memory_order_relaxed);}}
     // FsrTaa's copy: draws of the alternate view seen since the last call (0: no one-view render, the mask is not live), and the rig target
     // of this scene depth (empty: none yet / another depth).
     static std::uint64_t take_view_draws() noexcept {return view_draws_.exchange(0,std::memory_order_relaxed);}
@@ -211,7 +217,7 @@ public:
         srv=target_.srv;rtv=target_.rtv;return true;
     }
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);
-        for(auto& r:ring_) {r.ready.store(false);r.view.Reset();r.p.Reset();r.a.Reset();r.b.Reset();r.device=nullptr;r.bytes=0;r.run.store(0);r.last.store(~0u);}
+        for(auto& r:ring_) {r.ready.store(false);r.clear();r.device=nullptr;r.bytes=0;}
         target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
     static std::string json() {
         std::ostringstream o;
@@ -286,8 +292,11 @@ private:
     inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
     inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
     // v1179: per rig model, the ring the GPU skin copy rotates (P bound at draws; A, B the last two renders' palettes) and P's view
-    struct Ring {Microsoft::WRL::ComPtr<ID3D11Buffer> p,a,b;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;UINT bytes{};
-        std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};};
+    // v1206: rig_ring_slots palettes per model, slot frame%rig_ring_slots written once by that render's skin copy and tagged with its frame
+    struct Ring {std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,rig_ring_slots> slot;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,rig_ring_slots> view;
+        std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};UINT bytes{};
+        std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};
+        void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);}run.store(0);last.store(~0u);}};
     inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};
     inline static std::atomic<std::uint64_t> held_draws_{};
     inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{},ring_late_{},ring_young_{};
@@ -296,20 +305,20 @@ private:
     static ID3D11ShaderResourceView* ring_view(ID3D11DeviceContext* c,unsigned model,std::uint32_t frame) noexcept {
         if(model>=ring_.size()) return nullptr;
         Ring& r=ring_[model];
-        if(!r.ready.load(std::memory_order_acquire) || !rig_ring_valid(r.run.load(std::memory_order_acquire))) return nullptr;
-        if(r.run.load(std::memory_order_acquire)<rig_ring_proven) {ring_young_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
-        // v1205 (v1203 probe: a mid-run render of 41,000 px rig vectors): the engine frame counter NOW can already be the next render's (its skin
-        // copy rotated the ring while this render's late draws record: P is then the other eye's palette). The draw's own render must match.
-        if(frame==~0u || frame!=r.last.load(std::memory_order_acquire)) {ring_late_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
+        if(!r.ready.load(std::memory_order_acquire)) return nullptr;
+        // v1206: `frame` = the render whose palette the draw needs (this eye's previous render, from its receipt). Only the slot tagged with
+        // exactly that frame: written by that render's skin copy and not reused for rig_ring_slots engine frames (no rotation can move it)
+        const unsigned k=frame%rig_ring_slots;
+        if(frame==~0u || r.tag[k].load(std::memory_order_acquire)!=frame) {ring_late_.fetch_add(1,std::memory_order_relaxed);return nullptr;}
         std::lock_guard<std::mutex> lock(mutex_);
-        if(!r.ready.load(std::memory_order_relaxed)) return nullptr;
+        if(!r.ready.load(std::memory_order_relaxed) || r.tag[k].load(std::memory_order_relaxed)!=frame) return nullptr;
         ID3D11Device* device{};c->GetDevice(&device);if(device) device->Release();
         if(device!=r.device) return nullptr; // the ring is another device's
-        if(!r.view && r.p) {
+        if(!r.view[k] && r.slot[k]) {
             D3D11_SHADER_RESOURCE_VIEW_DESC vd{};tl_current_->GetDesc(&vd);
-            if(FAILED(device->CreateShaderResourceView(r.p.Get(),&vd,&r.view))) failures_.fetch_add(1,std::memory_order_relaxed);
+            if(FAILED(device->CreateShaderResourceView(r.slot[k].Get(),&vd,&r.view[k]))) failures_.fetch_add(1,std::memory_order_relaxed);
         }
-        tl_held_view_=r.view;return tl_held_view_.Get();
+        tl_held_view_=r.view[k];return tl_held_view_.Get();
     }
     // the unpaired draws' binding pattern (t0..t3: 0 none, 1 this model wrapper 0, 2 wrapper 1, 3 another rig model's, 4 another resource)
     inline static std::array<std::atomic<std::uint64_t>,625> unpaired_patterns_{},depth_only_patterns_{};
@@ -326,8 +335,7 @@ private:
             if(b) {b->GetDesc(&d);b->Release();}
             return at;};
         D3D11_BUFFER_DESC d{},cd{};const auto at=buffer_desc(t0,d);buffer_desc(t1,cd);
-        for(const auto& r:ring_) if(r.ready.load(std::memory_order_acquire) && (at==reinterpret_cast<std::uintptr_t>(r.p.Get()) || at==reinterpret_cast<std::uintptr_t>(r.a.Get()) ||
-            at==reinterpret_cast<std::uintptr_t>(r.b.Get()))) foreign_ours_.fetch_add(1,std::memory_order_relaxed); // v1179: a mod buffer left bound
+        for(const auto& r:ring_) if(r.ready.load(std::memory_order_acquire)) for(const auto& b:r.slot) if(at==reinterpret_cast<std::uintptr_t>(b.Get())) foreign_ours_.fetch_add(1,std::memory_order_relaxed); // v1179: a mod buffer left bound
         D3D11_SHADER_RESOURCE_VIEW_DESC vd{};t0->GetDesc(&vd);
         foreign_bytes_.store(d.ByteWidth,std::memory_order_relaxed);foreign_current_bytes_.store(cd.ByteWidth,std::memory_order_relaxed);foreign_bind_.store(d.BindFlags,std::memory_order_relaxed);
         foreign_misc_.store(d.MiscFlags,std::memory_order_relaxed);foreign_stride_.store(d.StructureByteStride,std::memory_order_relaxed);foreign_usage_.store(d.Usage,std::memory_order_relaxed);

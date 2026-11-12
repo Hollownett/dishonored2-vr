@@ -174,6 +174,14 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
             b1 = meta.get('b1_step_uv')
             if b1: line += '  b1 step %s vs own-prev step %s' % (np.round(b1, 6).tolist(), np.round(jitter_step(meta['current'], meta['previous']), 6).tolist())
             log(line)
+            om = meta.get('object_motion')  # v1206: the render's previous-row outcomes (object_motion.hpp RenderRow) at the dump
+            if om:
+                log('      rows: frame %s prev_frame %s phase %s reset %s; jitter %s prev %s rows-src %s (pair %s)' % (
+                    om['frame'], om['prev_frame'], om['phase'], om['reset'], om['jitter'], om['prev_jitter'], om.get('rows_src_jitter'), om.get('src_matches_pair')))
+                skip = ('display', 'frame', 'prev_frame', 'phase', 'reset', 'has_prev', 'eye', 'jitter', 'prev_jitter', 'rows_src_jitter', 'src_matches_pair')
+                log('      rows: ' + ' '.join(f'{k} {v}' for k, v in om.items() if k not in skip))
+            elif 'object_motion' in meta:
+                log('      rows: not in the ring (null)')
             r = dict(index=meta['index'], eye=meta['eye'], own_median=float(np.median(own)) if len(own) else None, movers=float(movers.mean()) if len(own) else 0.0)
             h1 = None
             other = burst[i - 1]['meta'] if i else None

@@ -55,12 +55,14 @@ struct Prepared {
     std::uint32_t phase{};
     bool reset{}, duplicate{}, has_previous{};
     std::uint64_t transaction{};
+    std::uint32_t previous_counter{}; // v1206: native_counter of the render `previous` was taken from (has_previous only)
 };
 struct Receipt {
     Key key{};
     Snapshot current{}, previous{};
     std::uint32_t phase{};
     bool reset{}, admitted{};
+    std::uint32_t previous_counter{}; // v1206: the engine frame of this eye's render that `previous` is (== key.native_counter on a reset)
 };
 
 class History {
@@ -98,6 +100,7 @@ public:
         if (eye.last) {
             p.previous = eye.last->current;
             p.phase = eye.last->phase + 1u;
+            p.previous_counter = eye.last->key.native_counter;
         }
         eye.active = p;
         return p;
@@ -110,7 +113,8 @@ public:
         // Use the stored transaction, so caller-side edits cannot change temporal ownership.
         const Prepared& active = *eye.active;
         Receipt receipt{active.key, current, active.has_previous ? active.previous : current,
-                        active.phase, active.reset, false};
+                        active.phase, active.reset, false,
+                        active.has_previous ? active.previous_counter : active.key.native_counter};
         eye.last = receipt;
         return receipt;
     }

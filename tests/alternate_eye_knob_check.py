@@ -209,7 +209,7 @@ assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fres
 assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
 assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
 assert '(mvScale.z>0?(rig==0 || (mvScale.w>0 && rig==255)):proj.y/(d+proj.x)>=proj.z)' in mp  # v1179: 255 = own motion, 254 = rig without
-assert 'const bool own=RigMask::previous_palette(c,static_cast<int>(label_eye),have_content?view.frame:~0u,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1204: no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
+assert 'const bool own=RigMask::previous_palette(c,have_content?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1206 (was v1204): no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
 assert 'restore_t0(); // v1166' in rig and 'k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}' in fsr
 assert 'd2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame);' in probe and 'o[i.xy]=held?253:own?255:rig?254:0;' in rig  # v1179 ring + per-pixel validity; v1183 held class 253
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
@@ -333,7 +333,7 @@ print('PASS: v1199 certain one-view draw views, two-slice rig target, afw2 rig_t
 # Setup-end final snapshot feeds the candidates; content status under alternate_eye.object_motion.content; build/alt-view-content-tol
 assert 'const bool by_content=rows && content_view(rows,out,prev_rows);' in om and 'const bool certain=by_content;' in om  # v1201: content only
 assert 'early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);' in om and 'const bool have_view=current_view(s,view,content_wanted?early:nullptr,early_prev_ok?early_prev:nullptr);' in om
-assert 'd2vr::ObjectMotion::note_setup_final(reinterpret_cast<std::uintptr_t>(view));' in probe
+assert 'd2vr::ObjectMotion::note_alternate_render(*alternate_receipt);' in probe  # v1206 (was v1200 note_setup_final)
 assert 'L"alt-view-content-tol"' in om and '\\"content\\":"+content_json()' in om
 bv = (root / 'src' / 'buffer_views.hpp').read_text(encoding='utf-8')
 assert 'inline double rows_shear(const ProjectionXY& p,const float* rows) noexcept {' in bv and 'inline int pick_by_shear(' in bv
@@ -359,7 +359,7 @@ assert 'const bool by_content=rows && content_view(rows,out,prev_rows);' in om a
 print('PASS: v1203 newest-two candidates, fit 1e-5, Gram test for skewed models')
 
 # v1204: every rig draw is chained and recorded (fix_any) whether or not its view is certain; rig_zero_why status
-assert 'const auto kind=table_.fix_any(label_eye,label_frame,cur,prev);' in om and 'const bool own=RigMask::previous_palette(c,static_cast<int>(label_eye),have_content?view.frame:~0u,rows_own);' in om
+assert 'kind=table_.fix_render(view.eye,view.frame,view.prev_frame,cur,prev,false);' in om  # v1206 (was v1204 fix_any)
 assert '\\"rig_zero_why\\":[' in om
 print('PASS: v1204 rig motion independent of the per-draw view, rig_zero_why')
 
@@ -368,5 +368,21 @@ print('PASS: v1204 rig motion independent of the per-draw view, rig_zero_why')
 assert 'tl_view_heuristic_=!certain;' in om and 'const bool have_content=have_view && !(alternate() && tl_view_heuristic_);' in om
 assert 'if(near_draw && one_view_place && have_content) {' in om and 'if(alt && !apply && kind!=PrevMvpTable::same) note_raw();' in om
 rm2 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
-assert 'if(frame==~0u || frame!=r.last.load(std::memory_order_acquire))' in rm2
+assert 'if(frame==~0u || r.tag[k].load(std::memory_order_acquire)!=frame)' in rm2  # v1206 (was v1205 r.last)
 print('PASS: v1205 heuristic chain labels for uncertain draws, content-only render consumers, ring per own render, raw-row status')
+
+# v1206: alternate records only from the receipt finish() publishes (final VP + previous render); previous rows and the rig palette from
+# exactly the receipt's previous render (fix_render, tagged palette ring); uncertain draws zero; per-render status ring + probe rows
+ant = (root / 'src' / 'alternate_native_taa.hpp').read_text(encoding='utf-8')
+ats = (root / 'src' / 'alternate_taa_state.hpp').read_text(encoding='utf-8')
+assert 'std::optional<Receipt> finish(std::uintptr_t view) {' in ant and 'p.previous_counter = eye.last->key.native_counter;' in ats
+assert 'const auto alternate_receipt=alternate_taa_runtime.finish(reinterpret_cast<std::uintptr_t>(view));' in probe
+assert 'static void note_alternate_render(const alternate_taa::Receipt& r) noexcept {' in om and 'if(old.receipt && !v.receipt) return;' in om
+assert 'snapshot(static_cast<unsigned>(eye),alt_view)' not in om  # no mid-frame alternate snapshots
+assert 'else if(view.receipt && view.has_prev) kind=table_.fix_render(view.eye,view.frame,view.prev_frame,cur,prev,true);' in om
+assert 'if(alt && (!have_content || !view.receipt) && !alt_view_heuristic.load(std::memory_order_relaxed) && have_prev) {' in om
+assert 'mul(rec.has_prev?rec.prev_vp:rec.m[2],inverse_own,out.camera);' in om and 'if(!alt && !apply && mode_.load(std::memory_order_relaxed)>=1' in om
+assert 'static constexpr unsigned gens=8,' in om and '\\"renders\\":"+renders_json()' in om
+assert 'const unsigned k=frame%rig_ring_slots;' in rm2 and 'inline constexpr unsigned rig_ring_slots=8;' in rm2
+assert '\\"object_motion\\":"<<d2vr::ObjectMotion::render_json(receipt->key.display);' in probe
+print('PASS: v1206 receipt records, exact previous render for rows and rig palette, uncertain zero, per-render status')
