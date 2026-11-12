@@ -515,13 +515,13 @@ print('PASS: v1234 binder drops G for a different holder; sanity per hold')
 # with no time limit; status body_prompt first_ms_max / cached_frames / fresh_frames / hides_by
 hd36 = (root / 'src' / 'native_hud_child_draw.hpp').read_text(encoding='utf-8')
 assert 'live_offer' not in hd36 and 'return takedown_slot?1300:std::max<UINT64>(kept,250);' in hd36
-assert 'inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,std::uintptr_t art_body,bool art_current,bool other_prompt_drawn,bool anchor) noexcept {' in hd36
+assert 'inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,bool carrying,bool kind_art,bool other_prompt_drawn,bool anchor) noexcept {' in hd36
 assert 'if(slot==0 && body_prompt_from_cache(now,destination,live_scope)) return;' in probe and 'body_prompt_keep(context,compact,art_owner,point,art_width,depth,now);' in probe
 assert 'native_body_prompt_stats.update(now,hand_body(now),shown,' in probe and 'prompt_live_holds' not in probe
 ia36 = (root / 'src' / 'native_interaction_aim.hpp').read_text(encoding='utf-8')
 sp36 = (root / 'src' / 'selection_policy.hpp').read_text(encoding='utf-8')
 assert 'return part?hand_pickup_in_range(probe,part->first,part->second):hand_pickup_in_range(probe,part_point,part_point);' in sp36
-assert 'const bool focused=hand && focus && focus->entity==owner;' in ia36 and 'if(on && !native_ok) {qualified_result=result&~std::uintptr_t{0xff};if(output)*output=0;++body_hand_on_passes_;}' in ia36
+assert 'body_los_verdict_.store(native_ok?1u:on?2u:focused?3u:4u,std::memory_order_relaxed);' in ia36 and 'if(on && !native_ok) {qualified_result=result&~std::uintptr_t{0xff};if(output)*output=0;++body_hand_on_passes_;}' in ia36
 assert ',\\"use_refused\\":{\\"other_owner\\":' in probe
 print('PASS: v1236 body prompt from its kept art while the body is under the hand; a downed body passes the hand-on-it LOS rule at its grabbed part')
 # v1237: held things - children of the held entity (+0xb0/+0xb8) are matched with the thing's delta; RigidLocal recycles the stalest cluster
@@ -550,7 +550,7 @@ print('PASS: v1238 goal-velocity feed, held shadow placement, hold_sync status')
 wd39 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
 assert 'static Prediction predict(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m,double gate,double gate_rad,RefOf&& ref_of) noexcept {' in wd39
 assert 'out.gate_m=std::min(.05+mps*.05,out.reach);' in wd39 and wd39.count('predict_place(*slot,full(') == 2
-assert 'const Mat x=predicted?predicted_x:rigid_part(' in wd39 and '\\"match\\":"+match_json(k)' in wd39
+assert 'const Mat x=predicted?predicted_x:rigid?mul(matched,l):m;' in wd39 and '\\"match\\":"+match_json(k)' in wd39
 print('PASS: v1239 held things matched through the read ring and the predicted rigid match')
 # v1240: a finite oversized hand-body speed/spin read-back retires and re-creates the body (wild_motion; max_wild_motion then the latch);
 # a held severed part's placed draws per key / pass with the placed L's rigidity and the per-render L spread between keys (severed_draws)
@@ -562,3 +562,18 @@ om40 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 assert wd40.count('note_l(matched,') == 2 and om40.count('weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,') == 2
 assert '<<",\\"severed_draws\\":"<<weapon_draw::Place::severed_json()' in om40
 print('PASS: v1240 hand-body wild-motion recovery and the severed_draws diagnostic')
+# v1241: sim fixture "grab left|right [radius] [name]" (simulated XR only) binds the nearest native_rigid_body prop through the ordinary hold
+# (seat_of, PhysicalGrab::bind, take_hold); held parts place every pass with one canonical L through one product VP*(B*L) (pass_spread_renders)
+ng41 = (root / 'src' / 'native_grab.hpp').read_text(encoding='utf-8')
+wd41 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+assert 'if(verb=="grab") {' in probe and 'if(!simulated_vr_requested) return "grab requires simulated XR";' in probe
+assert 'native_grab.fixture_active(h)' in probe and 'native_grab.take_fixture_said()' in probe
+assert ng41.count('take_hold(lane,side,*body,now);') == 2 and ng41.count('seat_of(*body,p,natural)') == 2 and 'fixture_reel(lane,side,dt);' in ng41
+assert 'static Mat canonical(unsigned side,std::uint32_t frame,unsigned ref,const Mat& l) noexcept {' in wd41
+assert wd41.count('rigid_now(w,vp,lref,l)') == 2 and wd41.count('RigidLocal::note_placed(') == 2 and '\\"pass_spread_renders\\":' in wd41
+print('PASS: v1241 grab fixture and one bitwise L across passes')
+# v1242: downed-body prompt art kept per kind (Carry / with Loot) and shown on any downed body under the hand; the kind cache file survives sessions
+assert 'auto& k=body_kind_art[body_prompt_kind(owner,now)];' in probe and 'output_directory.always()/L"cache"/L"prompt-kind-art.bin"' in probe
+assert 'inline std::optional<std::vector<PromptKindArt>> decode_prompt_kind_art(const std::vector<std::byte>& in) {' in hd36
+assert ',\\"kind_frames\\":' in probe and ',\\"kind_cache_loaded\\":' in probe and ',\\"kind_cache_saved\\":' in probe
+print('PASS: v1242 body prompt kind art, kind cache file, either hand focus in the hand-on pass')

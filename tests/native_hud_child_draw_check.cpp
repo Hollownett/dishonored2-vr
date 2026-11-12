@@ -120,7 +120,7 @@ int main(){
                 const bool fresh=on && (t%1000)>=200 && (t%1000)<500;
                 if(fresh) {if(!burst_from || t-last_fresh>11) burst_from=t;last_fresh=t;if(t-burst_from>=150) art_body=body;}
                 const bool gap_hold=!fresh && last_fresh && t-last_fresh<=500;   // v1232: art up to 250 ms old + the 250 ms gap
-                const auto miss=body_prompt_cached(under,art_body,true,false,true);
+                const auto miss=body_prompt_cached(under,false,art_body!=0,false,true);
                 const bool shown=fresh || (v1236?miss==BodyPromptMiss::none:gap_hold && on);
                 if(art_body && on && !shown) kept_any_frame_after_art=false;
                 if(!on && shown) leave_shown_ms+=11;
@@ -140,14 +140,29 @@ int main(){
          assert(length(on_shin-origin)>1. && downed_body_hand_on(on_shin,shin,origin) && !downed_body_hand_on(on_shin,std::nullopt,origin));
          assert(!downed_body_hand_on(off_shin,shin,origin));
          assert(downed_body_hand_on(Vec3{.8,.2,0},std::nullopt,Vec3{.8,0,0}) && !downed_body_hand_on(Vec3{.8,.3,0},std::nullopt,Vec3{.8,0,0}));}   // no box: its point, 25 cm
-        // Never drawn: the game never offered a prompt for this body, so it has no art (the miss says so; no invented art), and the run is "never".
-        {NativeBodyPromptStats s;for(UINT64 t=0;t<=800;t+=11) {const auto m=body_prompt_cached(0x10,0,false,false,true);assert(m==BodyPromptMiss::no_art);s.update(5000+t,0x10,false,m);}
-         s.update(7000,0,false);assert(s.intervals==1 && s.never==1);}
-        assert(body_prompt_cached(0,0x10,true,false,true)==BodyPromptMiss::not_targeted);   // the hand left: hidden at once
-        assert(body_prompt_cached(0x20,0x10,true,false,true)==BodyPromptMiss::no_art);      // another body: never the first body's art
-        assert(body_prompt_cached(0x10,0x10,true,true,true)==BodyPromptMiss::other_prompt); // the game draws another prompt: it replaces at once
-        assert(body_prompt_cached(0x10,0x10,false,false,true)==BodyPromptMiss::no_art);     // art of an older pose epoch
-        assert(body_prompt_cached(0x10,0x10,true,false,false)==BodyPromptMiss::no_anchor);
+        // v1242 kind art: body B the game never drew a prompt for, art of the same kind kept from body A earlier: B shows it from its first frame
+        // and hides the frame the hand leaves (hand_body 0: the grab focus is cached <= 150 ms, the live target <= 250 ms). Frames 11 ms.
+        {NativeBodyPromptStats s;const bool kind_art=true;UINT64 shown_after_leave{};
+         for(UINT64 t=0;t<=3000;t+=11) {const std::uintptr_t under=t<2000?0xB0:0;const auto m=body_prompt_cached(under,false,kind_art,false,true);
+             const bool shown=m==BodyPromptMiss::none;if(!under && shown) shown_after_leave+=11;s.update(9000+t,under,shown,m,shown,shown);}
+         s.close();assert(s.intervals==1 && !s.never && s.first_ms_max==0 && s.hides_total==0 && s.kind>0 && !shown_after_leave);}
+        assert(body_prompt_cached(0x10,false,false,false,true)==BodyPromptMiss::no_art);   // first session, no body drawn yet and no cache: nothing invented
+        assert(body_prompt_cached(0,false,true,false,true)==BodyPromptMiss::not_targeted); // the hand left; a living NPC is never a hand_body (downed only)
+        assert(body_prompt_cached(0x10,true,true,false,true)==BodyPromptMiss::carried);    // the player carries a body: the game shows its own prompt
+        assert(body_prompt_cached(0x10,false,true,true,true)==BodyPromptMiss::other_prompt); // the game draws another prompt: it replaces at once
+        assert(body_prompt_cached(0x10,false,true,false,false)==BodyPromptMiss::no_anchor);
+        {   // the kind cache file: round trip, and corrupt / truncated / wrong version / out-of-range files rejected whole
+            std::vector<PromptKindArt> arts(2);
+            for(unsigned i=0;i<2;++i) {auto& a=arts[i];a.kind=i;a.width=3+i;a.height=2;a.format=28;a.per_depth=.21;a.offset={0,.35,.1*i};
+                a.pixels.resize(std::size_t{a.width}*a.height*4);for(std::size_t p=0;p<a.pixels.size();++p) a.pixels[p]=static_cast<std::byte>(p*7+i);}
+            const auto blob=encode_prompt_kind_art(arts);const auto back=decode_prompt_kind_art(blob);
+            assert(back && back->size()==2 && (*back)[1].width==4 && (*back)[1].pixels==arts[1].pixels && (*back)[1].offset.z==.1 && (*back)[0].per_depth==.21);
+            auto bad=blob;bad[20]^=std::byte{1};assert(!decode_prompt_kind_art(bad));
+            assert(!decode_prompt_kind_art(std::vector<std::byte>(blob.begin(),blob.end()-9)));
+            arts[0].per_depth=5;assert(!decode_prompt_kind_art(encode_prompt_kind_art(arts)));arts[0].per_depth=.21;
+            auto v2=blob;const std::uint32_t version=2;std::memcpy(v2.data()+4,&version,4);const auto h=prompt_kind_hash(v2.data(),v2.size()-8);
+            std::memcpy(v2.data()+v2.size()-8,&h,8);assert(!decode_prompt_kind_art(v2));   // a valid checksum over a wrong version
+        }
         {NativeBodyPromptStats s;for(UINT64 t=0;t<=1000;t+=11) {const bool shown=t<400 || t>=600;   // one hide by another prompt, then back
              s.update(5000+t,0x10,shown,shown?BodyPromptMiss::none:BodyPromptMiss::other_prompt);}
          s.update(7000,0,false);assert(s.hides_total==1 && s.hide_reasons[static_cast<unsigned>(BodyPromptMiss::other_prompt)]==1);}

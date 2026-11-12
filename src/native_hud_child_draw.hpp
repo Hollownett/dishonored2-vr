@@ -5,6 +5,7 @@
 #include "native_prompt_entry.hpp"
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 namespace d2vr {
 enum class NativeHudChildKind:unsigned {none,prompt,health,mana,equipment,objective,tutorial,panel,crosshair};
@@ -73,12 +74,47 @@ inline UINT64 native_prompt_keep_grace(bool live,bool live_same_element,bool liv
 // downed body under the hand (its live Use target or its grab focus) shows the last good art the game drew for THAT body, with no time
 // limit; it goes when the hand leaves it (<= 250 ms: live target 250 ms, grab focus 150 ms), when it is held/carried (the grab focus
 // resets), or when the game draws a different prompt. A body the game never drew a prompt for has no art (miss no_art).
-enum class BodyPromptMiss:unsigned {none,no_art,other_prompt,no_anchor,not_targeted,count};
-inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,std::uintptr_t art_body,bool art_current,bool other_prompt_drawn,bool anchor) noexcept {
+// v1242 (headset v1239: 18 of 24 hides were no_art, a body the game never drew a prompt for): the art is kept per prompt KIND, not per body.
+// A downed body's prompt is the same picture for every body of one kind: kind 0 = Carry only, kind 1 = the body also offers Loot (the game's
+// own loot offer for it, last seen while it was the Use target; unknown = Carry). Any body's art of that kind shows on any downed body under
+// the hand, never while the player carries a body, never over a different prompt the game draws now.
+enum class BodyPromptMiss:unsigned {none,no_art,other_prompt,no_anchor,not_targeted,carried,count};
+inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,bool carrying,bool kind_art,bool other_prompt_drawn,bool anchor) noexcept {
     if(!hand_body) return BodyPromptMiss::not_targeted;
-    if(!art_body || art_body!=hand_body || !art_current) return BodyPromptMiss::no_art;
+    if(carrying) return BodyPromptMiss::carried;
+    if(!kind_art) return BodyPromptMiss::no_art;
     if(other_prompt_drawn) return BodyPromptMiss::other_prompt;
     return anchor?BodyPromptMiss::none:BodyPromptMiss::no_anchor;
+}
+// v1242: the kept kind art on disk (artifacts\cache\prompt-kind-art.bin), so the first body of a later session has it. RGBA8 pixels, the
+// art's metres per metre of depth and its offset from the body origin; magic, version, sizes, finite ranges and an FNV-1a checksum are
+// validated on load, anything else is rejected whole.
+struct PromptKindArt {std::uint32_t kind{},width{},height{},format{};double per_depth{};Vec3 offset{};std::vector<std::byte> pixels;};
+inline constexpr std::uint32_t prompt_kind_magic=0x4b505644u,prompt_kind_version=1;
+inline std::uint64_t prompt_kind_hash(const std::byte* p,std::size_t n) noexcept {std::uint64_t h=1469598103934665603ull;for(std::size_t i=0;i<n;++i){h^=static_cast<std::uint8_t>(p[i]);h*=1099511628211ull;}return h;}
+inline std::vector<std::byte> encode_prompt_kind_art(const std::vector<PromptKindArt>& arts) {
+    std::vector<std::byte> out;const auto put=[&](const void* v,std::size_t n){const auto* b=static_cast<const std::byte*>(v);out.insert(out.end(),b,b+n);};
+    const std::uint32_t head[3]{prompt_kind_magic,prompt_kind_version,static_cast<std::uint32_t>(arts.size())};put(head,sizeof(head));
+    for(const auto& a:arts) {const std::uint32_t u[4]{a.kind,a.width,a.height,a.format};const double d[4]{a.per_depth,a.offset.x,a.offset.y,a.offset.z};
+        put(u,sizeof(u));put(d,sizeof(d));put(a.pixels.data(),a.pixels.size());}
+    const auto h=prompt_kind_hash(out.data(),out.size());put(&h,sizeof(h));return out;
+}
+inline std::optional<std::vector<PromptKindArt>> decode_prompt_kind_art(const std::vector<std::byte>& in) {
+    if(in.size()<12+8) return {};
+    std::uint64_t h{};std::memcpy(&h,in.data()+in.size()-8,8);if(h!=prompt_kind_hash(in.data(),in.size()-8)) return {};
+    std::size_t at=0;const auto get=[&](void* v,std::size_t n){if(at+n>in.size()-8) return false;std::memcpy(v,in.data()+at,n);at+=n;return true;};
+    std::uint32_t head[3]{};if(!get(head,sizeof(head)) || head[0]!=prompt_kind_magic || head[1]!=prompt_kind_version || head[2]>2) return {};
+    std::vector<PromptKindArt> out;
+    for(std::uint32_t i=0;i<head[2];++i) {
+        PromptKindArt a;std::uint32_t u[4]{};double d[4]{};if(!get(u,sizeof(u)) || !get(d,sizeof(d))) return {};
+        a.kind=u[0];a.width=u[1];a.height=u[2];a.format=u[3];a.per_depth=d[0];a.offset={d[1],d[2],d[3]};
+        if(a.kind>1 || !a.width || !a.height || a.width>2048 || a.height>1024 || !std::isfinite(a.per_depth) || a.per_depth<=0 || a.per_depth>1 ||
+           !finite(a.offset) || length(a.offset)>2) return {};
+        a.pixels.resize(std::size_t{a.width}*a.height*4);if(!get(a.pixels.data(),a.pixels.size())) return {};
+        out.push_back(std::move(a));
+    }
+    if(at!=in.size()-8) return {};
+    return out;
 }
 // v1228: how well a body's carry prompt follows the hand. An interval is a run of frames whose prompt target is one body (a gap of up to
 // gap_ms without it continues the run); runs shorter than min_ms are not counted. Per counted run: never shown, first shown later than
@@ -89,15 +125,15 @@ struct NativeBodyPromptStats {
     static constexpr UINT64 gap_ms=300,min_ms=300,late_ms=300;
     std::uintptr_t body{};UINT64 start{},seen{},last{},run_ms{},run_shown{},first{};bool shown{},any{};unsigned hides{};
     BodyPromptMiss hid_by{};
-    UINT64 intervals{},never{},late{},flicker{},target_ms{},shown_ms{},hides_total{},first_ms_max{},cached{},fresh{};
+    UINT64 intervals{},never{},late{},flicker{},target_ms{},shown_ms{},hides_total{},first_ms_max{},cached{},fresh{},kind{};   // kind: kept art of ANOTHER body
     std::array<UINT64,static_cast<unsigned>(BodyPromptMiss::count)> hide_reasons{};
     void close() noexcept {
         if(body && seen-start>=min_ms) {++intervals;never+=!any;late+=any && first-start>late_ms;flicker+=hides>0;target_ms+=run_ms;shown_ms+=run_shown;hides_total+=hides;
             if(any) first_ms_max=std::max(first_ms_max,first-start);}
         body=0;
     }
-    void update(UINT64 now,std::uintptr_t target_body,bool prompt_shown,BodyPromptMiss miss=BodyPromptMiss::none,bool from_cache=false) noexcept {
-        if(target_body && prompt_shown) ++(from_cache?cached:fresh);
+    void update(UINT64 now,std::uintptr_t target_body,bool prompt_shown,BodyPromptMiss miss=BodyPromptMiss::none,bool from_cache=false,bool other_body=false) noexcept {
+        if(target_body && prompt_shown) {++(from_cache?cached:fresh);if(from_cache && other_body) ++kind;}
         if(body && (now<last || (target_body && target_body!=body) || (!target_body && now-seen>gap_ms))) close();
         if(!body && target_body) {body=target_body;start=seen=last=now;run_ms=run_shown=0;any=false;hides=0;shown=prompt_shown;if(prompt_shown){any=true;first=now;}return;}
         if(!body) return;

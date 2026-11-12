@@ -129,7 +129,45 @@ int main() {
         const std::string census=Place::census_json();std::printf("%s\n",census.c_str());
         CHECK(census.find("\"severed\":{\"renders\":1,\"mixed\":0,\"no_mv\":0,\"unplaced\":0,\"draws\":{\"placed\":1,\"with_prev\":1,\"child\":1")!=std::string::npos);
     }
+    { // v1241: one mesh drawn by a depth pass and a colour pass (two keys, two clusters) whose samples differ by float noise (1e-6 m, 1e-5 deg),
+      // in either order: both passes of every render write bit-identical rows (a forward pass testing depth against the prepass loses no pixel);
+      // a genuinely different part 5 mm away keeps its own L.
+        RigidLocal::clear();
+        const auto noisy=[&](const Mat& l) {Mat n=mul(axis_angle(.6,.48,.64,(uni()-.5)*2e-5*0.017453292519943295),l);n[3]+=(uni()-.5)*2e-6;n[7]+=(uni()-.5)*2e-6;n[11]+=(uni()-.5)*2e-6;return n;};
+        Mat l_part=l_true;l_part[3]+=.005;
+        const auto [pairs0,spread0]=RigidLocal::pass_counts();
+        unsigned differing=0,raw_differing=0,part_far=0;double part_err=0;
+        for(std::uint32_t n=0;n<60;++n) {
+            const Mat b=rigid(0.01*n,0.01*n,0.3,0.05),f=rigid(0.01*n-0.05,0.01*n-0.04,0.3,0.05);
+            const auto raw=raw_of(f);const std::array<const float*,2> raws{nullptr,raw.data()};const std::array<const Mat*,2> bounds{nullptr,&b};
+            Place::publish_bound(600+n,raws,bounds,{0,0.5},{0,0xa1});
+            for(int eye=0;eye<2;++eye) {
+                const Mat vp=vp_of(eye?0.032:-0.032);
+                float placed[2][16]{},raw_rows[2][16]{};
+                for(int k=0;k<2;++k) {
+                    const int pass=(n+static_cast<unsigned>(eye))%2?1-k:k;   // the depth pass first in some renders, the colour pass in others
+                    const Mat l=noisy(l_true);const Mat drawn=mul(mul(vp,f),l);const Mat ideal=mul(vp,mul(b,l));
+                    float cur[16],prev[16];for(int i=0;i<16;++i) {cur[i]=static_cast<float>(drawn[static_cast<std::size_t>(i)]);raw_rows[pass][i]=static_cast<float>(ideal[static_cast<std::size_t>(i)]);}
+                    bool own=false;const auto r=Place::place_one_view(vp,vp,cur,placed[pass],prev,own,nullptr,pass?12:11);
+                    CHECK(r.side==1);
+                }
+                if(std::memcmp(placed[0],placed[1],sizeof placed[0])) ++differing;
+                if(std::memcmp(raw_rows[0],raw_rows[1],sizeof raw_rows[0])) ++raw_differing;
+                const Mat drawn=mul(mul(vp,f),noisy(l_part));float cur[16],now[16],prev[16];for(int i=0;i<16;++i) cur[i]=static_cast<float>(drawn[static_cast<std::size_t>(i)]);
+                bool own=false;Place::place_one_view(vp,vp,cur,now,prev,own,nullptr,13);
+                part_err=std::max(part_err,worst(now,mul(mul(vp,b),l_part)));
+                if(worst(now,mul(mul(vp,b),l_true))>1e-3) ++part_far;
+            }
+        }
+        const auto [pairs1,spread1]=RigidLocal::pass_counts();
+        std::printf("depth/colour passes: %u of 120 eye-renders differ (each pass with its own sample: %u); pass pairs %llu, pass_spread_renders %llu; part 5 mm away: error %.2g, kept apart in %u of 120\n",
+            differing,raw_differing,static_cast<unsigned long long>(pairs1-pairs0),static_cast<unsigned long long>(spread1-spread0),part_err,part_far);
+        CHECK(differing==0);
+        CHECK(raw_differing>0);   // the noise alone would have split the passes
+        CHECK(spread1==spread0 && pairs1-pairs0>=120);
+        CHECK(part_far==120 && part_err<1e-5);
+    }
     if(failures) {std::printf("rigid_local_check: %d failure(s)\n",failures);return 1;}
-    std::printf("PASS: rigid_local_check (consensus settle, early candidate, steady mismatch not followed, genuine change, reset, 30/60/85%% mismatch, both eyes, full side recycles, child frames)\n");
+    std::printf("PASS: rigid_local_check (consensus settle, early candidate, steady mismatch not followed, genuine change, reset, 30/60/85%% mismatch, both eyes, full side recycles, child frames, one bitwise L across passes)\n");
     return 0;
 }

@@ -895,6 +895,7 @@ private:
             if(shared) lane.grab.second_hand(PhysicalGrab::SecondHand{sib.grab.hand_in_object(),(coupling_on_?sib.sample_hand:sib.published.hand).position});
             else lane.grab.second_hand(std::nullopt);
         }
+        fixture_reel(lane,side,dt);   // v1241 sim fixture: a far seat comes back to the palm
         const auto result=lane.grab.corpse_motor(body.pose,motor_usable,now,p.source_tick,in);
         if(!result) {end_capped_hold(lane,side,ReleaseReason::lifecycle);return true;}
         if(result->motor.release) {
@@ -977,6 +978,10 @@ private:
         const bool sample=lane.held && lane.pending_release?false:lane.grab.sample(coupling_on_?lane.sample_hand:p.hand,p.grip,
             usable && (physical_usable || (!lane.held && p.grip<.35f)) && (!lane.held || same_owner),p.epoch,p.tick,p.at_s);
         if(!lane.grab.pressed()) {lane.attempted=lane.acquired=false;if(!lane.owner.physical() && !lane.held) lane.candidates.clear();}
+        if(!lane.held && fixture_[side].bound) {   // v1241 sim fixture: its hold ended (ReleaseReason number)
+            fixture_[side].bound=false;fixture_[side].reel_local={};
+            fixture_say(side,"hold ended, reason "+std::to_string(static_cast<unsigned>(lane.grab.release_reason())));
+        }
         if(lane.held) {
             const auto body=native_grab_body(read_,base_,*lane.held);
             const auto h=*lane.held;
@@ -1023,6 +1028,8 @@ private:
                     if(body->bone<0 && length(motor->linear)>3) {std::lock_guard<std::mutex> g(thrown_mutex_);thrown_=Thrown{body->entity,body->component,body->entity_id,motor->linear,now};}
                     lane.end_hold();lane.pending_release=false;}
             }
+        } else if(fixture_[side].armed) {
+            fixture_tick(lane,side,world,now,sample,physical_usable);   // v1241 sim fixture (simulated XR only)
         } else if(const auto yanked=yanked_entity_[side].load();yanked && now<yanked_until_[side].load() && sample && physical_usable && lane.grab.pressed()) {
             // The guard this hand just yanked into ragdoll (NativeWeaponHands::yank): the hand had his collar or arm, so it takes
             // his nearest limb and pulls it into the fist (bound as if the limb's contact point were at the hand).
@@ -1070,13 +1077,8 @@ private:
             // orientation; the motor brings it there (rig::prop_seat). Not a body part (it stays where the hand took it and follows), and not far (a wall or a table in the way).
             // v1087 (user, v1086 headset: "I hold the leg at a distance ... it must work exactly like bottles"): a severed limb's body is seated like every prop, on its
             // real hull (v1086 kept it where it was taken, up to the 25 cm hand sphere away).
-            auto seated=body?body->pose:WorldTrackedPose{};
             bool natural=false;
-            if(sphere_grip_ && body && body->bone<0 && body->bounds && p.palm.valid) {
-                const auto s=rig::prop_seat(*body,p.palm.palm,p.palm.direction,p.palm.forward,natural_seat_,body->limb>=0?limb_seat_move_m:.5);
-                seated=s.pose;natural=s.natural;if(s.natural) {++natural_seats_;pinch_seats_+=s.pinch;}
-                if(body->limb>=0) seated=rig::surface_onto_skin(*body,seated,p.palm.palm,p.palm.direction);   // v1088: its real surface on the palm skin
-            }
+            const auto seated=body?seat_of(*body,p,natural):WorldTrackedPose{};
             if(body && contact && body->world==world && cleared(lane,*body,now) && lane.grab.bind(seated,*contact,body->limb>=0?limb_reach_m:body->bone>=0?std::max(grab_acquire_distance,tuning_.body_gate_m):grab_acquire_distance)) {
                 if(body->limb>=0) {   // v1088 status severed_limb.holds / seat, and severed-limb-hold.csv "seat"
                     ++limb_holds_;const auto s=p.palm.valid?rig::seat_stats(*body,seated,p.palm.palm,p.palm.direction):rig::SeatStats{};
@@ -1086,13 +1088,137 @@ private:
                     limb_row(now,"seat",side,*body,s.gap_mm,s.slide_mm,s.turn_deg,natural?1.:0.,s.reach_mm,body->group_root?1.:0.,
                         c?length(c->centre-body->pose.position)*1000:-1.,c?c->kg:-1.);
                 }
-                lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
-                lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
-                begin_hold(lane,side,*body,now);
-                probe_masses(*body,now);
+                take_hold(lane,side,*body,now);
             }
         }
     }
+    // The palm seat of a prop (the sphere grip: its bounds centre in the ball the fingers wrap; a severed limb's real surface on the palm skin); a body part
+    // stays where the hand took it. Shared by the pick above and the v1241 sim fixture.
+    WorldTrackedPose seat_of(const NativeRigidBody& body,const Publication& p,bool& natural) {
+        auto seated=body.pose;natural=false;
+        if(sphere_grip_ && body.bone<0 && body.bounds && p.palm.valid) {
+            const auto s=rig::prop_seat(body,p.palm.palm,p.palm.direction,p.palm.forward,natural_seat_,body.limb>=0?limb_seat_move_m:.5);
+            seated=s.pose;natural=s.natural;if(s.natural) {++natural_seats_;pinch_seats_+=s.pinch;}
+            if(body.limb>=0) seated=rig::surface_onto_skin(body,seated,p.palm.palm,p.palm.direction);   // v1088: its real surface on the palm skin
+        }
+        return seated;
+    }
+    // A bound grab becomes this lane's hold (mutex_ held). Shared by the pick above and the v1241 sim fixture.
+    void take_hold(Lane& lane,unsigned side,const NativeRigidBody& body,UINT64 now) {
+        const auto& p=lane.published;
+        lane.held=body;lane.acquired=true;lane.reset_tow();lane.owner_player=p.owner.player;lane.owner_camera=p.owner.camera;
+        lane.owner_generation=p.owner.camera_identity.generation;lane.owner_epoch=p.epoch;++picked_;
+        begin_hold(lane,side,body,now);
+        probe_masses(body,now);
+    }
+    // v1241 SIM FIXTURE (dxgi_probe test command "grab left|right [radius_m] [name]", simulated XR only): the lane takes the nearest loose prop that passes
+    // native_rigid_body - the eligibility of a real pick - and binds it through the ordinary path (seat_of, PhysicalGrab::bind, take_hold): the hold, its motor,
+    // held_draw and everything downstream run exactly as in play; only the palm-on-prop pick and the LOS check are skipped. The scripted grip must be held
+    // (no trigger): filter_native_grip claims the press for the lane while the fixture is armed, and a released grip drops the prop as in play.
+    // A prop farther than fixture_fly_m from its seat is bound with the seat moved that far toward it (the prop motor drops a hold whose goal is more than
+    // 1.5 m off, PhysicalGrab::corpse_motor) and the seat is reeled back to the palm at fixture_reel_mps: the prop flies to the hand under the motor; nothing teleports.
+    static constexpr double fixture_fly_m=1.,fixture_reel_mps=3.;
+    struct Fixture {bool armed{},scanned{},bound{};double radius{3};std::string name;std::optional<NativeRigidBody> body;Vec3 reel_local{};UINT64 since{};};
+    std::array<Fixture,2> fixture_{};
+    std::mutex fixture_said_mutex_;std::vector<std::string> fixture_said_;
+    void fixture_say(unsigned side,const std::string& s) {
+        std::lock_guard<std::mutex> g(fixture_said_mutex_);if(fixture_said_.size()<32) fixture_said_.push_back(std::string("grab ")+(side?"right":"left")+": "+s);
+    }
+    std::string entity_name(std::uintptr_t entity) {
+        std::uintptr_t at{};char s[96]{};
+        if(!read_(entity+0x20,&at,sizeof at) || !rig::pointer(at) || !read_(at,s,sizeof s-1)) return "?";
+        return s;
+    }
+    // The nearest eligible prop within the radius of the hand (its surface distance), or the reject histogram (native_rigid_body's reason per entity whose
+    // origin +0x300 lies within radius+1 m; other_hand: the other hand holds it; beyond_radius: eligible, surface farther) and the nearest rejects.
+    std::optional<NativeRigidBody> fixture_scan(unsigned side,Vec3 hand,std::string& report) {
+        auto& f=fixture_[side];
+        const auto game=rig::value<std::uintptr_t>(read_,base_+0x39a5290);
+        std::vector<std::uintptr_t> registry(0x3fff);
+        if(!game || !finite(hand) || !read_(*game+0x3130b0,registry.data(),registry.size()*sizeof(std::uintptr_t))) {report="registry unreadable or hand not finite";return {};}
+        std::map<std::string,unsigned> why;std::vector<std::pair<double,std::string>> rejects;
+        std::optional<NativeRigidBody> best;double best_d=f.radius;std::string best_name;
+        const auto& other=lanes_[1-side].held;
+        for(unsigned index=1;index<registry.size();++index) {
+            const auto at=registry[index];if(!rig::pointer(at)) continue;
+            const auto id=rig::value<std::uint32_t>(read_,at+0xa8);if(!id || (*id>>16)!=index) continue;
+            const auto pos=rig::value<std::array<float,3>>(read_,at+0x300);if(!pos) continue;
+            const Vec3 origin{(*pos)[0],(*pos)[1],(*pos)[2]};
+            if(!finite(origin) || length(origin-hand)>f.radius+1) continue;
+            const auto name=entity_name(at);
+            if(!f.name.empty() && name.find(f.name)==std::string::npos) continue;
+            BodyReject r{};const auto body=native_rigid_body(read_,base_,at,false,&r);
+            std::string reason=body?"ok":body_reject_name(r);
+            const double d=body?body->contact_distance(hand):length(origin-hand);
+            if(body && other && other->entity==body->entity) reason="other_hand";
+            else if(body && d>f.radius) reason="beyond_radius";
+            ++why[reason];
+            if(reason=="ok") {if(!best || d<best_d) {best=body;best_d=d;best_name=name;}}
+            else rejects.emplace_back(d,name+"("+reason+")");
+        }
+        std::ostringstream o;o<<std::setprecision(4);
+        if(best) {
+            o<<best_name<<" id="<<best->entity_id<<" entity=0x"<<std::hex<<best->entity<<" flags=0x"<<best->flags<<std::dec<<" d="<<best_d<<"m bounds="<<(best->bounds?"yes":"no")
+             <<" hull="<<(best->hull?"yes":"no")<<" eligible="<<why["ok"];
+            report=o.str();return best;
+        }
+        std::sort(rejects.begin(),rejects.end());
+        o<<"nothing eligible within "<<f.radius<<"m"<<(f.name.empty()?"":" named *"+f.name+"*")<<"; reasons {";
+        bool first=true;for(const auto& [k,n]:why) {o<<(first?"":",")<<k<<':'<<n;first=false;}
+        o<<"} nearest [";for(std::size_t i=0;i<rejects.size() && i<8;++i) o<<(i?", ":"")<<rejects[i].second<<' '<<rejects[i].first<<'m';
+        o<<']';report=o.str();return {};
+    }
+    // Dispatcher pass, the lane holds nothing. Scans once, then binds on the first pass whose press is the lane's (sample, physical_usable, pressed).
+    void fixture_tick(Lane& lane,unsigned side,std::uintptr_t world,UINT64 now,bool sample,bool physical_usable) {
+        auto& f=fixture_[side];const auto& p=lane.published;
+        if(!f.scanned) {
+            f.scanned=true;std::string report;f.body=fixture_scan(side,p.hand.position,report);
+            if(!f.body) {f.armed=false;fixture_say(side,"refused: "+report);return;}
+            fixture_say(side,"target "+report+"; waiting for the grip (held, no trigger)");
+        }
+        if(now>f.since+10000) {
+            f.armed=false;std::ostringstream o;o<<"timed out after 10 s: gate="<<static_cast<unsigned>(lane.gate)<<" grip="<<p.grip<<" usable="<<p.usable<<" occupied="<<p.occupied
+                <<" physical="<<lane.owner.physical()<<" pressed="<<lane.grab.pressed();fixture_say(side,o.str());return;
+        }
+        if(!sample || !physical_usable || !lane.grab.pressed()) return;
+        f.armed=false;
+        const auto body=native_grab_body(read_,base_,*f.body);
+        if(!body || body->world!=world || !same_body(*body,*f.body)) {fixture_say(side,"target lost before the bind");return;}
+        bool natural=false;auto seated=seat_of(*body,p,natural);
+        const auto& hand=coupling_on_?lane.sample_hand:p.hand;
+        const bool palm_seat=length(seated.position-hand.position)<=.25;
+        if(!palm_seat) seated.position=hand.position;   // no palm seat (no bounds or palm probe): the body's origin at the hand
+        const Vec3 gap=body->pose.position-seated.position;const double fly=length(gap);Vec3 shift{};
+        if(fly>fixture_fly_m) {shift=gap*((fly-fixture_fly_m)/fly);seated.position=seated.position+shift;}
+        if(!lane.grab.bind(seated,hand.position,grab_acquire_distance)) {fixture_say(side,"bind refused (regrab cooldown or no fresh pressed sample)");return;}
+        take_hold(lane,side,*body,now);
+        f.bound=true;f.reel_local=grab_local(hand,shift*-1.);
+        std::ostringstream o;o<<std::setprecision(4)<<"bound "<<entity_name(body->entity)<<" id="<<body->entity_id<<" flags=0x"<<std::hex<<body->flags<<std::dec
+            <<" seat_gap="<<fly<<"m seat="<<(palm_seat?"palm":"hand")<<" natural="<<natural<<(fly>fixture_fly_m?" (beyond 1 m: bound 1 m off, the seat reels in at 3 m/s; the motor flies the prop to the hand)":" (the motor pulls it into the hand)");
+        fixture_say(side,o.str());
+    }
+    // capped_tick, before the motor: the far seat comes back to the palm.
+    void fixture_reel(Lane& lane,unsigned side,double dt) {
+        auto& f=fixture_[side];const double r=length(f.reel_local);
+        if(!f.bound || !(r>0)) return;
+        const double step=std::min(r,fixture_reel_mps*dt);
+        lane.grab.nudge(grab_world(coupling_on_?lane.sample_hand:lane.published.hand,f.reel_local*(step/r)));f.reel_local=f.reel_local*((r-step)/r);
+    }
+public:
+    // Present thread (run_test_command). radius 0 (release): the lane lets go (no throw) and the fixture disarms.
+    void fixture_grab(unsigned side,double radius,const std::string& name) {
+        if(side>=2) return;
+        std::lock_guard<std::mutex> lock(mutex_);auto& f=fixture_[side];auto& lane=lanes_[side];
+        if(radius<=0) {f=Fixture{};if(lane.held && !lane.pending_release) {lane.pending_release=true;lane.release_throw=false;}return;}
+        f=Fixture{};f.armed=true;f.radius=radius;f.name=name;f.since=GetTickCount64();
+    }
+    // The fixture owns this hand's press (armed, or its hold is on): the input thread routes the squeeze to the grab (GripIntent grab, no Use).
+    bool fixture_active(unsigned side) {
+        if(side>=2) return false;
+        std::lock_guard<std::mutex> lock(mutex_);const auto& f=fixture_[side];return f.armed || (f.bound && lanes_[side].held.has_value());
+    }
+    std::vector<std::string> take_fixture_said() {std::lock_guard<std::mutex> g(fixture_said_mutex_);auto v=std::move(fixture_said_);fixture_said_.clear();return v;}
+private:
     void update(std::uintptr_t dispatcher) {
         ++callbacks_;
         std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);if(!lock.owns_lock()) return;
@@ -1476,6 +1602,7 @@ public:
     float filter_native_grip(unsigned side,float raw,UINT64 epoch,UINT64 now,bool gameplay,bool focused,bool use,bool defer_decision=false,bool grip_alone=false,bool no_buffer=false) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& lane=lanes_.at(side);auto& p=lane.published;lane.decision_deferred=false;
+        if(fixture_[side].armed || (fixture_[side].bound && lane.held)) use=false;   // v1241 sim fixture: no Use takes the press it owns
         lane.raw_grip=raw;lane.decision_tick=now;lane.gate=Gate::none;lane.decision_usable=false;
         struct Record {NativeGrab& self;unsigned side;UINT64 tick;~Record(){self.record_decision(side,tick);}} record{*this,side,now};
         if(epoch!=lane.grip_epoch || p.owner.player!=lane.grip_player || p.owner.camera!=lane.grip_camera ||
@@ -1514,6 +1641,10 @@ public:
             lane.pending_release=true;lane.release_throw=raw<.35f && usable;
         }
         if(!usable) {revoke_owner_locked(lane);lane.obstruction.reset();}
+        // v1241 sim fixture: a held squeeze is the lane's once the fixture has its target (as a yanked guard's: claim_physical + arm)
+        if(usable && fixture_[side].armed && fixture_[side].body && !lane.held && raw>=.35f && !lane.owner.physical()) {
+            const auto role_before=lane.owner.role();lane.owner.claim_physical();note_role_change_locked(role_before,lane);lane.grab.arm();lane.buffer.cancel();
+        }
         bool eligible=false;
         const double gate=grip_alone?tuning_.grip_alone_gate_m:grab_acquire_distance;
         const double bone_gate=grip_alone?std::max(gate,tuning_.body_gate_m):gate;   // v1141 (user feedback 2026-11-11: "body grabbing doesn't work much"): a lying body's bone reaches body_gate_m for a grip alone

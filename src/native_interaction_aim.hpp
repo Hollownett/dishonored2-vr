@@ -1926,16 +1926,20 @@ private:
             } else if(character && *character && physical_grab_ && hand_judged_los(false,true,rig::value<std::uint8_t>(read_,owner+0xd1).value_or(0))) {
                 // v1236 (headset v1233: the grab focus stayed on a body for 1.3 s while this LOS dropped it from the game's Use target): a downed
                 // body under the hand passes like a bottle does, measured at the ragdoll part the grab's palm pick has under this hand.
-                const auto hand=pickup_hand(observed_scope->hand);
-                const auto focus=physical_grab_->focus_cached(static_cast<unsigned>(observed_scope->side),GetTickCount64());
-                const bool focused=hand && focus && focus->entity==owner;
-                const bool on=focused && downed_body_hand_on(*hand,focus->bounds?std::optional<std::pair<Vec3,Vec3>>{{focus->bounds->minimum,focus->bounds->maximum}}:std::nullopt,
-                    focus->pose.position);
+                // v1242 (headset v1239: los_far_mean_mm 9190 = the 9999 "no focus" sentinel averaged in): either hand's grab focus on this body counts,
+                // measured from THAT hand (the routed hand's ray may be the other one); no focus on it is its own verdict, kept out of the distance.
+                bool on=false,focused=false;double best=1e9;
+                for(unsigned s=0;s<2;++s) if(const auto focus=physical_grab_->focus_cached(s,GetTickCount64()); focus && focus->entity==owner) {
+                    const auto hand=physical_grab_->published_hand_sphere(s);if(!hand.valid) continue;
+                    focused=true;best=std::min(best,focus->contact_distance(hand.palm));
+                    on=on || downed_body_hand_on(hand.palm,focus->bounds?std::optional<std::pair<Vec3,Vec3>>{{focus->bounds->minimum,focus->bounds->maximum}}:std::nullopt,
+                        focus->pose.position);
+                }
                 const bool native_ok=(result&0xffu)==0;
                 if(on && !native_ok) {qualified_result=result&~std::uintptr_t{0xff};if(output)*output=0;++body_hand_on_passes_;}
                 body_los_owner_.store(owner,std::memory_order_relaxed);body_los_tick_.store(GetTickCount64(),std::memory_order_relaxed);
-                body_los_verdict_.store(native_ok?1u:on?2u:3u,std::memory_order_relaxed);
-                body_los_hand_mm_.store(focused?static_cast<unsigned>(std::min(9999.,focus->contact_distance(*hand)*1000)):9999u,std::memory_order_relaxed);
+                body_los_verdict_.store(native_ok?1u:on?2u:focused?3u:4u,std::memory_order_relaxed);
+                body_los_hand_mm_.store(focused?static_cast<unsigned>(std::min(9999.,best*1000)):0u,std::memory_order_relaxed);
             }
         }
         const bool loot_los_armed=loot_los_capture_.armed;loot_los_capture_.armed=false;
