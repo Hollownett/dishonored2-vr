@@ -1463,6 +1463,7 @@ static d2vr::FsrTaa::MotionProbe alt_motion_probe_take(ID3D11DeviceContext* c,in
         alt_motion_snapshot_json(o,receipt->current);o<<",\"previous\":";alt_motion_snapshot_json(o,receipt->previous);
         if(d2vr::TaaDispatchHook::pass_jitter) {const auto& j=*d2vr::TaaDispatchHook::pass_jitter;o<<",\"pass_jitter\":["<<j[0]<<','<<j[1]<<','<<j[2]<<','<<j[3]<<']';}
         o<<",\"previous_counter\":"<<receipt->previous_counter<<",\"object_motion\":"<<d2vr::ObjectMotion::render_json(receipt->key.display); // v1206: the render's previous-row outcomes so far
+        d2vr::ObjectMotion::pin(receipt->key.display); // v1207: its final row is kept (status alternate_eye.object_motion.probed)
         probe.json=o.str();probe.stem=stem.wstring();probe.colour=index%alt_motion_size<2;
         if(b.cb[0]) { // copied on the game's context now, so the job's prefix carries it; mapped at the FSR dispatch
             D3D11_BUFFER_DESC d{};b.cb[0]->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.StructureByteStride=0;

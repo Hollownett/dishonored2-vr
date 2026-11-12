@@ -80,6 +80,12 @@ int main() {
         M cur=mvp(0,206,5),prev=mvp(1,205,5);
         CHECK(u->fix_render(0,206,202,cur.data(),prev.data(),true)==Kind::unproven && prev==mvp(1,205,5)); // receipt says 202: 204's rows refused
         prev=mvp(1,205,5);CHECK(u->fix_render(0,206,204,cur.data(),prev.data(),true)==Kind::other_last && prev==mvp(0,204,5));
+        { // v1207 prove_render: a rig draw without a content view; its raw rows (the other eye's 205) name exactly one candidate render
+            const d2vr::PrevMvpTable::RenderKey keys[]{{1,207,205},{0,204,202},{0,206,204},{1,205,203}};
+            M raw=mvp(1,205,5);CHECK(u->prove_render(keys,4,raw.data())==2);
+            raw=mvp(1,201,5);CHECK(u->prove_render(keys,4,raw.data())==-1); // rows of a render older than every candidate's previous one
+            raw=mvp(1,205,9);CHECK(u->prove_render(keys,4,raw.data())==-1); // never recorded (another pass's rows): nothing proves
+        }
         cur=mvp(1,209,5);prev=mvp(0,208,5); // the other eye's 208 was never recorded: a miss, rows unchanged (camera-only follows)
         CHECK(u->fix_render(1,209,207,cur.data(),prev.data(),true)==Kind::miss && prev==mvp(0,208,5));
     }

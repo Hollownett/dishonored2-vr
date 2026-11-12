@@ -57,6 +57,9 @@ def write_png(path, img):
                 + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
 
 
+PROBED = {}  # v1207: display -> the final object-motion row of a probed render (xr-live-status alternate_eye.object_motion.probed)
+
+
 def load_dumps(directory):
     bursts = {}
     for js in glob.glob(os.path.join(directory, 'alt-motion-*-*.json')):
@@ -174,7 +177,7 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
             b1 = meta.get('b1_step_uv')
             if b1: line += '  b1 step %s vs own-prev step %s' % (np.round(b1, 6).tolist(), np.round(jitter_step(meta['current'], meta['previous']), 6).tolist())
             log(line)
-            om = meta.get('object_motion')  # v1206: the render's previous-row outcomes (object_motion.hpp RenderRow) at the dump
+            om = PROBED.get(meta['display']) or meta.get('object_motion')  # v1207: the final row (status "probed"), else the row at the dump
             if om:
                 log('      rows: frame %s prev_frame %s phase %s reset %s; jitter %s prev %s rows-src %s (pair %s)' % (
                     om['frame'], om['prev_frame'], om['phase'], om['reset'], om['jitter'], om['prev_jitter'], om.get('rows_src_jitter'), om.get('src_matches_pair')))
@@ -227,6 +230,15 @@ def analyse(bursts, threshold=0.75, out=None, log=print):
                 if rig.any():
                     r['rig_own_p50'] = float(np.percentile(own[rig], 50)); r['rig_own_p90'] = float(np.percentile(own[rig], 90))
                     log(f'      rig pixels {rig.sum()}: own {pct(own[rig])}')
+                    raw = mv[rig].astype(np.float64)  # v1207: the raw MV texels at rig pixels (UV of the render rectangle), and in render px
+                    rpx = raw * np.array(size, np.float64)
+                    fin = np.isfinite(rpx).all(1)
+                    vals, counts = np.unique(raw[fin], axis=0, return_counts=True) if fin.any() else (np.zeros((0, 2)), np.zeros(0))
+                    top = vals[np.argmax(counts)].tolist() if len(counts) else None
+                    log('      rig raw MV: non-finite %d, |mv| px p50 %.3f p99 %.3f, >256 px %.2f%%, most common texel %s (%d px), median texel %s' % (
+                        int((~fin).sum()), *(np.percentile(np.hypot(*rpx[fin].T), [50, 99]) if fin.any() else (np.nan, np.nan)),
+                        100 * float((np.hypot(*rpx[fin].T) > 256).mean()) if fin.any() else 0.0, top, int(counts.max()) if len(counts) else 0,
+                        np.round(np.median(raw[fin], 0), 6).tolist() if fin.any() else None))
             per.append(r)
             if out:
                 os.makedirs(out, exist_ok=True)
@@ -436,6 +448,11 @@ def main():
         return check_pass(stem, a.exe, a.work)
     if not a.directory: ap.error('directory required')
     bursts = load_dumps(a.directory)
+    for st in glob.glob(os.path.join(a.directory, 'xr-live-status*.json')) + glob.glob(os.path.join(a.directory, '..', 'xr-live-status*.json')):
+        try:
+            with open(st) as f: rows = json.load(f)['alternate_eye']['object_motion'].get('probed') or []
+            PROBED.update({r['display']: r for r in rows if r})
+        except (OSError, ValueError, KeyError, TypeError): pass
     if not bursts: sys.exit('no alt-motion-*-*.json dumps with -mv.rg16f and -depth.r32 in ' + a.directory)
     analyse(bursts, a.threshold, a.out or os.path.join(a.directory, 'alt-motion-analysis'))
 

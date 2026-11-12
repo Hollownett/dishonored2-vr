@@ -117,7 +117,8 @@ public:
             const auto serial=e.rig_count_serial-2;auto& staging=e.rig_count_staging[(serial-1)%e.rig_count_staging.size()];
             D3D11_MAPPED_SUBRESOURCE m{};
             if(!staging.p || FAILED(immediate->Map(staging.p,0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m)) || !m.pData) continue;
-            std::uint32_t n[3]{};std::memcpy(n,m.pData,12);immediate->Unmap(staging.p,0);
+            std::uint32_t n[4]{};std::memcpy(n,m.pData,16);immediate->Unmap(staging.p,0);
+            if(const auto d=e.rig_count_display[(serial-1)%e.rig_count_staging.size()];d) RigMask::note_mask(d,n[0],n[2],n[3]); // v1207
             rig_pixels[eye].store(n[0],std::memory_order_relaxed);rig_near_misses[eye].store(n[1],std::memory_order_relaxed);rig_own_pixels[eye].store(n[2],std::memory_order_relaxed);e.rig_read_serial=serial;
         }
     }
@@ -153,6 +154,7 @@ private:
         // v1162: the mask read view (motion pass), whether the last copy was a marked mask, its pixel counter and read-back ring
         Ref<ID3D11ShaderResourceView> rig_srv;bool rig_live{},rig_motion{};Ref<ID3D11Buffer> rig_count;Ref<ID3D11UnorderedAccessView> rig_count_uav;
         std::array<Ref<ID3D11Buffer>,4> rig_count_staging{};std::uint64_t rig_count_serial{},rig_read_serial{};
+        std::array<std::uint64_t,4> rig_count_display{}; // v1207: the receipt display of each read-back slot (0: none)
         UINT motion_w{},motion_h{};bool motion_valid{};
         // v1107: FSR 4 runs on this display box only (fsr4 created at the box size); FSR 3 upscales the whole eye underneath.
         bool fovea=false;fovea::Axis fovea_x,fovea_y;
@@ -1142,12 +1144,18 @@ private:
                 float k[4]{0,0,static_cast<float>(depth_w),static_cast<float>(depth_h)};rig_mask_eps(depth_srv_format_,k[0],k[1]);
                 c->UpdateSubresource(rig_cb_.p,0,nullptr,k,0,0);
                 const UINT zero[4]{};c->ClearUnorderedAccessViewUint(e.rig_count_uav.p,zero);
-                ID3D11ShaderResourceView* in[2]{depth_view_.p,rig_depth.Get()};ID3D11UnorderedAccessView* outs2[2]{e.rig_uav.p,e.rig_count_uav.p};
-                c->CSSetShader(rig_copy_.p,nullptr,0);c->CSSetShaderResources(0,2,in);c->CSSetUnorderedAccessViews(0,2,outs2,nullptr);c->CSSetConstantBuffers(0,1,&rig_cb_.p);
+                if(job.motion.p && e.mv_key!=job.motion.p) { // v1207: the TAA's MV input at t2 (wild rig vectors census); the motion pass reuses it
+                    ++motion_srv_misses;e.mv_srv.reset();e.mv_key=nullptr;ID3D11Device* dev{};c->GetDevice(&dev);ID3D11ShaderResourceView* v{};
+                    if(dev && SUCCEEDED(dev->CreateShaderResourceView(job.motion.p,nullptr,&v))) {e.mv_srv.adopt(v);e.mv_key=job.motion.p;}
+                    if(dev) dev->Release();
+                }
+                ID3D11ShaderResourceView* in[3]{depth_view_.p,rig_depth.Get(),e.mv_key==job.motion.p?e.mv_srv.p:nullptr};ID3D11UnorderedAccessView* outs2[2]{e.rig_uav.p,e.rig_count_uav.p};
+                c->CSSetShader(rig_copy_.p,nullptr,0);c->CSSetShaderResources(0,3,in);c->CSSetUnorderedAccessViews(0,2,outs2,nullptr);c->CSSetConstantBuffers(0,1,&rig_cb_.p);
                 c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
-                ID3D11ShaderResourceView* none[2]{};ID3D11UnorderedAccessView* no_uav[2]{};ID3D11Buffer* no_cb{};
-                c->CSSetShaderResources(0,2,none);c->CSSetUnorderedAccessViews(0,2,no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
+                ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no_uav[2]{};ID3D11Buffer* no_cb{};
+                c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,2,no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
                 const float far_value[4]{};c->ClearRenderTargetView(rig_target.Get(),far_value); // the next render's rig depth starts empty
+                e.rig_count_display[e.rig_count_serial%e.rig_count_staging.size()]=job.receipt?job.receipt->key.display:0;
                 c->CopyResource(e.rig_count_staging[e.rig_count_serial%e.rig_count_staging.size()].p,e.rig_count.p);++e.rig_count_serial;++rig_live_renders;
                 e.rig_valid=true;e.rig_live=true;++rig_copies;
                 e.rig_motion=rig_motion_now; // v1166: every rig prepass draw of this render had the eye's own previous palette and rows

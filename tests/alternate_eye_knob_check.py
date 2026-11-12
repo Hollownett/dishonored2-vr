@@ -209,7 +209,7 @@ assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fres
 assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
 assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
 assert '(mvScale.z>0?(rig==0 || (mvScale.w>0 && rig==255)):proj.y/(d+proj.x)>=proj.z)' in mp  # v1179: 255 = own motion, 254 = rig without
-assert 'const bool own=RigMask::previous_palette(c,have_content?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1206 (was v1204): no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
+assert 'const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1207 (was v1204/v1206): no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
 assert 'restore_t0(); // v1166' in rig and 'k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}' in fsr
 assert 'd2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame);' in probe and 'o[i.xy]=held?253:own?255:rig?254:0;' in rig  # v1179 ring + per-pixel validity; v1183 held class 253
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
@@ -386,3 +386,11 @@ assert 'static constexpr unsigned gens=8,' in om and '\\"renders\\":"+renders_js
 assert 'const unsigned k=frame%rig_ring_slots;' in rm2 and 'inline constexpr unsigned rig_ring_slots=8;' in rm2
 assert '\\"object_motion\\":"<<d2vr::ObjectMotion::render_json(receipt->key.display);' in probe
 print('PASS: v1206 receipt records, exact previous render for rows and rig palette, uncertain zero, per-render status')
+
+# v1207: the rig without a content view takes the render its chain proves (prove_render); probed rows pinned; GPU census of wild rig MVs
+assert 'if((!have_content || !view.receipt) && std::memcmp(cur,prev,64)) chained=rig_render_by_chain(prev,view);' in om
+assert 'int prove_render(const RenderKey* r,int n,const float* prev) const noexcept {' in om and 'd2vr::ObjectMotion::pin(receipt->key.display);' in probe
+rm3 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+fsr3 = (root / 'src' / 'fsr_taa.hpp').read_text(encoding='utf-8')
+assert 'if(rig && !(dot(m,m)<=65536.0)) InterlockedAdd(g[3],1);' in rm3 and 'RigMask::note_mask(d,n[0],n[2],n[3]);' in fsr3
+print('PASS: v1207 rig render by chain, pinned probe rows, wild rig MV census')

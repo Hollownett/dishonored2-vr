@@ -107,6 +107,21 @@ public:
         if(!find(eye,own_frame,got,own)) return unproven;
         std::memcpy(prev,got,64);return other_last;
     }
+    // v1207: the rig without a content view. The rig is drawn in every render, so its raw rows are the render before its own (an other-eye
+    // render): the candidate render (eye, frame, own_frame) whose fix_render chain proves both hops (exact rows under exact labels) is the draw's
+    // render. Returns the index of the one candidate that proves, -1 when none or more than one does. Nothing is inserted.
+    struct RenderKey {unsigned eye;std::uint32_t frame,own_frame;};
+    int prove_render(const RenderKey* r,int n,const float* prev) const noexcept {
+        int found=-1;float got[16],own[16];
+        for(int i=0;i<n;++i) {
+            const RenderKey& k=r[i];if(k.own_frame>=k.frame || k.frame-k.own_frame>gens) continue;
+            bool hit=false;for(std::uint32_t f=k.frame-1;f!=k.own_frame && !hit;--f) hit=find(k.eye^1u,f,prev,got);
+            if(!hit || !find(k.eye,k.own_frame,got,own)) continue;
+            if(found>=0) return -1;
+            found=i;
+        }
+        return found;
+    }
     // v1185 rig draws in alternate mode: the rig is drawn in every render, so its raw previous rows are always the other eye's render one
     // engine frame back, whose own raw previous rows are this eye's render two back. The chain is followed by content alone in a window of
     // labels around `frame` (both eyes, frames frame+1 .. frame-6): a draw recorded under the wrong eye/frame label (v1183 street: one eye's
@@ -298,9 +313,13 @@ public:
                 for(unsigned k=0;k<cert_consumers;++k) {o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+','+std::to_string(alt_cert_[k][2].load())+']';
                     o+=",\""+std::string(names[k])+"_fallback_why\":[";for(unsigned w=0;w<5;++w) o+=(w?",":"")+std::to_string(alt_cert_why_[k][w].load());o+=']';}
                 return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"],\"rig_zero_why\":["+std::to_string(rig_zero_why_[0].load())+','+std::to_string(rig_zero_why_[1].load())+','+std::to_string(rig_zero_why_[2].load())+','+std::to_string(rig_zero_why_[3].load())+','+std::to_string(rig_zero_why_[4].load())+','+std::to_string(rig_zero_why_[5].load())+"],\"uncertain_zero\":"+std::to_string(alt_uncertain_.load())+",\"raw_rows\":{\"draws\":"+std::to_string(raw_total_.load())+",\"renders_over_16\":"+std::to_string(raw_renders_.load())+",\"worst\":"+std::to_string(raw_worst_.load())+",\"worst_frame\":"+std::to_string(raw_worst_frame_.load())+"}"
-            +",\"content\":"+content_json()+"},\"renders\":"+renders_json()+"}";
+            +",\"content\":"+content_json()+"},\"renders\":"+renders_json()+",\"probed\":"+probed_json()+",\"fallbacks\":"+fallback_json()
+            +",\"rig_wild_renders\":"+std::to_string(RigMask::wild_renders_.load())+"}";
     }
     // v1206: one render's row (the probe adds it to its dump of that render), "null" when the ring no longer holds it
+    static void pin(std::uint64_t display) noexcept { // v1207: the probe dumps this render
+        std::lock_guard<std::mutex> lock(pin_mutex_);if(pinned_n_<pinned_.size()) {pinned_[pinned_n_]=display;pinned_json_[pinned_n_].clear();++pinned_n_;}
+    }
     static std::string render_json(std::uint64_t display) {
         const RenderRow& w=render_rows_[display%render_ring];
         return w.display.load(std::memory_order_acquire)==display?row_json(w):std::string("null");
@@ -740,21 +759,59 @@ private:
     static constexpr std::uint64_t raw_threshold=16;
     // v1206: per alternate render (keyed by its receipt's display number, as the probe prints it) the previous-row outcomes of its draws
     enum RenderCount : unsigned {rr_same,rr_own_last,rr_other_now,rr_other_last,rr_unproven,rr_miss,rr_camera_only,rr_raw,rr_uncertain,
-        rr_own_d2,rr_own_d4,rr_own_dother,rr_rig_own,rr_rig_zero,rr_rig_palette_miss,rr_count};
+        rr_own_d2,rr_own_d4,rr_own_dother,rr_rig_own,rr_rig_zero,rr_rig_palette_miss,rr_rig_zero_unnamed,rr_count};
     static_assert(static_cast<unsigned>(rr_miss)==static_cast<unsigned>(PrevMvpTable::miss),"render counts start with the table's kinds");
     static constexpr unsigned render_ring=64;
     struct RenderRow {std::atomic<std::uint64_t> display{~0ull};std::uint32_t frame{},prev_frame{},phase{};unsigned eye{};bool reset{},has_prev{},src_known{};
         float jitter[2]{},prev_jitter[2]{},src_jitter[2]{};std::array<std::atomic<std::uint32_t>,rr_count> n{};};
     inline static std::array<RenderRow,render_ring> render_rows_{};
     inline static std::atomic<std::uint64_t> newest_display_{~0ull}; // uncertain draws are filed under the newest render (approximate)
+    // v1207: the probe pins the renders it dumps (at its TAA dispatch the scene draws are often not processed yet): when the ring reuses a pinned
+    // render's slot, its final row is kept as text (status "probed")
+    inline static std::array<std::uint64_t,64> pinned_{};inline static std::array<std::string,64> pinned_json_{};inline static unsigned pinned_n_{};
     static void render_open(unsigned eye,const EyeView& v,const float* prev_jitter,const float* src_jitter,bool reset) noexcept { // under views_mutex_
         RenderRow& w=render_rows_[v.display%render_ring];
         if(w.display.load(std::memory_order_relaxed)==v.display) return; // a duplicate receipt
+        {std::lock_guard<std::mutex> lock(pin_mutex_);const auto old=w.display.load(std::memory_order_relaxed);
+         if(old!=~0ull) for(unsigned i=0;i<pinned_n_;++i) if(pinned_[i]==old && pinned_json_[i].empty()) try {pinned_json_[i]=row_json(w);} catch(...) {}}
         w.display.store(~0ull,std::memory_order_release);
         for(auto& k:w.n) k.store(0,std::memory_order_relaxed);
         w.frame=v.frame;w.prev_frame=v.prev_frame;w.phase=v.phase;w.eye=eye;w.reset=reset;w.has_prev=v.has_prev;w.src_known=src_jitter!=nullptr;
         std::memcpy(w.jitter,v.jitter,8);std::memcpy(w.prev_jitter,prev_jitter,8);if(src_jitter) std::memcpy(w.src_jitter,src_jitter,8);
         w.display.store(v.display,std::memory_order_release);newest_display_.store(v.display,std::memory_order_relaxed);
+    }
+    inline static std::mutex pin_mutex_;
+    static std::string probed_json() {
+        std::lock_guard<std::mutex> lock(pin_mutex_);std::string o="[";
+        for(unsigned i=0;i<pinned_n_;++i) {const std::string row=pinned_json_[i].empty()?render_json(pinned_[i]):pinned_json_[i];o+=(i?",":"")+row;}
+        return o+"]";
+    }
+    // v1207: fallback draws (uncertain previous rows, unnamed rig) by render pass and by whether a render target is bound (a depth-only pass
+    // writes no motion vectors: zero motion there is harmless)
+    inline static std::array<std::array<std::atomic<std::uint64_t>,2>,65> fallback_pass_{};inline static std::array<std::atomic<std::uint64_t>,2> fallback_rt_{};
+    inline static std::atomic<std::uint64_t> rig_chained_{};
+    static void note_pass_fallback(ID3D11DeviceContext* c,bool rig) noexcept {
+        int pass=-1;if(const auto source=pass_source_.load(std::memory_order_relaxed)) pass=source().pass;
+        fallback_pass_[pass>=0 && pass<64?static_cast<unsigned>(pass):64u][rig?1:0].fetch_add(1,std::memory_order_relaxed);
+        ID3D11RenderTargetView* r[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,r,nullptr);
+        bool any=false;for(auto* x:r) if(x) {any=true;x->Release();}
+        fallback_rt_[any?1:0].fetch_add(1,std::memory_order_relaxed);
+    }
+    static std::string fallback_json() {
+        const auto name=pass_name_.load(std::memory_order_relaxed);
+        std::string o="{\"rt\":["+std::to_string(fallback_rt_[0].load())+','+std::to_string(fallback_rt_[1].load())+"],\"rig_chained\":"+std::to_string(rig_chained_.load())+",\"by_pass\":{";
+        bool first=true;
+        for(unsigned p=0;p<65;++p) if(const auto a=fallback_pass_[p][0].load(),b=fallback_pass_[p][1].load();a || b) {
+            const char* nm=p<64 && name?name(p):nullptr;o+=std::string(first?"":",")+'"'+(p==64?std::string("none"):nm?std::string(nm):std::to_string(p))+"\":["+std::to_string(a)+','+std::to_string(b)+']';first=false;}
+        return o+"}}";
+    }
+    static bool rig_render_by_chain(const float* prev,View& out) noexcept { // v1207: see PrevMvpTable::prove_render
+        std::lock_guard<std::mutex> lock(views_mutex_);
+        PrevMvpTable::RenderKey keys[8];const EyeView* recs[8];unsigned eyes[8];int n=0;
+        for(unsigned e=0;e<2;++e) for(const auto& r:eye_records_[e]) if(r.valid && r.receipt && r.has_prev && n<8) {keys[n]={e,r.frame,r.prev_frame};recs[n]=&r;eyes[n]=e;++n;}
+        const int i=table_.prove_render(keys,n,prev);
+        if(i<0) return false;
+        corrections(eyes[i],*recs[i],out);return true;
     }
     static void render_note(std::uint64_t display,RenderCount k) noexcept {
         if(display==~0ull) return;
@@ -769,8 +826,9 @@ private:
         if(w.src_known) o<<",\"rows_src_jitter\":["<<w.src_jitter[0]<<','<<w.src_jitter[1]<<"],\"src_matches_pair\":"<<(w.src_jitter[0]==w.prev_jitter[0] && w.src_jitter[1]==w.prev_jitter[1]?"true":"false");
         else o<<",\"rows_src_jitter\":null";
         static constexpr const char* names[rr_count]{"same","own_last","other_now","other_last","unproven","miss","camera_only","raw","uncertain",
-            "own_d2","own_d4","own_dother","rig_own","rig_zero","rig_palette_miss"};
+            "own_d2","own_d4","own_dother","rig_own","rig_zero","rig_palette_miss","rig_zero_unnamed"};
         for(unsigned k=0;k<rr_count;++k) o<<",\""<<names[k]<<"\":"<<w.n[k].load(std::memory_order_relaxed);
+        if(std::uint32_t m[3]{};RigMask::mask_counts(w.display.load(),m)) o<<",\"mask\":{\"rig_px\":"<<m[0]<<",\"own_px\":"<<m[1]<<",\"wild_mv_px\":"<<m[2]<<'}'; // v1207 GPU census
         o<<'}';return o.str();
     }
     static std::string renders_json() {
@@ -1081,15 +1139,22 @@ private:
             // TAA pair's previous. Anything else: zero motion (current rows + current palette), counted.
             // v1179: never own_last: the rig is drawn in every render, so its raw previous rows are always an other-eye render's.
             auto kind=PrevMvpTable::miss;
-            if(have_content && view.receipt && view.has_prev) kind=table_.fix_render(view.eye,view.frame,view.prev_frame,cur,prev,false);
+            // v1207 (v1206 stillprobe: 49,289 rig draws zeroed for "no content"): v1204's rule again, by construction. Without a content view the
+            // chain itself names the render (prove_render: exactly one receipt record whose two hops match); that record is then the draw's render.
+            bool chained=false;
+            if((!have_content || !view.receipt) && std::memcmp(cur,prev,64)) chained=rig_render_by_chain(prev,view);
+            const bool have_render=(have_content && view.receipt) || chained;
+            if(chained) rig_chained_.fetch_add(1,std::memory_order_relaxed);
+            if(have_render && view.has_prev) kind=table_.fix_render(view.eye,view.frame,view.prev_frame,cur,prev,false);
             else if(have_content && view.receipt) table_.insert(view.eye,view.frame,cur,prev); // a history reset: recorded for the next render
             const bool rows_own=kind==PrevMvpTable::other_last;
-            const bool own=RigMask::previous_palette(c,have_content?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);
+            const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);
             // status rig_zero_why: [first frame (cur == prev), chain miss, chain unproven (the second hop), palette (no slot tagged with the
             // previous render), no content view (or no receipt record), history reset]
-            if(!own) rig_zero_why_[!have_content || !view.receipt?4:!view.has_prev?5:kind==PrevMvpTable::same?0:kind==PrevMvpTable::miss?1:kind==PrevMvpTable::unproven?2:3].fetch_add(1,std::memory_order_relaxed);
-            render_note(have_content?view.display:newest_display_.load(std::memory_order_relaxed),own?rr_rig_own:rr_rig_zero);
-            if(have_content && rows_own && !own) render_note(view.display,rr_rig_palette_miss);
+            if(!own) rig_zero_why_[!have_render?4:!view.has_prev?5:kind==PrevMvpTable::same?0:kind==PrevMvpTable::miss?1:kind==PrevMvpTable::unproven?2:3].fetch_add(1,std::memory_order_relaxed);
+            if(!have_render) note_pass_fallback(c,true);
+            render_note(have_render?view.display:newest_display_.load(std::memory_order_relaxed),own?rr_rig_own:have_render?rr_rig_zero:rr_rig_zero_unnamed);
+            if(have_render && rows_own && !own) render_note(view.display,rr_rig_palette_miss);
             if(have_view) view_use(use_rig_motion);
             certainty(cert_previous_rows,own || have_content?cert_certain:tl_content_why_==3?cert_na:cert_fallback);
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
@@ -1168,6 +1233,7 @@ private:
         if(alt && (!have_content || !view.receipt) && !alt_view_heuristic.load(std::memory_order_relaxed) && have_prev) {
             if(tl_content_why_==3) {certainty(cert_previous_rows,cert_na);return false;}
             certainty(cert_previous_rows,cert_fallback);alt_uncertain_.fetch_add(1,std::memory_order_relaxed);render_note(newest_display_.load(std::memory_order_relaxed),rr_uncertain);
+            note_pass_fallback(c,false);
             if(mode_.load(std::memory_order_relaxed)<1) return false;
             std::memcpy(prev,cur,64);return bind_pool(c,s,*sh,nullptr,prev);
         }

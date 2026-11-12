@@ -30,18 +30,20 @@ namespace d2vr {
 // u0 Eye::rig (R8_UINT): 255 a visible rig pixel whose engine MV is this eye's own motion (v1179), 254 a visible rig pixel without (the
 // engine's vectors), 253 (v1183) a visible held weapon / held prop pixel (rigid, attached to a hand, no own motion), 0 not rig (consumers
 // that test > 0 see all three as rig); u1 counters: [0] mask pixels, [1] near misses (rig depth present,
-// eps < |difference| <= 64 eps: an eps too tight shows here), [2] own-motion pixels. k.xy eps = x + y * depth, k.zw the render rectangle.
+// eps < |difference| <= 64 eps: an eps too tight shows here), [2] own-motion pixels, [3] (v1207) rig pixels whose engine motion vector (t2, the
+// TAA's MV input, UV of the render rectangle; unbound reads 0) is not finite or longer than 256 px. k.xy eps = x + y * depth, k.zw the render rectangle.
 inline constexpr char rig_mask_copy_source[]=
-    "Texture2D<float> z:register(t0);Texture2D<float2> r:register(t1);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
-    "cbuffer C:register(b0){float4 k;};groupshared uint g[3];"
+    "Texture2D<float> z:register(t0);Texture2D<float2> r:register(t1);Texture2D<float2> mv:register(t2);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
+    "cbuffer C:register(b0){float4 k;};groupshared uint g[4];"
     "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID,uint t:SV_GroupIndex){"
-    "if(t<3) g[t]=0;GroupMemoryBarrierWithGroupSync();"
+    "if(t<4) g[t]=0;GroupMemoryBarrierWithGroupSync();"
     "const bool inside=all(float2(i.xy)<k.zw);const float d=z.Load(int3(i.xy,0));const float2 rq=r.Load(int3(i.xy,0));const float q=rq.x;"
     "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e,held=rig && rq.y>1.5,own=rig && !held && rq.y>0.5;"
     "o[i.xy]=held?253:own?255:rig?254:0;"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
     "if(own) InterlockedAdd(g[2],1);"
-    "GroupMemoryBarrierWithGroupSync();if(t<3 && g[t]) n.InterlockedAdd(t*4,g[t]);}";
+    "const float2 m=mv.Load(int3(i.xy,0))*k.zw;if(rig && !(dot(m,m)<=65536.0)) InterlockedAdd(g[3],1);"
+    "GroupMemoryBarrierWithGroupSync();if(t<4 && g[t]) n.InterlockedAdd(t*4,g[t]);}";
 // eps for a depth view format: D24 one step is 2^-24 (the replay's float z vs the stored 24-bit value: half a step + rounding); float: 4 ulp.
 inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) noexcept {
     if(depth_srv==DXGI_FORMAT_R24_UNORM_X8_TYPELESS || depth_srv==DXGI_FORMAT_D24_UNORM_S8_UINT) {absolute=2.f/16777215.f;relative=0;}
@@ -207,6 +209,18 @@ public:
         r.last.store(frame,std::memory_order_relaxed);r.run.store(run,std::memory_order_release);rotations_.fetch_add(1,std::memory_order_relaxed);
     }
     // dxgi_probe: the one-view mode (re)starts (the alternate view appears after paired frames or a mode change): every ring starts over.
+    // v1207: the copy/compare counts per render (FsrTaa::poll_rig_pixels, keyed by the render's receipt display): [mask px, own px, wild-MV px]
+    static void note_mask(std::uint64_t display,std::uint32_t rig,std::uint32_t own,std::uint32_t wild) noexcept {
+        auto& m=mask_census_[display%mask_census_.size()];m.display.store(~0ull,std::memory_order_release);
+        m.n[0].store(rig,std::memory_order_relaxed);m.n[1].store(own,std::memory_order_relaxed);m.n[2].store(wild,std::memory_order_relaxed);m.display.store(display,std::memory_order_release);
+        if(wild) wild_renders_.fetch_add(1,std::memory_order_relaxed);
+    }
+    static bool mask_counts(std::uint64_t display,std::uint32_t (&out)[3]) noexcept {
+        const auto& m=mask_census_[display%mask_census_.size()];if(m.display.load(std::memory_order_acquire)!=display) return false;
+        for(unsigned i=0;i<3;++i) out[i]=m.n[i].load(std::memory_order_relaxed);
+        return m.display.load(std::memory_order_acquire)==display;
+    }
+    inline static std::atomic<std::uint64_t> wild_renders_{};
     static void begin_epoch() noexcept {epoch_.fetch_add(1,std::memory_order_relaxed);for(auto& r:ring_) {r.run.store(0,std::memory_order_relaxed);r.last.store(~0u,std::memory_order_relaxed);for(auto& t:r.tag) t.store(~0u,std::memory_order_relaxed);}}
     // FsrTaa's copy: draws of the alternate view seen since the last call (0: no one-view render, the mask is not live), and the rig target
     // of this scene depth (empty: none yet / another depth).
@@ -297,6 +311,8 @@ private:
         std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};UINT bytes{};
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};
         void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);}run.store(0);last.store(~0u);}};
+    struct MaskCensus {std::atomic<std::uint64_t> display{~0ull};std::array<std::atomic<std::uint32_t>,3> n{};};
+    inline static std::array<MaskCensus,128> mask_census_{};
     inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};
     inline static std::atomic<std::uint64_t> held_draws_{};
     inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{},ring_late_{},ring_young_{};
