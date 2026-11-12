@@ -449,8 +449,17 @@ public:
     // draws were then read through the lens camera and matched no held frame. While a secondary pass borrows a view (dxgi_probe lens_pass, until
     // its replay re-created the eye): that view is never snapshotted, its jobs' per-view writes classify nothing, and its draws are left as the
     // engine made them. Counts: [draws left, per-view writes not classified, eye snapshots skipped].
-    static void note_borrowed_view(std::uintptr_t view) noexcept {borrowed_view_.store(view,std::memory_order_release);}
+    static void note_borrowed_view(std::uintptr_t view,unsigned pass_eye=0) noexcept {borrowed_eye_.store(pass_eye<2?pass_eye:2u,std::memory_order_relaxed);borrowed_view_.store(view,std::memory_order_release);}
     static std::array<std::uint64_t,3> secondary_counts() noexcept {return {secondary_draws_.load(),secondary_writes_.load(),borrowed_skips_.load()};}
+    // v1265 certificate: lens draws left with the engine's rows per lens pass eye [eye0, eye1, centre]; a digest of an eye's view records (frames
+    // and view-projections) to prove a lens pass left the borrowed eye's records as they were.
+    static std::array<std::uint64_t,3> secondary_draws_by_eye() noexcept {return {secondary_eye_draws_[0].load(),secondary_eye_draws_[1].load(),secondary_eye_draws_[2].load()};}
+    static std::uint64_t records_digest(unsigned eye) noexcept {
+        std::lock_guard<std::mutex> lock(views_mutex_);std::uint64_t h=1469598103934665603ull;
+        const auto mix=[&](const void* p,std::size_t n) {const auto* b=static_cast<const unsigned char*>(p);for(std::size_t i=0;i<n;++i) h=(h^b[i])*1099511628211ull;};
+        for(const auto& r:eye_records_[eye&1u]) if(r.valid) {mix(&r.frame,4);mix(r.m[2],64);}
+        return h;
+    }
     using PassSource=DrawPass(*)() noexcept;
     static void set_pass_source(PassSource source) noexcept {pass_source_.store(source,std::memory_order_relaxed);}
     static void set_pass_name(const char* (*name)(unsigned)) noexcept {pass_name_.store(name,std::memory_order_relaxed);} // status: pass id -> ARK_RENDERPASS_* name
@@ -574,6 +583,7 @@ private:
     // v1101: the draw's render pass (src/render_pass_map.hpp). No pass map installed: the v931 certificate path runs unchanged.
     inline static std::atomic<PassSource> pass_source_{};
     inline static std::atomic<std::uintptr_t> borrowed_view_{};inline static std::atomic<std::uint64_t> secondary_draws_{},secondary_writes_{},borrowed_skips_{}; // v1259
+    inline static std::atomic<unsigned> borrowed_eye_{};inline static std::array<std::atomic<std::uint64_t>,3> secondary_eye_draws_{}; // v1265
     static bool secondary_job() noexcept {const auto source=pass_source_.load(std::memory_order_relaxed);return source && source().secondary;}
     inline static std::atomic<const char* (*)(unsigned)> pass_name_{};
     // Status: draws that reached the weapon placement ("near": a held weapon's part is at most near_w deep) and the ones placed, by pass
@@ -1227,7 +1237,7 @@ private:
     // is not an eye view (shadow maps) are left at the engine's tick frame and counted (docs/WEAPON-DRAW-PLACE-TEMPORAL.md).
     static bool prepare(ID3D11DeviceContext* c,ContextState& s) noexcept {
         count(layout_draws);
-        if(secondary_job()) {secondary_draws_.fetch_add(1,std::memory_order_relaxed);return false;}   // v1259: a secondary pass's draw: the engine's rows
+        if(secondary_job()) {secondary_draws_.fetch_add(1,std::memory_order_relaxed);secondary_eye_draws_[borrowed_eye_.load(std::memory_order_relaxed)%3u].fetch_add(1,std::memory_order_relaxed);return false;}   // v1259: a secondary pass's draw: the engine's rows
         const Shadow* sh=s.cb[1]?&s.shadow(s.cb[1]):nullptr;
         if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);return false;}
         // v1040: no previous rows and no weapon placement: the draw ends in no_rows below whatever the view says. Skip the view lookup,
