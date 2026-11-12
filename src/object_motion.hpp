@@ -914,7 +914,7 @@ private:
     }
     inline static thread_local float early_z_[4]{}; // v1203: the z row the early gathers used
     inline static std::array<std::array<std::atomic<std::uint64_t>,11>,3> none_fit_kind_{};
-    inline static std::atomic<std::uint32_t> none_fit_first_{~0u},none_fit_last_{};
+    inline static std::atomic<std::uint32_t> none_fit_first_{~0u},none_fit_last_{},rig_none_fit_first_{~0u},rig_none_fit_last_{};inline static std::atomic<std::uint64_t> rig_none_fit_spans_{};
     static unsigned decade(double x) noexcept {if(!(x>0)) return 0;const int d=static_cast<int>(std::floor(std::log10(x)))+10;return static_cast<unsigned>(std::clamp(d,0,10));}
     // The view this draw's rows were built with, by content; false = ambiguous / not this form (counted). `rows`: the draw's engine rows.
     static bool content_view(const float* rows,View& out,const float* prev_rows=nullptr) noexcept {
@@ -953,6 +953,10 @@ private:
             const auto f=newest_frame_.load(std::memory_order_relaxed);
             for(auto m=none_fit_first_.load();f<m && !none_fit_first_.compare_exchange_weak(m,f);) {}
             for(auto m=none_fit_last_.load();f>m && !none_fit_last_.compare_exchange_weak(m,f);) {}
+            if(tl_draw_kind_==0) { // v1211: unnamed rig draws: first/last engine frame and the number of separate spans (a gap > 8 frames starts one)
+                for(auto m=rig_none_fit_first_.load();f<m && !rig_none_fit_first_.compare_exchange_weak(m,f);) {}
+                const auto last=rig_none_fit_last_.exchange(f);if(last==0 || f>last+8) rig_none_fit_spans_.fetch_add(1,std::memory_order_relaxed);
+            }
         }
         if(pick<0) {content_outcome_[pick==-1?content_none_fit:content_ambiguous].fetch_add(1,std::memory_order_relaxed);tl_content_why_=pick==-1?2u:1u;return false;}
         out=tl_cand_[static_cast<std::size_t>(pick)].view;content_outcome_[tied?content_tie_same_eye:content_certain].fetch_add(1,std::memory_order_relaxed);
@@ -967,7 +971,7 @@ private:
         for(unsigned h=0;h<2;++h) {o+=h?",\"second_log10\":[":",\"best_log10\":[";for(unsigned k=0;k<11;++k) o+=(k?",":"")+std::to_string(content_hist_[h][k].load());o+="]";}
         o+=",\"tick\":["+std::to_string(content_tick_[0].load())+','+std::to_string(content_tick_[1].load())+"],\"vs_job\":["+std::to_string(content_vs_job_[0].load())+','+std::to_string(content_vs_job_[1].load())
             +','+std::to_string(content_vs_job_[2].load())+','+std::to_string(content_vs_job_[3].load())+"]";
-        o+=",\"none_fit_frames\":["+std::to_string(none_fit_first_.load())+','+std::to_string(none_fit_last_.load())+"],\"none_fit_by_kind\":{";
+        o+=",\"none_fit_frames\":["+std::to_string(none_fit_first_.load())+','+std::to_string(none_fit_last_.load())+"],\"rig_none_fit_frames\":["+std::to_string(rig_none_fit_first_.load())+','+std::to_string(rig_none_fit_last_.load())+','+std::to_string(rig_none_fit_spans_.load())+"],\"none_fit_by_kind\":{";
         {static constexpr const char* kinds[3]{"rig","near","far"};
          for(unsigned k=0;k<3;++k) {o+=std::string(k?",":"")+'"'+kinds[k]+"\":[";for(unsigned d=0;d<11;++d) o+=(d?",":"")+std::to_string(none_fit_kind_[k][d].load());o+=']';}}
         o+="}";
@@ -1225,6 +1229,7 @@ private:
             const bool rows_own=kind==PrevMvpTable::other_last;
             RigMask::tl_bound_slot_=~0u;RigMask::tl_bound_tag_=~0u;RigMask::tl_bound_buffer_=0;
             const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);
+            if(have_render) RigMask::capture_drawn(c,view.frame); // v1211: this render's slot = the current palette this draw binds (t1), in GPU order
             if(have_render) rig_record(c,view.display,cur,engine,own?prev:cur,static_cast<unsigned>(kind),own,chained);
             draw_view_note(c,have_render?1u:0u);
             // status rig_zero_why: [first frame (cur == prev), chain miss, chain unproven (the second hop), palette (no slot tagged with the

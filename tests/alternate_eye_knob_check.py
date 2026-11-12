@@ -397,7 +397,7 @@ print('PASS: v1207 rig render by chain, pinned probe rows, wild rig MV census')
 
 # v1208: rig slots from the uploaded CPU palette (never copied from a dynamic wrapper), wrapper fingerprint, MV-target applicability
 rm4 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
-assert 'c->UpdateSubresource(r.slot[k].Get(),0,nullptr,r.upload.data(),0,0);' in rm4 and 'CopyResource(r.slot' not in rm4
+assert 'static void fingerprint(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,ID3D11Buffer* other)' in rm4  # v1211: slots now come from the drawn palette (pin below)
 assert 'd2vr::ObjectMotion::note_mv_texture(b.res[1]);' in probe and 'cpu_ok?bytes.data():nullptr,cpu_ok?bd.ByteWidth:0u,copied!=0,' in probe
 print('PASS: v1208 rig palette slots from the uploaded CPU palette, fingerprint, MV-target applicability')
 
@@ -417,3 +417,10 @@ assert 'nested_(RigMask::nested_draw()),s_(installed_ && !nested_?before(c):null
 assert 'probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on();' in probe and 'RigMask::probe_arm(view.display,want,sh->size);' in om6
 assert 'v && v!=alt_view_.load(std::memory_order_relaxed)) {' in om6
 print('PASS: v1210 nested draw hooks, draw-time rig probe, other-view MV writers')
+
+# v1211: a rig ring slot holds the current palette its render's rig draw binds (copied at the draw), never the skin-copy hook's upload
+rm7 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+om7 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'c->CopyResource(r.slot[k].Get(),cur.Get());' in rm7 and 'UpdateSubresource(r.slot' not in rm7
+assert 'if(have_render) RigMask::capture_drawn(c,view.frame);' in om7
+print('PASS: v1211 rig ring slots from the drawn current palette')

@@ -198,7 +198,7 @@ public:
     // vectors with a tag-matched slot). A frame without an upload writes the last uploaded palette (the wrappers still hold it). Until the
     // model's first upload is seen nothing is tagged (zero motion). `other`: the second wrapper, only for the fingerprint check.
     // v1210 diagnostics: `commit` = the image skin rewrote the CPU palette right before this upload, `race` = the CPU palette read after the
-    // engine's upload differs from the one read just before it (something wrote it meanwhile); kept per slot with the bytes written (shadow).
+    // engine's upload differs from the one read just before it (something wrote it meanwhile); counted (status slot_no_commit, slot_races).
     static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame,const void* cpu,UINT cpu_bytes,bool uploaded,ID3D11Buffer* other=nullptr,bool commit=true,bool race=false) noexcept {
         if(!c || !current || model>=ring_.size() || !motion.load(std::memory_order_relaxed)) return;
         Ring& r=ring_[model];
@@ -216,25 +216,29 @@ public:
             r.upload.assign(static_cast<const std::uint8_t*>(cpu),static_cast<const std::uint8_t*>(cpu)+cpu_bytes);uploads_.fetch_add(1,std::memory_order_relaxed);
             if(other && !(frame%32)) fingerprint(c,model,current,other);
         } else if(uploaded) layout_refused_.fetch_add(1,std::memory_order_relaxed);
-        if(r.upload.size()!=r.bytes) {no_upload_.fetch_add(1,std::memory_order_relaxed);return;} // nothing proven yet: no slot is tagged
-        const unsigned k=frame%rig_ring_slots;
-        const std::uint32_t last=r.last.load(std::memory_order_relaxed);
-        if(last==frame) { // a second call this frame: only an upload replaces what the slot holds
-            ring_repeats_.fetch_add(1,std::memory_order_relaxed);
-            if(!uploaded || r.from_upload[k]) return;
-        } else {
-            const unsigned run=rig_ring_run(last,r.run.load(std::memory_order_relaxed),frame);
-            if(run==1 && last!=~0u) ring_restarts_.fetch_add(1,std::memory_order_relaxed);
-            r.run.store(run,std::memory_order_release);rotations_.fetch_add(1,std::memory_order_relaxed);
-        }
-        // v1206: this render's own slot, tagged with its frame (no in-place rotation: a draw list that executes after a later render's write
-        // still reads the palette its tag names)
-        r.tag[k].store(~0u,std::memory_order_release);
-        c->UpdateSubresource(r.slot[k].Get(),0,nullptr,r.upload.data(),0,0);r.from_upload[k]=uploaded;
-        if(probe_on.load(std::memory_order_relaxed)) {r.shadow[k]=r.upload;r.commit[k]=commit;r.race[k]=uploaded && race;r.writer_deferred[k]=c->GetType()==D3D11_DEVICE_CONTEXT_DEFERRED;}
         if(uploaded && race) races_.fetch_add(1,std::memory_order_relaxed);
         if(!commit) no_commit_.fetch_add(1,std::memory_order_relaxed);
-        r.tag[k].store(frame,std::memory_order_release);r.last.store(frame,std::memory_order_relaxed);
+        // v1211: no slot is written here any more. v1210's draw-time probe: on every wild render the slot held exactly the CPU palette this
+        // hook captured (GPU == shadow, rows == intended), always from an upload the image skin had not committed: the upload this hook sees
+        // under a frame number is not provably the palette that render drew. capture_drawn() writes the slot at the draw from what it binds.
+    }
+    // v1211: render `frame`'s slot of the draw's rig model = a copy of the current palette (t1) this rig draw binds, recorded on the draw's own
+    // context right at the draw: by construction what that render's skinning read as its current palette, whichever upload (committed by the
+    // image skin or not, either engine wrapper) put it there. Once per render and model (the first named rig draw). A later render whose
+    // previous render left no slot gets zero motion (ring_late), never another palette.
+    static void capture_drawn(ID3D11DeviceContext* c,std::uint32_t frame) noexcept {
+        if(!c || !tl_rig_ || !tl_prepass_ || !tl_current_ || frame==~0u || tl_model_>=ring_.size()) return;
+        Ring& r=ring_[tl_model_];const unsigned k=frame%rig_ring_slots;
+        if(!r.ready.load(std::memory_order_acquire) || r.tag[k].load(std::memory_order_acquire)==frame) return;
+        Microsoft::WRL::ComPtr<ID3D11Resource> res;tl_current_->GetResource(&res);Microsoft::WRL::ComPtr<ID3D11Buffer> cur;
+        if(!res || FAILED(res.As(&cur))) return;
+        D3D11_BUFFER_DESC d{};cur->GetDesc(&d);Microsoft::WRL::ComPtr<ID3D11Device> device;c->GetDevice(&device);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!r.ready.load(std::memory_order_relaxed) || r.tag[k].load(std::memory_order_relaxed)==frame || !r.slot[k]) return;
+        if(r.bytes!=d.ByteWidth || r.device!=device.Get()) {capture_refused_.fetch_add(1,std::memory_order_relaxed);return;}
+        r.tag[k].store(~0u,std::memory_order_release);
+        c->CopyResource(r.slot[k].Get(),cur.Get());
+        r.tag[k].store(frame,std::memory_order_release);r.last.store(frame,std::memory_order_relaxed);rotations_.fetch_add(1,std::memory_order_relaxed);
     }
     // v1208 diagnostic: every 32nd uploading frame, both engine wrappers are read back and compared with the CPU palette just uploaded (status
     // fingerprint: [checks, current wrapper == CPU, other wrapper == CPU, neither, first differing byte of current]). Proves which wrapper
@@ -353,10 +357,13 @@ public:
          <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load();
         // v1210: nested draw hooks (inert inner scopes), slot metadata counts, the draw-time probe: tally [wild][pal_eq][cb_eq] and notes
+        // v1211: slot_captures = slots written at the draw (capture_drawn), capture_refused = size/device mismatch; pal = slot == the t1 the eye's
+        // previous render drew (prev_unknown: that render had no probe, counted as pal!)
         o<<",\"nested_scopes\":"<<nested_scopes_.load()<<",\"slot_races\":"<<races_.load()<<",\"slot_no_commit\":"<<no_commit_.load()
+         <<",\"slot_captures\":"<<rotations_.load()<<",\"capture_refused\":"<<capture_refused_.load()
          <<",\"draw_probe\":{\"on\":"<<(probe_on.load()?"true":"false")<<",\"fields\":\"still: pal!cb!,pal!cb,pal cb!,pal cb; wild: same\",\"tally\":[";
         for(unsigned i=0;i<probe_tally_.size();++i) o<<(i?",":"")<<probe_tally_[i].load();
-        o<<"],\"dropped\":"<<probe_dropped_.load()<<",\"notes\":[";
+        o<<"],\"prev_unknown\":"<<probe_prev_unknown_.load()<<",\"dropped\":"<<probe_dropped_.load()<<",\"notes\":[";
         {std::lock_guard<std::mutex> lock(mutex_);for(unsigned i=0;i<probe_notes_n_;++i) o<<(i?",":"")<<probe_notes_[i];}
         o<<"]}}";
         return o.str();
@@ -428,18 +435,17 @@ private:
         std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,rig_ring_slots> slot;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,rig_ring_slots> view;
         std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};UINT bytes{};
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};
-        std::array<std::vector<std::uint8_t>,rig_ring_slots> shadow;std::array<bool,rig_ring_slots> commit{},race{},writer_deferred{}; // v1210 probe
-        void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);from_upload[i]=false;shadow[i].clear();}upload.clear();run.store(0);last.store(~0u);}};
+        void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);from_upload[i]=false;}upload.clear();run.store(0);last.store(~0u);}};
     // v1210 draw-time probe (diagnostics): for the first own rig draw of each model in a render, right after the engine's draw and on its
     // context (GPU order), copies of what that draw read: t0 (our ring slot), t1 (the engine's current palette), b2 (our pool rows). Read
     // back on the immediate context once the render's mask census is in (its command lists have executed) and compared with what the CPU
-    // meant to give it: the slot's shadow bytes and the pool bytes ObjectMotion wrote (probe_arm).
-    struct Probe {std::uint64_t display{~0ull};unsigned model{},state{},polls{};std::uint32_t tag{};bool deferred{},commit{},race{},writer_deferred{};
-        Microsoft::WRL::ComPtr<ID3D11Buffer> pal,cur,cb;std::vector<std::uint8_t> want_pal,want_cb;};
+    // meant to give it: v1211 the t1 its eye's previous render read (that render's probe) and the pool bytes ObjectMotion wrote (probe_arm).
+    struct Probe {std::uint64_t display{~0ull};unsigned model{},state{},polls{};std::uint32_t tag{};bool deferred{};
+        Microsoft::WRL::ComPtr<ID3D11Buffer> pal,cur,cb;std::vector<std::uint8_t> want_cb,got_cur;}; // v1211: got_cur = the t1 this draw read (bytes)
     inline static std::array<Probe,32> probes_{};inline static unsigned probe_next_{};
     inline static std::array<std::atomic<std::uint64_t>,8> probe_tally_{}; // [wild*4 + pal_eq*2 + cb_eq]
     inline static std::array<std::string,12> probe_notes_{};inline static unsigned probe_notes_n_{};
-    inline static std::atomic<std::uint64_t> races_{},no_commit_{},nested_scopes_{},probe_dropped_{};
+    inline static std::atomic<std::uint64_t> races_{},no_commit_{},nested_scopes_{},probe_dropped_{},capture_refused_{},probe_prev_unknown_{};
     inline static thread_local unsigned tl_scope_depth_{};inline static thread_local std::uint64_t tl_probe_display_{~0ull};inline static thread_local std::vector<std::uint8_t> tl_probe_cb_;
     static bool make_staging(ID3D11Device* device,ID3D11Resource* src,Microsoft::WRL::ComPtr<ID3D11Buffer>& out) noexcept {
         Microsoft::WRL::ComPtr<ID3D11Buffer> b;if(!device || !src || FAILED(src->QueryInterface(IID_PPV_ARGS(&b)))) return false;
@@ -456,44 +462,56 @@ private:
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             Ring& r=ring_[model];
-            if(!r.ready.load(std::memory_order_relaxed) || r.tag[k].load(std::memory_order_relaxed)!=tl_bound_tag_ || !r.slot[k] || r.shadow[k].size()!=r.bytes || device.Get()!=r.device) return;
+            if(!r.ready.load(std::memory_order_relaxed) || r.tag[k].load(std::memory_order_relaxed)!=tl_bound_tag_ || !r.slot[k] || device.Get()!=r.device) return;
             for(const auto& p:probes_) if(p.state && p.display==tl_probe_display_ && p.model==model) return; // one per render and model
             Probe* p=nullptr;for(unsigned i=0;i<probes_.size() && !p;++i) {Probe& q=probes_[(probe_next_+i)%probes_.size()];if(q.state!=1) p=&q;}
             if(!p) {probe_dropped_.fetch_add(1,std::memory_order_relaxed);return;}
             ++probe_next_;p->state=0;
             if(!make_staging(device.Get(),r.slot[k].Get(),p->pal) || !make_staging(device.Get(),cur.Get(),p->cur) || !make_staging(device.Get(),cb.Get(),p->cb)) return;
             c->CopyResource(p->pal.Get(),r.slot[k].Get());c->CopyResource(p->cur.Get(),cur.Get());c->CopyResource(p->cb.Get(),cb.Get());
-            p->want_pal=r.shadow[k];p->want_cb=tl_probe_cb_;p->display=tl_probe_display_;p->model=model;p->tag=tl_bound_tag_;p->polls=0;
-            p->deferred=c->GetType()==D3D11_DEVICE_CONTEXT_DEFERRED;p->commit=r.commit[k];p->race=r.race[k];p->writer_deferred=r.writer_deferred[k];p->state=1;
+            p->got_cur.clear();p->want_cb=tl_probe_cb_;p->display=tl_probe_display_;p->model=model;p->tag=tl_bound_tag_;p->polls=0;
+            p->deferred=c->GetType()==D3D11_DEVICE_CONTEXT_DEFERRED;p->state=1;
         } catch(...) {}
     }
-    // max |translation| difference over the joints of two packed 3x4 palettes (metres; NaN-safe: a non-finite difference reads 1e9)
-    static double palette_gap(const float* a,const float* b,std::size_t bytes) noexcept {
-        double gap=0;for(std::size_t j=0;j+48<=bytes;j+=48) for(unsigned t:{3u,7u,11u}) {const double d=std::abs(double(a[j/4+t])-double(b[j/4+t]));gap=std::max(gap,d==d?d:1e9);}
+    // v1211: over the model's real joints only (arms 69, body 20; the packed tail is padding): max |translation| difference (m) where both
+    // are finite, and the count of non-finite floats in `a`
+    static unsigned probe_joints(unsigned model) noexcept {return model<2?69u:20u;}
+    static double palette_gap(const float* a,const float* b,std::size_t bytes,unsigned joints) noexcept {
+        double gap=0;for(std::size_t j=0;j<joints && (j+1)*48<=bytes;++j) for(unsigned t:{3u,7u,11u}) {const double d=std::abs(double(a[j*12+t])-double(b[j*12+t]));if(d==d && d<1e30) gap=std::max(gap,d);}
         return gap;
     }
+    static unsigned non_finite(const float* a,std::size_t bytes,unsigned joints) noexcept {
+        unsigned n=0;for(std::size_t i=0;i<joints*12u && (i+1)*4<=bytes;++i) n+=!std::isfinite(a[i]);return n;
+    }
     static void poll_probes(ID3D11DeviceContext* immediate) noexcept { // under mutex_
-        for(auto& p:probes_) if(p.state==1) {
+        // oldest first: a render's slot is compared with the t1 its eye's previous render (display - 2) read
+        std::array<Probe*,32> order{};unsigned n=0;for(auto& p:probes_) if(p.state==1) order[n++]=&p;
+        std::sort(order.begin(),order.begin()+n,[](const Probe* x,const Probe* y) {return x->display<y->display;});
+        for(unsigned i=0;i<n;++i) {Probe& p=*order[i];
             std::uint32_t m[3]{};
             if(!mask_counts(p.display,m)) {if(++p.polls>2000) p.state=0;continue;} // the render's census (its lists have executed) not in yet
+            const Probe* q=nullptr;bool wait=false;
+            for(const auto& x:probes_) if(x.display+2==p.display && x.model==p.model) {if(x.state==1) wait=true;else if(x.state==2 && !x.got_cur.empty()) q=&x;}
+            if(wait && ++p.polls<=2000) continue;
             D3D11_MAPPED_SUBRESOURCE a{},b{},cbm{};
             if(FAILED(immediate->Map(p.pal.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&a)) || !a.pData) continue;
             if(FAILED(immediate->Map(p.cur.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&b)) || !b.pData) {immediate->Unmap(p.pal.Get(),0);continue;}
             if(FAILED(immediate->Map(p.cb.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&cbm)) || !cbm.pData) {immediate->Unmap(p.cur.Get(),0);immediate->Unmap(p.pal.Get(),0);continue;}
             D3D11_BUFFER_DESC pd{},cd{};p.pal->GetDesc(&pd);p.cb->GetDesc(&cd);
-            const std::size_t pal_bytes=std::min<std::size_t>(pd.ByteWidth,p.want_pal.size()),cb_bytes=std::min<std::size_t>(cd.ByteWidth,p.want_cb.size());
+            const std::size_t pal_bytes=pd.ByteWidth,cb_bytes=std::min<std::size_t>(cd.ByteWidth,p.want_cb.size());const unsigned joints=probe_joints(p.model);
             const auto* gp=static_cast<const float*>(a.pData);const auto* gc=static_cast<const float*>(b.pData);const auto* gb=static_cast<const float*>(cbm.pData);
-            const bool pal_eq=pal_bytes && !std::memcmp(gp,p.want_pal.data(),pal_bytes),cb_eq=cb_bytes && !std::memcmp(gb,p.want_cb.data(),cb_bytes);
-            std::size_t pal_diff=0;for(std::size_t i=0;i<pal_bytes;++i) pal_diff+=static_cast<const std::uint8_t*>(a.pData)[i]!=p.want_pal[i];
-            const double slot_cur=palette_gap(gp,gc,pal_bytes),want_cur=palette_gap(reinterpret_cast<const float*>(p.want_pal.data()),gc,pal_bytes);
-            std::size_t cb_first=~std::size_t{0};for(std::size_t i=0;i+4<=cb_bytes && cb_first==~std::size_t{0};i+=4) if(std::memcmp(gb+i/4,p.want_cb.data()+i,4)) cb_first=i/4;
+            try {p.got_cur.assign(static_cast<const std::uint8_t*>(b.pData),static_cast<const std::uint8_t*>(b.pData)+pal_bytes);} catch(...) {p.got_cur.clear();}
+            // pal_eq: the slot this draw read == the current palette its eye's previous render drew (by construction since v1211); unknown: false, counted
+            const bool known=q && q->got_cur.size()==pal_bytes;if(!known) probe_prev_unknown_.fetch_add(1,std::memory_order_relaxed);
+            const bool pal_eq=known && !std::memcmp(gp,q->got_cur.data(),std::min<std::size_t>(pal_bytes,joints*48u)),cb_eq=cb_bytes && !std::memcmp(gb,p.want_cb.data(),cb_bytes);
+            const double slot_cur=palette_gap(gp,gc,pal_bytes,joints);const unsigned nf_slot=non_finite(gp,pal_bytes,joints),nf_cur=non_finite(gc,pal_bytes,joints);
+            std::size_t cb_first=~std::size_t{0};for(std::size_t b4=0;b4+4<=cb_bytes && cb_first==~std::size_t{0};b4+=4) if(std::memcmp(gb+b4/4,p.want_cb.data()+b4,4)) cb_first=b4/4;
             const bool wild=m[2]>0;probe_tally_[(wild?4u:0u)+(pal_eq?2u:0u)+(cb_eq?1u:0u)].fetch_add(1,std::memory_order_relaxed);
-            if((wild || ((!pal_eq || !cb_eq) && probe_notes_n_<4)) && probe_notes_n_<probe_notes_.size()) try { // wild renders first; at most 4 other mismatches
+            if((wild || ((!pal_eq || !cb_eq) && known && probe_notes_n_<4)) && probe_notes_n_<probe_notes_.size()) try { // wild renders first; at most 4 other mismatches
                 float want_f=0;if(cb_first!=~std::size_t{0}) std::memcpy(&want_f,p.want_cb.data()+cb_first*4,4);
-                std::ostringstream o;o<<"{\"display\":"<<p.display<<",\"model\":"<<p.model<<",\"tag\":"<<p.tag<<",\"wild\":"<<(wild?1:0)<<",\"pal_eq\":"<<(pal_eq?1:0)<<",\"pal_diff_bytes\":"<<pal_diff
-                 <<",\"slot_vs_cur_m\":"<<slot_cur<<",\"want_vs_cur_m\":"<<want_cur<<",\"cb_eq\":"<<(cb_eq?1:0)<<",\"cb_first_float\":"<<static_cast<long long>(cb_first==~std::size_t{0}?-1:static_cast<long long>(cb_first))
-                 <<",\"cb_gpu\":"<<(cb_first==~std::size_t{0}?0.f:gb[cb_first])<<",\"cb_cpu\":"<<want_f<<",\"draw_deferred\":"<<(p.deferred?1:0)<<",\"writer_deferred\":"<<(p.writer_deferred?1:0)
-                 <<",\"commit\":"<<(p.commit?1:0)<<",\"race\":"<<(p.race?1:0)<<",\"mask\":["<<m[0]<<','<<m[1]<<','<<m[2]<<"]}";
+                std::ostringstream o;o<<"{\"display\":"<<p.display<<",\"model\":"<<p.model<<",\"tag\":"<<p.tag<<",\"wild\":"<<(wild?1:0)<<",\"prev_drawn_eq\":"<<(known?(pal_eq?1:0):-1)
+                 <<",\"slot_vs_cur_m\":"<<slot_cur<<",\"slot_non_finite\":"<<nf_slot<<",\"cur_non_finite\":"<<nf_cur<<",\"cb_eq\":"<<(cb_eq?1:0)<<",\"cb_first_float\":"<<static_cast<long long>(cb_first==~std::size_t{0}?-1:static_cast<long long>(cb_first))
+                 <<",\"cb_gpu\":"<<(cb_first==~std::size_t{0}?0.f:gb[cb_first])<<",\"cb_cpu\":"<<want_f<<",\"draw_deferred\":"<<(p.deferred?1:0)<<",\"mask\":["<<m[0]<<','<<m[1]<<','<<m[2]<<"]}";
                 probe_notes_[probe_notes_n_++]=o.str();
             } catch(...) {}
             immediate->Unmap(p.cb.Get(),0);immediate->Unmap(p.cur.Get(),0);immediate->Unmap(p.pal.Get(),0);p.state=2;

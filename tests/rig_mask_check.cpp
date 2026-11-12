@@ -65,13 +65,9 @@ static void run(bool d24,int mode) {
     d2vr::RigMask::publish({reinterpret_cast<std::uintptr_t>(rig_pal.Get()),reinterpret_cast<std::uintptr_t>(rig_prev.Get()),0,0,0,0});
     const bool ring=mode==1 || mode==2; // v1183: mode 3 = a held rigid item (no rig palette, marked held: 253)
     d2vr::RigMask::motion=ring;d2vr::RigMask::begin_epoch();
-    if(ring) for(std::uint32_t f=1;f<=8;++f) { // v1185: proven after 8 // three engine frames' skin copies: the current palette's x = frame/1000 (a tiny clip offset)
-        // v1208: the wrapper holds something else (99: an undefined dynamic buffer); the slot must come from the CPU palette (x = frame/1000).
-        // Frame 3 has no upload: its slot holds the last uploaded palette (frame 2's); before the first upload nothing is tagged.
-        const float v[4]{f*1e-3f,0,0,0},junk[4]{99,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,junk,0,0);
-        if(f==1) {d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f,nullptr,0,false);continue;}
-        d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f,v,16,f!=3);
-    }
+    // v1211: the ring is created by the engine's skin copy (skin_copied) but its slots are written only at the rig draws (capture_drawn), from
+    // the current palette each render's draw binds at t1 (seeded below once the pass state is bound)
+    if(ring) {const float junk[4]{99,0,0,0};d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),1,junk,16,true);}
     if(ring) {const float v[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);} // this render's current palette
     // the engine's shaders: SV_Position after a TEXCOORD output; depth sloped across x; the PS writes two targets
     static const char vs_src[]="Buffer<float4> skin:register(t0);cbuffer C:register(b0){float4 r;};"
@@ -101,6 +97,17 @@ static void run(bool d24,int mode) {
     c->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0.f,0);
     const float clear[4]{0,0,0,0};c->ClearRenderTargetView(rtv[0].Get(),clear);c->ClearRenderTargetView(rtv[1].Get(),clear);
     d2vr::RigMask::enabled=true;d2vr::RigMask::view=1;d2vr::RigMask::take_view_draws();
+    if(ring) for(std::uint32_t f=1;f<=7;++f) { // renders 1..7: each rig draw binds its current palette x = f/1000 at t1
+        // v1211 case: at render 6 the skin copy hook sees an upload the image skin did not commit (CPU palette 99, v1210 tagged it as frame 6),
+        // while render 6's draw binds x = 0.006: the slot must hold what the draw read, never the uncommitted upload
+        const float v[4]{f*1e-3f,0,0,0},junk[4]{99,0,0,0};
+        if(f==6) d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f,junk,16,true,nullptr,false);
+        c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);
+        ID3D11ShaderResourceView* pair[2]{prev_view.Get(),rig_view.Get()};c->VSSetShaderResources(0,2,pair);
+        d2vr::RigMask::Scope scope(c.Get(),1);CHECK(d2vr::RigMask::draw_is_rig());d2vr::RigMask::capture_drawn(c.Get(),f);
+        if(f==6) {const float later[4]{77,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,later,0,0);} // a later upload: the copy was recorded at the draw
+    }
+    if(ring) {const float v[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);d2vr::RigMask::take_view_draws();} // render 8's current palette
     const auto draw=[](ID3D11DeviceContext* x,const d2vr::RigMask::DrawArgs& a) noexcept {x->Draw(a.count,a.start);};
     const auto targets=[](ID3D11DeviceContext* x,UINT n,ID3D11RenderTargetView* const* r,ID3D11DepthStencilView* d) noexcept {x->OMSetRenderTargets(n,r,d);};
     float bound_x=-1;bool restored=true;
@@ -115,10 +122,10 @@ static void run(bool d24,int mode) {
             // on the context before this draw executes (a late draw list): slot 6 is untouched, the draw still reads frame 6's palette. A frame
             // whose slot was reused (1, now 9) or an unknown render gets no palette.
             if(mode==1) {
-                const float v9[4]{9e-3f,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v9,0,0);d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),9,v9,16,true);
-                const float z0[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,z0,0,0);
+                d2vr::RigMask::capture_drawn(c.Get(),9); // render 9's draw (late list order): slot 1 reused, slot 6 untouched
                 CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,1,true));CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,~0u,true));
-                CHECK(d2vr::RigMask::previous_palette(c.Get(),0,3,true)); // v1208: frame 3 (no upload) is tagged with the last uploaded palette
+                CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,8,true)); // render 8's own slot is not written by previous_palette
+                CHECK(d2vr::RigMask::previous_palette(c.Get(),0,3,true));
             }
             const bool own=d2vr::RigMask::previous_palette(c.Get(),0,6,mode==1);CHECK(own==(mode==1));
             { // v1210: a draw hook entered from inside this one (the same draw) is inert: the outer's state and its t0 binding survive it
