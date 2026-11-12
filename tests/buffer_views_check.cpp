@@ -42,6 +42,7 @@ int main() {
      CHECK(view_source(true,true,true,&shared_b1,&shared_b1,true)==0);    // own newest write
      CHECK(view_source(false,true,true,&b_r,&shared_b1,true)==2);         // own write was another buffer: the b1 table
      CHECK(view_source(false,true,false,nullptr,&shared_b1,false)==4);    // nothing known: the newest (counted)
+     CHECK(view_source(false,true,true,&b_r,&shared_b1,false)==5);        // v1197: an unclassified b1, own view of another buffer: that own view
      CHECK(view_source(false,false,true,&shared_b1,&shared_b1,true)==4);} // paired frames keep the old rule
     // eviction keeps the newest buffers
     int more[4]{};for(auto& b:more) views.store(&b,View{});CHECK(!views.find(&b_r,got) && views.find(&more[3],got));

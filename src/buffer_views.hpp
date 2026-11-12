@@ -35,11 +35,14 @@ public:
 };
 // v1194: where a draw's view comes from. own_newest: its context wrote the newest view; on one-view frames (alternate) a context's own
 // older write of the b1 it binds is its record-time snapshot and wins over any shared lookup; then the b1's last write by any context
-// (b1_known); else the newest view anywhere (only paired frames, or a b1 never seen written). 0 own, 1 own snapshot, 2 b1, 4 newest.
+// (b1_known); else the newest view anywhere (only paired frames, or a b1 never seen written). 0 own, 1 own snapshot, 2 b1, 4 newest, 5 own view of another buffer (v1197).
 inline unsigned view_source(bool own_newest,bool alternate,bool own_valid,const void* own_buffer,const void* bound,bool b1_known) noexcept {
     if(own_newest) return 0;
     if(alternate && own_valid && own_buffer && own_buffer==bound) return 1;
     if(alternate && b1_known) return 2;
+    // v1197: a b1 no classified write ever filled (v1196 runs: 99.99% of the remaining fallbacks, rig and near draws among them), on a context
+    // whose own last view is older than the newest: that own view is this render's, the newest is the next render's (the other eye)
+    if(alternate && own_valid && own_buffer) return 5;
     return 4;
 }
 } // namespace d2vr

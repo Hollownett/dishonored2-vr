@@ -264,7 +264,7 @@ assert 'Predicate' not in (root / 'src' / 'rig_mask.hpp').read_text(encoding='ut
 print('PASS: v1193 one-view draws tagged by their bound b1 view (rig target E, held mask, placement); v1191 predicate removed')
 
 # v1194: the recording context's own snapshot of its bound b1 wins on one-view frames; view source and per-consumer use counters
-assert 's->view_buffer=valid?r:nullptr;' in om2 and 'if(tl_view_src_==1) {out=s.view;ok=true;}' in om2 and '\\"view_use\\":[' in om2
+assert 's->view_buffer=valid?r:nullptr;' in om2 and 'if(tl_view_src_==1 || tl_view_src_==5) {out=s.view;ok=true;}' in om2 and '\\"view_use\\":[' in om2
 print('PASS: v1194 view source (own record-time b1 snapshot, b1 table, newest) and per-consumer counters')
 
 # v1195: the drawn hands follow a head step on the same frame (both stereo modes): clamp carried with the play mapping, reach shoulders
@@ -274,7 +274,7 @@ assert 's.drawn_world=carry_play(s.play,*in.play,s.drawn_world);' in clamp_src a
 assert 'in.play=d2vr::to_game_pose(d2vr::camera_relative_controller(d2vr::TrackedPose{{0,0,0},{0,0,0,1}},hand_centre,head_origin.position),head_origin,anchor,1.0);' in probe
 assert 'r.shoulder=d2vr::HandClamp::carry_play(*reach_root,clamp_root,r.shoulder);' in probe
 assert 'by_contact || !agreement_draws_clamp?in.body->position:in.clamp.position' in vis_src
-for k in ('legacy-clamp-play-lag','legacy-reach-lag','legacy-body-agreement'): assert k in probe
+for k in ('legacy-clamp-play-lag','reach-root-carry','legacy-body-agreement'): assert k in probe
 print('PASS: v1195 drawn hands without the one-frame head lag (clamp play carry, reach shoulder carry, agreement draws the clamp pose)')
 
 # v1196: hand-chain trace (sim-pose-hold only), hashed b1 view table, newest_why counters
@@ -282,3 +282,13 @@ assert 'if(d2vr::sim_pose_hold::on.load() && fs::exists(root/L"build"/L"hand-cha
 assert 'template<class V,std::size_t N=1024> class BufferViews' in (root / 'src' / 'buffer_views.hpp').read_text(encoding='utf-8')
 assert 'alt_newest_why_' in (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 print('PASS: v1196 hand-chain trace knob, hashed b1 view table, newest_why')
+
+# v1197: a one-view draw whose b1 no classified write filled takes its context's own view (source 5), not the newest; the v1195 reach carry is opt-in
+bv=(root / 'src' / 'buffer_views.hpp').read_text(encoding='utf-8')
+assert 'if(alternate && own_valid && own_buffer) return 5;' in bv and 'tl_view_src_==1 || tl_view_src_==5' in (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'static bool reach_shoulder_carry=false;' in probe
+print('PASS: v1197 own view for unclassified b1 draws; reach root carry opt-in')
+# v1197: the warp's failure reason and the AFW v2 per-stage GPU times in the status
+assert 'try {stale_warp_error=std::string(e.what()).substr(0,300);} catch(...) {}' in xr and '\\"stale_warp_error\\":\\""' in probe
+assert '\\"afw2_stages\\":{' in probe and 'd2vr::Afw2Pass::stage_names[k]' in probe
+print('PASS: v1197 stale_warp_error and perf_gpu_ms.afw2_stages')

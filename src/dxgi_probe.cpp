@@ -134,7 +134,7 @@
 #include "cross_eye_history.hpp"
 #include "rig_target.hpp"
 #include "sim_pose_hold.hpp"
-static bool reach_shoulder_carry=true; // v1195: build/legacy-reach-lag (the reach shoulders carried with the camera root)
+static bool reach_shoulder_carry=false; // v1195 carry, off since v1197 (build/reach-root-carry): world_from_solve already carries the solve by the native root, and the v1196 traces show the stale part moves with the head and hands, not the root
 // v1196 knob build/hand-chain-trace (simulated XR + sim-pose-hold only): artifacts/hand-chain-trace.csv, one row per hand per Setup with every
 // stage's inputs and outputs of the drawn-hand chain (the replay input for the chain tests). Capped at 60000 rows.
 struct HandChainTrace {
@@ -1770,7 +1770,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     hand_clamp.set_hold_seconds(legacy_hand_stuck?0.:d2vr::HandClampConfig{}.hold_seconds);
     hand_clamp.set_rig_turn_carry(!fs::exists(root/L"build"/L"legacy-clamp-world-hold"));   // v861: a held hand turns with the rig
     hand_clamp.set_play_carry(!fs::exists(root/L"build"/L"legacy-clamp-play-lag"));   // v1195: last frame's hand carried with the play mapping
-    reach_shoulder_carry=!fs::exists(root/L"build"/L"legacy-reach-lag");   // v1195: the reach's shoulders carried with the camera root
+    reach_shoulder_carry=fs::exists(root/L"build"/L"reach-root-carry");   // v1195 carry, opt-in since v1197
     d2vr::HandVisualSource::agreement_draws_clamp=!fs::exists(root/L"build"/L"legacy-body-agreement");   // v1195: a body elected by agreement draws the clamp pose
     run_root_gate=!fs::exists(root/L"build"/L"no-run-root-gate");
     spyglass_scope_enabled=!fs::exists(root/L"build"/L"spyglass-lens") && !fs::exists(root/L"build"/L"native-zoom");   // v1040: the scope is the default
@@ -1906,13 +1906,16 @@ static struct PerfSpans {
         void add(double ms) {++n;sum+=ms;max=std::max(max,ms);++bins[static_cast<std::size_t>(std::clamp(ms*100.,0.,1000.))];}
         double p95() const {if(!n) return 0;std::uint64_t want=(n*95+99)/100,at=0;for(std::size_t i=0;i<bins.size();++i) {at+=bins[i];if(at>=want) return i/100.;}return 10.;}};
     std::array<One,3> span{};std::uint64_t last_sequence{};std::mutex mutex;
+    std::array<One,d2vr::Afw2Pass::profile_stages> afw2{};std::uint64_t afw2_profiled{}; // v1197: Afw2Pass::stage_ms per completed measurement
 } perf_spans;
 static std::string perf_spans_json() {
     if(!d2vr::diag::on()) return "null";
     std::lock_guard<std::mutex> lock(perf_spans.mutex);std::ostringstream o;o.precision(4);
     const char* names[3]{"stale_warp","rig_target_copy","eye_motion"};o<<'{';
     for(unsigned k=0;k<3;++k) {const auto& x=perf_spans.span[k];o<<(k?",":"")<<'"'<<names[k]<<"\":{\"n\":"<<x.n<<",\"mean\":"<<(x.n?x.sum/x.n:0.)<<",\"p95\":"<<x.p95()<<",\"max\":"<<x.max<<'}';}
-    o<<'}';return o.str();
+    o<<",\"afw2_stages\":{"; // v1197: the warp helper's per-stage GPU timestamps (Afw2Pass::stage_names order)
+    for(int k=0;k<d2vr::Afw2Pass::profile_stages;++k) {const auto& x=perf_spans.afw2[static_cast<std::size_t>(k)];o<<(k?",":"")<<'"'<<d2vr::Afw2Pass::stage_names[k]<<"\":{\"n\":"<<x.n<<",\"mean\":"<<(x.n?x.sum/x.n:0.)<<",\"p95\":"<<x.p95()<<",\"max\":"<<x.max<<'}';}
+    o<<"}}";return o.str();
 }
 // v1190 (rig_target.hpp): the fresh camera, the stale eye's target camera and its FOV tangents, recorded at prepare_head_view; Setup's end
 // turns them into E with the view's final matrices and publishes it. Render thread only.
@@ -10586,7 +10589,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
-               << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0) << '}' << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"perf_gpu_ms\":" << perf_spans_json() << ",\"sim_pose_hold\":{\"on\":" << (d2vr::sim_pose_hold::on.load()?"true":"false") << ",\"phase\":" << d2vr::sim_pose_hold::phase.load() << ",\"changes\":" << d2vr::sim_pose_hold::changes_n.load() << ",\"holds\":" << d2vr::sim_pose_hold::holds_n.load() << ",\"verified\":" << d2vr::sim_pose_hold::verified.load() << ",\"broken\":" << d2vr::sim_pose_hold::broken.load() << '}' << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
+               << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0) << '}' << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"stale_warp_error\":\"" << [] {std::string e=game_xr?game_xr->stale_warp_error:std::string{};for(auto& ch:e) if(ch=='"' || ch==92 || static_cast<unsigned char>(ch)<32) ch='/';return e;}() << '"' << ",\"perf_gpu_ms\":" << perf_spans_json() << ",\"sim_pose_hold\":{\"on\":" << (d2vr::sim_pose_hold::on.load()?"true":"false") << ",\"phase\":" << d2vr::sim_pose_hold::phase.load() << ",\"changes\":" << d2vr::sim_pose_hold::changes_n.load() << ",\"holds\":" << d2vr::sim_pose_hold::holds_n.load() << ",\"verified\":" << d2vr::sim_pose_hold::verified.load() << ",\"broken\":" << d2vr::sim_pose_hold::broken.load() << '}' << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
                << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
@@ -15066,6 +15069,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
             const bool split_timed=native_gpu_requested && native_gpu_prepared;
             const d2vr::PhaseGpu split_phase=split_timed?native_gpu_summary.last_phase:d2vr::PhaseGpu{};
             const d2vr::ModGpu split_mod=split_timed?d2vr::mod_gpu_timer().stats().last:d2vr::ModGpu{};
+            if(split_timed && d2vr::diag::on() && game_xr) if(const auto* pass=game_xr->afw2_pass();pass && pass->profiled!=perf_spans.afw2_profiled) { // v1197
+                std::lock_guard<std::mutex> perf_lock(perf_spans.mutex);perf_spans.afw2_profiled=pass->profiled;
+                for(int k=0;k<d2vr::Afw2Pass::profile_stages;++k) if(pass->stage_ms[static_cast<std::size_t>(k)]>=0) perf_spans.afw2[static_cast<std::size_t>(k)].add(pass->stage_ms[static_cast<std::size_t>(k)]);
+            }
             if(split_timed && split_mod.valid) { // v1191: each timed frame once
                 const auto sequence=d2vr::mod_gpu_timer().stats().last_sequence;std::lock_guard<std::mutex> perf_lock(perf_spans.mutex);
                 if(sequence!=perf_spans.last_sequence) {

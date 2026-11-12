@@ -409,6 +409,10 @@ private:
     std::unique_ptr<SpyglassScopeMask> spyglass_scope_mask_; // v1040: the right-eye scope's mask, made on the first zoom
     std::array<WarpMatrix,2> uncant_back_{};std::array<bool,2> uncanted_{}; // this frame: turned image point -> submitted image point
     std::unique_ptr<StaleEyeWarp> stale_warp_;
+public:
+    std::string stale_warp_error; // v1197: the first 300 characters of the exception that turned the warp off (exception text, HRESULT, shader log)
+    const Afw2Pass* afw2_pass() const noexcept {return stale_warp_ && stale_warp_->afw2?stale_warp_->afw2.get():nullptr;} // v1197: read-only (stage_ms)
+private:
     bool stale_warp_failed_{};
     // v796: the game camera of each eye's image shown by a Present (and of each kept image), each eye's target game camera and kept depth
     // handed over for the Present in the *_frame_ stamps, and the parallax of each eye's last warp (the reticle follows it).
@@ -2898,7 +2902,8 @@ public:
                         if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
                         stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;
                     }
-                } catch(const std::exception&) {stale_warp_failed_=true;stale_warped_frame_[eye]=0;++stale_eye_warp_failures;processed=sources[eye];}
+                } catch(const std::exception& e) {stale_warp_failed_=true;stale_warped_frame_[eye]=0;++stale_eye_warp_failures;processed=sources[eye];
+                    try {stale_warp_error=std::string(e.what()).substr(0,300);} catch(...) {}} // v1197: the reason, for the status
                 transfer_processing_[eye]=processing;
                 // v808 (headset v806: canted eyes "clearly sharper", but "the eyes felt pulled toward the centre"): a canted eye is rendered
                 // turned and goes out in its own located view, resampled here (the turn taken back off, the runtime's own FOV), so the

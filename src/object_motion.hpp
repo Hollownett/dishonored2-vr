@@ -252,9 +252,9 @@ public:
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
         return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_draws\":"+std::to_string(alt_rig_.load())+",\"rig_own\":"+std::to_string(alt_rig_own_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())
-            +",\"view_src\":["+[] {std::string o;for(unsigned i=0;i<5;++i) o+=(i?",":"")+std::to_string(alt_view_src_[i].load());return o;}()
+            +",\"view_src\":["+[] {std::string o;for(unsigned i=0;i<6;++i) o+=(i?",":"")+std::to_string(alt_view_src_[i].load());return o;}()
             +"],\"newest_why\":["+std::to_string(alt_newest_why_[0].load())+','+std::to_string(alt_newest_why_[1].load())+','+std::to_string(alt_newest_why_[2].load())
-            +"],\"view_use\":["+[] {std::string o;for(unsigned i=0;i<5;++i) {o+=i?",[":"[";for(unsigned u=0;u<use_count;++u) o+=(u?",":"")+std::to_string(alt_view_use_[i][u].load());o+="]";}return o;}()+"]"
+            +"],\"view_use\":["+[] {std::string o;for(unsigned i=0;i<6;++i) {o+=i?",[":"[";for(unsigned u=0;u<use_count;++u) o+=(u?",":"")+std::to_string(alt_view_use_[i][u].load());o+="]";}return o;}()+"]"
             +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
@@ -312,10 +312,10 @@ public:
     // v1194: where a one-view draw's view came from: 0 own newest write, 1 own older write of its bound b1, 2/3 another context's write of its
     // b1 (of the newest frame / older), 4 the newest view anywhere (the pre-v1193 fallback); and per source, what used it (view_use)
     inline static thread_local unsigned tl_view_src_{};
-    inline static std::array<std::atomic<std::uint64_t>,5> alt_view_src_{};
+    inline static std::array<std::atomic<std::uint64_t>,6> alt_view_src_{};
     inline static std::array<std::atomic<std::uint64_t>,3> alt_newest_why_{}; // v1196: no b1 bound / own view of another buffer, b1 unknown / no own view, b1 unknown
     enum ViewUse : unsigned {use_held_mask,use_rig_target,use_rig_motion,use_place,use_fix,use_camera_only,use_near,use_count};
-    inline static std::array<std::array<std::atomic<std::uint64_t>,use_count>,5> alt_view_use_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,use_count>,6> alt_view_use_{};
     static void view_use(ViewUse u) noexcept {alt_view_use_[tl_view_src_][u].fetch_add(1,std::memory_order_relaxed);}
     // v1101: the placement gate (the knob build/no-weapon-draw-place sets weapon_mode 0; object-motion-mode 0 is diagnostic only).
     static bool weapon_draw_on(int weapon_mode,int mode) noexcept {return weapon_mode>=1 && mode>=1;}
@@ -674,7 +674,7 @@ private:
         View shared{};const bool alt=alternate(),b1_known=alt && !own && buffer_views_.find(s.cb[0],shared);
         tl_view_src_=view_source(own,alt,s.view_valid,s.view_buffer,s.cb[0],b1_known);
         if(tl_view_src_==0) {out=s.view;ok=s.view_valid;}
-        else if(tl_view_src_==1) {out=s.view;ok=true;}
+        else if(tl_view_src_==1 || tl_view_src_==5) {out=s.view;ok=true;}
         else if(tl_view_src_==2) {out=shared;ok=true;if(out.frame!=newest) tl_view_src_=3;}
         else ok=latest(latest_eye_.load(std::memory_order_acquire),out) && out.frame==newest;
         if(alternate()) {alt_view_src_[tl_view_src_].fetch_add(1,std::memory_order_relaxed);
