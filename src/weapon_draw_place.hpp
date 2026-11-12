@@ -807,10 +807,10 @@ public:
         auto& d=draws_[k];
         if(r.side>=0) {
             d[0].fetch_add(1,std::memory_order_relaxed);if(with_prev) d[1].fetch_add(1,std::memory_order_relaxed);if(r.extra) d[2].fetch_add(1,std::memory_order_relaxed);
-            bits_[static_cast<unsigned>(s)].fetch_or(with_prev?3u:1u,std::memory_order_relaxed);
+            bits_[static_cast<unsigned>(s)].fetch_or(8u|(with_prev?3u:1u),std::memory_order_relaxed);
         } else {
             d[r.near_like?3:4].fetch_add(1,std::memory_order_relaxed);
-            if(r.near_like) bits_[static_cast<unsigned>(s)].fetch_or(4u,std::memory_order_relaxed);
+            bits_[static_cast<unsigned>(s)].fetch_or(8u|(r.near_like?4u:0u),std::memory_order_relaxed);   // v1254: bit 3 = a draw reached the placement at all
         }
     }
     // v1240 diagnostic (user v1233: a carried severed head drew with BLACK skin): per distinct placed draw of a held severed part (first 8 keys):
@@ -861,6 +861,7 @@ public:
         for(unsigned k=1;k<kinds;++k) {
             o+=std::string(k>1?",":"")+"\""+names[k]+"\":{\"renders\":"+std::to_string(renders_[k][0].load())+",\"mixed\":"+std::to_string(renders_[k][1].load())
               +",\"no_mv\":"+std::to_string(renders_[k][2].load())+",\"unplaced\":"+std::to_string(renders_[k][3].load())
+              +",\"unplaced_nodraw\":"+std::to_string(renders_[k][4].load())+",\"unplaced_refused\":"+std::to_string(renders_[k][3].load()-renders_[k][4].load())
               +",\"draws\":{\"placed\":"+std::to_string(draws_[k][0].load())+",\"with_prev\":"+std::to_string(draws_[k][1].load())+",\"child\":"+std::to_string(draws_[k][2].load())
               +",\"near_like\":"+std::to_string(draws_[k][3].load())+",\"near_other\":"+std::to_string(draws_[k][4].load())+"},\"match\":"+match_json(k)+"}";
         }
@@ -1162,7 +1163,7 @@ private:
     inline static std::array<Staged,2> staged_{};
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
     inline static std::array<std::uint32_t,2> census_frame_{};
-    inline static std::array<std::array<std::atomic<std::uint64_t>,4>,kinds> renders_{};   // [renders, mixed, no_mv, unplaced]
+    inline static std::array<std::array<std::atomic<std::uint64_t>,5>,kinds> renders_{};   // [renders, mixed, no_mv, unplaced, unplaced without any draw]
     inline static std::array<std::array<std::atomic<std::uint64_t>,5>,kinds> draws_{};     // [placed, with_prev, child, near_like, near_other]
     inline static std::atomic<std::uint64_t> children_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,m_slots>,kinds> match_{};   // v1239
@@ -1176,7 +1177,7 @@ private:
         auto& r=renders_[k];r[0].fetch_add(1,std::memory_order_relaxed);
         if((b&1u) && (b&4u)) r[1].fetch_add(1,std::memory_order_relaxed);
         if((b&1u) && !(b&2u)) r[2].fetch_add(1,std::memory_order_relaxed);
-        if(!(b&1u)) r[3].fetch_add(1,std::memory_order_relaxed);
+        if(!(b&1u)) {r[3].fetch_add(1,std::memory_order_relaxed);if(!(b&8u)) r[4].fetch_add(1,std::memory_order_relaxed);}   // v1254: [unplaced, of which no draw was drawn at all]
     }
     struct Last {bool valid{},have_prev{};std::uint32_t frame{},prev_frame{};Mat model{},placed{},prev{},relative{};};
     inline static std::array<Last,2> older_{},older2_{};

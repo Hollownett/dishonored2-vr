@@ -61,6 +61,7 @@
 #include "native_interaction_aim.hpp"
 #include "native_grab.hpp"
 #include "held_render_pose.hpp"   // v1249
+#include "held_engine_pose.hpp"   // v1254
 #include "body_target.hpp"
 #include "hand_feel.hpp"
 #include "hand_weapon_contact.hpp"
@@ -532,6 +533,8 @@ static std::array<d2vr::rig::GripPoseBlend,2> grip_pose_blend;static std::array<
 static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static std::array<std::atomic<std::uintptr_t>,2> held_bound_entity{};static std::array<std::atomic<unsigned long long>,4> prop_seat_frames{};struct HeldExact {std::uint64_t serial{};bool valid{};double since{};unsigned off_frames{};d2vr::weapon_draw::Mat k{};};static std::atomic<unsigned long long> held_exact_dropped{};static std::array<HeldExact,2> held_exact{};struct UseTargets {std::uintptr_t entity{};unsigned side{};std::array<d2vr::WorldTrackedPose,8> ring{};unsigned count{},next{};double at{};std::optional<d2vr::weapon_draw::Mat> k,k_try;unsigned agree{};double since{};};static UseTargets use_targets{};static std::mutex use_targets_mutex;   // v1074: a Use hold's own targets
 static std::array<std::atomic<unsigned long long>,2> held_use_exact{};
 static std::array<std::atomic<unsigned long long>,2> held_exact_placed{};   // v1074: props drawn at grip * hold * (body -> model frame)
+// v1254: the engine render frame of a held thing follows the drawn hand every render (held_engine_pose.hpp); written by held_engine_pose_write().
+static std::atomic<unsigned long long> held_frame_writes{},held_frame_noops{},held_frame_far{},held_frame_bad{},held_frame_skipped{};
 static std::array<std::array<std::atomic<unsigned long long>,3>,2> held_skip{};static unsigned held_entity_side{}; // v1067: held things placed at their draws (build/no-held-draw-place = off); v1071 held_bound_entity: the thing each hand's draws are placed on
 static bool legacy_finger_ease=false,legacy_finger_grab=false,legacy_held_collision=false,surface_grip_enabled=true;static std::array<std::atomic<bool>,2> finger_ease_active{}; // legacy_finger_grab: build/legacy-finger-grab (v638 contact on the held thing's own shapes, no sphere grip)
 static std::array<std::atomic<bool>,2> grip_pose_blend_request{};
@@ -1724,6 +1727,8 @@ static std::string weapon_draw_json() {
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
+    text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
+        ",\"far\":"+std::to_string(held_frame_far.load())+",\"bad\":"+std::to_string(held_frame_bad.load())+",\"skipped_use\":"+std::to_string(held_frame_skipped.load())+"}";   // v1254
     text+=",\"place\":"+d2vr::ObjectMotion::weapon_status_json()+",\"held_walk_burst\":"+d2vr::held_walk_burst::status_json()+"}";
     return text;
 }
@@ -3625,6 +3630,24 @@ static std::array<d2vr::WeaponPlace,2> weapon_place{};
 static bool write_self(std::uintptr_t address,const void* data,std::size_t size) noexcept {
     __try {std::memcpy(reinterpret_cast<void*>(address),data,size);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
+// v1254 (user, v1252 walking bursts: the carried ashtray is drawn at two places in a steady hand, ~4 cm apart on one render in three or four):
+// the publisher writes the held prop's / severed part's ENGINE render frame (model+0x1860) to the pose its draws are placed at, once per render,
+// the way place_weapons() has written a held weapon's frame since v864. The engine's own sync only runs on a physics step, and 5 of the 16 burst
+// frames carried the same tick (dt 0): on those the frame - shadows, culling bounds and every draw the placement did not match - was a tick old.
+// The game rewrites the frame from the entity at its own tick, so nothing accumulates and the physics body is untouched.
+static void held_engine_pose_write(std::uintptr_t model,const d2vr::weapon_draw::Mat& b,unsigned kind) noexcept {
+    if(!d2vr::HeldEnginePose::on || !model) return;
+    if(kind==d2vr::weapon_draw::Place::kind_use) {++held_frame_skipped;return;}   // the game's own keyframed carry is right every frame: not ours to move
+    try {
+        std::array<float,15> cur{};
+        if(!read_self(model+0x1860,cur.data(),sizeof cur)) {++held_frame_bad;return;}
+        std::array<float,15> want{};
+        if(!d2vr::HeldEnginePose::frame_from_pose(b.data(),want.data())) {++held_frame_bad;return;}
+        if(!(d2vr::HeldEnginePose::origin_gap(cur.data(),want.data())<=d2vr::HeldEnginePose::max_move_m)) {++held_frame_far;return;}   // not the thing we hold
+        if(d2vr::HeldEnginePose::frame_gap(cur.data(),want.data())<d2vr::HeldEnginePose::write_eps) {++held_frame_noops;return;}
+        if(write_self(model+0x1860,want.data(),sizeof want)) ++held_frame_writes;else ++held_frame_bad;
+    } catch(...) {}
+}
 static void place_weapons() noexcept {
     try {
         const auto models=weapon_models();const auto now=frames.load();
@@ -3909,6 +3932,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
                             if(const auto hk=native_grab.held(hand)) d2vr::hold_sync().engine(hk->limb>=0?d2vr::HoldSync::severed:d2vr::HoldSync::prop,player_speed,d2vr::weapon_draw::distance(b,d2vr::weapon_draw::model_of(raw[hand].data())));   // v1249 engine_gap
                             ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);held_placed(hand,d2vr::weapon_draw::RigidLocal::path_physical); // v1231/v1237
+                            held_engine_pose_write(model,b,hand_kind[hand]);   // v1254: the engine's render frame follows the drawn hand on every render
                             continue;
                         }
                     }
@@ -3932,6 +3956,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         if(d2vr::weapon_draw::finite(b) && d2vr::weapon_draw::distance(b,f)<1.) {
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
                             ++held_draw_placed[hand];++held_use_exact[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);held_placed(hand,d2vr::weapon_draw::RigidLocal::path_use); // v1231/v1237
+                            held_engine_pose_write(model,b,hand_kind[hand]);   // v1254 (counted as skipped: the game's own carry is right every frame)
                             continue;
                         }
                     }
@@ -3939,6 +3964,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 const double track_mps=game_xr?static_cast<double>(game_xr->grip_speeds[hand]):-1.;   // the hand's own motion: walking is not a moving hand
                 if(!held_bind.frame(hand,thing[hand],weapon_mat(*image),d2vr::weapon_draw::model_of(raw[hand].data()),t,bound[hand],track_mps,player_speed)) continue;
                 raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];++held_draw_placed[hand];held_bound_entity[hand].store(thing[hand]);held_placed(hand,d2vr::weapon_draw::RigidLocal::path_bind); // v1231/v1237
+                held_engine_pose_write(model,bound[hand],hand_kind[hand]);   // v1254: the engine's render frame follows the drawn hand on every render
             }
             d2vr::ObjectMotion::set_held_placing((thing[0] && raw_ptr[0] && place_ids[0]==thing[0]) || (thing[1] && raw_ptr[1] && place_ids[1]==thing[1]));
         } else d2vr::ObjectMotion::set_held_placing(false);
@@ -16869,6 +16895,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             native_grab.attach_corpse_trace(&corpse_trace);
             d2vr::HeldRenderPose::ragdolls=!fs::exists(root/L"build"/L"no-held-render-pose-severed");d2vr::HeldRenderPose::corpses=fs::exists(root/L"build"/L"held-render-pose-corpse");   // v1253
             if(!fs::exists(root/L"build"/L"no-held-render-pose")) (void)d2vr::HeldRenderPose::install(image_base);   // v1249: a held prop's engine render frame = the hold's goal
+            d2vr::HeldEnginePose::on=!fs::exists(root/L"build"/L"no-held-engine-pose");   // v1254: the render frame itself follows the drawn hand every render
             if(controller_aim_requested)native_interaction_aim.install_door_interaction();
         }
         // Weapons/powers follow the tracked hands (native attachment readers).
