@@ -511,3 +511,9 @@ assert 'bool live_same_window=false,bool live_offer=false) noexcept {' in hd33 a
 assert 'const auto live_hand=offer_same && hand_gap?native_interaction_aim.qualified_target(now):std::nullopt;' in probe
 assert 'live_scope.child.node==c.child.node && live_scope.child.epoch==c.child.epoch,live_offer):0;' in probe and '++prompt_target_hides[!fresh?2:live_same?0:1];' in probe
 print('PASS: v1233 hand prompt held while the live hand target is its object')
+# v1234: a render with no composition names its holder (Binder::observe 5-arg): a different holder drops G, never the old weapon's grip on the new one
+# (dual-wield toss/swap); sanity is per hold (Binder::idle when the hand holds nothing)
+wd34 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+assert 'if(!candidate.identity) {candidate.identity=held;candidate.source=held_source;candidate.space=held_space;}' in wd34 and 'if(s.sanity_idle) {s.sanity_idle=false;' in wd34
+assert 'd2vr::weapon_draw::Binder::observe(hand,candidate,identity,held_source,held_space);' in probe and '{d2vr::weapon_draw::Binder::idle(hand);continue;}' in probe
+print('PASS: v1234 binder drops G for a different holder; sanity per hold')

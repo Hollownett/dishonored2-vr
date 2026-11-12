@@ -3665,7 +3665,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             if(!copy.valid) {
                 const auto route=d2vr::weapon_draw::WriteLog::native_route(hand,attachment_pose.cross_mask()&3u);
                 engine_side=route.arm;required_kind=route.kind;
-                if(engine_side<0 || !models[engine_side]) continue;   // neither a copy nor a native weapon in this physical hand
+                if(engine_side<0 || !models[engine_side]) {d2vr::weapon_draw::Binder::idle(hand);continue;}   // neither a copy nor a native weapon in this physical hand
                 native_model=models[engine_side];
             }
             // image_skin_slots is indexed by the ENGINE arm side, while this loop is per PHYSICAL hand. With both arms crossed
@@ -3685,12 +3685,15 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             std::optional<d2vr::fullbody::Xf> image;
             d2vr::weapon_draw::GripCandidate candidate{};
             bool note_missing{};
+            unsigned held_source=required_kind,held_space=d2vr::weapon_draw::space_joint59;   // v1234: what a composition of this holder would carry
             if(copy.valid) {
+                held_source=copy.kind?copy.kind:d2vr::weapon_draw::write_mirror;
                 // A copy's offset is relative to the controller grip. Bind it to the DRAWN hand like a native weapon: the grip the drawn
                 // joint 59 stands for (joint 59 = grip * grip_to_attachment). image_grip is the raw tracked grip (menu space in a menu,
                 // the v1014 16 m rejections) and ignores the arm's reach clamp, so the copy would float off the drawn hand.
                 const auto joint=full_body.image_world(hand,59,now);
                 const auto grip=full_body.image_grip(hand,now);
+                held_space=copy.offset_valid && joint && grip?d2vr::weapon_draw::space_joint59:d2vr::weapon_draw::space_grip;
                 if(joint) image=d2vr::body::mul(*joint,d2vr::body::inverse(full_body.attachment_target(hand,d2vr::fullbody::Xf{})));
                 if(copy.offset_valid) {
                     const auto offset=d2vr::weapon_draw::model_of(copy.offset.data());
@@ -3739,7 +3742,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 } else {note_missing=true;if(image) ++weapon_draw_stale_note[hand];}
             }
             if(note_missing && !d2vr::weapon_draw::Binder::bound(hand)) ++weapon_draw_no_writer[hand];
-            const bool is_bound=d2vr::weapon_draw::Binder::observe(hand,candidate);
+            const bool is_bound=d2vr::weapon_draw::Binder::observe(hand,candidate,identity,held_source,held_space);
             if(!is_bound) {skip(candidate.attempted&&!candidate.valid?4u:3u);continue;}   // no valid G yet: the engine's rows stay (counted)
             if(!image) {skip(1);continue;}
             const auto hand_mat=weapon_mat(*image);

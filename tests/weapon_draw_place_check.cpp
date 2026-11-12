@@ -292,6 +292,21 @@ int main() {
         CHECK(dist(swapped,mul(image,g3))<1e-9);
         CHECK(Binder::summary(0).learns==2);
         std::printf("v1106 refresh: regrip_refreshes=%llu swap_learns=%llu\n",Binder::summary(0).refreshes,Binder::summary(0).learns);
+        // v1234: a render with NO composition (no fresh note) of the same holder keeps G; of a DIFFERENT holder (the tossed gun came
+        // back, a swap, the other arm crossed in) it drops G: the new weapon is never published at the old one's grip
+        CHECK(Binder::observe(0,GripCandidate{},0x6008,write_engine,space_joint59));
+        Mat kept{};CHECK(Binder::frame(0,image,kept) && dist(kept,mul(image,g3))<1e-9);
+        CHECK(!Binder::observe(0,GripCandidate{},0x6009,write_engine,space_joint59));
+        Mat dropped{};CHECK(!Binder::frame(0,image,dropped));
+        CHECK(Binder::summary(0).learns==2);
+        // v1234: sanity is per hold: an idle hand's next sample starts fresh numbers
+        Binder::observe(0,c3);Binder::observe(0,c3);
+        Mat b3{};Binder::frame(0,image,b3);
+        Binder::note_sanity(0,mul(image,rigid(rot(0,0,1,0),.5,0,0)),b3);
+        CHECK(Binder::summary(0).sanity_max_mm>400);
+        Binder::idle(0);Binder::note_sanity(0,b3,b3);
+        CHECK(Binder::summary(0).sanity_n==1 && Binder::summary(0).sanity_max_mm<1e-6);
+        std::printf("v1234 holder: same keeps G, other drops G, sanity per hold n=%llu\n",Binder::summary(0).sanity_n);
     }
 
     // ---- 7. an invalid G is rejected; the engine's rows stay (counted) until a valid G exists -------------------------

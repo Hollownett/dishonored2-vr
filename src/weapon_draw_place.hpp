@@ -233,6 +233,7 @@ public:
         unsigned pending_source{},pending_space{};
         std::uint64_t learns{},refreshes{},rejects{},fallbacks{};
         unsigned sanity_n{};double sanity_gap_m{},sanity_deg{},sanity_max_m{};
+        bool sanity_idle{};   // v1234: the hand held nothing since the last sample: the next sample starts a new hold's numbers
     };
     static bool same_grip(const Mat& a,const Mat& b) noexcept {
         return distance(a,b)<=same_m && angle(a,b)<=same_deg*3.14159265358979323846/180.;
@@ -275,6 +276,15 @@ public:
         } else if(candidate.attempted) ++s.rejects;
         return true;
     }
+    // v1234: a render with no composition still names what this hand draws (held = its copy entity / native model, with the source and
+    // space a composition of it would carry). A nil candidate used to keep G whatever the hand now held: after a toss or swap, until a
+    // note arrived, the new weapon was published at the OLD weapon's G (drawn off the hand). Now a different holder drops G like a new identity.
+    static bool observe(unsigned hand,GripCandidate candidate,std::uintptr_t held,unsigned held_source,unsigned held_space) {
+        if(!candidate.identity) {candidate.identity=held;candidate.source=held_source;candidate.space=held_space;}
+        return observe(hand,candidate);
+    }
+    // v1234: this hand holds nothing this render (diagnostics only: G is kept for the same weapon's return).
+    static void idle(unsigned hand) {if(hand>1) return;std::lock_guard<std::mutex> lock(mutex_);states_[hand].sanity_idle=true;}
     // B = H * G for this render's drawn hand H (joint 59 or grip, matching the G's space).
     static bool frame(unsigned hand,const Mat& hand_frame,Mat& out) {
         if(hand>1) return false;
@@ -289,6 +299,7 @@ public:
         if(hand>1) return;
         std::lock_guard<std::mutex> lock(mutex_);
         State& s=states_[hand];
+        if(s.sanity_idle) {s.sanity_idle=false;s.sanity_n=0;s.sanity_gap_m=s.sanity_deg=s.sanity_max_m=0;}   // v1234: per hold
         const double gap=distance(engine,bound_frame);
         s.sanity_gap_m=gap;s.sanity_deg=angle(engine,bound_frame)*57.29577951308232;
         if(gap>s.sanity_max_m) s.sanity_max_m=gap;++s.sanity_n;
