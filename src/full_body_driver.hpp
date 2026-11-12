@@ -399,6 +399,18 @@ public:
         image_valid_=false;
         if(!have_track_ || !have_native_body_ || !solve_locked(0,false)) return;
         image_out_=out_;image_fit_=fit_revision_;image_frame_=frame;image_valid_=true;image_held_ok_=true;++image_begins_;
+        image_carry_ok_=false;   // v1258: the root position and heading this image was placed with (item_advance's reference), for a held prop's engine pose
+        if(track_.anchor_root_valid && track_.camera_heading_valid && std::isfinite(track_.camera_heading) && std::isfinite(track_.head_follow)) try {
+            image_carry_={frame_of(track_.anchor_root).rigid.p,track_.camera_heading-track_.head_follow};image_carry_ok_=true;
+        } catch(...) {}
+    }
+    // v1258: the image of `frame`'s carry reference: the anchor root position and (camera heading - head follow) of its publication. A world pose drawn
+    // by that image moves on with the player as item_advance moves an attached item: about the root by the heading change, with the root's translation.
+    struct ImageCarry {Vec3 root{};double heading{};};
+    std::optional<ImageCarry> image_carry(std::uint64_t frame) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_ || !image_carry_ok_) return {};
+        return image_carry_;
     }
     // Render jobs, at the GPU skin copy (0x25f930): the image's joints in the frame the model is drawn in (its live model+0x1860).
     // frame: the Present counter now; the image must have begun in this interval (a render without a begin keeps the tick's upload).
@@ -744,6 +756,7 @@ private:
         return out;
     }
     body::Output image_out_{};bool image_valid_{},image_held_ok_{};std::uint64_t image_fit_{},image_begins_{},image_frame_{};
+    ImageCarry image_carry_{};bool image_carry_ok_{};   // v1258
     // v1104: the baked engine idle clip per type (model space, unscaled), built once. clip_for_type_locked picks the best authored
     // clip for a type: the calm captured one, then the first live frame, then the engine's own idle clip; never another type's.
     static const std::vector<Xf>& baked_clip(unsigned type) {

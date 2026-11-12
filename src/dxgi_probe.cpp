@@ -535,6 +535,8 @@ static std::array<std::atomic<unsigned long long>,2> held_use_exact{};
 static std::array<std::atomic<unsigned long long>,2> held_exact_placed{};   // v1074: props drawn at grip * hold * (body -> model frame)
 // v1254: the engine render frame of a held thing follows the drawn hand every render (held_engine_pose.hpp); written by held_engine_pose_write().
 static std::atomic<unsigned long long> held_frame_writes{},held_frame_noops{},held_frame_far{},held_frame_bad{},held_frame_skipped{};
+// v1258: build/legacy-held-render-goal = v1256 (the engine is given the bare motor goal; v1255's bind-time "body" frames are published as reads)
+static bool legacy_held_render_goal=false;
 static std::array<std::array<std::atomic<unsigned long long>,3>,2> held_skip{};static unsigned held_entity_side{}; // v1067: held things placed at their draws (build/no-held-draw-place = off); v1071 held_bound_entity: the thing each hand's draws are placed on
 static bool legacy_finger_ease=false,legacy_finger_grab=false,legacy_held_collision=false,surface_grip_enabled=true;static std::array<std::atomic<bool>,2> finger_ease_active{}; // legacy_finger_grab: build/legacy-finger-grab (v638 contact on the held thing's own shapes, no sphere grip)
 static std::array<std::atomic<bool>,2> grip_pose_blend_request{};
@@ -3884,7 +3886,15 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             // the draw was >5.7 deg off the hold frame - so it stayed at the lagging body. The body's own frame as native_grab sampled it, converted
             // to the model frame by the same K the placement uses, is published as one more frame a draw may be composed from (the children loop's
             // delta applies unchanged: a draw matched there is still placed at B). Status: held_census.<kind>.draws.child.
-            const auto held_placed=[&](unsigned hand,unsigned path,const d2vr::weapon_draw::Mat* body=nullptr) {
+            // v1258 one-pose certificate: the player's turn rate this render (the camera heading the Setup placed it with; stick and snap turns)
+            double yaw_dps=0;
+            if(const auto cam=d2vr::native_player_camera(read_self,image_base,head_body_camera)) {
+                static double last_heading=0,last_heading_t=0;
+                if(last_heading_t>0 && t>last_heading_t+1e-4) yaw_dps=std::remainder(cam->heading-last_heading,6.283185307179586)/(t-last_heading_t)*57.29577951308232;
+                last_heading=cam->heading;last_heading_t=t;
+            }
+            const auto held_placed=[&](unsigned hand,unsigned path,const d2vr::weapon_draw::Mat* body=nullptr,const d2vr::weapon_draw::Mat* given=nullptr,const d2vr::weapon_draw::Mat* body_now=nullptr) {
+                d2vr::weapon_draw::Place::stage_motion(hand,player_speed,yaw_dps,given,body_now);   // v1258
                 d2vr::weapon_draw::RigidLocal::set_path(hand,path);
                 const auto hb=path==d2vr::weapon_draw::RigidLocal::path_physical?native_grab.held(hand):std::nullopt;
                 const bool severed=hb && hb->entity==thing[hand] && hb->limb>=0;
@@ -3938,12 +3948,38 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         auto b=d2vr::weapon_draw::mul(d2vr::weapon_draw::mul(weapon_mat(grip),d2vr::weapon_draw::pose_mat(hd.relative)),ex.k);
                         if(t-ex.since<.12) b=d2vr::weapon_draw::HeldBind::eased(d2vr::weapon_draw::model_of(raw[hand].data()),b,(t-ex.since)/.12);
                         if(d2vr::weapon_draw::finite(b)) {
+                            namespace wd=d2vr::weapon_draw;
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
-                            const auto body_frame=d2vr::weapon_draw::mul(d2vr::weapon_draw::pose_mat(hd.body),ex.k);   // v1255: where the engine draws it when its own sync wrote the frame
-                            body_frames[hand]=hd.frame;body_ptrs[hand]=body_frames[hand].data();   // v1255: the body frame this hold was sampled with
-                            if(const auto hk=native_grab.held(hand)) d2vr::hold_sync().engine(hk->limb>=0?d2vr::HoldSync::severed:d2vr::HoldSync::prop,player_speed,d2vr::weapon_draw::distance(b,d2vr::weapon_draw::model_of(raw[hand].data())));   // v1249 engine_gap
-                            ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);held_placed(hand,d2vr::weapon_draw::RigidLocal::path_physical,&body_frame); // v1231/v1237, v1255 body frame
-                            held_engine_pose_write(model,b,hand_kind[hand]);   // v1254: the engine's render frame follows the drawn hand on every render
+                            const auto f_read=wd::model_of(raw[hand].data());
+                            const auto hk=native_grab.held(hand);
+                            if(hk) d2vr::hold_sync().engine(hk->limb>=0?d2vr::HoldSync::severed:d2vr::HoldSync::prop,player_speed,wd::distance(b,f_read));   // v1249 engine_gap
+                            // v1258 (headset v1256: 57 % of held-prop renders had no draw placed and showed the engine pose, 35-100 mm from B): the engine
+                            // is given the hold as THIS render draws it (held_render_pose.hpp HeldRenderSlot::note_drawn), so every draw the placement misses
+                            // is composed at the hand too. The body->model map is the engine's own: K = inverse(given) * F for the pose the read F was
+                            // written from (the nearest recent given * the bind's K within 1 cm / 2 deg), else the bind's K.
+                            d2vr::WorldTrackedPose given[d2vr::HeldRenderSlot::ring]{};
+                            const unsigned given_n=legacy_held_render_goal?0u:d2vr::held_render_pose().recent(thing[hand],given,d2vr::HeldRenderSlot::ring);
+                            wd::Mat kt=ex.k;double kt_best=.01;
+                            for(unsigned i=0;i<given_n;++i) {
+                                const auto gm=wd::pose_mat(given[i]);const auto gk=wd::mul(gm,ex.k);const double d=wd::distance(gk,f_read);
+                                if(d<kt_best && wd::frame_angle(gk,f_read)<.035) if(wd::Mat ig{};wd::inverse(gm,ig)) {kt_best=d;kt=wd::mul(ig,f_read);}
+                            }
+                            const wd::Mat given_frame=given_n?wd::mul(wd::pose_mat(given[0]),kt):wd::Mat{},body_now=hk?wd::mul(wd::pose_mat(hk->pose),kt):wd::Mat{};
+                            if(!legacy_held_render_goal) if(wd::Mat ikt{};wd::inverse(kt,ikt)) {
+                                const auto d=wd::mul(b,ikt);d2vr::WorldTrackedPose drawn{};drawn.position={d[3],d[7],d[11]};
+                                for(unsigned c=0;c<3;++c) {const d2vr::Vec3 axis{d[c],d[4+c],d[8+c]};const double n=d2vr::length(axis);drawn.basis[c]=n>1e-9?axis*(1/n):axis;}
+                                const auto carry=full_body.image_carry(now);   // the rig this render's image was placed with
+                                const d2vr::HeldCarry from=carry?d2vr::HeldCarry{carry->root,carry->heading}:d2vr::HeldCarry{};
+                                d2vr::held_render_pose().note_drawn(thing[hand],drawn,d2vr::precise_s(),carry?&from:nullptr);
+                            }
+                            wd::Mat body_frame{};
+                            if(legacy_held_render_goal) {   // v1255 (the bind-time frame: native_grab draw_bind is sampled once per hold)
+                                body_frame=wd::mul(wd::pose_mat(hd.body),ex.k);
+                                body_frames[hand]=hd.frame;body_ptrs[hand]=body_frames[hand].data();
+                            }
+                            ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);
+                            held_placed(hand,wd::RigidLocal::path_physical,legacy_held_render_goal?&body_frame:nullptr,given_n?&given_frame:nullptr,hk?&body_now:nullptr); // v1231/v1237, v1258 one-pose sources
+                            held_engine_pose_write(model,b,hand_kind[hand]);   // v1254 (opt-in build/held-engine-pose)
                             continue;
                         }
                     }
@@ -8220,6 +8256,19 @@ static std::optional<d2vr::rig::Transform> advance_attachment(unsigned side,cons
         item_shift_um_sum+=shift_um;++item_shift_count;for(auto m=item_shift_um_max.load();shift_um>m && !item_shift_um_max.compare_exchange_weak(m,shift_um);) {}
         return d2vr::fullbody::to_transform(d2vr::fullbody::to_model(live_frame,wanted));
     } catch(...) {return {};}
+}
+// v1258 (held_render_pose.hpp HeldRenderPose::rig_now): the player's rig as advance_attachment reads it for an item placed this tick - the body
+// model's root position and (camera heading - head follow) - so a held prop's engine pose is the last drawn hold carried exactly as the weapons are.
+static bool held_rig_now(d2vr::HeldCarry& out) noexcept {
+    try {
+        const auto binding=arm_binding_cache.load();if(!binding) return false;
+        const auto body_model=d2vr::rig::value<std::uintptr_t>(read_self,binding->arms[0].player+0xf0);
+        std::array<float,15> root{};
+        if(!body_model || !d2vr::rig::pointer(*body_model) || !read_self(*body_model+0x1860,root.data(),sizeof(root))) return false;
+        const auto camera=d2vr::native_player_camera(read_self,image_base,head_body_camera);if(!camera) return false;
+        out.root=d2vr::fullbody::frame_of(root).rigid.p;out.heading=camera->heading-native_turning.head_follow_total();
+        return d2vr::finite(out.root) && std::isfinite(out.heading);
+    } catch(...) {return false;}
 }
 void prepare_head_view(void* view) noexcept {
     forced_view_jitter.reset();
@@ -16943,7 +16992,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             native_grab.install(image_base,&read_self,&game_logic_mask,output/L"native-physical-grab.csv",root); // v1046: the knob folder apart from the (diagnostic, empty while off) csv; reads build/no-corpse-grab, build/no-ragdoll-posts and build/grab-tuning.cfg, logs each
             native_grab.attach_corpse_trace(&corpse_trace);
             d2vr::HeldRenderPose::ragdolls=!fs::exists(root/L"build"/L"no-held-render-pose-severed");d2vr::HeldRenderPose::corpses=fs::exists(root/L"build"/L"held-render-pose-corpse");   // v1253
+            d2vr::HeldRenderPose::rig_now=&held_rig_now;   // v1258: the drawn hold carried to the rig of the engine's sync
             if(!fs::exists(root/L"build"/L"no-held-render-pose")) (void)d2vr::HeldRenderPose::install(image_base);   // v1249: a held prop's engine render frame = the hold's goal
+            legacy_held_render_goal=fs::exists(root/L"build"/L"legacy-held-render-goal");d2vr::HeldRenderSlot::drawn_hold=!legacy_held_render_goal;   // v1258
             d2vr::HeldEnginePose::on=fs::exists(root/L"build"/L"held-engine-pose");   // v1255: opt-in (v1254 wrote it every render; the flip was
             // the un-substituted body frame instead, fixed by the v1255 body read - writing the frame on top of that changed what the next render's
             // match sees without changing what the renderer draws)

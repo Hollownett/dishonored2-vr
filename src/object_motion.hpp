@@ -1756,6 +1756,7 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<",\"v1216_prev_error\":"<<resid_json(0)<<",\"v1216_prev_error_alt\":"<<resid_json(1)
        <<",\"rigid_local\":"<<weapon_draw::RigidLocal::json() // v1223
        <<",\"held_census\":"<<weapon_draw::Place::census_json() // v1237
+       <<",\"one_pose\":"<<weapon_draw::Place::one_pose_json() // v1258
        <<",\"severed_draws\":"<<weapon_draw::Place::severed_json() // v1240
        <<",\"placed_view_frame\":["<<placed_view_frame_[0].load()<<','<<placed_view_frame_[1].load()<<','<<placed_view_frame_[2].load()<<','<<placed_view_frame_[3].load()<<']'
        <<",\"hand_lock\":"<<weapon_draw::HandLock::json() // v1243

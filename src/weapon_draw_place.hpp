@@ -458,6 +458,7 @@ struct Side {
     static constexpr unsigned max_hist=7;
     unsigned hists{};std::array<Mat,max_hist> hist{};std::array<unsigned,max_hist> hist_age{};
     double gate_m{},gate_rad{};
+    std::array<Mat,2> src{};unsigned nsrc{};   // v1258 one-pose source probe: the pose the engine was last given, the physics body (model frames)
 };
 struct Slot {std::atomic<std::uint32_t> ready{};std::array<Side,2> side{};};
 
@@ -608,6 +609,19 @@ public:
         }
     }
     static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};others_={};render_l_={};placed_frame_=0;placed_n_=0;}
+    // v1258 one-pose census: a draw with the vertex shader + cb2 size of a part this hold has placed (any pose, any render)
+    static bool has_key(unsigned side,std::uint64_t key) noexcept {
+        if(side>1) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(const auto& c:side_[side]) if(c.active && c.key==key) return true;
+        return false;
+    }
+    static bool settled_l(unsigned side,std::uint64_t key,Mat& out) noexcept {   // v1258 source probe: the first settled L of this key relative to the thing
+        if(side>1) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(const auto& c:side_[side]) if(c.active && c.settled_ok && c.key==key && c.ref==0) {out=c.settled;return true;}
+        return false;
+    }
     static std::uint64_t settles() noexcept {std::lock_guard<std::mutex> lock(mutex_);return settles_;}
     static std::pair<std::uint64_t,std::uint64_t> pass_counts() noexcept {std::lock_guard<std::mutex> lock(mutex_);return {pass_pairs_,pass_spread_renders_};}   // v1241
     static std::string json() {
@@ -726,7 +740,7 @@ public:
         Slot& slot=ring_[frame%ring];
         slot.ready.store(0,std::memory_order_release);
         for(unsigned s=0;s<2;++s) {
-            roll_census(s,frame);kind_[s].store(0,std::memory_order_relaxed);
+            roll_census(s,frame);kind_[s].store(0,std::memory_order_relaxed);cert_pending_[s].valid=false;
             Side& out=slot.side[s];out=Side{};
             Mat model{},inverse_model{};
             Read& rd=reads_[s];
@@ -756,7 +770,7 @@ public:
                     rd.ring[1]=body_model;rd.ring_t[1]=now_s;rd.ring_n=std::min<unsigned>(rd.ring_n+1,Side::max_hist+1);
                 }
             }
-            out.valid=true;out.model=model;out.reach=side_reach[s];out.rigid=side_reach[s]>0;
+            out.valid=true;out.model=model;out.reach=side_reach[s];out.rigid=side_reach[s]>0;out.src=staged_[s].src;out.nsrc=staged_[s].nsrc;
             if(!bound[s] || !finite(*bound[s])) {last_[s]={};continue;}   // no G yet: no placement, no previous chain
             out.bound=true;out.bound_frame=*bound[s];
             out.delta=mul(*bound[s],inverse_model);
@@ -789,6 +803,7 @@ public:
             }
             l={true,out.have_prev,frame,out.prev_frame,model,*bound[s],out.prev,out.relative};
             published_side_[s].fetch_add(1,std::memory_order_relaxed);
+            if(staged_[s].kind>=kind_prop) {auto& c=cert_pending_[s];c.valid=true;c.f=model;c.b=*bound[s];c.bucket=staged_[s].bucket;c.kind=staged_[s].kind;c.id=ids[s];c.src=staged_[s].src;c.nsrc=staged_[s].nsrc;}   // v1258
         }
         staged_={};
         latest_frame_.store(frame,std::memory_order_release);
@@ -815,6 +830,18 @@ public:
         staged_[s].kind=kind<kinds?kind:0u;
         for(unsigned k=0;extra && k<n && staged_[s].extras<Side::max_extra;++k) staged_[s].extra[staged_[s].extras++]=extra[k];
     }
+    // v1258 one-pose certificate (status weapon_draw.place.one_pose). Publisher, before publish_bound: the player's motion this render (bucket
+    // still / walk / turn) and the engine-side poses an unplaced draw of the thing could have been composed from, as model frames: [0] the pose the
+    // engine was last given (held_render_pose), [1] the physics body now. Per render the rolled tally says what the thing was drawn at.
+    enum Bucket:unsigned {b_still,b_walk,b_run,b_turn,buckets};   // turn: the player's heading turns >= 20 deg/s (stick or snap), whatever the speed
+    static unsigned bucket_of(double player_mps,double yaw_dps) noexcept {return std::abs(yaw_dps)>=20.?b_turn:player_mps>=2.5?b_run:player_mps>=.3?b_walk:b_still;}
+    static void stage_motion(unsigned s,double player_mps,double yaw_dps,const Mat* given=nullptr,const Mat* body=nullptr) noexcept {
+        if(s>1) return;
+        staged_[s].bucket=bucket_of(player_mps,yaw_dps);
+        staged_[s].nsrc=0;
+        if(given && finite(*given)) staged_[s].src[staged_[s].nsrc++]=*given;else staged_[s].src[staged_[s].nsrc++]=Mat{};
+        if(body && finite(*body)) staged_[s].src[staged_[s].nsrc++]=*body;else staged_[s].src[staged_[s].nsrc++]=Mat{};
+    }
     // ObjectMotion, per draw that reached the placement (rig draws excluded): its result and whether previous rows were written for it.
     static void census(const Result& r,bool with_prev) noexcept {
         const int s=r.side>=0?r.side:r.near_side;if(s<0 || s>1) return;
@@ -822,7 +849,7 @@ public:
         auto& d=draws_[k];
         if(r.side>=0) {
             d[0].fetch_add(1,std::memory_order_relaxed);if(with_prev) d[1].fetch_add(1,std::memory_order_relaxed);if(r.extra) d[2].fetch_add(1,std::memory_order_relaxed);
-            bits_[static_cast<unsigned>(s)].fetch_or(8u|(with_prev?3u:1u),std::memory_order_relaxed);
+            bits_[static_cast<unsigned>(s)].fetch_or(8u|(with_prev?3u:1u)|(r.eye==0 || r.eye==1?64u<<r.eye:0u),std::memory_order_relaxed);   // v1258: 64/128 = placed in eye 0/1
         } else {
             d[r.near_like?3:4].fetch_add(1,std::memory_order_relaxed);
             bits_[static_cast<unsigned>(s)].fetch_or(8u|(r.near_like?4u:0u),std::memory_order_relaxed);   // v1254: bit 3 = a draw reached the placement at all
@@ -885,7 +912,30 @@ public:
         o+="],\"deg\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::to_string(pred_deg_[i].load());
         return o+"]},\"children_published\":"+std::to_string(children_.load())+'}';
     }
-    static void clear() noexcept {RigidLocal::clear();for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};older_={};older2_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
+    // v1258 status weapon_draw.place.one_pose: per held kind (renders > 0) and bucket still / walk / turn; source = [F, B, given, body] (mm).
+    static std::string one_pose_json() {
+        static constexpr const char* kn[kinds]={"none","weapon","prop","use","bind","severed"};
+        static constexpr const char* bn[buckets]={"still","walk","run","turn"};
+        static constexpr const char* sn[4]={"F","B","given","body"};
+        std::lock_guard<std::mutex> lock(cert_mutex_);
+        std::string o="{";bool first=true;
+        for(unsigned k=kind_prop;k<kinds;++k) {
+            std::uint64_t n=0;for(const auto& c:cert_[k]) n+=c.renders;if(!n) continue;
+            o+=std::string(first?"":",")+"\""+kn[k]+"\":{";first=false;
+            for(unsigned bk=0;bk<buckets;++bk) {
+                const OneCell& c=cert_[k][bk];char b[160];
+                std::snprintf(b,sizeof b,"\"%s\":{\"renders\":%llu,\"unplaced\":%llu,\"unplaced_no_held_draw\":%llu,\"eye_split\":%llu,\"shown_deg_max\":%.2f",bn[bk],
+                    static_cast<unsigned long long>(c.renders),static_cast<unsigned long long>(c.unplaced),static_cast<unsigned long long>(c.unseen),static_cast<unsigned long long>(c.eye_split),c.deg_max);
+                o+=std::string(bk?",":"")+b+",\"shown_mm\":"+c.shown.json()+",\"flip_mm\":"+c.flip.json()+",\"intra_mm\":"+c.intra.json()+",\"eye_mm\":"+c.eye.json()+",\"source_mm\":{";
+                for(unsigned i=0;i<4;++i) o+=std::string(i?",":"")+"\""+sn[i]+"\":"+c.source[i].json();
+                o+="}}";
+            }
+            o+="}";
+        }
+        return o+"}";
+    }
+    static void clear() noexcept {RigidLocal::clear();for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};older_={};older2_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);
+        cert_pending_={};cert_prev_={};}   // v1258
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
     static std::uint64_t published(unsigned side) noexcept {return side<2?published_side_[side].load(std::memory_order_relaxed):0;}
     static std::uint32_t latest_frame() noexcept {return latest_frame_.load(std::memory_order_acquire);}
@@ -1032,8 +1082,26 @@ public:
         const Slot* slot=slot_of(frame);if(!slot) return r;
         const Views* v=get_views(frame,slot->side[0].valid?slot->side[0].prev_frame:0,slot->side[1].valid?slot->side[1].prev_frame:0);
         const unsigned e=pass_eye==0 || pass_eye==1?static_cast<unsigned>(pass_eye):tag_eye==1?1u:0u;
-        if(v && v->ok[e]) near_of(*slot,model_rows(v->inv[e].data(),cur),r);
+        if(v && v->ok[e]) {const Rows m=model_rows(v->inv[e].data(),cur);near_of(*slot,m,r);source_probe(*slot,full(m),draw_key);}
         return r;
+    }
+    // v1258 one-pose source probe: an unplaced draw with the shader + cb2 size of a part this hold placed, through that part's settled L, is the thing
+    // at raw = m * inverse(L). Per render and side: the nearest such draw (within 2 deg) to each pose it could have been composed from -
+    // [F read at the begin, B placed, the pose the engine was last given, the physics body]. A peak near 0 mm names the source; none = no such draw.
+    static void source_probe(const Slot& slot,const Mat& m,std::uint64_t key) noexcept {
+        if(!key) return;
+        for(unsigned s=0;s<2;++s) {
+            const Side& w=slot.side[s];if(!w.valid || !w.bound || !w.rigid) continue;
+            Mat l{},il{};if(!RigidLocal::settled_l(s,key,l) || !inverse(l,il)) continue;
+            const Mat raw=mul(m,il);if(!finite(raw) || distance(raw,w.model)>1.6) continue;   // farther than the motor ever lets a held thing go: another object
+            bits_[s].fetch_or(32u,std::memory_order_relaxed);
+            const Mat* cand[4]={&w.model,&w.bound_frame,w.nsrc>0?&w.src[0]:nullptr,w.nsrc>1?&w.src[1]:nullptr};
+            for(unsigned i=0;i<4;++i) {
+                if(!cand[i] || (*cand[i])[15]!=1. || !(frame_angle(raw,*cand[i])<=.035)) continue;
+                const auto um=static_cast<std::uint64_t>(std::min(distance(raw,*cand[i])*1e6,1e12))+1;   // +1: 0 = no such draw this render
+                auto& slot_min=src_min_um_[s][i];for(auto old=slot_min.load(std::memory_order_relaxed);(!old || um<old) && !slot_min.compare_exchange_weak(old,um);) {}
+            }
+        }
     }
     // Which bound side's F / previous read / child this unplaced draw's model is within reach of (nearest), and whether its axes nearly agree.
     static void near_of(const Slot& slot,const Rows& m,Result& r) noexcept {
@@ -1174,7 +1242,7 @@ private:
     struct SevDraw {std::uint64_t key{},layout{},passes{},placed{};unsigned size{};double scale_min{1e9},scale_max{},ortho_max{};std::array<double,3> l_mm{};};
     inline static std::mutex sev_mutex_;inline static std::array<SevDraw,8> sev_{};inline static unsigned sev_n_{};
     inline static std::uint32_t last_frame_l_{};inline static Mat sev_first_{};inline static std::uint64_t sev_first_key_{},sev_pairs_{},sev_apart_{};inline static double sev_spread_um_{};
-    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};};
+    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};};   // v1258: motion bucket, source poses
     inline static std::array<Staged,2> staged_{};
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
     inline static std::array<std::uint32_t,2> census_frame_{};
@@ -1183,11 +1251,65 @@ private:
     inline static std::atomic<std::uint64_t> children_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,m_slots>,kinds> match_{};   // v1239
     inline static std::array<std::atomic<std::uint64_t>,9> pred_mm_{},pred_deg_{};
+    // v1258 one-pose certificate. Per held kind and motion bucket, per render: shown = where the thing was drawn against the placed B (0 when a draw
+    // was placed; else the engine frame F read at the begin, the pose every unplaced draw is composed from or near), flip = the change of that offset
+    // (in B's frame, i.e. against the drawn hand: B is rigid in it, hand_lock) from the previous render of the same hold, intra = placed AND an
+    // unplaced draw within 0.1 rad of F in the same render (two poses inside one frame: passes / eyes), eye_split = placed in one eye only.
+    // unplaced_no_held_draw: no draw with a placed part's shader reached the placement at all (the engine drew it unseen).
+public:
+    struct OneHist {
+        static constexpr unsigned bins=10;static constexpr double edge[bins]={.1,.5,1,2,5,10,20,50,100,1e9};
+        std::array<std::uint64_t,bins> n{};double max{};
+        void add(double v) noexcept {if(!std::isfinite(v)) return;unsigned i=0;while(i+1<bins && !(v<=edge[i])) ++i;++n[i];if(v>max) max=v;}
+        std::string json() const {
+            std::uint64_t t=0;for(auto v:n) t+=v;
+            const auto q=[&](double p) {std::uint64_t run=0;for(unsigned i=0;i<bins;++i) {run+=n[i];if(t && static_cast<double>(run)>=p*static_cast<double>(t)) return edge[i];}return 0.;};
+            char b[112];std::snprintf(b,sizeof b,"{\"n\":%llu,\"p50_le\":%g,\"p90_le\":%g,\"max\":%.3f}",static_cast<unsigned long long>(t),q(.5),q(.9),max);return b;
+        }
+    };
+    struct OneCell {std::uint64_t renders{},unplaced{},unseen{},eye_split{};double deg_max{};OneHist shown,flip,intra,eye;std::array<OneHist,4> source;};
+    static OneCell one_pose_cell(unsigned kind,unsigned bucket) {std::lock_guard<std::mutex> lock(cert_mutex_);return kind<kinds && bucket<buckets?cert_[kind][bucket]:OneCell{};}
+    static void reset_one_pose() {std::lock_guard<std::mutex> lock(cert_mutex_);cert_={};cert_prev_={};cert_pending_={};for(auto& s:src_min_um_) for(auto& v:s) v.store(0);}
+private:
+    struct CertRender {bool valid{};Mat f{},b{};unsigned bucket{},kind{};std::uintptr_t id{};std::array<Mat,2> src{};unsigned nsrc{};};
+    inline static std::array<CertRender,2> cert_pending_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,4>,2> src_min_um_{};
+    struct CertPrev {bool ok{};std::uintptr_t id{};std::array<double,3> dev{};};
+    inline static std::array<CertPrev,2> cert_prev_{};
+    inline static std::mutex cert_mutex_;inline static std::array<std::array<OneCell,buckets>,kinds> cert_{};
+    // The offset of F's origin from B's in B's (normalised) axes, metres.
+    static std::array<double,3> offset_in(const Mat& b,const Mat& f) noexcept {
+        std::array<double,3> o{};const double d[3]={f[3]-b[3],f[7]-b[7],f[11]-b[11]};
+        for(int c=0;c<3;++c) {double n=0,t=0;for(int r=0;r<3;++r) {const double x=b[static_cast<std::size_t>(r*4+c)];n+=x*x;t+=x*d[r];}o[static_cast<std::size_t>(c)]=n>1e-12?t/std::sqrt(n):0;}
+        return o;
+    }
+    static void roll_cert(unsigned s,unsigned b) noexcept {
+        std::array<std::uint64_t,4> mins{};for(unsigned i=0;i<4;++i) mins[i]=src_min_um_[s][i].exchange(0,std::memory_order_relaxed);
+        const CertRender c=cert_pending_[s];
+        if(!c.valid || c.kind>=kinds || c.bucket>=buckets) {cert_prev_[s]={};return;}
+        const bool placed=(b&1u)!=0;
+        const auto dev=placed?std::array<double,3>{}:offset_in(c.b,c.f);
+        const double dev_mm=std::hypot(dev[0],std::hypot(dev[1],dev[2]))*1000.,full_mm=distance(c.f,c.b)*1000.;
+        std::lock_guard<std::mutex> lock(cert_mutex_);
+        OneCell& cell=cert_[c.kind][c.bucket];++cell.renders;
+        cell.shown.add(dev_mm);
+        if(!placed) {++cell.unplaced;if(!(b&32u)) ++cell.unseen;const double deg=frame_angle(c.f,c.b)*57.29577951308232;if(deg>cell.deg_max) cell.deg_max=deg;
+            for(unsigned i=0;i<4;++i) if(mins[i]) cell.source[i].add(static_cast<double>(mins[i]-1)/1000.);}
+        if(placed) {
+            cell.intra.add((b&4u)?full_mm:0.);
+            const bool split=((b>>6)&3u)==1u || ((b>>6)&3u)==2u;   // placed in one eye only: the other eye drew the engine pose (or did not draw it)
+            if(split) ++cell.eye_split;cell.eye.add(split?full_mm:0.);
+        }
+        auto& p=cert_prev_[s];
+        if(p.ok && p.id==c.id) cell.flip.add(std::hypot(dev[0]-p.dev[0],std::hypot(dev[1]-p.dev[1],dev[2]-p.dev[2]))*1000.);
+        p={true,c.id,dev};
+    }
     // The render published last for this side ends here: its tallies into its kind (a republish of the same render adds nothing).
     static void roll_census(unsigned s,std::uint32_t frame) noexcept {
         if(census_frame_[s]==frame+1) return;
         census_frame_[s]=frame+1;
         const unsigned k=kind_[s].load(std::memory_order_relaxed),b=bits_[s].exchange(0,std::memory_order_relaxed);
+        roll_cert(s,b);   // v1258
         if(!k || k>=kinds) return;
         auto& r=renders_[k];r[0].fetch_add(1,std::memory_order_relaxed);
         if((b&1u) && (b&4u)) r[1].fetch_add(1,std::memory_order_relaxed);

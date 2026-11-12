@@ -127,7 +127,7 @@ int main() {
         Place::census(r,true);
         Place::publish_bound(402,raws,bounds,{0,0.5},{0,0x99});   // closes render 401 (kind severed, placed, with previous rows)
         const std::string census=Place::census_json();std::printf("%s\n",census.c_str());
-        CHECK(census.find("\"severed\":{\"renders\":1,\"mixed\":0,\"no_mv\":0,\"unplaced\":0,\"draws\":{\"placed\":1,\"with_prev\":1,\"child\":1")!=std::string::npos);
+        CHECK(census.find("\"severed\":{\"renders\":1,\"mixed\":0,\"no_mv\":0,\"unplaced\":0,\"unplaced_nodraw\":0,\"unplaced_refused\":0,\"draws\":{\"placed\":1,\"with_prev\":1,\"child\":1")!=std::string::npos);   // v1254 split
     }
     { // v1241: one mesh drawn by a depth pass and a colour pass (two keys, two clusters) whose samples differ by float noise (1e-6 m, 1e-5 deg),
       // in either order: both passes of every render write bit-identical rows (a forward pass testing depth against the prepass loses no pixel);

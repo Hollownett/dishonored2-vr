@@ -35,6 +35,7 @@
 #include <intrin.h>
 #include <MinHook.h>
 #include "physical_grab.hpp"
+#include "grip_anchor.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -68,22 +69,79 @@ struct HoldDelta {
 inline WorldTrackedPose translated_goal(const WorldTrackedPose& bone,const WorldTrackedPose& goal,double cap_m) noexcept {
     WorldTrackedPose out=bone;Vec3 d=goal.position-bone.position;const double n=length(d);if(n>cap_m) d=d*(cap_m/n);out.position=bone.position+d;return out;
 }
+// v1258: where the player's rig stands for a drawn pose: the anchor root position and (camera heading - head follow), item_advance's reference.
+struct HeldCarry {Vec3 root{};double heading{};};
+// A world pose drawn with `from` as it is drawn with `to`: turned about the root by the heading change, moved with the root (FullBodyDriver::item_advance).
+inline WorldTrackedPose held_carried(const WorldTrackedPose& drawn,const HeldCarry& from,const HeldCarry& to) noexcept {
+    const double a=to.heading-from.heading,c=std::cos(a),s=std::sin(a);
+    const auto turn=[&](Vec3 v) {return Vec3{c*v.x-s*v.y,s*v.x+c*v.y,v.z};};
+    WorldTrackedPose out{};out.position=to.root+turn(drawn.position-from.root);
+    for(unsigned i=0;i<3;++i) out.basis[i]=turn(drawn.basis[i]);
+    return out;
+}
 // One held (or just released) entity: its published goal and what the engine was last given for it.
+// v1258 (headset v1256: a held prop drawn at two poses; 57 % of renders had no draw placed and showed the ENGINE pose, which sat 35-100 mm
+// from the drawn hold - hold_sync engine_gap p50/p90): the motor goal is built from the motor's own hand sample and lead, not from the hand
+// the render draws, and its lead does not step with the player's root the way the drawn hand does (one root step per game tick). Each render
+// the publisher notes the drawn hold as a body pose with the rig reference its image was placed with (note_drawn). The engine is then given the
+// drawn hold carried to the rig of NOW (held_carried: the weapons' item_advance, v835) - the pose the next render will draw, whatever the tick
+// phase. Without a rig reading, the drawn hold carried by the goal's own motion (goal * X, X = inverse(goal) * drawn); without a note, the goal.
+// The physics body is untouched (still motor-driven). drawn_hold = false (build/legacy-held-render-goal): the bare goal (v1256).
 struct HeldRenderSlot {
-    static constexpr double fresh_s=.1,blend_s=.15;
+    static constexpr double fresh_s=.1,blend_s=.15,drawn_max_m=.25,carry_max_m=1.;
+    inline static bool drawn_hold=true;
+    enum Given:unsigned {given_goal,given_relative,given_carried};
     std::uintptr_t entity{};WorldTrackedPose goal{};double at_s{};bool held{};
     unsigned mode{};std::uintptr_t world{};std::uint32_t handle{};HoldDelta delta{};double delta_s{};bool delta_ok{},bones_seen{},frame_seen{};   // v1253 ragdolls
     WorldTrackedPose written{};bool has_written{};double released_s{};bool offset_set{};Vec3 off_pos{},off_rot{};
+    WorldTrackedPose drawn{},drawn_rel{};HeldCarry drawn_carry{};double drawn_s{};bool drawn_ok{},rel_ok{},carry_ok{};unsigned used{};   // v1258: the note; what the last decide gave
+    HeldCarry seen{};double seen_s{},seen_dt{};bool have_seen{},stepped{};   // v1258: the rig read at the previous sync and the interval before it; a repeated step
+    static constexpr double step_max_mps=15.,step_max_rps=6.;   // faster than any walk or stick turn: a teleport or a snap turn, never repeated
+    // The rig of THIS tick from the reading at the sync. The body model's frame is written by the post-physics attach job, which can still be pending
+    // when the prop's own sync runs: then the reading equals the rig the last image was drawn with although the player moves. Then the rig's velocity
+    // over the last tick (the step between the two previous readings over their interval) is carried over this tick's interval (now - the last sync):
+    // the root steps once per tick and the drawn hand with it. A rig that already moved is used as read. A snap turn's own tick is not predicted.
+    HeldCarry rig_of_tick(const HeldCarry& read,double now) noexcept {
+        HeldCarry out=read;stepped=false;
+        const double dt=have_seen?now-seen_s:0.;
+        const bool unmoved=carry_ok && length(read.root-drawn_carry.root)<1e-4 && std::abs(std::remainder(read.heading-drawn_carry.heading,6.283185307179586))<1e-5;
+        if(unmoved && have_seen && dt>0 && dt<.05 && seen_dt>0 && seen_dt<.05) {
+            const Vec3 v=(read.root-seen.root)*(1/seen_dt);const double w=std::remainder(read.heading-seen.heading,6.283185307179586)/seen_dt;
+            if(length(v)<step_max_mps) {out.root=read.root+v*dt;stepped=length(v)*dt>1e-6;}
+            if(std::abs(w)<step_max_rps) {out.heading=read.heading+w*dt;stepped=stepped || std::abs(w)*dt>1e-7;}
+        }
+        seen_dt=dt;seen=read;seen_s=now;have_seen=true;
+        return out;
+    }
+    static constexpr unsigned ring=4;std::array<WorldTrackedPose,ring> recent{};unsigned recent_n{},recent_next{};   // v1258: the last poses given (newest last)
     void publish(std::uintptr_t e,const WorldTrackedPose& g,double now) noexcept {
         if(e!=entity) *this={};
         entity=e;goal=g;at_s=now;held=true;offset_set=false;
     }
-    void end(double now) noexcept {if(held) {held=false;released_s=now;offset_set=false;}}
-    // The pose the engine is given for this entity whose body is at `body` at `now` (s). false: the body's own (and a finished blend frees the slot).
-    bool decide(const WorldTrackedPose& body,double now,WorldTrackedPose& out,bool& blending) noexcept {
-        blending=false;
+    void end(double now) noexcept {if(held) {held=false;released_s=now;offset_set=false;drawn_ok=false;}}
+    // v1258: the hold as the render drew it (a body pose: the drawn model frame * inverse of the body->model map) at `now` (s), and the rig reference
+    // its image was placed with (null: none, only goal * X is possible).
+    bool note_drawn(const WorldTrackedPose& pose,double now,const HeldCarry* carry=nullptr) noexcept {
+        if(!held || !grab_pose_valid(pose) || !grab_pose_valid(goal)) return false;
+        const auto x=grip_compose(grip_inverse(goal),pose);
+        rel_ok=length(x.position)<=drawn_max_m;if(rel_ok) drawn_rel=x;   // far from the goal (a snap the goal has not caught up with, a teleport): no goal * X
+        drawn=pose;drawn_s=now;drawn_ok=true;carry_ok=carry && finite(carry->root) && std::isfinite(carry->heading);if(carry_ok) drawn_carry=*carry;
+        return true;
+    }
+    // The pose the engine is given for this entity whose body is at `body` at `now` (s); `rig` = the player's rig now (null: unknown).
+    // false: the body's own (and a finished blend frees the slot).
+    bool decide(const WorldTrackedPose& body,double now,WorldTrackedPose& out,bool& blending,const HeldCarry* rig=nullptr) noexcept {
+        blending=false;used=given_goal;
         if(held && !(now-at_s<=fresh_s)) end(at_s+fresh_s);   // publications stopped without an end (a stalled pass): blend out from then
-        if(held) {out=goal;written=goal;has_written=true;return true;}
+        if(held) {
+            out=goal;
+            if(drawn_hold && drawn_ok && now-drawn_s<=fresh_s) {
+                if(rel_ok) if(const auto d=grip_compose(goal,drawn_rel);grab_pose_valid(d)) {out=d;used=given_relative;}
+                if(carry_ok && rig && finite(rig->root) && std::isfinite(rig->heading)) if(const auto d=held_carried(drawn,drawn_carry,rig_of_tick(*rig,now));
+                    grab_pose_valid(d) && length(d.position-drawn.position)<=carry_max_m) {out=d;used=given_carried;}   // a teleport / load is not motion
+            }
+            written=out;has_written=true;recent[recent_next]=out;recent_next=(recent_next+1)%ring;if(recent_n<ring) ++recent_n;return true;
+        }
         if(!has_written || !(now>=released_s) || !(now-released_s<blend_s)) {*this={};return false;}
         if(!offset_set) {off_pos=written.position-body.position;off_rot=grab_rotation_error(body,written);offset_set=true;}
         out=render_blend(body,off_pos,off_rot,(now-released_s)/blend_s);written=out;blending=true;return true;
@@ -122,6 +180,26 @@ public:
         for(auto& s:slots_) if(s.entity==entity && s.held) {s.end(now);ended_.fetch_add(1,std::memory_order_relaxed);}
     }
     void refuse(Refusal r) noexcept {if(r<refusals) refused_[r].fetch_add(1,std::memory_order_relaxed);}
+    // v1258: the hold as this render draws it (a body pose), for every later engine pose of `entity` (HeldRenderSlot::note_drawn). Props only.
+    bool note_drawn(std::uintptr_t entity,const WorldTrackedPose& drawn,double now,const HeldCarry* carry=nullptr) noexcept {
+        if(!entity || !installed_.load(std::memory_order_relaxed)) return false;
+        std::lock_guard<std::mutex> l(m_);
+        for(auto& s:slots_) if(s.entity==entity && s.held && s.mode==prop) {const bool ok=s.note_drawn(drawn,now,carry);(ok?drawn_notes_:drawn_refused_).fetch_add(1,std::memory_order_relaxed);return ok;}
+        return false;
+    }
+    // v1258: the player's rig now (dxgi_probe: the body model's root position, camera heading - head follow), read on the engine's sync thread.
+    using RigNow=bool (*)(HeldCarry&) noexcept;
+    inline static RigNow rig_now{};
+    // v1258: the poses the engine was given for `entity` (newest first, at most HeldRenderSlot::ring): the publisher finds the one its model frame came from.
+    unsigned recent(std::uintptr_t entity,WorldTrackedPose* out,unsigned max) noexcept {
+        if(!entity || !out) return 0;
+        std::lock_guard<std::mutex> l(m_);
+        for(const auto& s:slots_) if(s.entity==entity && s.mode==prop) {
+            unsigned n=0;for(unsigned i=0;i<s.recent_n && n<max;++i) out[n++]=s.recent[(s.recent_next+HeldRenderSlot::ring-1-i)%HeldRenderSlot::ring];
+            return n;
+        }
+        return 0;
+    }
     // The pose the engine was last given for `entity` while it is overridden (held or blending): a model frame read now belongs to it, not the body.
     std::optional<WorldTrackedPose> source(std::uintptr_t entity) noexcept {
         if(!entity || (watched_[0].load(std::memory_order_relaxed)!=entity && watched_[1].load(std::memory_order_relaxed)!=entity)) return std::nullopt;
@@ -135,7 +213,10 @@ public:
             ",\"blended\":"+std::to_string(blended_.load())+",\"ended\":"+std::to_string(ended_.load())+",\"refused\":{\"ragdoll\":"+std::to_string(refused_[ragdoll].load())+
             ",\"far\":"+std::to_string(refused_[too_far].load())+",\"invalid\":"+std::to_string(refused_[invalid].load())+",\"two_hands\":"+std::to_string(refused_[two_hands].load())+
             ",\"unread\":"+std::to_string(refused_[unread].load())+"},\"ragdoll\":{\"enabled\":"+(joint_target_ && ragdolls?"true":"false")+",\"corpses\":"+(corpses?"true":"false")+
-            ",\"frames\":"+std::to_string(ragdoll_frames_.load())+",\"bones\":"+std::to_string(ragdoll_bones_.load())+",\"unframed\":"+std::to_string(unframed_.load())+"}}";
+            ",\"frames\":"+std::to_string(ragdoll_frames_.load())+",\"bones\":"+std::to_string(ragdoll_bones_.load())+",\"unframed\":"+std::to_string(unframed_.load())+"}"+
+            ",\"drawn_hold\":{\"on\":"+(HeldRenderSlot::drawn_hold?"true":"false")+",\"notes\":"+std::to_string(drawn_notes_.load())+",\"refused\":"+std::to_string(drawn_refused_.load())+
+            ",\"given\":{\"goal\":"+std::to_string(given_[0].load())+",\"relative\":"+std::to_string(given_[1].load())+",\"carried\":"+std::to_string(given_[2].load())+
+            ",\"carried_rig_read\":"+std::to_string(carry_stepped_[0].load())+",\"carried_step_repeated\":"+std::to_string(carry_stepped_[1].load())+"}}}";   // v1258: what the engine was given
     }
     static bool install(std::uintptr_t base) noexcept {
         auto& p=instance();if(!base) return false;
@@ -170,6 +251,8 @@ private:
     std::atomic<std::uint64_t> ragdoll_frames_{},ragdoll_bones_{},unframed_{};
     std::mutex m_;std::array<HeldRenderSlot,2> slots_{};std::array<std::atomic<std::uintptr_t>,2> watched_{};std::atomic<bool> installed_{};
     std::atomic<std::uint64_t> published_{},written_{},blended_{},ended_{};std::array<std::atomic<std::uint64_t>,refusals> refused_{};
+    std::atomic<std::uint64_t> drawn_notes_{},drawn_refused_{};std::array<std::atomic<std::uint64_t>,3> given_{};   // v1258: [goal, goal * X, carried drawn hold]
+    std::array<std::atomic<std::uint64_t>,2> carry_stepped_{};   // v1258: carried with the rig as read / with the last tick step repeated (the rig read was not yet this tick's)
     static bool same(std::uintptr_t at,const unsigned char* bytes,std::size_t n) noexcept {
         __try {return std::memcmp(reinterpret_cast<const void*>(at),bytes,n)==0;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
@@ -217,15 +300,18 @@ private:
     bool substitute(std::uintptr_t entity,const float* origin,const float* axis,float* o,float* a) noexcept {
         WorldTrackedPose body{};body.position={origin[0],origin[1],origin[2]};
         for(unsigned i=0;i<3;++i) body.basis[i]={axis[i*3],axis[i*3+1],axis[i*3+2]};
+        HeldCarry rig{};const bool have_rig=HeldRenderSlot::drawn_hold && rig_now && rig_now(rig);   // v1258: read before the lock (game memory)
         std::lock_guard<std::mutex> l(m_);
         for(unsigned i=0;i<2;++i) {
             auto& s=slots_[i];if(s.entity!=entity || s.mode!=prop) continue;
             WorldTrackedPose out{};bool blending=false;
-            if(!s.decide(body,precise_s(),out,blending)) {watched_[i].store(0,std::memory_order_release);return false;}
+            if(!s.decide(body,precise_s(),out,blending,have_rig?&rig:nullptr)) {watched_[i].store(0,std::memory_order_release);return false;}
             if(!finite(out.position) || !finite(out.basis[0]) || !finite(out.basis[1]) || !finite(out.basis[2])) {refuse(invalid);s={};watched_[i].store(0);return false;}
             o[0]=float(out.position.x);o[1]=float(out.position.y);o[2]=float(out.position.z);
             for(unsigned k=0;k<3;++k) {a[k*3]=float(out.basis[k].x);a[k*3+1]=float(out.basis[k].y);a[k*3+2]=float(out.basis[k].z);}
-            (blending?blended_:written_).fetch_add(1,std::memory_order_relaxed);return true;
+            (blending?blended_:written_).fetch_add(1,std::memory_order_relaxed);if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);
+            if(s.used==HeldRenderSlot::given_carried) carry_stepped_[s.stepped?1:0].fetch_add(1,std::memory_order_relaxed);
+            return true;
         }
         return false;
     }
