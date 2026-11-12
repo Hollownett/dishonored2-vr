@@ -110,6 +110,7 @@ public:
     // Present thread, immediate context: picks up finished mask counts (never waits for the GPU).
     void poll_rig_pixels(ID3D11DeviceContext* immediate) noexcept {
         if(!immediate) return;
+        RigMask::poll_fingerprints(immediate); // v1208
         std::lock_guard<std::mutex> lock(mutex_);
         for(unsigned eye=0;eye<2;++eye) {
             auto& e=(*eyes_)[eye];

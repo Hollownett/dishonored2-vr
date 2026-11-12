@@ -1477,6 +1477,7 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
     d2vr::TaaBindings b;b.read(c);
     const bool taa=b.taa();
     if(taa && eye>=0) d2vr::ObjectMotion::note_taa_b1(static_cast<unsigned>(eye),b.cb[0]); // v950: the eye key of the scene draws
+    if(taa && eye>=0) d2vr::ObjectMotion::note_mv_texture(b.res[1]); // v1208: the MV texture the eye's TAA reads (fallback draws writing it are applicable)
     if(taa && eye>=0 && d2vr::TaaDispatchHook::pass_display) alt_pose_trace_pass(fsr_taa.enabled.load()?2:1,eye,d2vr::TaaDispatchHook::pass_display);
     if(taa) {
         d2vr::TaaDispatchHook::post_taa=true;
@@ -3832,9 +3833,17 @@ static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) 
         for(unsigned i=0;i<3;++i) if(image_skin_slots[i].model.load(std::memory_order_relaxed)==m) {
             signed char index{};std::uintptr_t buffer{};std::uint32_t frame{};
             ID3D11DeviceContext* d3d=*static_cast<ID3D11DeviceContext**>(context); // 0x2d3c60: Map through *(param)'s vtable +0x70
+            std::uintptr_t other{},cpu{};
             if(read_self(m+0x1fb2,&index,1) && (index==0 || index==1) && read_self(m+0x2008+static_cast<std::uintptr_t>(index)*0x38,&buffer,8) &&
-               d2vr::rig::pointer(buffer) && d3d && read_self(image_base+d2vr::taa_history::frame_counter_rva,&frame,4))
-                d2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame);
+               d2vr::rig::pointer(buffer) && d3d && read_self(image_base+d2vr::taa_history::frame_counter_rva,&frame,4)) {
+                // v1208: the slot's source is the CPU palette at model+0x1ff8 (what 0x25f930 uploads), the wrapper's size of it
+                static thread_local std::vector<std::uint8_t> bytes;D3D11_BUFFER_DESC bd{};reinterpret_cast<ID3D11Buffer*>(buffer)->GetDesc(&bd);
+                const bool cpu_ok=bd.ByteWidth && bd.ByteWidth<=(1u<<16) && read_self(m+0x1ff8,&cpu,8) && d2vr::rig::pointer(cpu) &&
+                    (bytes.resize(bd.ByteWidth),read_self(cpu,bytes.data(),bd.ByteWidth));
+                read_self(m+0x2008+static_cast<std::uintptr_t>(index^1)*0x38,&other,8);
+                d2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame,cpu_ok?bytes.data():nullptr,cpu_ok?bd.ByteWidth:0u,copied!=0,
+                    d2vr::rig::pointer(other)?reinterpret_cast<ID3D11Buffer*>(other):nullptr);
+            }
             break;
         }
     } catch(...) {}

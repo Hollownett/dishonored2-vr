@@ -21,6 +21,8 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -185,7 +187,12 @@ public:
     }
     // v1179, the engine's GPU skin copy of rig model `model` (0x25f930 hook, after the engine's upload): `c` the context it uploaded on,
     // `current` the buffer now holding this render's palette, `frame` the engine frame counter. Rotates the ring once per engine frame.
-    static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame) noexcept {
+    // v1208: the slot is written from the CPU palette the engine uploaded (`cpu`, `cpu_bytes` = the wrapper's size; `uploaded` = this call's
+    // original upload ran), never copied from the engine's dynamic wrapper: which wrapper +0x1fb2 names at this call, and what a dynamic
+    // buffer DISCARD-mapped in another command list holds on this context, are not provable (v1198-v1207: whole renders of 40,000 px rig
+    // vectors with a tag-matched slot). A frame without an upload writes the last uploaded palette (the wrappers still hold it). Until the
+    // model's first upload is seen nothing is tagged (zero motion). `other`: the second wrapper, only for the fingerprint check.
+    static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame,const void* cpu,UINT cpu_bytes,bool uploaded,ID3D11Buffer* other=nullptr) noexcept {
         if(!c || !current || model>=ring_.size() || !motion.load(std::memory_order_relaxed)) return;
         Ring& r=ring_[model];
         D3D11_BUFFER_DESC d{};current->GetDesc(&d);
@@ -198,15 +205,49 @@ public:
             if(!ok) {r.clear();failures_.fetch_add(1,std::memory_order_relaxed);return;}
             r.bytes=d.ByteWidth;r.device=owner;r.ready.store(true,std::memory_order_release);
         }
+        if(uploaded && cpu && cpu_bytes==r.bytes) {
+            r.upload.assign(static_cast<const std::uint8_t*>(cpu),static_cast<const std::uint8_t*>(cpu)+cpu_bytes);uploads_.fetch_add(1,std::memory_order_relaxed);
+            if(other && !(frame%32)) fingerprint(c,model,current,other);
+        } else if(uploaded) layout_refused_.fetch_add(1,std::memory_order_relaxed);
+        if(r.upload.size()!=r.bytes) {no_upload_.fetch_add(1,std::memory_order_relaxed);return;} // nothing proven yet: no slot is tagged
+        const unsigned k=frame%rig_ring_slots;
         const std::uint32_t last=r.last.load(std::memory_order_relaxed);
-        if(last==frame) {ring_repeats_.fetch_add(1,std::memory_order_relaxed);return;}
-        const unsigned run=rig_ring_run(last,r.run.load(std::memory_order_relaxed),frame);
-        if(run==1 && last!=~0u) ring_restarts_.fetch_add(1,std::memory_order_relaxed);
-        // v1206: written once, into this render's own slot, tagged with its frame (no in-place rotation: a draw list that executes after a
-        // later render's copy still reads the palette its tag names)
-        const unsigned k=frame%rig_ring_slots;r.tag[k].store(~0u,std::memory_order_release);
-        c->CopyResource(r.slot[k].Get(),current);r.tag[k].store(frame,std::memory_order_release);
-        r.last.store(frame,std::memory_order_relaxed);r.run.store(run,std::memory_order_release);rotations_.fetch_add(1,std::memory_order_relaxed);
+        if(last==frame) { // a second call this frame: only an upload replaces what the slot holds
+            ring_repeats_.fetch_add(1,std::memory_order_relaxed);
+            if(!uploaded || r.from_upload[k]) return;
+        } else {
+            const unsigned run=rig_ring_run(last,r.run.load(std::memory_order_relaxed),frame);
+            if(run==1 && last!=~0u) ring_restarts_.fetch_add(1,std::memory_order_relaxed);
+            r.run.store(run,std::memory_order_release);rotations_.fetch_add(1,std::memory_order_relaxed);
+        }
+        // v1206: this render's own slot, tagged with its frame (no in-place rotation: a draw list that executes after a later render's write
+        // still reads the palette its tag names)
+        r.tag[k].store(~0u,std::memory_order_release);
+        c->UpdateSubresource(r.slot[k].Get(),0,nullptr,r.upload.data(),0,0);r.from_upload[k]=uploaded;
+        r.tag[k].store(frame,std::memory_order_release);r.last.store(frame,std::memory_order_relaxed);
+    }
+    // v1208 diagnostic: every 32nd uploading frame, both engine wrappers are read back and compared with the CPU palette just uploaded (status
+    // fingerprint: [checks, current wrapper == CPU, other wrapper == CPU, neither, first differing byte of current]). Proves which wrapper
+    // +0x1fb2 names after an upload and whether the CPU palette is the GPU layout.
+    static void fingerprint(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,ID3D11Buffer* other) noexcept { // under mutex_
+        auto& r=ring_[model];auto& f=fingerprints_[model];if(f.pending || !r.device) return;
+        D3D11_BUFFER_DESC d{};current->GetDesc(&d);D3D11_BUFFER_DESC od{};other->GetDesc(&od);if(od.ByteWidth!=d.ByteWidth) return;
+        d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.StructureByteStride=0;
+        if((!f.cur && FAILED(r.device->CreateBuffer(&d,nullptr,&f.cur))) || (!f.oth && FAILED(r.device->CreateBuffer(&d,nullptr,&f.oth)))) return;
+        c->CopyResource(f.cur.Get(),current);c->CopyResource(f.oth.Get(),other);f.cpu=r.upload;f.pending=true;
+    }
+    static void poll_fingerprints(ID3D11DeviceContext* immediate) noexcept { // Present thread (immediate context): never waits
+        if(!immediate) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(auto& f:fingerprints_) if(f.pending && f.cur && f.oth) {
+            D3D11_MAPPED_SUBRESOURCE a{},b{};
+            if(FAILED(immediate->Map(f.cur.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&a)) || !a.pData) continue;
+            if(FAILED(immediate->Map(f.oth.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&b)) || !b.pData) {immediate->Unmap(f.cur.Get(),0);continue;}
+            const bool cur_eq=!std::memcmp(a.pData,f.cpu.data(),f.cpu.size()),oth_eq=!std::memcmp(b.pData,f.cpu.data(),f.cpu.size());
+            fp_[0].fetch_add(1);fp_[cur_eq?1:oth_eq?2:3].fetch_add(1);
+            if(!cur_eq) {std::size_t i=0;while(i<f.cpu.size() && static_cast<const std::uint8_t*>(a.pData)[i]==f.cpu[i]) ++i;fp_first_diff_.store(i);}
+            immediate->Unmap(f.oth.Get(),0);immediate->Unmap(f.cur.Get(),0);f.pending=false;
+        }
     }
     // dxgi_probe: the one-view mode (re)starts (the alternate view appears after paired frames or a mode change): every ring starts over.
     // v1207: the copy/compare counts per render (FsrTaa::poll_rig_pixels, keyed by the render's receipt display): [mask px, own px, wild-MV px]
@@ -248,6 +289,8 @@ public:
          <<",\"cpu\":"<<foreign_cpu_.load()<<",\"srv_format\":"<<foreign_format_.load()<<",\"srv_dimension\":"<<foreign_dimension_.load()<<",\"srv_elements\":"<<foreign_elements_.load()
          <<",\"distinct\":"<<foreign_distinct_.load()<<",\"draw_count\":"<<foreign_count_.load()<<",\"mod_ring\":"<<foreign_ours_.load()<<"}"
          <<",\"no_previous_slot\":"<<no_history_.load()<<",\"ring\":{\"rotations\":"<<rotations_.load()<<",\"restarts\":"<<ring_restarts_.load()
+         <<",\"uploads\":"<<uploads_.load()<<",\"no_upload_yet\":"<<no_upload_.load()<<",\"layout_refused\":"<<layout_refused_.load()
+         <<",\"fingerprint\":["<<fp_[0].load()<<','<<fp_[1].load()<<','<<fp_[2].load()<<','<<fp_[3].load()<<','<<static_cast<long long>(fp_first_diff_.load())<<']'
          <<",\"repeats\":"<<ring_repeats_.load()<<",\"late\":"<<ring_late_.load()<<",\"young\":"<<ring_young_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"held_draws\":"<<held_draws_.load()<<",\"target\":{\"on\":"<<(target_on.load()?"true":"false")<<",\"draws\":"<<target_draws_.load()
          <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
@@ -307,10 +350,14 @@ private:
     inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
     // v1179: per rig model, the ring the GPU skin copy rotates (P bound at draws; A, B the last two renders' palettes) and P's view
     // v1206: rig_ring_slots palettes per model, slot frame%rig_ring_slots written once by that render's skin copy and tagged with its frame
-    struct Ring {std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,rig_ring_slots> slot;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,rig_ring_slots> view;
+    struct Ring {std::vector<std::uint8_t> upload;std::array<bool,rig_ring_slots> from_upload{}; // v1208: the last uploaded CPU palette
+        std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,rig_ring_slots> slot;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,rig_ring_slots> view;
         std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};UINT bytes{};
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};
-        void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);}run.store(0);last.store(~0u);}};
+        void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);from_upload[i]=false;}upload.clear();run.store(0);last.store(~0u);}};
+    struct Fingerprint {Microsoft::WRL::ComPtr<ID3D11Buffer> cur,oth;std::vector<std::uint8_t> cpu;bool pending{};};
+    inline static std::array<Fingerprint,3> fingerprints_{};inline static std::array<std::atomic<std::uint64_t>,4> fp_{};inline static std::atomic<std::uint64_t> fp_first_diff_{~0ull};
+    inline static std::atomic<std::uint64_t> uploads_{},no_upload_{},layout_refused_{};
     struct MaskCensus {std::atomic<std::uint64_t> display{~0ull};std::array<std::atomic<std::uint32_t>,3> n{};};
     inline static std::array<MaskCensus,128> mask_census_{};
     inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};

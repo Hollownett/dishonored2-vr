@@ -66,7 +66,11 @@ static void run(bool d24,int mode) {
     const bool ring=mode==1 || mode==2; // v1183: mode 3 = a held rigid item (no rig palette, marked held: 253)
     d2vr::RigMask::motion=ring;d2vr::RigMask::begin_epoch();
     if(ring) for(std::uint32_t f=1;f<=8;++f) { // v1185: proven after 8 // three engine frames' skin copies: the current palette's x = frame/1000 (a tiny clip offset)
-        const float v[4]{f*1e-3f,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f);
+        // v1208: the wrapper holds something else (99: an undefined dynamic buffer); the slot must come from the CPU palette (x = frame/1000).
+        // Frame 3 has no upload: its slot holds the last uploaded palette (frame 2's); before the first upload nothing is tagged.
+        const float v[4]{f*1e-3f,0,0,0},junk[4]{99,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,junk,0,0);
+        if(f==1) {d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f,nullptr,0,false);continue;}
+        d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),f,v,16,f!=3);
     }
     if(ring) {const float v[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v,0,0);} // this render's current palette
     // the engine's shaders: SV_Position after a TEXCOORD output; depth sloped across x; the PS writes two targets
@@ -111,9 +115,10 @@ static void run(bool d24,int mode) {
             // on the context before this draw executes (a late draw list): slot 6 is untouched, the draw still reads frame 6's palette. A frame
             // whose slot was reused (1, now 9) or an unknown render gets no palette.
             if(mode==1) {
-                const float v9[4]{9e-3f,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v9,0,0);d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),9);
+                const float v9[4]{9e-3f,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,v9,0,0);d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),9,v9,16,true);
                 const float z0[4]{0,0,0,0};c->UpdateSubresource(rig_pal.Get(),0,nullptr,z0,0,0);
                 CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,1,true));CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,~0u,true));
+                CHECK(d2vr::RigMask::previous_palette(c.Get(),0,3,true)); // v1208: frame 3 (no upload) is tagged with the last uploaded palette
             }
             const bool own=d2vr::RigMask::previous_palette(c.Get(),0,6,mode==1);CHECK(own==(mode==1));
             ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0); // what the draw reads as its previous palette

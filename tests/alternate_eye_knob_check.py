@@ -211,7 +211,7 @@ assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
 assert '(mvScale.z>0?(rig==0 || (mvScale.w>0 && rig==255)):proj.y/(d+proj.x)>=proj.z)' in mp  # v1179: 255 = own motion, 254 = rig without
 assert 'const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1207 (was v1204/v1206): no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
 assert 'restore_t0(); // v1166' in rig and 'k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}' in fsr
-assert 'd2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame);' in probe and 'o[i.xy]=held?253:own?255:rig?254:0;' in rig  # v1179 ring + per-pixel validity; v1183 held class 253
+assert 'd2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame,' in probe and 'o[i.xy]=held?253:own?255:rig?254:0;' in rig  # v1179 ring + per-pixel validity; v1183 held class 253
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
 assert 'ds.DepthFunc=D3D11_COMPARISON_EQUAL;ds.StencilEnable=FALSE;' in rig and 'targets(c,rtv_count,rtvs.data(),dsv);' in rig
 print('PASS: v1163 rig mask routing (knob, one-view rig draws replayed, mask at the copy, both-or-none masks, motion arm rule, raw rig rows, status)')
@@ -366,7 +366,7 @@ print('PASS: v1204 rig motion independent of the per-draw view, rig_zero_why')
 # v1205: uncertain draws keep the v1197 heuristic view as the chain label (flagged); render-identity consumers need have_content; ring
 # palette only for the draw's own render; raw-rows per-render status
 assert 'tl_view_heuristic_=!certain;' in om and 'const bool have_content=have_view && !(alternate() && tl_view_heuristic_);' in om
-assert 'if(near_draw && one_view_place && have_content) {' in om and 'if(alt && !apply && kind!=PrevMvpTable::same) note_raw();' in om
+assert 'if(near_draw && one_view_place && have_content) {' in om and 'if(alt && !apply && kind!=PrevMvpTable::same && kind!=PrevMvpTable::own_last) note_raw();' in om
 rm2 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 assert 'if(frame==~0u || r.tag[k].load(std::memory_order_acquire)!=frame)' in rm2  # v1206 (was v1205 r.last)
 print('PASS: v1205 heuristic chain labels for uncertain draws, content-only render consumers, ring per own render, raw-row status')
@@ -394,3 +394,9 @@ rm3 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 fsr3 = (root / 'src' / 'fsr_taa.hpp').read_text(encoding='utf-8')
 assert 'if(rig && !(dot(m,m)<=65536.0)) InterlockedAdd(g[3],1);' in rm3 and 'RigMask::note_mask(d,n[0],n[2],n[3]);' in fsr3
 print('PASS: v1207 rig render by chain, pinned probe rows, wild rig MV census')
+
+# v1208: rig slots from the uploaded CPU palette (never copied from a dynamic wrapper), wrapper fingerprint, MV-target applicability
+rm4 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+assert 'c->UpdateSubresource(r.slot[k].Get(),0,nullptr,r.upload.data(),0,0);' in rm4 and 'CopyResource(r.slot' not in rm4
+assert 'd2vr::ObjectMotion::note_mv_texture(b.res[1]);' in probe and 'cpu_ok?bytes.data():nullptr,cpu_ok?bd.ByteWidth:0u,copied!=0,' in probe
+print('PASS: v1208 rig palette slots from the uploaded CPU palette, fingerprint, MV-target applicability')

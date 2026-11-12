@@ -332,6 +332,7 @@ public:
         if(own[0].load(std::memory_order_relaxed)==b || own[1].load(std::memory_order_relaxed)==b) return;
         own[1].store(own[0].load(std::memory_order_relaxed),std::memory_order_relaxed);own[0].store(b,std::memory_order_relaxed);
     }
+    static void note_mv_texture(const void* r) noexcept {note_mv_target(r);} // v1208: the eye TAA's motion-vector input (dxgi_probe TAA dispatch)
     static int b1_eye(const void* b) noexcept { // -1: no eye's
         int eye=-1;
         if(b) for(int e=0;e<2;++e) for(const auto& p:taa_b1_[static_cast<unsigned>(e)]) if(p.load(std::memory_order_relaxed)==b) eye=eye==-1 || eye==e?e:-2;
@@ -788,18 +789,30 @@ private:
     }
     // v1207: fallback draws (uncertain previous rows, unnamed rig) by render pass and by whether a render target is bound (a depth-only pass
     // writes no motion vectors: zero motion there is harmless)
-    inline static std::array<std::array<std::atomic<std::uint64_t>,2>,65> fallback_pass_{};inline static std::array<std::atomic<std::uint64_t>,2> fallback_rt_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,2>,65> fallback_pass_{};inline static std::array<std::atomic<std::uint64_t>,3> fallback_rt_{};
+    inline static std::atomic<std::uint64_t> rig_na_{};
     inline static std::atomic<std::uint64_t> rig_chained_{};
-    static void note_pass_fallback(ID3D11DeviceContext* c,bool rig) noexcept {
-        int pass=-1;if(const auto source=pass_source_.load(std::memory_order_relaxed)) pass=source().pass;
-        fallback_pass_[pass>=0 && pass<64?static_cast<unsigned>(pass):64u][rig?1:0].fetch_add(1,std::memory_order_relaxed);
+    // v1208: true when one of the draw's render targets is the motion-vector texture the eye's TAA reads (note_mv_target, the TAA dispatch's
+    // motion input; unknown yet: true). rt status: [no target, a target but not the MV texture, the MV texture]; by_pass counts only those.
+    inline static std::array<std::atomic<const void*>,4> mv_target_{};inline static std::atomic<unsigned> mv_next_{}; // the engine may rotate them
+    static void note_mv_target(const void* r) noexcept {
+        if(!r) return;for(const auto& m:mv_target_) if(m.load(std::memory_order_relaxed)==r) return;
+        mv_target_[mv_next_.fetch_add(1,std::memory_order_relaxed)%mv_target_.size()].store(r,std::memory_order_relaxed);
+    }
+    static bool note_pass_fallback(ID3D11DeviceContext* c,bool rig) noexcept {
         ID3D11RenderTargetView* r[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,r,nullptr);
-        bool any=false;for(auto* x:r) if(x) {any=true;x->Release();}
-        fallback_rt_[any?1:0].fetch_add(1,std::memory_order_relaxed);
+        bool any=false,writes=!mv_target_[0].load(std::memory_order_relaxed);
+        for(auto* x:r) if(x) {any=true;ID3D11Resource* res{};x->GetResource(&res);if(res) {for(const auto& m:mv_target_) writes=writes || m.load(std::memory_order_relaxed)==res;res->Release();}x->Release();}
+        fallback_rt_[!any?0:writes?2:1].fetch_add(1,std::memory_order_relaxed);
+        if(!any) writes=false;
+        if(writes) {int pass=-1;if(const auto source=pass_source_.load(std::memory_order_relaxed)) pass=source().pass;
+            fallback_pass_[pass>=0 && pass<64?static_cast<unsigned>(pass):64u][rig?1:0].fetch_add(1,std::memory_order_relaxed);}
+        return writes;
     }
     static std::string fallback_json() {
         const auto name=pass_name_.load(std::memory_order_relaxed);
-        std::string o="{\"rt\":["+std::to_string(fallback_rt_[0].load())+','+std::to_string(fallback_rt_[1].load())+"],\"rig_chained\":"+std::to_string(rig_chained_.load())+",\"by_pass\":{";
+        std::string o="{\"rt\":["+std::to_string(fallback_rt_[0].load())+','+std::to_string(fallback_rt_[1].load())+','+std::to_string(fallback_rt_[2].load())+"],\"rig_na\":"+std::to_string(rig_na_.load())
+            +",\"rig_chained\":"+std::to_string(rig_chained_.load())+",\"by_pass_mv\":{";
         bool first=true;
         for(unsigned p=0;p<65;++p) if(const auto a=fallback_pass_[p][0].load(),b=fallback_pass_[p][1].load();a || b) {
             const char* nm=p<64 && name?name(p):nullptr;o+=std::string(first?"":",")+'"'+(p==64?std::string("none"):nm?std::string(nm):std::to_string(p))+"\":["+std::to_string(a)+','+std::to_string(b)+']';first=false;}
@@ -1151,12 +1164,14 @@ private:
             const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);
             // status rig_zero_why: [first frame (cur == prev), chain miss, chain unproven (the second hop), palette (no slot tagged with the
             // previous render), no content view (or no receipt record), history reset]
-            if(!own) rig_zero_why_[!have_render?4:!view.has_prev?5:kind==PrevMvpTable::same?0:kind==PrevMvpTable::miss?1:kind==PrevMvpTable::unproven?2:3].fetch_add(1,std::memory_order_relaxed);
-            if(!have_render) note_pass_fallback(c,true);
-            render_note(have_render?view.display:newest_display_.load(std::memory_order_relaxed),own?rr_rig_own:have_render?rr_rig_zero:rr_rig_zero_unnamed);
+            // v1208: an unnamed rig draw that does not write the eye's motion-vector target (another view's depth pass) is not applicable
+            const bool applicable=have_render || note_pass_fallback(c,true);
+            if(!own && applicable) rig_zero_why_[!have_render?4:!view.has_prev?5:kind==PrevMvpTable::same?0:kind==PrevMvpTable::miss?1:kind==PrevMvpTable::unproven?2:3].fetch_add(1,std::memory_order_relaxed);
+            if(!applicable) rig_na_.fetch_add(1,std::memory_order_relaxed);
+            else render_note(have_render?view.display:newest_display_.load(std::memory_order_relaxed),own?rr_rig_own:have_render?rr_rig_zero:rr_rig_zero_unnamed);
             if(have_render && rows_own && !own) render_note(view.display,rr_rig_palette_miss);
             if(have_view) view_use(use_rig_motion);
-            certainty(cert_previous_rows,own || have_content?cert_certain:tl_content_why_==3?cert_na:cert_fallback);
+            certainty(cert_previous_rows,own || have_content?cert_certain:tl_content_why_==3 || !applicable?cert_na:cert_fallback);
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
             if(!own) std::memcpy(prev,cur,64);
             return bind_pool(c,s,*sh,nullptr,prev);
@@ -1232,8 +1247,8 @@ private:
         // step, never the other eye's parallax), not recorded, counted. Another pass's view (shadow, light): left as the engine made it.
         if(alt && (!have_content || !view.receipt) && !alt_view_heuristic.load(std::memory_order_relaxed) && have_prev) {
             if(tl_content_why_==3) {certainty(cert_previous_rows,cert_na);return false;}
-            certainty(cert_previous_rows,cert_fallback);alt_uncertain_.fetch_add(1,std::memory_order_relaxed);render_note(newest_display_.load(std::memory_order_relaxed),rr_uncertain);
-            note_pass_fallback(c,false);
+            if(note_pass_fallback(c,false)) {certainty(cert_previous_rows,cert_fallback);alt_uncertain_.fetch_add(1,std::memory_order_relaxed);render_note(newest_display_.load(std::memory_order_relaxed),rr_uncertain);}
+            else certainty(cert_previous_rows,cert_na); // v1208: not the eye's motion-vector target: not applicable (still zero motion)
             if(mode_.load(std::memory_order_relaxed)<1) return false;
             std::memcpy(prev,cur,64);return bind_pool(c,s,*sh,nullptr,prev);
         }
@@ -1266,7 +1281,7 @@ private:
             if(pick) {std::memcpy(prev,pick,64);apply=true;count(pick==moved?(view.eye?corrected_r:corrected_l):(view.eye?camera_r:camera_l));}
         }
         measure(view.eye,cur,engine,apply?prev:engine);
-        if(alt && !apply && kind!=PrevMvpTable::same) note_raw(); // v1205: the engine's other-eye rows stay
+        if(alt && !apply && kind!=PrevMvpTable::same && kind!=PrevMvpTable::own_last) note_raw(); // v1205: the engine's other-eye rows stay (v1208: own_last rows are already own, not raw)
         if(alt) { // v1206 per-render ring
             const bool camera=apply && (kind==PrevMvpTable::miss || kind==PrevMvpTable::unproven);
             render_note(view.display,camera?rr_camera_only:!apply && kind!=PrevMvpTable::same && kind!=PrevMvpTable::own_last?rr_raw:static_cast<RenderCount>(kind));
