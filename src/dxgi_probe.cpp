@@ -4673,6 +4673,14 @@ static std::optional<d2vr::rig::NativeCarrySnapshot> controls_carry_snapshot;
 static d2vr::TalkYOwner talk_y_owner;
 static bool hold_y_menu_enabled=true,legacy_hold_y_settings=false; // hold Y: native Pause, then VR settings; legacy restores the gameplay panel
 static std::atomic<UINT64> offered_choke_hint_frames{},choke_input_frames{},talk_y_input_frames{};
+// v1235 diagnostics (status "choke_blocked"): frames with a choke offered or running and the choke hand's raw grip held but no RB from the route, by the
+// first reason in the order the control thread evaluates them; offer frames by source and choke hand; OfferedChokeGrip role transitions.
+static constexpr const char* choke_block_names[]={"none","hand_state_stale","hand_holding_object","hand_carrying","carry_snapshot_missing","carry_owner_mismatch",
+    "native_carrying","fist_held_body","spoken_copy","spoken_taken","spoken_weapon","lanes_missing","lane_held","lane_pending_release","lane_deferred",
+    "lane_occupied","lane_unusable","lane_epoch","lane_owner","not_allowed","no_victim","role_drain","refused_victim","other_npc","ready_no_use"};
+static std::array<std::atomic<UINT64>,std::size(choke_block_names)> choke_block_frames{};
+static std::atomic<UINT64> choke_final_cancels{},choke_src_hud{},choke_src_sensor{},choke_src_running{},choke_hand_frames0{},choke_hand_frames1{},
+    choke_ready_to_choke{},choke_ready_to_other{},choke_other_to_choke{},choke_choke_to_drain{};
 static std::atomic<int> gaze_ray_side{-1};static std::atomic<UINT64> gaze_ray_until{};static std::atomic<unsigned> yank_requests{},look_uses{},look_hits{};static std::array<bool,2> hand_at_neck{};static std::array<std::atomic<float>,2> yank_peak{};static std::array<std::atomic<unsigned>,2> yank_gate{};static d2vr::GunGrip gun_grip;static bool gun_owns{},hip_loaded{};static std::atomic<unsigned> hip_kind{};static std::atomic<int> hip_owner{-1};static std::array<std::atomic<unsigned>,5> gun_actions{}; // hip_kind: 0 pistol, 1 crossbow
 // The right hand in the world after weapon collision (render thread), with its velocity: where a dropped sword starts.
 static d2vr::WorldTrackedPose hand_world[2]{};static d2vr::Vec3 hand_velocity[2]{};static UINT64 hand_tick[2]{}; // under hand_state_mutex
@@ -10384,6 +10392,11 @@ std::string feedback_status_json() {    std::ostringstream out;
     out << ",\"native_offer_controls\":{\"choke_observer_enabled\":"
         << (d2vr::NativeOfferedChoke::process_owner().enabled()?"true":"false")
         << ",\"offered_choke_frames\":" << offered_choke_hint_frames.load() << ",\"choke_input_frames\":" << choke_input_frames.load()
+        << ",\"choke_blocked\":" << [] {std::string j="{";for(std::size_t i=1;i<std::size(choke_block_names);++i) {if(i>1) j+=',';j+='"';j+=choke_block_names[i];j+="\":";j+=std::to_string(choke_block_frames[i].load());}
+            j+=",\"final_cancel\":"+std::to_string(choke_final_cancels.load())+",\"src_hud\":"+std::to_string(choke_src_hud.load())+",\"src_sensor\":"+std::to_string(choke_src_sensor.load())+
+               ",\"src_running\":"+std::to_string(choke_src_running.load())+",\"hand0\":"+std::to_string(choke_hand_frames0.load())+",\"hand1\":"+std::to_string(choke_hand_frames1.load())+
+               ",\"ready_to_choke\":"+std::to_string(choke_ready_to_choke.load())+",\"ready_to_other\":"+std::to_string(choke_ready_to_other.load())+
+               ",\"other_to_choke\":"+std::to_string(choke_other_to_choke.load())+",\"choke_to_drain\":"+std::to_string(choke_choke_to_drain.load())+"}";return j;}()
         << ",\"talk_y_input_frames\":" << talk_y_input_frames.load() << ",\"npc_trigger_interact_frames\":" << npc_trigger_uses.load()
         << ",\"npc_prompt_trig_frames\":" << npc_prompt_frames.load() << ",\"choke_range_widened\":false,\"observer\":{\"updates\":"
         << choke_diagnostics.updates << ",\"hints\":" << choke_diagnostics.hints << ",\"exact_candidates\":" << choke_diagnostics.exact_candidates
@@ -14168,17 +14181,29 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     d2vr::takedown_target(sensor_reader,image_base,control_takedown.choke_spawn).has_value();
                                 const auto current_carry=(choke_offer || control_active_choke || sensor_choke) && choke_carry?
                                     d2vr::rig::native_carry_current(control_reader,image_base,*choke_carry):std::nullopt;
+                                // v1235: the same terms as before, also kept as the first reason for choke_blocked (values unchanged; holding() is now always read)
+                                unsigned choke_why=0;const auto why=[&](bool c,unsigned r) {if(c && !choke_why) choke_why=r;return c;};
+                                if(choke_occupied) {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
+                                    why(!hand_state_tick || controls_now<hand_state_tick || controls_now-hand_state_tick>300,1);why(hand_holding_object,2);why(hand_carrying_bits!=0,3);}
+                                why(!current_carry,4);
+                                why(current_carry && (!choke_owner || current_carry->player!=choke_owner->player || current_carry->machine!=choke_owner->machine),5);
+                                why(current_carry && current_carry->carrying(),6);
                                 choke_occupied=choke_occupied || !current_carry || !choke_owner ||
                                     current_carry->player!=choke_owner->player || current_carry->machine!=choke_owner->machine || current_carry->carrying();
                                 const unsigned cs=choke_side;
-                                choke_occupied=choke_occupied || (physical_grab_requested && native_grab.holding(cs));
+                                choke_occupied=why(physical_grab_requested && native_grab.holding(cs),7) || choke_occupied;
                                 // v920 (user, headset v891: "a choke instead of the stealth kill with the sword"): with a gun in the other hand the sword hand is the
                                 // choke hand, and its hold-to-hold squeeze (the raw grip below) took the sensor's offer before the blade reached the guard. A squeeze
                                 // that holds a weapon or that another gesture took (holster, temple, shoulder dock) is no choke press (vr_controls.hpp grip_spoken_for).
-                                choke_occupied=choke_occupied || d2vr::grip_spoken_for(cs,mh,sword_owns,gun_owns || hip_draw_reserved || left_gadget.load(),extra_owns[cs],
-                                    ((cs?raw.right_grip:raw.left_grip)>.35f && (cs?physical_right_grip:physical_left_grip)<.35f) || (shoulder_consume_bits.load()&(1u<<cs))!=0);
+                                {const bool gun_hand_holds=gun_owns || hip_draw_reserved || left_gadget.load();
+                                 const bool taken=((cs?raw.right_grip:raw.left_grip)>.35f && (cs?physical_right_grip:physical_left_grip)<.35f) || (shoulder_consume_bits.load()&(1u<<cs))!=0;
+                                 why(extra_owns[cs],8);why(taken,9);why(cs==mh?sword_owns:gun_hand_holds,10);
+                                 choke_occupied=choke_occupied || d2vr::grip_spoken_for(cs,mh,sword_owns,gun_hand_holds,extra_owns[cs],taken);}
                                 if(physical_grab_requested && (choke_offer || control_active_choke)) {
                                     const auto lanes=native_grab.diagnostics(controls_now);
+                                    if(!why(!lanes,11)) {const auto& l=(*lanes)[cs];
+                                        why(l.held.has_value(),12);why(l.pending_release,13);why(l.deferred,14);why(l.occupied,15);why(!l.usable,16);
+                                        why(l.epoch!=game_xr->pose_epoch(),17);why(!choke_owner || l.player!=choke_owner->player,18);}
                                     choke_occupied=choke_occupied || !lanes || (*lanes)[cs].held || (*lanes)[cs].pending_release ||
                                         (*lanes)[cs].deferred || (*lanes)[cs].occupied || !(*lanes)[cs].usable ||
                                         (*lanes)[cs].epoch!=game_xr->pose_epoch() || !choke_owner || (*lanes)[cs].player!=choke_owner->player;
@@ -14191,11 +14216,37 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // living hold (intent grab, no Use): a still-held grip takes an offer that appears later, from the sensor or the
                                 // HUD, and keeps a running choke while the sensor flickers (user, 2026-11-01: combat choke never registered).
                                 const bool stealth_held=(sensor_choke || offered_choke || control_active_choke!=0) && (cs?raw.right_grip:raw.left_grip)>.35f;
+                                // v1235: the NPC this squeeze is on (vr_controls.hpp OfferedChokeGrip case 2; latched there at the press): the choke hand's living hold
+                                // or living palm pick (spawn ids, native_grab.hpp living_candidates), else the kill sensor's target (the guard in front), else none.
+                                std::uint32_t choke_press_npc=0;
+                                if(const auto g=native_grab.living_grasp(cs)) choke_press_npc=g->entity_id;
+                                else if(const auto f=native_grab.focus_score(cs,controls_now,250);f && f->kind==d2vr::PalmKind::living) choke_press_npc=static_cast<std::uint32_t>(f->id);
+                                else if(control_takedown.kill) choke_press_npc=control_takedown.kill_spawn;
+                                const int choke_role_before=offered_choke_grip.role();
                                 const auto choke_route=offered_choke_grip.update(
                                     grip_intent_out[cs].use || stealth_held,grip_intent_out[cs].use_started || stealth_held,
                                     (cs?raw.right_grip:raw.left_grip)>.35f,logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel(),
-                                    game_xr->pose_epoch(),offered_choke?choke_offer->spawn:sensor_choke?control_takedown.choke_spawn:0,control_active_choke,choke_occupied,(cs?raw.right_trigger:raw.left_trigger)>.35f);
+                                    game_xr->pose_epoch(),offered_choke?choke_offer->spawn:sensor_choke?control_takedown.choke_spawn:0,control_active_choke,choke_occupied,(cs?raw.right_trigger:raw.left_trigger)>.35f,choke_press_npc);
                                 d2vr::NativeInteractionAim::reserve_nonlethal_grip(choke_route.rb);
+                                {   // v1235 choke_blocked counters (diagnostics only)
+                                    const bool allowed_c=logic==2 && controls_focus && !input.menu_modifier && !x_wheel.wheel();
+                                    const std::uint32_t offered_id=offered_choke?choke_offer->spawn:sensor_choke?control_takedown.choke_spawn:0;
+                                    const int after=offered_choke_grip.role();
+                                    if(choke_role_before==0 && after==2) ++choke_ready_to_choke;else if(choke_role_before==0 && after==1) ++choke_ready_to_other;
+                                    else if(choke_role_before==1 && after==2) ++choke_other_to_choke;else if(choke_role_before==2 && after==3) ++choke_choke_to_drain;
+                                    if(offered_choke || sensor_choke || control_active_choke) {
+                                        if(offered_choke) ++choke_src_hud;
+                                        if(sensor_choke) ++choke_src_sensor;
+                                        if(control_active_choke) ++choke_src_running;
+                                        if(cs) ++choke_hand_frames1;else ++choke_hand_frames0;
+                                        if((cs?raw.right_grip:raw.left_grip)>.35f && !choke_route.rb) {
+                                            unsigned r=choke_occupied?choke_why:0;
+                                            if(!r) r=!allowed_c?19:(!offered_id && !(control_active_choke && control_active_choke==offered_choke_grip.chosen()) && after!=2)?20:
+                                                after==3?21:after==1 && offered_id && offered_id==offered_choke_grip.refused()?22:after==1?23:24;
+                                            ++choke_block_frames[r];
+                                        }
+                                    }
+                                }
                                 std::array<bool,2> grip_use{};
                                 for(unsigned h=0;h<2;++h) grip_use[h]=controller_aim_requested;
                                 // The right grip at an unaware guard's neck is the choke (native RB), not a Use.
@@ -14944,6 +14995,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                              d2vr::NativeOfferedChoke::active_victim(&read_self,image_base,control_machine)==victim ||
                                              stealth_current);
                                     }
+                                    if(!final_choke_current && offered_choke_grip.role()==2) {++choke_final_cancels;++choke_choke_to_drain;}
                                     if(!final_choke_current)offered_choke_grip.cancel();
                                     else ++choke_input_frames;
                                     // v639: the sword-in-front Block may already hold RB, and a held RB makes no new press: the choke lets RB go

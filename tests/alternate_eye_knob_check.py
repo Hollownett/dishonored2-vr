@@ -497,13 +497,14 @@ wd31 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
 assert 'static constexpr unsigned settle_n=3,early_n=2,cands=6,window=45,' in wd31 and 'if(c.renders-c.settled_last>window)' in wd31
 assert probe.count('d2vr::weapon_draw::RigidLocal::set_path(hand,d2vr::weapon_draw::RigidLocal::path_') == 3
 print('PASS: v1231 rigid local by consensus, in_step per publisher path')
-# v1232: a held grip whose press went to a Use (or a living hold) takes a choke offer that appears later (combat: the guard turns chokeable only
-# once vulnerable); an offer refused at the press (a weapon's squeeze, v920) stays refused for that squeeze
+# v1232/v1235: OfferedChokeGrip - a held `other` squeeze takes a later offer only for the NPC its press was on (press_npc, never refused at the press);
+# a ready re-press takes the running game choke only when this owner chose that victim (click -> release -> press again)
 vc32 = (root / 'src' / 'vr_controls.hpp').read_text(encoding='utf-8')
-assert 'if((role_==Role::ready || (role_==Role::other && offered_victim!=refused_)) && use && started) {' in vc32
-assert 'else if(role_==Role::ready) {role_=Role::other;refused_=offered_victim;}' in vc32 and '{role_=Role::ready;victim_=refused_=0;return {};}' in vc32
-assert 'const std::uint32_t entry=role_==Role::ready && !offered_victim?active_victim:offered_victim;' in vc32 and '{role_=Role::choke;victim_=entry;}' in vc32
-print('PASS: v1232 combat choke: a still-held grip takes a later offer')
+assert 'role_==Role::other && offered_victim && offered_victim!=refused_ && offered_victim==pressed_npc_?offered_victim:0u;' in vc32
+assert '(offered_victim?offered_victim:active_victim && active_victim==choked_?active_victim:0u)' in vc32 and '{role_=Role::choke;victim_=choked_=entry;}' in vc32
+assert 'else if(role_==Role::ready) {role_=Role::other;refused_=offered_victim;pressed_npc_=press_npc;}' in vc32
+assert 'control_active_choke,choke_occupied,(cs?raw.right_trigger:raw.left_trigger)>.35f,choke_press_npc);' in probe
+print('PASS: v1235 combat choke: later offer only for the pressed NPC, re-press takes back its own choke')
 # v1233: a slot-0 prompt keeps the takedown hold (1300 ms) while the hand's LIVE target is still the art's object (sim v1232: a body's carry prompt hid
 # at art_age 515 with the hand on the body while the game drew the window through the bare prompt root); status prompt_live_holds, prompt_target_hides
 hd33 = (root / 'src' / 'native_hud_child_draw.hpp').read_text(encoding='utf-8')

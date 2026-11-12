@@ -173,23 +173,37 @@ int main() {
         assert(update(true,true,true,0,123).rb);
         assert(owner.victim()==123);owner.cancel();assert(owner.victim()==0);
         assert(!update(true,false,true,123,0,false,true,2).rb);
-        // v1232 (user, headset: "when I grab an enemy in combat and I only click grip ... I cannot choke the guardian"): the grip's own press went to a Use
-        // before the guard turned chokeable (an aware guard: the kill sensor's target or a drawn gun makes grip alone a Use, no offer yet); the still-held
-        // grip (stealth_held: use+started while the offer shows) takes the offer that appears later.
+        // v1235 (v1232 follow-up; user, headset: "when I grab an enemy in combat and I only click grip ... I cannot choke the guardian"): OfferedChokeGrip's
+        // three cases. press(use,started,held,offered,active,occupied,npc): npc = the NPC the squeeze is on (living hold/pick or the kill sensor's target).
+        const auto press=[&](bool use,bool started,bool held,std::uint32_t offered,std::uint32_t active,bool occupied,std::uint32_t npc) {
+            return owner.update(use,started,held,true,1,offered,active,occupied,false,npc);};
+        // (1) grip alone became a living hold of guard 123 (intent grab: no Use); he turns chokeable: the held grip chokes (NativeGrab releases the hold:
+        // reserve_npc -> npc_reserved in living_tick, not modelled here)
         update(false,false,false,0);
-        require(!update(true,true,true,0).rb,"combat: the press with no offer is a Use");
-        require(update(true,true,true,123).rb,"combat: the still-held grip takes the offer that appears later");
-        // An offer refused at the press (the squeeze held a weapon: occupied) stays refused for that squeeze, whatever `occupied` says later (v920).
+        require(!press(false,false,true,0,0,false,123).rb && press(true,true,true,123,0,false,123).rb,"living hold of the offered victim: the held grip chokes");
+        // (2) a crank/lever/door Use held by the grip, a guard offered later: no NPC press, never a choke
         update(false,false,false,0);
-        require(!update(true,true,true,123,0,true).rb && !update(true,true,true,123).rb,"an offer refused at the press stays refused");
-        require(update(true,true,true,456).rb,"a different victim offered later is a new offer");
-        // v1232 click -> release -> press again: the click started the game's choke (active 123, no offer any more); the new press takes it again.
+        require(!press(true,true,true,0,0,false,0).rb && !press(true,true,true,123,0,false,0).rb,"crank squeeze + later offer: no choke");
+        // (3) a held corpse (native_grab.holding: occupied) + an offer: no choke
+        update(false,false,false,0);
+        require(!press(true,true,true,123,0,true,0).rb && !press(true,true,true,123,0,true,0).rb,"held corpse + offer: no choke");
+        // (4a) combat: the press on guard 123 went to a Use (kill sensor target) before he was offered; the still-held grip takes his later offer, no other's
+        update(false,false,false,0);
+        require(!press(true,true,true,0,0,false,123).rb,"combat: the press with no offer is a Use");
+        require(!press(true,true,true,456,0,false,123).rb,"combat: another guard's offer is not taken");
+        require(press(true,true,true,123,0,false,123).rb,"combat: the still-held grip takes his offer that appears later");
+        // (4b) an offer refused at the press (a weapon's squeeze: occupied) stays refused for that squeeze, whatever `occupied` says later (v920)
+        update(false,false,false,0);
+        require(!press(true,true,true,123,0,true,123).rb && !press(true,true,true,123,0,false,123).rb,"an offer refused at the press stays refused");
+        // (4c) click -> release -> press again: the click started the game's choke (active 123, no offer any more); the new press takes it again
         update(false,false,false,0);
         require(update(true,true,true,123).rb,"click: the press chokes");
         require(!update(false,false,false,0,123).rb,"click: released, RB off");
         require(update(true,true,true,0,123).rb,"press again while the game's choke runs: RB again");
         update(false,false,false,0,123);
         require(!update(true,true,true,0,123,true).rb,"press again: occupied still blocks");
+        {d2vr::OfferedChokeGrip fresh;fresh.update(false,false,false,true,1,0,0,false);
+         require(!fresh.update(true,true,true,true,1,0,77,false).rb,"a running choke this owner never chose is not taken");}
     }
     {   // The choke goes to the free hand, and a squeeze that holds a weapon is no choke press (user, headset v891: "when I tried a stealth kill from behind
         // with the sword, I often got a choke instead"). With a crossbow in the left hand the sword hand is the choke hand, and v698/v793 let any squeezed
