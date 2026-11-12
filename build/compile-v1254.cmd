@@ -4,6 +4,9 @@ rem presented render (src/held_engine_pose.hpp; model+0x1860, the way place_weap
 rem show 5 of 16 frames carrying the same physics tick (dt 0): on those the engine frame - shadows, culling bounds, every draw the placement did not
 rem match - was a tick old, which is the 4 cm flicker in the hand. build/no-held-engine-pose: v1253 behaviour; status weapon_draw.held_engine_pose;
 rem held_census.<kind>.unplaced splits into unplaced_nodraw / unplaced_refused.
+rem
+rem + Timepiece: the slot-1 grip is a PRESS toggle (each fresh squeeze flips the device once, a held grip never repeats), and a Timepiece hand no
+rem longer has its left trigger swallowed (GripIntent pass_trigger, the fist rule, the grab guard): that trigger is the time shift. v1251 hold semantics are gone.
 rem v1253 = v1252 + held severed parts drawn at the hold goal by the engine (src/held_render_pose.hpp): the ragdoll sync 0x76d640 queues world bone requests (0x53fbe0 at 0x76db00) that the animation stores model-relative against the frame passed to 0x754ea0 at 0x76dc12; both are moved by goal*inverse(held body), the model frame rewritten after; corpses translation-only opt-in build/held-render-pose-corpse; build/no-held-render-pose-severed; status held_render_pose.ragdoll
 rem v1252 = working tree + Timepiece held on the slot-1 grip: squeeze = unfold, open = fold (native Use pulses keyed on player states 68/69/70, src/timepiece_grip.hpp; status timepiece.grip_unfold_fold_gaveup_busy)
 rem v1248 = v1247 + review fixes: held census restored as code; body kind art saved once per change off the frame and anchored on the body under the hand (cache v2); unpaired flat needs 45 gameplay frames every run (settle/authored not counted, panel kept); lens replay/hold only after a real lens Begin
@@ -18,3 +21,6 @@ set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_arm_v1254.dll
 set L=C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags\third_party
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /O2 /bigobj /Zi /Fd:build\dxgi_probe_v1254.pdb /MD /LD /I. /FI"src\dlss_eye_upscaler.hpp" /Ithird_party\minhook\include /Ithird_party\openxr\include /Ithird_party\fidelityfx src\dxgi_probe.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\dxgi_probe_v1254.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link /DEBUG /OPT:REF /OPT:ICF %L%\dlss\lib\nvsdk_ngx_d.lib advapi32.lib uuid.lib d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib %L%\fidelityfx\libs\ffx_backend_dx11_x64.lib %L%\fidelityfx\libs\ffx_fsr3_x64.lib %L%\fidelityfx\libs\ffx_fsr3upscaler_x64.lib %L%\fidelityfx\libs\ffx_frameinterpolation_x64.lib %L%\fidelityfx\libs\ffx_opticalflow_x64.lib
 echo dll_exit=%errorlevel%
+rem
+rem + Timepiece: the slot-1 grip is a PRESS toggle (each fresh squeeze flips the device once, a held grip never repeats) and a Timepiece hand no
+rem longer has its left trigger swallowed (GripIntent pass_trigger, the fist rule, the grab guard) - the trigger is the time shift. v1251 hold semantics are gone.

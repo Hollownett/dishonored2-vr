@@ -4745,6 +4745,13 @@ static char left_equip_name[32]{}; // native equip pose name of the left hand ("
 static std::atomic<bool> left_gadget{}; // the left hand holds a grenade, stun mine or spring razor (its equip name)
 static std::atomic<float> gadget_throw_hold{}; // dual wield (v771): 1 while an armed grenade is held (GadgetGrip), for NativeGrenadeThrow's release
 static std::atomic<bool> left_power_item{}; // the left slot holds a power, whatever build/power-native-fingers says (dual wield's power-hand cross)
+// v1254 (user: "hold grip should not block trigger event"): with the Timepiece out the left trigger is the time shift (ACTION_POWER_WEAPON), not a
+// weapon shot or a cast. The grip must not swallow it: GripIntent's fist/use kinds (pass_trigger) and the "a fist never fires" rule both zero the
+// trigger while the grip is held, which a Timepiece hand must be exempt from. Read once per check from the equip name.
+static bool timepiece_out() noexcept {
+    std::lock_guard<std::mutex> l(hand_state_mutex);
+    return d2vr::is_timepiece_equip_name(std::string_view(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name))));
+}
 // Dual wield decisions, one JSON line each (artifacts/dual-wield-events.jsonl): what the next headset test needs to explain a wrong hand.
 // v820: one stream kept open (an open+close per row was 3% of a core on the render thread in a paired sim).
 static std::array<bool,2> g_hip_near{};static std::array<int,2> g_hip_mm{-1,-1};static UINT64 g_heart_unequip_at{};
@@ -14969,7 +14976,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     weapon_owns(1) || talk_targets[1] || npc_owns[1] || (cs==1 && choke_route.consume_use) || !(grip_intent_out[1].use || fist_take[1])?0.f:1.f};
                                 if(logic==2) input.right_grip=0;
                                 if(logic==2) { // a fist never casts, fires or blocks; a trigger pulled first waits 100 ms for its grip
-                                    if(!grip_intent_out[0].pass_trigger) input.left_trigger=0;else if(grip_intent_out[0].tap_trigger) input.left_trigger=1;
+                                    const bool timepiece=timepiece_out();   // v1254: the Timepiece's trigger is the time shift, never a fist's
+                                    if(!grip_intent_out[0].pass_trigger && !timepiece) input.left_trigger=0;else if(grip_intent_out[0].tap_trigger) input.left_trigger=1;
                                     if(!grip_intent_out[1].pass_trigger) input.right_trigger=0;else if(grip_intent_out[1].tap_trigger) input.right_trigger=1;
                                 }
                                 if(rh && logic==2) std::swap(input.left_trigger,input.right_trigger);
@@ -15443,7 +15451,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                     // Both hands thrown up above the head = native A (jump), held while they stay up (mantle at a ledge).
                                     {static bool jump_was{};if(gesture.jump && !jump_was) ++gesture_jumps;jump_was=gesture.jump;if(gesture.jump) input.a=true;}
-                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget) input.left_trigger=0; // a fist never fires; a gripped gun or gadget does
+                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget && !timepiece_out()) input.left_trigger=0; // a fist never fires; a gripped gun or gadget does; the Timepiece's trigger is its time shift (v1254)
                                     if(GetTickCount64()<gesture_cast_until) input.left_trigger=1;
                                     if(gesture_release_until) {if(raw_trigger(rh)<.3f) gesture_release_until=0;else input.left_trigger=0;} // yoink: release the aimed power, held until the trigger is let go
                                 }
@@ -15561,7 +15569,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         busy=busy || use_hand==static_cast<int>(rh) || !controls_focus || input.menu_modifier || x_wheel.wheel() || input.lean_suspended;
                                         if(timepiece_grip.update(equipped,raw_grip(rh),tp_state,busy,use_now)) input.x=true;
                                     }
-                                    if(grab_guard[rh]) input.left_trigger=0;
+                                    if(grab_guard[rh] && !timepiece_out()) input.left_trigger=0;   // v1254: the trigger that shifts time is the Timepiece's, not a grab's
                                     {   // A grenade or mine in the slot-1 hand. Last word on the left trigger.
                                         // Without dual wield (user, headset v671): the fist holds the game's left trigger (aim / cook), opening the hand lets it go
                                         // (the throw / the placement); the trigger alone still works.
