@@ -27,5 +27,12 @@ int main() {
     assert(text.find("\"attach_clears\":3,\"weapon_hidden_frames\":2}")!=std::string::npos);
     assert(text.find("\"fallback_runs_max_frames\":[4,2]")!=std::string::npos);
     f.reset();assert(f.of(0).uploads==0 && f.weapon_hidden_frames()==0);
+    { // v1213 image skin plan: intended gaps keep the upload, a VR fallback never shows the engine pose while an image exists
+        using d2vr::ImageSkinPlan;using d2vr::image_skin_plan;
+        assert(image_skin_plan(0,true,true)==ImageSkinPlan::keep_upload);
+        assert(image_skin_plan(1,true,true)==ImageSkinPlan::write_fresh && image_skin_plan(2,true,false)==ImageSkinPlan::write_fresh && image_skin_plan(3,true,true)==ImageSkinPlan::write_fresh);
+        assert(image_skin_plan(3,false,true)==ImageSkinPlan::write_held && image_skin_plan(3,false,false)==ImageSkinPlan::gap_unheld);
+        assert(image_skin_plan(1,false,true)==ImageSkinPlan::keep_upload && image_skin_plan(7,true,true)==ImageSkinPlan::keep_upload);
+    }
     std::cout<<"arm_flicker_check passed\n";
 }

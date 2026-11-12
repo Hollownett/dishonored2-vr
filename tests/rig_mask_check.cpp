@@ -126,6 +126,12 @@ static void run(bool d24,int mode) {
                 CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,1,true));CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,~0u,true));
                 CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,8,true)); // render 8's own slot is not written by previous_palette
                 CHECK(d2vr::RigMask::previous_palette(c.Get(),0,3,true));
+                // v1212: the slot is taken only with its capturing draw's rows; v1213: a VR-pose switch between the two renders is zero motion
+                CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,3,true,0x1234));
+                {const float junk[4]{99,0,0,0};d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),10,junk,16,true,nullptr,true,false,1,false);}
+                d2vr::RigMask::capture_drawn(c.Get(),10); // render 10 draws the engine pose (slot 2)
+                CHECK(!d2vr::RigMask::previous_palette(c.Get(),0,3,true,0,10));CHECK(d2vr::RigMask::previous_palette(c.Get(),0,3,true,0,~0u));
+                {const float junk[4]{99,0,0,0};d2vr::RigMask::skin_copied(c.Get(),0,rig_pal.Get(),11,junk,16,true);}
             }
             const bool own=d2vr::RigMask::previous_palette(c.Get(),0,6,mode==1);CHECK(own==(mode==1));
             { // v1210: a draw hook entered from inside this one (the same draw) is inert: the outer's state and its t0 binding survive it
@@ -173,7 +179,7 @@ static void run(bool d24,int mode) {
     D3D11_BUFFER_DESC kb{};kb.ByteWidth=16;kb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;D3D11_SUBRESOURCE_DATA kd{k,0,0};ComPtr<ID3D11Buffer> kbuf;dev->CreateBuffer(&kb,&kd,&kbuf);
     c->OMSetRenderTargets(0,nullptr,nullptr); // the depth is read now
     // v1209: the TAA's motion input (UV): wild (20 = 20 render widths) left of x = N/4, a real small motion (0.001) elsewhere
-    std::vector<float> mvi(N*N*2);for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) mvi[(y*N+x)*2]=x<N/4?20.f:.001f;
+    std::vector<float> mvi(N*N*2);for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) mvi[(y*N+x)*2]=x<N/4?20.f:x<N/2?.6f:.001f; // v1213: 0.6 widths = a fast swing, true motion (not wild)
     D3D11_TEXTURE2D_DESC mvd=t;mvd.Format=DXGI_FORMAT_R32G32_FLOAT;mvd.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;D3D11_SUBRESOURCE_DATA mvs{mvi.data(),N*8,0};
     ComPtr<ID3D11Texture2D> mvt;dev->CreateTexture2D(&mvd,&mvs,&mvt);ComPtr<ID3D11ShaderResourceView> mv_srv;dev->CreateShaderResourceView(mvt.Get(),nullptr,&mv_srv);
     ID3D11ShaderResourceView* in[3]{depth_srv.Get(),rig_srv.Get(),mv_srv.Get()};ID3D11UnorderedAccessView* outs[2]{mask_uav.Get(),counts_uav.Get()};
@@ -194,7 +200,7 @@ static void run(bool d24,int mode) {
         const bool inside=nx>-.8 && nx<.4 && ny>-.6 && ny<.6,want=inside && nx<0;
         // v1209: a rig (not held) pixel with a wild vector is 252 and its vector is zero after the guard; every other vector is untouched
         const bool wild_rig=mode!=3 && m[y*N+x]==252;float mvx;std::memcpy(&mvx,&mvo[(y*N+x)*8],4);
-        if(wild_rig) {CHECK(x<N/4);CHECK(mvx==0.f);} else CHECK(mvx==(x<N/4?20.f:.001f));
+        if(wild_rig) {CHECK(x<N/4);CHECK(mvx==0.f);} else CHECK(mvx==(x<N/4?20.f:x<N/2?.6f:.001f));
         const bool got=m[y*N+x]>=252;CHECK(m[y*N+x]==0 || wild_rig || m[y*N+x]==(mode==1?255:mode==3?253:254));
         if(got && mode!=3 && x<N/4) CHECK(wild_rig);
         if(got!=want && std::abs(nx+.8)>.04 && std::abs(nx-.4)>.04 && std::abs(nx)>.04 && std::abs(std::abs(ny)-.6)>.04) ++wrong; // edges: rasterization rule

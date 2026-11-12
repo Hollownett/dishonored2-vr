@@ -1636,7 +1636,7 @@ static bool attachment_pose_installed=false;
 // are rewritten: hidden, contact or native palettes stay the upload's).
 struct ImageSkinSlot {std::atomic<std::uintptr_t> model{};std::atomic<int> kind{};std::atomic<bool> uploading{};};   // v864 kind: 0 keep the upload, 1 tracked palette, 2 contact raw palette
 static std::array<ImageSkinSlot,3> image_skin_slots{};
-static std::atomic<std::uint64_t> image_skin_writes[3]{},image_skin_misses[3]{},image_skin_busy{},image_skin_kinds[3][3]{};   // kinds: per slot, uploads of each kind
+static std::atomic<std::uint64_t> image_skin_writes[3]{},image_skin_misses[3]{},image_skin_busy{},image_skin_kinds[3][4]{},image_skin_gaps[3]{};   // kinds: per slot, uploads of each kind (v1213: 3 = VR arms held over a tick fallback); gaps: held, intended, unheld
 static bool weapon_place_enabled{};   // v864: build/weapon-image-place: held weapons moved to the image's hand at the render's begin (opt-in until a sim shows the render reads it)
 static std::atomic<std::uint64_t> weapon_place_writes{},weapon_place_skips{};
 // v930 (weapon_draw_place.hpp; default on, opt-out build/no-weapon-draw-place): a held weapon is placed in the hand each render draws, at its draw.
@@ -1715,7 +1715,8 @@ static std::string arm_flicker_json() {
         ",\"rejects_source\":"+std::to_string(c.rejects_source)+",\"rejects_other\":"+std::to_string(c.rejects_other)+",\"rebases\":"+std::to_string(attachment_pose.rebases())+"}"+
         ",\"image_skin\":{\"enabled\":"+(image_skin_enabled?"true":"false")+",\"hooked\":"+(skin_gpu_hooked?"true":"false")+",\"begins\":"+std::to_string(full_body.image_begins())+",\"writes\":["+std::to_string(image_skin_writes[0].load())+","+std::to_string(image_skin_writes[1].load())+","+std::to_string(image_skin_writes[2].load())+
         "],\"misses\":["+std::to_string(image_skin_misses[0].load())+","+std::to_string(image_skin_misses[1].load())+","+std::to_string(image_skin_misses[2].load())+"],\"busy\":"+std::to_string(image_skin_busy.load())+",\"rig_turns\":"+std::to_string(full_body.rig_turns())+
-        ",\"kinds\":[["+std::to_string(image_skin_kinds[0][0].load())+","+std::to_string(image_skin_kinds[0][1].load())+","+std::to_string(image_skin_kinds[0][2].load())+"],["+std::to_string(image_skin_kinds[1][0].load())+","+std::to_string(image_skin_kinds[1][1].load())+","+std::to_string(image_skin_kinds[1][2].load())+"],["+std::to_string(image_skin_kinds[2][0].load())+","+std::to_string(image_skin_kinds[2][1].load())+","+std::to_string(image_skin_kinds[2][2].load())+"]]"+
+        ",\"kinds\":[["+std::to_string(image_skin_kinds[0][0].load())+","+std::to_string(image_skin_kinds[0][1].load())+","+std::to_string(image_skin_kinds[0][2].load())+","+std::to_string(image_skin_kinds[0][3].load())+"],["+std::to_string(image_skin_kinds[1][0].load())+","+std::to_string(image_skin_kinds[1][1].load())+","+std::to_string(image_skin_kinds[1][2].load())+","+std::to_string(image_skin_kinds[1][3].load())+"],["+std::to_string(image_skin_kinds[2][0].load())+","+std::to_string(image_skin_kinds[2][1].load())+","+std::to_string(image_skin_kinds[2][2].load())+","+std::to_string(image_skin_kinds[2][3].load())+"]]"+
+        ",\"skin_gaps\":{\"held\":"+std::to_string(image_skin_gaps[0].load())+",\"intended\":"+std::to_string(image_skin_gaps[1].load())+",\"unheld\":"+std::to_string(image_skin_gaps[2].load())+"}"+ // v1213 per arm upload
         ",\"weapon_place\":["+std::to_string(weapon_place_writes.load())+","+std::to_string(weapon_place_skips.load())+"]}"+weapon_draw_json()+"}";
     return text;
 }
@@ -3463,17 +3464,28 @@ static bool image_skin_commit(void* model) noexcept {
         const auto m=reinterpret_cast<std::uintptr_t>(model);
         unsigned slot=3;for(unsigned i=0;i<3;++i) if(image_skin_slots[i].model.load(std::memory_order_relaxed)==m) slot=i;
         const int kind=slot<3?image_skin_slots[slot].kind.load():0;
-        if(slot>2 || kind==0 || !capturing.load(std::memory_order_acquire)) return false;
+        if(slot>2 || !capturing.load(std::memory_order_acquire)) return false;
+        // v1213 (v1212 stillprobe 8177-8179: three frames of the engine arm pose after a hitch, why "not active" = the tick fell back on a track
+        // aged sample): kind 0 is an intended gap (wheel / cutscene avatar, contact receipt, VR arms not active yet); kind 3 (VR arms in use, the
+        // tick fell back) draws this Present's image, else the last image held (image_skin_plan, arm_flicker.hpp)
+        if(kind==0) {if(slot<2 && full_body_requested && tracked_arms_requested) ++image_skin_gaps[1];return false;}
         if(image_skin_slots[slot].uploading.load()) {++image_skin_busy;image_skin_why=2;return false;}   // the tick is writing this skin right now
         std::array<float,15> live{};std::uintptr_t desc{};short joints{};
         if(!read_self(m+0x1860,live.data(),sizeof(live)) || !read_self(m+0x1fe8,&desc,8) || !desc || !read_self(desc+0x50,&desc,8) || !desc ||
            !read_self(desc+0x78,&joints,2) || joints!=(slot<2?69:20)) {++image_skin_misses[slot];image_skin_why=3;return false;}
         alignas(16) std::array<float,72*12> packed{};
         const auto pack=[&](const auto& palette) {for(std::size_t j=0;j<palette.size();++j) {const auto r=d2vr::rig::affine_rows(palette[j]);std::memcpy(&packed[j*12],r.data(),sizeof(r));}};
-        if(slot<2) {const auto pose=full_body.image_arm(slot,live,frames.load(),kind==2);if(!pose) {++image_skin_misses[slot];image_skin_why=4;return false;}pack(*pose);}
+        if(slot<2) {
+            const auto now=frames.load();const auto plan=d2vr::image_skin_plan(kind,full_body.image_fresh(now),true);
+            auto pose=plan==d2vr::ImageSkinPlan::write_fresh?full_body.image_arm(slot,live,now,kind==2):std::nullopt;
+            bool held=false;
+            if(!pose && kind==3) {pose=full_body.image_arm(slot,live,now,false,true);held=pose.has_value();++image_skin_gaps[held?0:2];}
+            if(!pose) {++image_skin_misses[slot];image_skin_why=4;return false;}
+            pack(*pose);if(held) image_skin_why=5;
+        }
         else {const auto pose=full_body.image_body(live,frames.load());if(!pose) {++image_skin_misses[slot];image_skin_why=4;return false;}pack(*pose);}
         reinterpret_cast<void(__fastcall*)(void*,const float*)>(image_base+0x25f200)(model,packed.data());
-        ++image_skin_writes[slot];image_skin_why=0;return true;
+        ++image_skin_writes[slot];if(image_skin_why!=5) image_skin_why=0;return true;
     } catch(...) {return false;}
 }
 // v1162: the skin-palette buffers of the rig's skinned models (both arms, the full-body avatar: the models the arm upload hook names), both
@@ -3653,7 +3665,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             // image_skin_slots is indexed by the ENGINE arm side, while this loop is per PHYSICAL hand. With both arms crossed
             // (mirrored dual wield) physical hand 1 is drawn by engine arm 0.
             const unsigned arm_side=(attachment_pose.cross_mask()&3u)==3u?hand^1u:hand;
-            if(image_skin_slots[arm_side].kind.load()!=1) {skip(0);continue;}   // a game clip or contact palette draws this arm: no image hand
+            if(const int k=image_skin_slots[arm_side].kind.load();k!=1 && k!=3) {skip(0);continue;}   // a game clip or contact palette draws this arm: no image hand (v1213: 3 = the image held)
             std::uintptr_t model{};std::uintptr_t identity{};
             if(copy.valid) {
                 std::uint32_t id{};
@@ -3751,7 +3763,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             for(unsigned hand=0;hand<2;++hand) {
                 if(raw_ptr[hand] || !thing[hand]) {held_bind.clear(hand);held_bound_entity[hand].store(0);continue;}
                 const unsigned arm_side=(attachment_pose.cross_mask()&3u)==3u?hand^1u:hand;
-                if(image_skin_slots[arm_side].kind.load()!=1) {++held_skip[hand][0];continue;}
+                if(const int k=image_skin_slots[arm_side].kind.load();k!=1 && k!=3) {++held_skip[hand][0];continue;} // v1213: 3 = the image held
                 std::uintptr_t model{};
                 if(!read_self(thing[hand]+0xf0,&model,sizeof model) || !model || !read_self(model+0x1860,raw[hand].data(),sizeof raw[hand])) {++held_skip[hand][1];continue;}
                 const auto image=full_body.image_world(hand,59,now);if(!image) {++held_skip[hand][2];continue;}
@@ -3826,7 +3838,9 @@ static std::array<float,12> skin_row59(void* model) noexcept {   // frame-order 
 static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) {
     const bool tracing=d2vr::frame_order::on.load(std::memory_order_relaxed);
     const auto before=tracing?skin_row59(model):std::array<float,12>{};const double hash_before=tracing?skin_row_hash(model):0.;
+    int skin_kind=0;for(const auto& s:image_skin_slots) if(s.model.load(std::memory_order_relaxed)==reinterpret_cast<std::uintptr_t>(model)) skin_kind=s.kind.load(); // v1213
     image_skin_why=1;const bool wrote=image_skin_enabled && image_skin_commit(model);const unsigned skin_why=image_skin_why; // v1212
+    const bool skin_vr=wrote || skin_kind==1 || skin_kind==2; // v1213: this upload draws a VR pose (the image, or the tick's own tracked palette)
     // v1210 probe: the rig model's CPU palette right before the engine's upload, to compare with the one read after it (RigMask slot race)
     static thread_local std::vector<std::uint8_t> before_bytes;before_bytes.clear();int probe_slot=-1;
     if(d2vr::RigMask::probe_on.load(std::memory_order_relaxed)) try {
@@ -3856,7 +3870,7 @@ static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) 
                 read_self(m+0x2008+static_cast<std::uintptr_t>(index^1)*0x38,&other,8);
                 const bool race=cpu_ok && before_bytes.size()==bytes.size() && std::memcmp(before_bytes.data(),bytes.data(),bytes.size())!=0; // v1210
                 d2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame,cpu_ok?bytes.data():nullptr,cpu_ok?bd.ByteWidth:0u,copied!=0,
-                    d2vr::rig::pointer(other)?reinterpret_cast<ID3D11Buffer*>(other):nullptr,!image_skin_enabled || wrote,race,skin_why);
+                    d2vr::rig::pointer(other)?reinterpret_cast<ID3D11Buffer*>(other):nullptr,!image_skin_enabled || wrote,race,skin_why,skin_vr);
             }
             break;
         }
@@ -4320,7 +4334,8 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
     const int image_slot=side<2?static_cast<int>(side):(count==20 && body_binding && body_binding->model==reinterpret_cast<std::uintptr_t>(model))?2:-1;
     if(image_slot>=0) {auto& slot=image_skin_slots[static_cast<unsigned>(image_slot)];slot.model.store(reinterpret_cast<std::uintptr_t>(model));slot.uploading.store(true);}
     original_arm_upload(model,submitted,count);
-    if(image_slot>=0) {auto& slot=image_skin_slots[static_cast<unsigned>(image_slot)];const int kind=submitted!=source?image_kind:0;
+    // v1213: an arm upload of the full body (VR arms in use) that fell back to the engine pose is kind 3: the image skin draws the image over it
+    if(image_slot>=0) {auto& slot=image_skin_slots[static_cast<unsigned>(image_slot)];const int kind=submitted!=source?image_kind:image_slot<2 && full && tracked_arms_requested && !full_body_stopping.load()?3:0;
         slot.kind.store(kind);slot.uploading.store(false);++image_skin_kinds[static_cast<unsigned>(image_slot)][static_cast<unsigned>(kind)];}
     if(image_slot>=0 && d2vr::frame_order::on.load(std::memory_order_relaxed)) d2vr::frame_order::note('W',static_cast<std::uint8_t>(image_slot),{skin_row_hash(model)});
     if(diagnostic) {

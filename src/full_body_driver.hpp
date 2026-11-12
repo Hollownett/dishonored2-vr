@@ -398,14 +398,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         image_valid_=false;
         if(!have_track_ || !have_native_body_ || !solve_locked(0,false)) return;
-        image_out_=out_;image_fit_=fit_revision_;image_frame_=frame;image_valid_=true;++image_begins_;
+        image_out_=out_;image_fit_=fit_revision_;image_frame_=frame;image_valid_=true;image_held_ok_=true;++image_begins_;
     }
     // Render jobs, at the GPU skin copy (0x25f930): the image's joints in the frame the model is drawn in (its live model+0x1860).
     // frame: the Present counter now; the image must have begun in this interval (a render without a begin keeps the tick's upload).
     // raw: the full-hand-contact "raw reach" pose (Output::raw_arm), which an empty hand's upload submits while its contact is prepared.
-    std::optional<std::array<Transform,69>> image_arm(unsigned side,const std::array<float,15>& live,std::uint64_t frame,bool raw=false) const {
+    // v1213 `held`: without this Present's image, the last image solved since the last clear() (same fit), re-expressed in the live frame: the
+    // hands stay where they were last drawn instead of the engine's arm pose (dxgi_probe image_skin_plan write_held)
+    std::optional<std::array<Transform,69>> image_arm(unsigned side,const std::array<float,15>& live,std::uint64_t frame,bool raw=false,bool held=false) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(side>1 || !image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_) return {};
+        if(side>1 || image_fit_!=fit_revision_ || !(held?image_held_ok_:image_valid_ && image_frame_==frame)) return {};
         const auto& joints=raw?image_out_.raw_arm[side]:image_out_.arm[side];if(joints.size()!=69) return {};
         try {const auto f=frame_of(live);return export_arm(side,joints,f,f,image_out_);} catch(...) {return {};}
     }
@@ -415,6 +417,7 @@ public:
         try {const auto f=frame_of(live);return export_body(image_out_,f,f);} catch(...) {return {};}
     }
     std::uint64_t image_begins() const {std::lock_guard<std::mutex> lock(mutex_);return image_begins_;}
+    bool image_fresh(std::uint64_t frame) const {std::lock_guard<std::mutex> lock(mutex_);return image_valid_ && image_frame_==frame && image_fit_==fit_revision_;} // v1213
     // v861: the image's solved world joint (as its render draws it), for an item placed before the next image: Nothing without an image this interval.
     std::optional<Xf> image_world(unsigned side,unsigned joint,std::uint64_t frame) const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -435,7 +438,7 @@ public:
         return image_out_.arm[side][joint].p;
     }
     Xf attachment_target(unsigned side,const Xf& grip) const {std::lock_guard<std::mutex> lock(mutex_);return hand_target(side&1u,grip);}   // the attachment joint a grip asks for (frame-order trace)
-    void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();image_valid_=false;have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;have_xr_latest_=false;have_heading_last_=have_heading_at_publish_=have_heading_solved_=false;
+    void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();image_valid_=false;image_held_ok_=false;have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;have_xr_latest_=false;have_heading_last_=have_heading_at_publish_=have_heading_solved_=false;
         have_native_arm_[0]=have_native_arm_[1]=false;native_={};for(auto& c:gun_clip_) c.clear();for(auto& c:gun_clip_first_) c.clear();legacy_gun_clip_.clear();gun_clip_have_last_=false;gun_clip_calm_=0;gun_clip_type_=0;clip_fallbacks_={};last_={};solved_track_={};diag_={};solver_.reset();}
     void clear_calibration() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -740,7 +743,7 @@ private:
         }
         return out;
     }
-    body::Output image_out_{};bool image_valid_{};std::uint64_t image_fit_{},image_begins_{},image_frame_{};
+    body::Output image_out_{};bool image_valid_{},image_held_ok_{};std::uint64_t image_fit_{},image_begins_{},image_frame_{};
     // v1104: the baked engine idle clip per type (model space, unscaled), built once. clip_for_type_locked picks the best authored
     // clip for a type: the calm captured one, then the first live frame, then the engine's own idle clip; never another type's.
     static const std::vector<Xf>& baked_clip(unsigned type) {

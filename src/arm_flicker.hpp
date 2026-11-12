@@ -6,6 +6,17 @@
 #include <string>
 
 namespace d2vr {
+// v1213: what the image skin does with a rig upload (dxgi_probe image_skin_commit). kind = the tick upload's image kind: 0 the engine's or an
+// intended palette (wheel / cutscene avatar, contact receipt, VR arms not active), 1 tracked, 2 contact raw, 3 (v1213) VR arms in use but the
+// tick fell back to the engine pose (track aged after a hitch, solve or publish refused). fresh: this Present's image exists; held: an earlier
+// image of the same fit exists. The engine's arm pose is never kept for kind 3 while any image exists (the v1212 1-3 frame arm vanish).
+enum class ImageSkinPlan : unsigned {keep_upload,write_fresh,write_held,gap_unheld};
+inline ImageSkinPlan image_skin_plan(int kind,bool fresh,bool held) noexcept {
+    if(kind<=0 || kind>3) return ImageSkinPlan::keep_upload;               // intended (or unknown): the upload stays
+    if(fresh) return ImageSkinPlan::write_fresh;
+    if(kind==3) return held?ImageSkinPlan::write_held:ImageSkinPlan::gap_unheld;
+    return ImageSkinPlan::keep_upload;                                     // kind 1/2 without an image: the tick's own tracked palette (a VR pose)
+}
 // Counts how often a hand (and the sword in it) stops being the tracked pose and falls back to the native arm, per side.
 // Pure counting, no behaviour: note() is called once per arm upload with whether the tracked palette was submitted and,
 // when it was not, why. gate_flips are tracked<->fallback transitions; fallback_runs_max_frames is the longest run of

@@ -429,7 +429,14 @@ print('PASS: v1211 rig ring slots from the drawn current palette')
 rm8 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om8 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 assert 'if(rows && r.rows[k]!=rows) {pair_rows_mismatch_.fetch_add(1,std::memory_order_relaxed);return nullptr;}' in rm8 and 'r.rows[k]=rows;' in rm8
-assert 'rows_own,rows_own?hash64(prev)|1u:0u);' in om8 and 'RigMask::capture_drawn(c,view.frame,hash64(cur)|1u);' in om8
+assert 'rows_own,rows_own?hash64(prev)|1u:0u,' in om8 and 'RigMask::capture_drawn(c,view.frame,hash64(cur)|1u);' in om8
 assert 'if(o==cert_fallback && tl_content_why_==5) o=cert_na;' in om8 and 'now-newest>PrevMvpTable::gens;' in om8
-assert '!image_skin_enabled || wrote,race,skin_why);' in probe and 'dump(p,"wild");' in rm8
+assert '!image_skin_enabled || wrote,race,skin_why,' in probe and 'dump(p,"wild");' in rm8
 print('PASS: v1212 rig pair from one draw, wild-render dumps, no-render draws n/a')
+# v1213: VR arms never show the engine pose after a tick fallback (kind 3: image or held image), VR-pose switch = zero motion, wild bound = render width
+rm9 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+om9 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'image_slot<2 && full && tracked_arms_requested && !full_body_stopping.load()?3:0;' in probe and 'd2vr::image_skin_plan(kind,full_body.image_fresh(now),true);' in probe
+assert 'r.vr[n]!=r.vr[k]) {skin_switch_.fetch_add(1,std::memory_order_relaxed);return nullptr;}' in rm9 and 'const float b=k.z;' in rm9
+assert om9.index('RigMask::capture_drawn(c,view.frame,hash64(cur)|1u);') < om9.index('const bool own=RigMask::previous_palette(')
+print('PASS: v1213 held VR arms, skin switch zero motion, wild bound')

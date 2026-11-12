@@ -40,6 +40,9 @@ namespace d2vr {
 // v1209: the bound is a quarter of the render width (no hand or body point crosses a quarter of the eye's view between two renders of that eye:
 // 5 m/s at 0.3 m is ~340 px of 1922; the measured wild vectors are 40,000+ px). Such a pixel is marked 252 (rig, no own motion) and
 // RigMask::guard rewrites its motion vector to zero before the motion pass and the upscaler read it.
+// v1213: the bound is the render width (v1212 swing 5331/5332: an exact pair, the right arm moved 0.15-0.23 m and up to 50 deg in two engine
+// frames, 124k rig pixels past a quarter width were TRUE motion the guard zeroed). Past a whole render width a vector leaves the view: TAA
+// cannot use it, and the start-up/vanish garbage (40,000 px) stays caught.
 inline constexpr char rig_mask_copy_source[]=
     "Texture2D<float> z:register(t0);Texture2D<float2> r:register(t1);Texture2D<float2> mv:register(t2);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
     "cbuffer C:register(b0){float4 k;};groupshared uint g[4];"
@@ -50,7 +53,7 @@ inline constexpr char rig_mask_copy_source[]=
     "o[i.xy]=held?253:own?255:rig?254:0;"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
     "if(own) InterlockedAdd(g[2],1);"
-    "const float2 m=mv.Load(int3(i.xy,0))*k.zw;const float b=0.25*k.z;const bool wild=rig && !held && !(dot(m,m)<=b*b);if(wild) {o[i.xy]=252;InterlockedAdd(g[3],1);}"
+    "const float2 m=mv.Load(int3(i.xy,0))*k.zw;const float b=k.z;const bool wild=rig && !held && !(dot(m,m)<=b*b);if(wild) {o[i.xy]=252;InterlockedAdd(g[3],1);}"
     "GroupMemoryBarrierWithGroupSync();if(t<4 && g[t]) n.InterlockedAdd(t*4,g[t]);}";
 // eps for a depth view format: D24 one step is 2^-24 (the replay's float z vs the stored 24-bit value: half a step + rounding); float: 4 ulp.
 inline void rig_mask_eps(DXGI_FORMAT depth_srv,float& absolute,float& relative) noexcept {
@@ -169,7 +172,9 @@ public:
     // v1206: `frame` = the render whose palette is this eye's previous one (the draw's receipt: previous render's engine frame; ~0u unknown)
     // v1212: `rows` = hash of the previous rows the caller will bind (the chain's rows of render `frame`): the slot is taken only when its
     // capturing draw drew exactly those rows, so palette and rows come from ONE draw of that render (else zero motion, pair_rows_mismatch)
-    static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own,std::uint64_t rows=0) noexcept {
+    // v1213: `now` = this render's frame: its slot (captured first, at this draw) and the previous one must both hold a VR pose or both not
+    // (skin_vr at capture); a switch (VR arms becoming active at start-up, or ending) is a real discontinuity: zero motion, skin_switch
+    static bool previous_palette(ID3D11DeviceContext* c,int eye,std::uint32_t frame,bool rows_own,std::uint64_t rows=0,std::uint32_t now=~0u) noexcept {
         tl_own_=false;
         if(!tl_rig_ || !c) return false;
         if(!tl_prepass_ || !tl_current_) {
@@ -185,7 +190,7 @@ public:
         }
         ID3D11ShaderResourceView* bind=tl_current_;bool own=false;
         if(rows_own && eye>=0) {
-            if(ID3D11ShaderResourceView* v=ring_view(c,tl_model_,frame,rows)) {bind=v;own=true;}
+            if(ID3D11ShaderResourceView* v=ring_view(c,tl_model_,frame,rows,now)) {bind=v;own=true;}
             else no_history_.fetch_add(1,std::memory_order_relaxed);
         }
         if(!tl_saved_set_) {c->VSGetShaderResources(tl_prev_slot_,1,&tl_saved_t0_);tl_saved_set_=true;tl_saved_slot_=tl_prev_slot_;}
@@ -204,8 +209,10 @@ public:
     // engine's upload differs from the one read just before it (something wrote it meanwhile); counted (status slot_no_commit, slot_races).
     // v1212: `why` = the image skin's outcome for this upload (dxgi_probe image_skin_commit: 0 wrote, 1 not active, 2 busy, 3 model unreadable,
     // 4 no image pose for this Present), logged per engine frame (skin_log_) for the wild-render notes
-    static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame,const void* cpu,UINT cpu_bytes,bool uploaded,ID3D11Buffer* other=nullptr,bool commit=true,bool race=false,unsigned why=7) noexcept {
+    // v1213: `vr` = this upload draws a VR pose (image skin wrote, or the tick's tracked palette): kept per model for capture_drawn
+    static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame,const void* cpu,UINT cpu_bytes,bool uploaded,ID3D11Buffer* other=nullptr,bool commit=true,bool race=false,unsigned why=7,bool vr=true) noexcept {
         if(!c || !current || model>=ring_.size() || !motion.load(std::memory_order_relaxed)) return;
+        skin_vr_[model].store(vr,std::memory_order_relaxed);
         Ring& r=ring_[model];
         D3D11_BUFFER_DESC d{};current->GetDesc(&d);
         ID3D11Device* owner{};current->GetDevice(&owner);if(owner) owner->Release(); // identity only
@@ -248,7 +255,7 @@ public:
         if(!r.ready.load(std::memory_order_relaxed) || r.tag[k].load(std::memory_order_relaxed)==frame || !r.slot[k]) return;
         if(r.bytes!=d.ByteWidth || r.device!=device.Get()) {capture_refused_.fetch_add(1,std::memory_order_relaxed);return;}
         r.tag[k].store(~0u,std::memory_order_release);
-        c->CopyResource(r.slot[k].Get(),cur.Get());r.rows[k]=rows;
+        c->CopyResource(r.slot[k].Get(),cur.Get());r.rows[k]=rows;r.vr[k]=skin_vr_[tl_model_].load(std::memory_order_relaxed); // v1213
         r.tag[k].store(frame,std::memory_order_release);r.last.store(frame,std::memory_order_relaxed);rotations_.fetch_add(1,std::memory_order_relaxed);
     }
     // v1208 diagnostic: every 32nd uploading frame, both engine wrappers are read back and compared with the CPU palette just uploaded (status
@@ -371,7 +378,7 @@ public:
         // v1211: slot_captures = slots written at the draw (capture_drawn), capture_refused = size/device mismatch; pal = slot == the t1 the eye's
         // previous render drew (prev_unknown: that render had no probe, counted as pal!)
         o<<",\"nested_scopes\":"<<nested_scopes_.load()<<",\"slot_races\":"<<races_.load()<<",\"slot_no_commit\":"<<no_commit_.load()
-         <<",\"slot_captures\":"<<rotations_.load()<<",\"capture_refused\":"<<capture_refused_.load()<<",\"pair_rows_mismatch\":"<<pair_rows_mismatch_.load() // v1212
+         <<",\"slot_captures\":"<<rotations_.load()<<",\"capture_refused\":"<<capture_refused_.load()<<",\"pair_rows_mismatch\":"<<pair_rows_mismatch_.load()<<",\"skin_switch\":"<<skin_switch_.load() // v1212, v1213
          <<",\"dumps\":["<<dumps_wild_<<','<<dumps_clean_<<']'
          <<",\"draw_probe\":{\"on\":"<<(probe_on.load()?"true":"false")<<",\"fields\":\"still: pal!cb!,pal!cb,pal cb!,pal cb; wild: same\",\"tally\":[";
         for(unsigned i=0;i<probe_tally_.size();++i) o<<(i?",":"")<<probe_tally_[i].load();
@@ -445,7 +452,7 @@ private:
     // v1206: rig_ring_slots palettes per model, slot frame%rig_ring_slots written once by that render's skin copy and tagged with its frame
     struct Ring {std::vector<std::uint8_t> upload;std::array<bool,rig_ring_slots> from_upload{}; // v1208: the last uploaded CPU palette
         std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,rig_ring_slots> slot;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,rig_ring_slots> view;
-        std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};std::array<std::uint64_t,rig_ring_slots> rows{};UINT bytes{}; // v1212 rows: the capturing draw's current-rows hash (under mutex_)
+        std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};std::array<std::uint64_t,rig_ring_slots> rows{};std::array<bool,rig_ring_slots> vr{};UINT bytes{}; // v1212 rows: the capturing draw's current-rows hash (under mutex_)
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};
         void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);from_upload[i]=false;}upload.clear();run.store(0);last.store(~0u);}};
     // v1210 draw-time probe (diagnostics): for the first own rig draw of each model in a render, right after the engine's draw and on its
@@ -460,7 +467,7 @@ private:
     struct SkinFrame {std::uint32_t frame{~0u};std::uint8_t calls[3]{},uploads[3]{},commits[3]{},why[3]{};std::uint64_t turns{};};
     inline static std::array<SkinFrame,64> skin_log_{};
     inline static unsigned dumps_wild_{},dumps_clean_{};inline static std::uint64_t dump_clean_display_{~0ull},probes_seen_{};
-    inline static std::atomic<std::uint64_t> pair_rows_mismatch_{};
+    inline static std::atomic<std::uint64_t> pair_rows_mismatch_{},skin_switch_{};inline static std::array<std::atomic<bool>,3> skin_vr_{}; // v1213
     static std::string skin_json(std::uint32_t from,std::uint32_t to) { // under mutex_
         std::ostringstream o;o<<'[';bool first=true;
         for(std::uint32_t f=from;f<=to && f-from<16;++f) {const SkinFrame& s=skin_log_[f%skin_log_.size()];if(s.frame!=f) continue;
@@ -495,7 +502,7 @@ public:
 private:
     inline static std::array<Probe,32> probes_{};inline static unsigned probe_next_{};
     inline static std::array<std::atomic<std::uint64_t>,8> probe_tally_{}; // [wild*4 + pal_eq*2 + cb_eq]
-    inline static std::array<std::string,12> probe_notes_{};inline static unsigned probe_notes_n_{};
+    inline static std::array<std::string,120> probe_notes_{};inline static unsigned probe_notes_n_{}; // v1213: every wild display of a run (was 12)
     inline static std::atomic<std::uint64_t> races_{},no_commit_{},nested_scopes_{},probe_dropped_{},capture_refused_{},probe_prev_unknown_{};
     inline static thread_local unsigned tl_scope_depth_{};inline static thread_local std::uint64_t tl_probe_display_{~0ull};inline static thread_local std::vector<std::uint8_t> tl_probe_cb_;
     static bool make_staging(ID3D11Device* device,ID3D11Resource* src,Microsoft::WRL::ComPtr<ID3D11Buffer>& out) noexcept {
@@ -603,7 +610,7 @@ private:
     inline static std::atomic<std::uint64_t> own_pairs_{},zero_pairs_{},no_history_{},unpaired_{},rotations_{},ring_restarts_{},ring_repeats_{},foreign_ours_{},ring_late_{},ring_young_{};
     // P's view (made like the draw's current palette view) when the model's ring holds this eye's previous render, else null
     // Held by the caller's thread until the draw's Scope ends (a reset may release the ring meanwhile). ~13 rig draws a render: the lock is cheap.
-    static ID3D11ShaderResourceView* ring_view(ID3D11DeviceContext* c,unsigned model,std::uint32_t frame,std::uint64_t rows) noexcept {
+    static ID3D11ShaderResourceView* ring_view(ID3D11DeviceContext* c,unsigned model,std::uint32_t frame,std::uint64_t rows,std::uint32_t now=~0u) noexcept {
         if(model>=ring_.size()) return nullptr;
         Ring& r=ring_[model];
         if(!r.ready.load(std::memory_order_acquire)) return nullptr;
@@ -614,6 +621,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         if(!r.ready.load(std::memory_order_relaxed) || r.tag[k].load(std::memory_order_relaxed)!=frame) return nullptr;
         if(rows && r.rows[k]!=rows) {pair_rows_mismatch_.fetch_add(1,std::memory_order_relaxed);return nullptr;} // v1212: not the slot draw's rows
+        if(const unsigned n=now%rig_ring_slots;now!=~0u && r.tag[n].load(std::memory_order_relaxed)==now && r.vr[n]!=r.vr[k]) {skin_switch_.fetch_add(1,std::memory_order_relaxed);return nullptr;} // v1213
         ID3D11Device* device{};c->GetDevice(&device);if(device) device->Release();
         if(device!=r.device) return nullptr; // the ring is another device's
         if(!r.view[k] && r.slot[k]) {

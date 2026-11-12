@@ -1242,8 +1242,9 @@ private:
             const bool rows_own=kind==PrevMvpTable::other_last;
             RigMask::tl_bound_slot_=~0u;RigMask::tl_bound_tag_=~0u;RigMask::tl_bound_buffer_=0;
             // v1212: the slot of the previous render is taken only together with the rows its capturing draw drew (hash of `prev` = the chain's rows)
-            const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own,rows_own?hash64(prev)|1u:0u);
+            // v1213: this render's slot first (its VR-pose state is compared with the previous slot's in previous_palette)
             if(have_render) RigMask::capture_drawn(c,view.frame,hash64(cur)|1u); // v1211: this render's slot = the current palette this draw binds (t1), in GPU order
+            const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own,rows_own?hash64(prev)|1u:0u,have_render?view.frame:~0u);
             if(have_render) rig_record(c,view.display,cur,engine,own?prev:cur,static_cast<unsigned>(kind),own,chained);
             draw_view_note(c,have_render?1u:0u);
             // status rig_zero_why: [first frame (cur == prev), chain miss, chain unproven (the second hop), palette (no slot tagged with the
