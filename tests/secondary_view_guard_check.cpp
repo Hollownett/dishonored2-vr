@@ -2,6 +2,7 @@
 // v1257: per-eye lens logic and the shadow share's handling of a secondary pass (src/shadow_share.hpp Runtime over the pure Model).
 #include "secondary_view_guard.hpp"
 #include "shadow_share.hpp"
+#include "weapon_draw_place.hpp"   // v1259: the per-eye placement census
 #include <cstdio>
 #include <cstdlib>
 #define CHECK(x) do {if(!(x)) {std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#x);std::exit(1);}} while(0)
@@ -136,6 +137,27 @@ int main() {
         ss::Runtime rt;rt.configure(false,false);rt.set_installed(true);
         rt.on_secondary_begin(B,true,true);CHECK(view_jobs_untouched(rt,B));rt.on_secondary_end();
         CHECK(rt.stats().secondary_writer_jobs==0 && rt.stats().fallbacks==0);
+    }
+    {   // v1259 per-eye placement census: a render's placed draws by eye, split by whether the render had a lens pass; "one publish" = both eyes
+        // placed from the same publication. v1257's failure (eye 1 never placed while the lens is open) shows as lens [.., eye0_only>0, ..].
+        namespace wd=d2vr::weapon_draw;
+        CHECK(wd::Place::eye_slot(16u|32u|9u)==0 && wd::Place::eye_slot(16u|1u)==1 && wd::Place::eye_slot(32u)==2 && wd::Place::eye_slot(9u)==3);
+        std::array<float,15> raw{};raw[3]=raw[7]=raw[11]=1.f;raw[12]=raw[13]=raw[14]=1.f;   // origin 0, unit axes, unit scales
+        const auto bound=wd::identity();
+        const auto publish=[&](std::uint32_t frame,bool lens) {
+            wd::Place::stage(0,wd::Place::kind_prop);wd::Place::render_secondary(lens);
+            const std::array<const float*,2> rp{raw.data(),nullptr};const std::array<const wd::Mat*,2> bp{&bound,nullptr};
+            wd::Place::publish_bound(frame,rp,bp,{.5,0.},{0x1234,0});
+        };
+        wd::Result e0;e0.side=0;e0.eye=0;wd::Result e1=e0;e1.eye=1;
+        publish(100,true);wd::Place::census(e0,true,100);wd::Place::census(e1,true,100);    // lens render, both eyes, one publish
+        publish(101,true);wd::Place::census(e0,true,101);                                   // lens render, eye 1 unplaced (v1257)
+        publish(102,false);wd::Place::census(e0,false,102);wd::Place::census(e1,false,102); // plain render, both, one publish
+        publish(103,false);wd::Place::census(e0,false,103);wd::Place::census(e1,false,102); // both, but eye 1 from another publish
+        publish(104,false);                                                                 // rolls 103
+        CHECK(wd::Place::eyes_json()=="{\"plain\":[2,0,0,1],\"lens\":[1,1,0,1]}");
+        wd::Result miss;miss.side=-1;miss.near_side=0;wd::Place::census(miss,false,104);publish(105,false);   // nothing placed: no eye slot
+        CHECK(wd::Place::eyes_json()=="{\"plain\":[2,0,0,1],\"lens\":[1,1,0,1]}");
     }
     std::printf("PASS secondary_view_guard\n");
     return 0;

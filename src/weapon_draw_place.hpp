@@ -815,14 +815,24 @@ public:
         staged_[s].kind=kind<kinds?kind:0u;
         for(unsigned k=0;extra && k<n && staged_[s].extras<Side::max_extra;++k) staged_[s].extra[staged_[s].extras++]=extra[k];
     }
+    // v1259 per-eye census (user v1257: a held prop at another position in one eye while the Timepiece is open): a render's placed draws by eye
+    // (census bits 16 eye 0, 32 eye 1): 0 both eyes, 1 eye 0 only, 2 eye 1 only, 3 neither named. Split by whether the render had a secondary
+    // pass (render_secondary, set by the publisher before publish_bound); slot 3 of the status = renders placed in both eyes from ONE publish.
+    static constexpr unsigned eye_slot(unsigned bits) noexcept {return (bits&16u) && (bits&32u)?0u:(bits&16u)?1u:(bits&32u)?2u:3u;}
+    static void render_secondary(bool on) noexcept {secondary_next_.store(on,std::memory_order_relaxed);}
     // ObjectMotion, per draw that reached the placement (rig draws excluded): its result and whether previous rows were written for it.
-    static void census(const Result& r,bool with_prev) noexcept {
+    // frame: the publish the draw was placed from (paired passes; 0 = not recorded).
+    static void census(const Result& r,bool with_prev,std::uint32_t frame=0) noexcept {
         const int s=r.side>=0?r.side:r.near_side;if(s<0 || s>1) return;
         const unsigned k=kind_[static_cast<unsigned>(s)].load(std::memory_order_relaxed);
         auto& d=draws_[k];
         if(r.side>=0) {
             d[0].fetch_add(1,std::memory_order_relaxed);if(with_prev) d[1].fetch_add(1,std::memory_order_relaxed);if(r.extra) d[2].fetch_add(1,std::memory_order_relaxed);
             bits_[static_cast<unsigned>(s)].fetch_or(8u|(with_prev?3u:1u),std::memory_order_relaxed);
+            if(r.eye==0 || r.eye==1) {   // v1259
+                bits_[static_cast<unsigned>(s)].fetch_or(16u<<r.eye,std::memory_order_relaxed);
+                if(frame) {std::uint32_t none=0;eye_frame_[static_cast<unsigned>(s)][static_cast<unsigned>(r.eye)].compare_exchange_strong(none,frame+1,std::memory_order_relaxed);}
+            }
         } else {
             d[r.near_like?3:4].fetch_add(1,std::memory_order_relaxed);
             bits_[static_cast<unsigned>(s)].fetch_or(8u|(r.near_like?4u:0u),std::memory_order_relaxed);   // v1254: bit 3 = a draw reached the placement at all
@@ -883,7 +893,14 @@ public:
         // v1239: predicted matches, how far the draw's implied pose was from the latest read (mm edges 1 2 5 10 20 50 100 200; deg .25 .5 1 2 5 10 20 45)
         o+=",\"predicted_offset\":{\"mm\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::to_string(pred_mm_[i].load());
         o+="],\"deg\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::to_string(pred_deg_[i].load());
-        return o+"]},\"children_published\":"+std::to_string(children_.load())+'}';
+        o+="]},\"children_published\":"+std::to_string(children_.load());
+        // v1259: renders with a held thing placed, by eye [both, eye 0 only, eye 1 only, both from one publish], with / without a secondary pass
+        return o+",\"eyes\":"+eyes_json()+'}';
+    }
+    static std::string eyes_json() {
+        std::string o="{";
+        for(unsigned l=0;l<2;++l) {o+=l?"],\"lens\":[":"\"plain\":[";for(unsigned i=0;i<4;++i) o+=(i?",":"")+std::to_string(eyes_[l][i].load());}
+        return o+"]}";
     }
     static void clear() noexcept {RigidLocal::clear();for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};older_={};older2_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
@@ -1178,6 +1195,8 @@ private:
     inline static std::array<Staged,2> staged_{};
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
     inline static std::array<std::uint32_t,2> census_frame_{};
+    inline static std::atomic<bool> secondary_next_{};inline static std::array<bool,2> census_secondary_{};   // v1259 (publisher thread)
+    inline static std::array<std::array<std::atomic<std::uint32_t>,2>,2> eye_frame_{};inline static std::array<std::array<std::atomic<std::uint64_t>,4>,2> eyes_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,5>,kinds> renders_{};   // [renders, mixed, no_mv, unplaced, unplaced without any draw]
     inline static std::array<std::array<std::atomic<std::uint64_t>,5>,kinds> draws_{};     // [placed, with_prev, child, near_like, near_other]
     inline static std::atomic<std::uint64_t> children_{};
@@ -1188,6 +1207,10 @@ private:
         if(census_frame_[s]==frame+1) return;
         census_frame_[s]=frame+1;
         const unsigned k=kind_[s].load(std::memory_order_relaxed),b=bits_[s].exchange(0,std::memory_order_relaxed);
+        const bool lens=census_secondary_[s];census_secondary_[s]=secondary_next_.load(std::memory_order_relaxed);   // v1259: the rolled render's flag; the new one's
+        const std::uint32_t f0=eye_frame_[s][0].exchange(0,std::memory_order_relaxed),f1=eye_frame_[s][1].exchange(0,std::memory_order_relaxed);
+        if(k && k<kinds && (b&1u)) {const unsigned slot=eye_slot(b);if(slot<3) eyes_[lens?1:0][slot].fetch_add(1,std::memory_order_relaxed);
+            if(slot==0 && f0 && f0==f1) eyes_[lens?1:0][3].fetch_add(1,std::memory_order_relaxed);}
         if(!k || k>=kinds) return;
         auto& r=renders_[k];r[0].fetch_add(1,std::memory_order_relaxed);
         if((b&1u) && (b&4u)) r[1].fetch_add(1,std::memory_order_relaxed);

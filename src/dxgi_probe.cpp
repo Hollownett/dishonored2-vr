@@ -4014,6 +4014,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 else wd::HandLock::idle(hand);
             }
         }
+        d2vr::weapon_draw::Place::render_secondary(lens_stats.last_frame.load()==frames.load());   // v1259: this render had a lens pass (per-eye census)
         d2vr::weapon_draw::Place::publish_bound(engine_frame,raw_ptr,bound_ptr,reach,place_ids,-1,body_ptrs);   // v1072: ids let a draw composed from the previous read F match; v1255: and the body frame
     } catch(...) {}
 }
@@ -6788,20 +6789,26 @@ void lens_note_pass_begin(std::uintptr_t view) noexcept {
     } catch(...) {}
 }
 // One secondary render (0x366590) drawn for pass_eye (0/1; 2 = head centre), then the borrowed eye view re-created. True when it began.
+static bool lens_isolated=true;   // v1259: build/no-lens-isolation = v1257 (the lens pass's jobs and its borrowed view seen as the eye's)
 static bool lens_pass(void* renderer,void* entry,std::uintptr_t view,int pass_eye,bool between) noexcept {
     lens_pass_eye=pass_eye;lens_between=between;lens_began=false;lens_pass_camera={};lens_shadow_open=false;
     lens_view=view;lens_active=true;
+    // v1259: from the lens Setup until the replay re-created the eye, the borrowed view holds the lens camera and its jobs are the lens's
+    // (RenderPassMap::secondary_view, ObjectMotion::note_borrowed_view): no per-render eye state may be taken from either.
+    if(lens_isolated) {d2vr::RenderPassMap::secondary_view=view;d2vr::ObjectMotion::note_borrowed_view(view);}
     original_lens_render(renderer,entry);
+    d2vr::RenderPassMap::secondary_view=0;
     lens_active=false;lens_between=false;
     if(lens_shadow_open) shadow_share.on_secondary_end();
     // v1248: only a pass whose Begin ran is a lens pass (the engine returns early on main view +0x48 with +0x88 still set): no replay, no hold
     const bool began=lens_began.exchange(false);
-    if(!began) return false;
+    if(!began) {d2vr::ObjectMotion::note_borrowed_view(0);return false;}
     const auto k=static_cast<std::size_t>(pass_eye);
     lens_stats.last_pass_eye=pass_eye;++lens_stats.passes[k];++(lens_pass_camera.match?lens_stats.camera_match:lens_stats.camera_mismatch)[k];
     if(lens_shadow_open) {const auto now=shadow_share.stats();   // the lens view's own PREPARE ran inside the pass and no share action touched its jobs
         ++(now.secondary_prepare_jobs>lens_shadow_before.secondary_prepare_jobs && now.secondary_actions==lens_shadow_before.secondary_actions?lens_stats.shadow_ok:lens_stats.shadow_bad)[k];}
     lens_replay(view);
+    d2vr::ObjectMotion::note_borrowed_view(0);
     return true;
 }
 void __fastcall lens_render_hook(void* renderer,void* entry) {
@@ -6890,6 +6897,10 @@ static std::string lens_status_json() {
      <<",\"shadow_ok\":"<<list(lens_stats.shadow_ok)<<",\"shadow_bad\":"<<list(lens_stats.shadow_bad)<<",\"second_refused\":"<<list(lens_stats.second_refused)
      <<",\"composited_own\":"<<list(lens_stats.composited_own)<<",\"composited_other\":"<<list(lens_stats.composited_other)
      <<",\"pair_frames\":"<<lens_stats.pair_frames.load()<<",\"rearm_busy\":"<<lens_stats.rearm_busy.load()<<'}'
+     // v1259: the lens passes kept out of the eyes' draw-time state: [lens draws left as the engine made them, lens per-view writes not classified,
+     // snapshots of the borrowed view skipped]; held_eyes = renders with a held thing placed [both eyes, eye 0 only, eye 1 only, both from one publish]
+     <<",\"isolation\":{\"on\":"<<(lens_isolated?"true":"false")<<",\"draws_writes_snapshots\":["<<d2vr::ObjectMotion::secondary_counts()[0]<<','
+     <<d2vr::ObjectMotion::secondary_counts()[1]<<','<<d2vr::ObjectMotion::secondary_counts()[2]<<"]},\"held_eyes\":"<<d2vr::weapon_draw::Place::eyes_json()
      <<",\"owner_cameras\":"<<lens_stats.owner_cameras.load()<<",\"camera_follows\":"<<(camera.follows?"true":"false")
      <<",\"translation\":["<<camera.translation[0]<<','<<camera.translation[1]<<','<<camera.translation[2]<<']'
      <<",\"replays\":"<<lens_stats.replays.load()<<",\"replay_exact\":"<<lens_stats.replay_exact.load()<<",\"replay_differs\":"<<lens_stats.replay_differs.load()
@@ -16848,6 +16859,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             lens_guard_enabled=head_requested && !fs::exists(root/L"build"/L"no-lens-guard");
             lens_eye0_camera=fs::exists(root/L"build"/L"lens-eye0-camera");   // v1256: the v1246 eye-0 lens camera (default: the head's centre)
             lens_mono=fs::exists(root/L"build"/L"lens-mono");lens_shared_shadows=fs::exists(root/L"build"/L"lens-shared-shadows");   // v1257: v1256 camera / v1256 shadows
+            lens_isolated=!fs::exists(root/L"build"/L"no-lens-isolation");   // v1259: build/no-lens-isolation = v1257
             if(lens_guard_enabled) {
                 namespace sv=d2vr::secondary_view;
                 static constexpr std::array<unsigned char,16> owner_prologue{0x40,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,0x24};
@@ -17203,7 +17215,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // v1101: the draw hooks read the thread's current pass/view (and a pass name for the status) through ObjectMotion; a failed pass
         // map install leaves the source returning -1/0, which keeps the v931 certificate path as the fallback.
         d2vr::ObjectMotion::set_pass_source(+[]() noexcept -> d2vr::ObjectMotion::DrawPass {
-            return {d2vr::RenderPassMap::current_pass(),d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_job()}; // v1199: + the pass job
+            return {d2vr::RenderPassMap::current_pass(),d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_job(),d2vr::RenderPassMap::current_secondary()}; // v1199: + the pass job; v1259: + a secondary pass's job
         });
         d2vr::ObjectMotion::set_alternate_eye(+[](std::uintptr_t view,std::uint32_t frame) noexcept -> int { // v1151: the receipt names the eye
             // Resolved once per (view, frame): classify calls this for every per-view constant write. Packed: frame | eye+1 | view bits.

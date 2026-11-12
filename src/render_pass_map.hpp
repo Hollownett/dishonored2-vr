@@ -430,7 +430,13 @@ public:
     // The pass this thread is recording, and the view the pass renders (0 outside a pass). Read by the draw hooks through
     // ObjectMotion::set_pass_source (src/dxgi_probe.cpp): a view pass's view is one of the eye views, which names the eye exactly.
     static int current_pass() noexcept {return current_pass_;}
-    static std::uintptr_t current_view() noexcept {return reinterpret_cast<std::uintptr_t>(current_view_);}
+    // v1259: a secondary pass (engine secondary-view render, the Timepiece lens) borrows an EYE's view object, so its jobs carry that eye's
+    // view at item+0x70. While one runs (dxgi_probe lens_pass sets secondary_view around it) its jobs name no view: no consumer of the pass
+    // view (draw placement, object motion, rig mask, cross-eye history, visibility stamp) may take the lens camera for that eye's render.
+    // The shadow share keeps the job's real view (execute_hook's local) and isolates the pass itself (shadow_share Model::on_secondary_begin).
+    inline static std::atomic<std::uintptr_t> secondary_view{};
+    static bool current_secondary() noexcept {const auto v=reinterpret_cast<std::uintptr_t>(current_view_);return v && v==secondary_view.load(std::memory_order_relaxed);}
+    static std::uintptr_t current_view() noexcept {return current_secondary()?0:reinterpret_cast<std::uintptr_t>(current_view_);}
     static std::uint64_t current_job() noexcept {return current_job_;} // v1199: 0 outside a pass job
     // Called from the existing FinishCommandList observer, on the deferred job thread, before the
     // thread-local pass is cleared.
