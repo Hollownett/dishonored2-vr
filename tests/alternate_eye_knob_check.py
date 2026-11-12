@@ -317,7 +317,7 @@ om = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 rpm = (root / 'src' / 'render_pass_map.hpp').read_text(encoding='utf-8')
 rm = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 rt = (root / 'src' / 'rig_target.hpp').read_text(encoding='utf-8')
-assert 'const bool certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);' in om
+assert 'const bool job_certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);' in om  # v1200: now the cross-check
 assert 'if(alt && !alt_view_heuristic.load(std::memory_order_relaxed)) {' in om and 'L"alt-view-heuristic"' in om
 assert 's->view_job=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) s->view_job=source().job;' in om
 assert 'current_job_=job_serial_.fetch_add(1,std::memory_order_relaxed)+1;' in rpm and rpm.count('current_job_=previous_job;') == 3
@@ -328,3 +328,13 @@ assert 'c->CopySubresourceRegion(out,0,0,0,0,trg.Get(),slice,&box);' in rm and '
 assert '\\"certainty\\":{' in om and '\\"hypothesis_check\\":[' in om
 assert '\\"rig_target_state\\":{\\"none\\":' in probe and '\\"rig_world_share\\":{\\"n\\":' in probe
 print('PASS: v1199 certain one-view draw views, two-slice rig target, afw2 rig_target_state/rig_world_share status')
+
+# v1200: the one-view draw's view by its rows' content (buffer_views.hpp rows_shear/pick_by_shear against every recorded eye view), the
+# Setup-end final snapshot feeds the candidates; content status under alternate_eye.object_motion.content; build/alt-view-content-tol
+assert 'const bool by_content=rows && content_view(rows,out);' in om
+assert 'early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);' in om and 'const bool have_view=current_view(s,view,early_ok?early:nullptr);' in om
+assert 'd2vr::ObjectMotion::note_setup_final(reinterpret_cast<std::uintptr_t>(view));' in probe
+assert 'L"alt-view-content-tol"' in om and '\\"content\\":"+content_json()' in om
+bv = (root / 'src' / 'buffer_views.hpp').read_text(encoding='utf-8')
+assert 'inline double rows_shear(const ProjectionXY& p,const float* rows) noexcept {' in bv and 'inline int pick_by_shear(' in bv
+print('PASS: v1200 one-view draw views by content (rows vs each recorded render projection)')

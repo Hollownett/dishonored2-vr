@@ -239,6 +239,14 @@ public:
     // of the engine frame it holds now (the alternate_taa receipt: -1 unknown). Its records go to that eye; own previous = two frames back.
     using AlternateEye=int (*)(std::uintptr_t view,std::uint32_t frame) noexcept;
     static void note_alternate_view(std::uintptr_t view) noexcept {alt_view_.store(view,std::memory_order_relaxed);}
+    // v1200: at the end of an alternate Setup (dxgi_probe, next to the rig target publish): the record of this render from the view's FINAL
+    // matrices (the per-view-write snapshot can predate them, v1160), so the content candidates hold exactly the VP the draws are built with
+    static void note_setup_final(std::uintptr_t view) noexcept {
+        if(!view || !read_ || !on()) return;
+        std::uint32_t frame{};if(!read_(view+0x77b4,&frame,4)) return;
+        const auto resolve=alt_eye_.load(std::memory_order_relaxed);const int eye=resolve?resolve(view,frame):-1;
+        if(eye==0 || eye==1) {std::lock_guard<std::mutex> lock(views_mutex_);snapshot(static_cast<unsigned>(eye),view);}
+    }
     static void set_alternate_eye(AlternateEye f) noexcept {alt_eye_.store(f,std::memory_order_relaxed);}
     static bool alternate() noexcept {return alt_view_.load(std::memory_order_relaxed)!=0;}
     // From the engine's view Setup (entry: the view still holds its last frame's matrices). 0 = not a paired eye.
@@ -259,7 +267,7 @@ public:
             +",\"view_mode\":\""+(alt_view_heuristic.load()?"heuristic":"certain")+"\",\"certainty\":{"+[] {std::string o; // v1199: per consumer [certain, fell back]
                 static constexpr const char* names[cert_consumers]{"rig_target","placement","previous_rows","held_mask"};
                 for(unsigned k=0;k<cert_consumers;++k) o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+']';
-                return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"]}}";
+                return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"],\"content\":"+content_json()+"}}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -593,7 +601,7 @@ private:
         v.valid=true;
         auto& ring=eye_records_[eye];auto* slot=&ring[0];
         for(auto& old:ring) {if(old.valid && old.frame==v.frame) {slot=&old;break;} if(!old.valid || old.frame<slot->frame) slot=&old;}
-        *slot=v;
+        *slot=v;records_gen_.fetch_add(1,std::memory_order_release); // v1200: the content candidates are rebuilt
         std::uint32_t newest=newest_eye_frame_[eye].load(std::memory_order_relaxed);
         if(v.frame>=newest) { // the draw hooks read these without the views lock
             newest_eye_frame_[eye].store(v.frame,std::memory_order_release);
@@ -616,7 +624,6 @@ private:
             if(read_(alt_view+0x77b4,&frame,4) && frame!=alt_snapped_frame_)
                 if(const int eye=resolve(alt_view,frame);eye==0 || eye==1) {snapshot(static_cast<unsigned>(eye),alt_view);alt_snapped_frame_=frame;}
         }
-        const unsigned own_step=alt_view?2u:1u;
         int best_eye=-1,best_rank=-1;const EyeView* best=nullptr;UINT best_at=0;
         const auto scan=[&](UINT o,int first) {
             for(unsigned eye=0;eye<2;++eye) for(const auto& r:eye_records_[eye]) if(r.valid) for(int m=first;m<4;++m) {
@@ -646,7 +653,71 @@ private:
         }
         count(best_rank==1?view_vp:best_rank==0?view_v:view_none);
         if(!best) return false;
-        out.eye=static_cast<unsigned>(best_eye);out.frame=best->frame;
+        fill_view(static_cast<unsigned>(best_eye),*best,out);
+        return true;
+    }
+    // v1200: content identification (buffer_views.hpp rows_shear). Candidates: every recorded eye view (both eyes, ~4 renders each), rebuilt
+    // per thread when a snapshot changes them (records_gen_). Each candidate carries its full View (fill_view) and its projection's x/y terms.
+    struct Candidate {View view{};ProjectionXY p{};};
+    inline static std::atomic<std::uint64_t> records_gen_{1};
+    inline static thread_local std::uint64_t tl_cand_gen_{};inline static thread_local std::array<Candidate,8> tl_cand_{};inline static thread_local int tl_cand_n_{};
+    static void refresh_candidates() noexcept {
+        const auto gen=records_gen_.load(std::memory_order_acquire);if(gen==tl_cand_gen_) return;
+        std::lock_guard<std::mutex> lock(views_mutex_);tl_cand_n_=0;
+        for(unsigned eye=0;eye<2;++eye) for(const auto& r:eye_records_[eye]) if(r.valid && tl_cand_n_<8) {
+            Candidate& c=tl_cand_[static_cast<std::size_t>(tl_cand_n_)];c.p=projection_of(r.m[2]);if(!c.p.ok) continue;
+            View v{};
+            const unsigned own_step=alt_view_.load(std::memory_order_relaxed)?2u:1u;
+            v.eye=eye;v.frame=r.frame;std::memcpy(v.inv,r.inv,32);std::memcpy(v.z,r.m[2]+8,16);std::memcpy(v.vp,r.m[2],64);
+            const EyeView* own=nullptr;const EyeView* source=nullptr;const std::uint32_t source_frame=v.eye && own_step==1?v.frame:v.frame-1;
+            for(const auto& o:eye_records_[v.eye]) if(o.valid && o.frame==v.frame-own_step) own=&o;
+            for(const auto& o:eye_records_[v.eye^1u]) if(o.valid && o.frame==source_frame) source=&o;
+            float inverse_source[16],inverse_own[16];
+            v.corr_ok=own && source && inverse(source->m[2],inverse_source);if(v.corr_ok) mul(own->m[2],inverse_source,v.corr);
+            v.camera_ok=own && inverse(r.m[2],inverse_own);if(v.camera_ok) mul(own->m[2],inverse_own,v.camera);
+            c.view=v;++tl_cand_n_;
+        }
+        tl_cand_gen_=gen;
+    }
+    // Tolerances (knob build/alt-view-content-tol: "<fit> <ratio> <floor>"), outcome counters and score histograms (log10 decades -9..0).
+    inline static std::atomic<double> content_fit_{1e-4},content_ratio_{4.0},content_floor_{2e-6};
+    enum ContentOutcome : unsigned {content_certain,content_ambiguous,content_none_fit,content_other_pass,content_no_candidates,content_outcomes};
+    inline static std::array<std::atomic<std::uint64_t>,content_outcomes> content_outcome_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,11>,2> content_hist_{}; // [0] best, [1] second best
+    inline static std::array<std::atomic<std::uint64_t>,2> content_tick_{},content_vs_job_{}; // tick: picked the newest of its eye / an older one; vs the job-b1 view: agree / disagree
+    static unsigned decade(double x) noexcept {if(!(x>0)) return 0;const int d=static_cast<int>(std::floor(std::log10(x)))+10;return static_cast<unsigned>(std::clamp(d,0,10));}
+    // The view this draw's rows were built with, by content; false = ambiguous / not this form (counted). `rows`: the draw's engine rows.
+    static bool content_view(const float* rows,View& out) noexcept {
+        if(const auto source=pass_source_.load(std::memory_order_relaxed)) { // a pass of another view (shadow, light): not this test's form
+            const auto v=source().view;const auto alt=alt_view_.load(std::memory_order_relaxed);
+            if(v && alt && v!=alt) {content_outcome_[content_other_pass].fetch_add(1,std::memory_order_relaxed);return false;}
+        }
+        refresh_candidates();
+        if(tl_cand_n_<1) {content_outcome_[content_no_candidates].fetch_add(1,std::memory_order_relaxed);return false;}
+        double shear[8]{};for(int i=0;i<tl_cand_n_;++i) shear[i]=rows_shear(tl_cand_[static_cast<std::size_t>(i)].p,rows);
+        int second=-1;
+        const int pick=pick_by_shear(shear,tl_cand_n_,content_fit_.load(std::memory_order_relaxed),content_ratio_.load(std::memory_order_relaxed),content_floor_.load(std::memory_order_relaxed),second);
+        int best=pick;if(best<0) {best=0;for(int i=1;i<tl_cand_n_;++i) if(shear[i]<shear[best]) best=i;}
+        content_hist_[0][decade(shear[best])].fetch_add(1,std::memory_order_relaxed);
+        if(second>=0) content_hist_[1][decade(shear[second])].fetch_add(1,std::memory_order_relaxed);
+        if(pick<0) {content_outcome_[pick==-1?content_none_fit:content_ambiguous].fetch_add(1,std::memory_order_relaxed);return false;}
+        out=tl_cand_[static_cast<std::size_t>(pick)].view;content_outcome_[content_certain].fetch_add(1,std::memory_order_relaxed);
+        bool newest=true;for(int i=0;i<tl_cand_n_;++i) if(tl_cand_[static_cast<std::size_t>(i)].view.eye==out.eye && tl_cand_[static_cast<std::size_t>(i)].view.frame>out.frame) newest=false;
+        content_tick_[newest?0:1].fetch_add(1,std::memory_order_relaxed);
+        return true;
+    }
+    static std::string content_json() {
+        std::string o="{\"outcome\":{\"certain\":"+std::to_string(content_outcome_[0].load())+",\"ambiguous\":"+std::to_string(content_outcome_[1].load())
+            +",\"none_fit\":"+std::to_string(content_outcome_[2].load())+",\"other_pass\":"+std::to_string(content_outcome_[3].load())+",\"no_candidates\":"+std::to_string(content_outcome_[4].load())+"}";
+        for(unsigned h=0;h<2;++h) {o+=h?",\"second_log10\":[":",\"best_log10\":[";for(unsigned k=0;k<11;++k) o+=(k?",":"")+std::to_string(content_hist_[h][k].load());o+="]";}
+        o+=",\"tick\":["+std::to_string(content_tick_[0].load())+','+std::to_string(content_tick_[1].load())+"],\"vs_job\":["+std::to_string(content_vs_job_[0].load())+','+std::to_string(content_vs_job_[1].load())+"]";
+        o+=",\"tol\":["+std::to_string(content_fit_.load())+','+std::to_string(content_ratio_.load())+','+std::to_string(content_floor_.load())+"]}";
+        return o;
+    }
+    // classify's view of a record (under views_mutex_): the eye records give the correction and camera-only previous; publishes latest_
+    static void fill_view(unsigned eye,const EyeView& rec,View& out) noexcept {
+        const EyeView* best=&rec;const unsigned own_step=alt_view_.load(std::memory_order_relaxed)?2u:1u;
+        out.eye=eye;out.frame=best->frame;
         std::memcpy(out.inv,best->inv,32);std::memcpy(out.z,best->m[2]+8,16);std::memcpy(out.vp,best->m[2],64);
         // Draws the chain cannot prove (rival's PrevCorrection idea): a previous MVP cached from the other eye's view (case A:
         // R(n-1) for the left eye, L(n) for the right) moved into this eye's last view, VP_own(n-1) * inverse(VP_source).
@@ -666,7 +737,6 @@ private:
             l.seq.fetch_add(1,std::memory_order_acq_rel);l.view=out;l.seq.fetch_add(1,std::memory_order_release);
         }
         if(out.frame>=newest_frame_.load(std::memory_order_relaxed)) {latest_eye_.store(out.eye,std::memory_order_relaxed);newest_frame_.store(out.frame,std::memory_order_release);}
-        return true;
     }
     static bool latest(unsigned eye,View& out) noexcept {
         const Latest& l=latest_[eye&1u];
@@ -694,7 +764,7 @@ private:
     // view's constants there leave the draw untagged), else the newest eye view written anywhere.
     // v950: in paired stereo that newest view is often the other eye's (weapon-pin: weapon draws tagged with the other eye).
     // The draw's VS b1, when it is the per-view globals buffer an eye's native TAA binds, names the eye; the tag keeps it.
-    static bool current_view(const ContextState& s,View& out) noexcept {
+    static bool current_view(const ContextState& s,View& out,const float* rows=nullptr) noexcept {
         const std::uint32_t newest=newest_frame_.load(std::memory_order_acquire);
         const bool own=s.view_frame==newest;
         bool ok;
@@ -703,9 +773,13 @@ private:
         const bool alt=alternate();
         if(alt && !alt_view_heuristic.load(std::memory_order_relaxed)) { // v1199: certain or nothing (buffer_views.hpp view_certain)
             std::uint64_t job=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) job=source().job;
-            const bool certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);
+            const bool job_certain=view_certain(s.view_valid,s.view_buffer,s.cb[0],s.view_job,job,s.type==1);
+            // v1200: by the rows' content (the VP they were built with); the same-job b1 rule stays as a cross-check and a fallback
+            const bool by_content=rows && content_view(rows,out);
+            if(by_content && job_certain) content_vs_job_[out.frame==s.view.frame && out.eye==s.view.eye?0:1].fetch_add(1,std::memory_order_relaxed);
+            if(!by_content && job_certain) out=s.view;
+            const bool certain=by_content || job_certain;
             tl_view_src_=certain?6u:7u;alt_view_src_[tl_view_src_].fetch_add(1,std::memory_order_relaxed);
-            if(certain) out=s.view;
             return certain;
         }
         View shared{};const bool b1_known=alt && !own && buffer_views_.find(s.cb[0],shared);
@@ -787,7 +861,14 @@ private:
             count(motion);count(no_rows);return false;
         }
         View view{};
-        const bool have_view=current_view(s,view);
+        // v1200: alternate certain mode identifies the view from the rows, so they are gathered first (z row: the newest eye's; the content
+        // test never reads the z row, and the view's own z row re-gathers below when it differs)
+        float early[16]{};bool early_ok=false;
+        if(alternate() && !alt_view_heuristic.load(std::memory_order_relaxed)) {
+            float zn[4]{};const unsigned e=latest_eye_.load(std::memory_order_relaxed)&1u;for(unsigned k=0;k<4;++k) zn[k]=eye_z_[e][k].load(std::memory_order_relaxed);
+            early_ok=gather_current(s.layout,sh->data,sh->size,zn,early);
+        }
+        const bool have_view=current_view(s,view,early_ok?early:nullptr);
         // The pass this draw is recorded in, when build/native-gpu-timing or build/shadow-share (or the weapon placement itself, which
         // installs the pass map) is on: its id and the eye its view names. A v1101 pass job's view is one of the eye views for a view pass.
         int pass=-1,pass_eye=-1;
@@ -1101,6 +1182,7 @@ private:
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)
+        if(std::ifstream tol{knobs_/L"alt-view-content-tol"}) {double f=0,r=0,fl=0;if(tol>>f>>r>>fl && f>0 && r>=1 && fl>=0) {content_fit_.store(f);content_ratio_.store(r);content_floor_.store(fl);}} // v1200
         if(std::ifstream tolerance{knobs_/L"weapon-draw-tol"}) { // "<orientation> <reach m> <identity>", for the model-matrix match
             double axes=0,reach=0,identity=0;
             if(tolerance>>axes>>reach>>identity && axes>0 && reach>0 && identity>0) {weapon_draw::Place::axes_tol.store(axes);weapon_draw::Place::reach.store(reach);weapon_draw::Place::identity_tol.store(identity);}

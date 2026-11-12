@@ -2041,6 +2041,7 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
                         if(has_e) ++rig_target_published;else if(want_e) ++rig_target_refused;
                     } else if(want_e) ++rig_target_refused;
                 }
+                if(!alternate_taa_runtime.failed.load()) d2vr::ObjectMotion::note_setup_final(reinterpret_cast<std::uintptr_t>(view)); // v1200: the render's final VP for content identification
                 if(alternate_taa_runtime.failed.load()) {}
                 else if(alt_mv_jittered.load(std::memory_order_relaxed)) { // the roll at 0x375a98 is pinned by alternate_taa::verified_abi
                     auto* jitter=reinterpret_cast<d2vr::TaaJitter*>(static_cast<std::byte*>(view)+0x7850);

@@ -3,7 +3,9 @@
 // view itself reads the view its bound b1 holds, not the newest one: with one view per engine frame the next render's Setup and view
 // writes overlap this render's draw recording, and the newest view is then the OTHER eye's (swing dumps v1190/v1191: the held sword
 // retargeted with the previous render's E landed ~300 px from the hand).
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 
@@ -53,6 +55,43 @@ inline unsigned view_source(bool own_newest,bool alternate,bool own_valid,const 
 // it binds at b1 (whole-buffer bind) in the SAME pass job (= the same command list; `job` 0 = outside any pass job: never certain on a
 // deferred context), or on the immediate context, where writes and draws are in execution order. Anything else is uncertain: the
 // consumers that change a real draw (placement, previous rows, held mask) then leave it alone, and the rig target needs no view (rig_target.hpp).
+// v1200: the render a draw's rows were built with, by their content. Rows = VP * M (column vectors), VP = P * V. For a candidate VP_h the
+// projective row test (is inverse(VP_h) * rows affine?) cannot discriminate: its last row depends only on the depth terms, which every
+// render shares. V_h cancels out of any angle test too. What differs per render is P: the eye's frustum and its TAA jitter (P[0][2],
+// P[1][2]), so the candidate's P is tested: with P's x/y/w rows (a, b; c, d: x_c = a x + b z, y_c = c y + d z, w_c = -z) the model axes are
+// recovered in that candidate's view space from the rows' x, y, w (never z: some layouts carry a synthesized z row) and must be mutually
+// orthogonal (any rigid model, non-uniform scale allowed). The wrong render's P shears them by about |delta b|/a (a jitter step: ~1e-4);
+// float noise is ~1e-7. Returns max |cos| between the three axes (1e30: degenerate). VP row-major (rows of clip), rows likewise.
+struct ProjectionXY {double a{},b{},c{},d{};bool ok{};};
+inline ProjectionXY projection_of(const float* vp) noexcept {
+    ProjectionXY p{};
+    const double w[3]{-double(vp[12]),-double(vp[13]),-double(vp[14])}; // V's z row (unit) = -VP row 3
+    const double n=w[0]*w[0]+w[1]*w[1]+w[2]*w[2];if(!(n>1e-12)) return p;
+    for(int r=0;r<2;++r) {
+        const float* row=vp+4*r;const double t=(row[0]*w[0]+row[1]*w[1]+row[2]*w[2])/n; // = b (or d), as V's rows are orthonormal
+        double q=0;for(int k=0;k<3;++k) {const double e=row[k]-t*w[k];q+=e*e;}
+        (r?p.c:p.a)=std::sqrt(q/n);(r?p.d:p.b)=t;
+    }
+    p.ok=p.a>1e-6 && p.c>1e-6;return p;
+}
+inline double rows_shear(const ProjectionXY& p,const float* rows) noexcept {
+    if(!p.ok) return 1e30;
+    double axis[3][3];
+    for(int j=0;j<3;++j) {const double W=rows[12+j],z=-W;axis[j][0]=(rows[j]-p.b*z)/p.a;axis[j][1]=(rows[4+j]-p.d*z)/p.c;axis[j][2]=z;}
+    double len[3];for(int j=0;j<3;++j) {len[j]=std::sqrt(axis[j][0]*axis[j][0]+axis[j][1]*axis[j][1]+axis[j][2]*axis[j][2]);if(!(len[j]>1e-9)) return 1e30;}
+    double worst=0;
+    for(int i=0;i<3;++i) for(int j=i+1;j<3;++j) worst=std::max(worst,std::abs((axis[i][0]*axis[j][0]+axis[i][1]*axis[j][1]+axis[i][2]*axis[j][2])/(len[i]*len[j])));
+    return worst;
+}
+// The pick: the best candidate fits (shear <= fit) and every other candidate is clearly worse (>= ratio * best and >= floor). -1 none fits
+// (not rows of the M * VP form for any recent render: a view-model special, a shadow view: excluded), -2 ambiguous (fall back, counted).
+inline int pick_by_shear(const double* shear,int n,double fit,double ratio,double floor,int& second) noexcept {
+    int best=-1;second=-1;
+    for(int i=0;i<n;++i) if(best<0 || shear[i]<shear[best]) {second=best;best=i;} else if(second<0 || shear[i]<shear[second]) second=i;
+    if(best<0 || !(shear[best]<=fit)) return -1;
+    if(second>=0 && !(shear[second]>=ratio*shear[best] && shear[second]>=floor)) return -2;
+    return best;
+}
 inline bool view_certain(bool own_valid,const void* own_buffer,const void* bound,std::uint64_t own_job,std::uint64_t job,bool immediate) noexcept {
     if(!own_valid || !own_buffer || own_buffer!=bound) return false;
     return immediate || (job!=0 && own_job==job);

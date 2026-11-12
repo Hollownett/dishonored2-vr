@@ -64,6 +64,43 @@ int main() {
      const double v1197_err=std::abs(via(e_prev)[0]-truth[0]);
      std::printf("v1197 own-older E error %.3f NDC (~%.0f px); v1199 leaves the draw alone\n",v1197_err,v1197_err*961);
      CHECK(v1197_err>.1);}
+    // v1200: the render a draw's rows were built with, by content (rows_shear / pick_by_shear). Six renders alternate eyes 6.4 cm apart
+    // (symmetric frusta as in the sim: the only per-render projection difference is the TAA jitter, uniform +-0.5 px at 1922 x 2070, the
+    // hardest case); the eyes also turn a little between renders. Random rigid models (any orientation, non-uniform scale, 0.2-60 m away)
+    // drawn with one render's VP in float (as the engine), picked among all six with the default tolerances.
+    {std::uint32_t seed=12345;const auto rnd=[&] {seed=seed*1664525u+1013904223u;return (seed>>8)/16777216.0;};
+     const auto mul4=[](const rig_target::M4& a,const rig_target::M4& b) {return rig_target::mul(a,b);};
+     const auto rot=[](double ax,double ay,double az) {const double cx=std::cos(ax),sx=std::sin(ax),cy=std::cos(ay),sy=std::sin(ay),cz=std::cos(az),sz=std::sin(az);
+         rig_target::M4 x{1,0,0,0, 0,cx,-sx,0, 0,sx,cx,0, 0,0,0,1},y{cy,0,sy,0, 0,1,0,0, -sy,0,cy,0, 0,0,0,1},z{cz,-sz,0,0, sz,cz,0,0, 0,0,1,0, 0,0,0,1};
+         return rig_target::mul(rig_target::mul(z,y),x);};
+     constexpr int R=6;rig_target::M4 vp[R];float vpf[R][16];ProjectionXY pr[R];
+     for(int i=0;i<R;++i) {
+         rig_target::M4 p{};p[0]=1/0.8;p[5]=1/0.8;p[10]=1.4e-6;p[11]=.01;p[14]=-1;
+         p[2]=(rnd()-.5)*2/1922;p[6]=(rnd()-.5)*2/2070;                              // jitter (NDC)
+         rig_target::M4 v=rot(.01*i,.3+.004*i,.002*i);v[3]=(i&1?.032:-.032)+100;v[7]=-40;v[11]=-12; // eye offset + world translation
+         vp[i]=mul4(p,v);for(int k=0;k<16;++k) vpf[i][k]=static_cast<float>(vp[i][k]);pr[i]=projection_of(vpf[i]);CHECK(pr[i].ok);
+     }
+     int right=0,wrong=0,ambiguous=0,none=0;double worst_true=0;
+     for(int n=0;n<20000;++n) {
+         const int truth_i=static_cast<int>(rnd()*R)%R;
+         rig_target::M4 m=rot(rnd()*6.3,rnd()*6.3,rnd()*6.3);const double sx=.2+rnd()*3,sy=.2+rnd()*3,sz=.2+rnd()*3;
+         for(int q=0;q<3;++q) {m[q*4]*=sx;m[q*4+1]*=sy;m[q*4+2]*=sz;}
+         m[3]=(rnd()-.5)*120;m[7]=(rnd()-.5)*120;m[11]=(rnd()-.5)*20;
+         float rows[16];for(int q=0;q<4;++q) for(int c=0;c<4;++c) {float t=0;for(int k=0;k<4;++k) t+=vpf[truth_i][q*4+k]*static_cast<float>(m[k*4+c]);rows[q*4+c]=t;}
+         rows[8]=rows[9]=rows[10]=0;rows[11]=.01f; // a layout's synthesized z row: never read
+         double sh[R];for(int i=0;i<R;++i) sh[i]=rows_shear(pr[i],rows);
+         worst_true=std::max(worst_true,sh[truth_i]);
+         int second=-1;const int pick=pick_by_shear(sh,R,1e-4,4.0,2e-6,second);
+         if(pick==truth_i) ++right;else if(pick>=0) ++wrong;else if(pick==-2) ++ambiguous;else ++none;
+     }
+     std::printf("content pick: %d right, %d wrong, %d ambiguous, %d none of 20000 (worst true-render shear %.2g)\n",right,wrong,ambiguous,none,worst_true);
+     CHECK(wrong==0 && right>=19800);
+     // rows that are not of the M * VP form (a view-model projection: other focal length) fit none
+     {rig_target::M4 p{};p[0]=2.2;p[5]=2.2;p[10]=1.4e-6;p[11]=.01;p[14]=-1;const rig_target::M4 vm=mul4(p,rot(.0,.3,0));
+      rig_target::M4 m=rot(.4,1.1,2.0);float rows[16];for(int k=0;k<16;++k) rows[k]=static_cast<float>(mul4(vm,m)[k]);
+      double sh[R];for(int i=0;i<R;++i) sh[i]=rows_shear(pr[i],rows);int second=-1;
+      std::printf("view-model rows: best shear %.3g -> pick %d\n",*std::min_element(sh,sh+R),pick_by_shear(sh,R,1e-4,4.0,2e-6,second));}
+    }
     // eviction keeps the newest buffers
     int more[4]{};for(auto& b:more) views.store(&b,View{});CHECK(!views.find(&b_r,got) && views.find(&more[3],got));
     if(failures) {std::printf("buffer_views_check: %d failure(s)\n",failures);return 1;}
