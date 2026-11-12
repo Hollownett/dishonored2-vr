@@ -3735,6 +3735,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
         std::array<d2vr::weapon_draw::Mat,2> bound{};
         std::array<const float*,2> raw_ptr{};std::array<const d2vr::weapon_draw::Mat*,2> bound_ptr{};
         std::array<std::uintptr_t,2> place_ids{};
+        std::array<std::array<float,15>,2> body_frames{};std::array<const float*,2> body_ptrs{};   // v1255: the held body's own frame as native_grab sampled it
         std::array<unsigned,2> hand_kind{};   // v1243 hand_lock: the census kind each hand was placed as
         const auto in_frame=[](const d2vr::fullbody::Xf& frame,const d2vr::Vec3& point) {return rotated(d2vr::body::conj(frame.q),point-frame.p);};
         // v1018: one copy entity published for BOTH hands is the dual-wield failure: two sides share one engine model frame, every
@@ -3876,7 +3877,14 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             // v1237: a placed held thing's census kind (a physically held severed part is its own kind) and the frames of the entities the engine
             // binds to it (its +0xb0 children, count +0xb8: the bind/Hide/Show list, d2vr-upgrade-attach-abi), so a helmet on a carried head moves
             // with it instead of staying at the engine's lagging pose. A child is used only with a finite model frame within 0.6 m of F.
-            const auto held_placed=[&](unsigned hand,unsigned path) {
+            // v1255 (user, v1254: "with it in my hand and standing still it flips between two positions ~3-10 cm apart; walking/running it trails
+            // behind the hand and catches up"): the held prop is drawn at TWO poses across renders. One is B (the mod's placement, at the hand), the
+            // other is the engine's own frame: the rigid sync that v1249 substitutes runs on a physics step, not on every render, and a draw composed
+            // from the un-substituted body pose (or rotated with it while it hangs in the hand) matched no published frame - near_like stayed 0, i.e.
+            // the draw was >5.7 deg off the hold frame - so it stayed at the lagging body. The body's own frame as native_grab sampled it, converted
+            // to the model frame by the same K the placement uses, is published as one more frame a draw may be composed from (the children loop's
+            // delta applies unchanged: a draw matched there is still placed at B). Status: held_census.<kind>.draws.child.
+            const auto held_placed=[&](unsigned hand,unsigned path,const d2vr::weapon_draw::Mat* body=nullptr) {
                 d2vr::weapon_draw::RigidLocal::set_path(hand,path);
                 const auto hb=path==d2vr::weapon_draw::RigidLocal::path_physical?native_grab.held(hand):std::nullopt;
                 const bool severed=hb && hb->entity==thing[hand] && hb->limb>=0;
@@ -3884,9 +3892,10 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 const unsigned kind=severed?d2vr::weapon_draw::Place::kind_severed:path==d2vr::weapon_draw::RigidLocal::path_use?d2vr::weapon_draw::Place::kind_use:
                     path==d2vr::weapon_draw::RigidLocal::path_bind?d2vr::weapon_draw::Place::kind_bind:d2vr::weapon_draw::Place::kind_prop; if(kind==d2vr::weapon_draw::Place::kind_prop||kind==d2vr::weapon_draw::Place::kind_severed||kind==d2vr::weapon_draw::Place::kind_use) d2vr::held_walk_burst::note_place(hand,kind==d2vr::weapon_draw::Place::kind_prop?d2vr::held_walk_burst::prop:kind==d2vr::weapon_draw::Place::kind_severed?d2vr::held_walk_burst::severed:d2vr::held_walk_burst::use); // v1249
                 std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
+                const auto f=d2vr::weapon_draw::model_of(raw[hand].data());
+                if(body && d2vr::weapon_draw::finite(*body) && d2vr::weapon_draw::distance(*body,f)<=.6) kids[n++]=*body;   // v1255: the body's own frame
                 std::uintptr_t list{};std::uint32_t count{};
                 if(read_self(thing[hand]+0xb0,&list,sizeof list) && list && read_self(thing[hand]+0xb8,&count,sizeof count) && count<=64) {
-                    const auto f=d2vr::weapon_draw::model_of(raw[hand].data());
                     for(std::uint32_t i=0;i<count && i<16 && n<kids.size();++i) {
                         std::uintptr_t child{},model{};std::array<float,15> frame{};
                         if(!read_self(list+i*8,&child,sizeof child) || !child || child==thing[hand] || !read_self(child+0xf0,&model,sizeof model) || !model ||
@@ -3930,8 +3939,10 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         if(t-ex.since<.12) b=d2vr::weapon_draw::HeldBind::eased(d2vr::weapon_draw::model_of(raw[hand].data()),b,(t-ex.since)/.12);
                         if(d2vr::weapon_draw::finite(b)) {
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
+                            const auto body_frame=d2vr::weapon_draw::mul(d2vr::weapon_draw::pose_mat(hd.body),ex.k);   // v1255: where the engine draws it when its own sync wrote the frame
+                            body_frames[hand]=hd.frame;body_ptrs[hand]=body_frames[hand].data();   // v1255: the body frame this hold was sampled with
                             if(const auto hk=native_grab.held(hand)) d2vr::hold_sync().engine(hk->limb>=0?d2vr::HoldSync::severed:d2vr::HoldSync::prop,player_speed,d2vr::weapon_draw::distance(b,d2vr::weapon_draw::model_of(raw[hand].data())));   // v1249 engine_gap
-                            ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);held_placed(hand,d2vr::weapon_draw::RigidLocal::path_physical); // v1231/v1237
+                            ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);held_placed(hand,d2vr::weapon_draw::RigidLocal::path_physical,&body_frame); // v1231/v1237, v1255 body frame
                             held_engine_pose_write(model,b,hand_kind[hand]);   // v1254: the engine's render frame follows the drawn hand on every render
                             continue;
                         }
@@ -3983,7 +3994,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 else wd::HandLock::idle(hand);
             }
         }
-        d2vr::weapon_draw::Place::publish_bound(engine_frame,raw_ptr,bound_ptr,reach,place_ids);   // v1072: ids let a draw composed from the previous read F match
+        d2vr::weapon_draw::Place::publish_bound(engine_frame,raw_ptr,bound_ptr,reach,place_ids,-1,body_ptrs);   // v1072: ids let a draw composed from the previous read F match; v1255: and the body frame
     } catch(...) {}
 }
 static std::array<float,12> skin_row59(void* model) noexcept {   // frame-order trace: joint 59's skin row block as the copy will upload it
@@ -9523,7 +9534,7 @@ void prepare_head_view(void* view) noexcept {
                          else if(seat) {double peak=prop_seat_gap_m.load();while(drawn.gap_m>peak && !prop_seat_gap_m.compare_exchange_weak(peak,drawn.gap_m));}
                      }
                  }}
-                // B16: held things follow the hand body (Bonelab §1.2, §2.2; src/hold_coupling.hpp). Part 1, before B15: a hold with a ready body drives
+                // B16: held things follow the hand body (Bonelab Â§1.2, Â§2.2; src/hold_coupling.hpp). Part 1, before B15: a hold with a ready body drives
                 // the body instead of yielding it; B14's snaps are suppressed while a hand holds something; the hand body's filter word drops the held
                 // body's layer while it holds (HandFilterKeeper, restored only through SafeRelease or with a new body). Part 2, after B15: held things
                 // follow the DRAWN hand (the body only as far as B15 draws it); the lag release judges the raw body gap. Knob off: nothing here runs.
@@ -14226,7 +14237,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             if(!carrying) shoulder_native_carry=false;
                                         }
                                         if(r.toss) {carry_toss_until=now_c+120;++carry_throws;} else if(r.drop) {corpse_drop_press_until=now_c+160;++carry_drops;}
-                                        // Hands only (v637): a native shoulder carry the mod did not start is put down. v1022: OFF by default — with
+                                        // Hands only (v637): a native shoulder carry the mod did not start is put down. v1022: OFF by default â€” with
                                         // the shoulder carry it put down the body the placement had just handed to the game (45 auto-drops in the
                                         // v1019 session); build/legacy-corpse-auto-drop restores it.
                                         {static ULONGLONG native_carry_drop_at{};
@@ -16903,7 +16914,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             native_grab.attach_corpse_trace(&corpse_trace);
             d2vr::HeldRenderPose::ragdolls=!fs::exists(root/L"build"/L"no-held-render-pose-severed");d2vr::HeldRenderPose::corpses=fs::exists(root/L"build"/L"held-render-pose-corpse");   // v1253
             if(!fs::exists(root/L"build"/L"no-held-render-pose")) (void)d2vr::HeldRenderPose::install(image_base);   // v1249: a held prop's engine render frame = the hold's goal
-            d2vr::HeldEnginePose::on=!fs::exists(root/L"build"/L"no-held-engine-pose");   // v1254: the render frame itself follows the drawn hand every render
+            d2vr::HeldEnginePose::on=fs::exists(root/L"build"/L"held-engine-pose");   // v1255: opt-in (v1254 wrote it every render; the flip was
+            // the un-substituted body frame instead, fixed by the v1255 body read - writing the frame on top of that changed what the next render's
+            // match sees without changing what the renderer draws)
             if(controller_aim_requested)native_interaction_aim.install_door_interaction();
         }
         // Weapons/powers follow the tracked hands (native attachment readers).

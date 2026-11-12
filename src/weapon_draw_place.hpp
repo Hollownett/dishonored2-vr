@@ -721,7 +721,7 @@ public:
     // delta*F as the bound frame.
     static constexpr double alt_max_m=.6;   // a previous read farther than this from F is another thing or a teleport, never an alternative
     static void publish_bound(std::uint32_t frame,const std::array<const float*,2>& raw,const std::array<const Mat*,2>& bound,const std::array<double,2>& side_reach={0.,0.},
-            const std::array<std::uintptr_t,2>& ids={0,0},double now_s=-1) noexcept {
+            const std::array<std::uintptr_t,2>& ids={0,0},double now_s=-1,const std::array<const float*,2>& body_read={nullptr,nullptr}) noexcept {
         if(now_s<0) now_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         Slot& slot=ring_[frame%ring];
         slot.ready.store(0,std::memory_order_release);
@@ -740,6 +740,21 @@ public:
             if(!rd.ring_n || distance(rd.ring[0],model)>1e-7 || frame_angle(rd.ring[0],model)>1e-7) {
                 for(unsigned k=std::min<unsigned>(rd.ring_n,Side::max_hist);k>0;--k) {rd.ring[k]=rd.ring[k-1];rd.ring_t[k]=rd.ring_t[k-1];}
                 rd.ring[0]=model;rd.ring_t[0]=now_s;rd.ring_n=std::min<unsigned>(rd.ring_n+1,Side::max_hist+1);
+            }
+            // v1255 (user, v1254: standing still the held prop "flips between two positions ~3-10 cm apart"): the rigid sync that makes the engine's
+            // frame the hold's goal (held_render_pose.hpp v1249) runs on a physics step, not on every render. A draw composed before that step carries
+            // the PHYSICS BODY's own frame, which the publisher never reads (it reads the frame after the step): no published read matched it, the draw
+            // stayed at the trailing body, and the next render put it back on the hand - the flip. The body frame native_grab sampled for this hold is
+            // published as one more earlier read of the same thing: a draw composed from it matches an exact historical read (base B, L relative to
+            // that read), so it is placed on the hand like every other frame.
+            if(body_read[s] && ids[s] && rd.ring_n) {
+                const Mat body_model=model_of(body_read[s]);
+                if(finite(body_model) && distance(body_model,model)<=alt_max_m &&
+                   (distance(rd.ring[0],body_model)>1e-7 || frame_angle(rd.ring[0],body_model)>1e-7)) {
+                    const unsigned last=std::min<unsigned>(rd.ring_n,Side::max_hist);
+                    for(unsigned k=last;k>1;--k) {rd.ring[k]=rd.ring[k-1];rd.ring_t[k]=rd.ring_t[k-1];}
+                    rd.ring[1]=body_model;rd.ring_t[1]=now_s;rd.ring_n=std::min<unsigned>(rd.ring_n+1,Side::max_hist+1);
+                }
             }
             out.valid=true;out.model=model;out.reach=side_reach[s];out.rigid=side_reach[s]>0;
             if(!bound[s] || !finite(*bound[s])) {last_[s]={};continue;}   // no G yet: no placement, no previous chain
