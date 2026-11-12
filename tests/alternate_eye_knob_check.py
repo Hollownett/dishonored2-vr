@@ -408,3 +408,12 @@ assert 'static bool guard(ID3D11DeviceContext* c,ID3D11Resource* mv,ID3D11Shader
 assert 'if(e.mv_key==job.motion.p) RigMask::guard(c,job.motion.p,e.rig_srv.p,depth_w,depth_h);' in fsr5
 assert fsr5.index('RigMask::guard(c,job.motion.p') < fsr5.index('dispatched=motion_pass_.dispatch(')
 print('PASS: v1209 rig guard, forensics, draw views')
+
+# v1210: nested draw hooks are one draw (inner RigMask/ObjectMotion scopes inert), draw-time probe of rig slots and rows, other-view MV writers n/a
+rm6 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+om6 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'nested_=tl_scope_depth_++>0;' in rm6 and '~Scope() {--tl_scope_depth_;if(nested_) return;' in rm6 and 'void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {\n            if(nested_) return;' in rm6
+assert 'nested_(RigMask::nested_draw()),s_(installed_ && !nested_?before(c):nullptr)' in om6 and 'if(nested_) return;\n            SkinMotion::restore(c_);' in om6
+assert 'probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on();' in probe and 'RigMask::probe_arm(view.display,want,sh->size);' in om6
+assert 'v && v!=alt_view_.load(std::memory_order_relaxed)) {' in om6
+print('PASS: v1210 nested draw hooks, draw-time rig probe, other-view MV writers')

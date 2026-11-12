@@ -795,7 +795,7 @@ private:
     // v1207: fallback draws (uncertain previous rows, unnamed rig) by render pass and by whether a render target is bound (a depth-only pass
     // writes no motion vectors: zero motion there is harmless)
     inline static std::array<std::array<std::atomic<std::uint64_t>,2>,65> fallback_pass_{};inline static std::array<std::atomic<std::uint64_t>,3> fallback_rt_{};
-    inline static std::atomic<std::uint64_t> rig_na_{};
+    inline static std::atomic<std::uint64_t> rig_na_{},fallback_other_view_{}; // v1210: MV-texture writers of another engine view (n/a)
     inline static std::atomic<std::uint64_t> rig_chained_{};
     // v1208: true when one of the draw's render targets is the motion-vector texture the eye's TAA reads (note_mv_target, the TAA dispatch's
     // motion input; unknown yet: true). rt status: [no target, a target but not the MV texture, the MV texture]; by_pass counts only those.
@@ -808,6 +808,10 @@ private:
         ID3D11RenderTargetView* r[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,r,nullptr);
         bool any=false,writes=!mv_target_[0].load(std::memory_order_relaxed);
         for(auto* x:r) if(x) {any=true;ID3D11Resource* res{};x->GetResource(&res);if(res) {for(const auto& m:mv_target_) writes=writes || m.load(std::memory_order_relaxed)==res;res->Release();}x->Release();}
+        // v1210: an MV-texture writer whose pass renders another engine view than the alternate one-view (no eye render: a companion/flat
+        // window view, a probe view) feeds no eye's TAA through this draw: not applicable by view identity, its signature kept (draw_views)
+        if(any && writes && alternate()) if(const auto source=pass_source_.load(std::memory_order_relaxed)) if(const auto v=source().view;v && v!=alt_view_.load(std::memory_order_relaxed)) {
+            fallback_other_view_.fetch_add(1,std::memory_order_relaxed);draw_view_note(c,2);return false;}
         fallback_rt_[!any?0:writes?2:1].fetch_add(1,std::memory_order_relaxed);
         if(!any) writes=false;
         if(writes) draw_view_note(c,0);
@@ -817,7 +821,7 @@ private:
     }
     static std::string fallback_json() {
         const auto name=pass_name_.load(std::memory_order_relaxed);
-        std::string o="{\"rt\":["+std::to_string(fallback_rt_[0].load())+','+std::to_string(fallback_rt_[1].load())+','+std::to_string(fallback_rt_[2].load())+"],\"rig_na\":"+std::to_string(rig_na_.load())
+        std::string o="{\"rt\":["+std::to_string(fallback_rt_[0].load())+','+std::to_string(fallback_rt_[1].load())+','+std::to_string(fallback_rt_[2].load())+"],\"other_view_na\":"+std::to_string(fallback_other_view_.load())+",\"rig_na\":"+std::to_string(rig_na_.load())
             +",\"rig_chained\":"+std::to_string(rig_chained_.load())+",\"by_pass_mv\":{";
         bool first=true;
         for(unsigned p=0;p<65;++p) if(const auto a=fallback_pass_[p][0].load(),b=fallback_pass_[p][1].load();a || b) {
@@ -860,22 +864,28 @@ private:
         o<<']';return o.str();
     }
     // v1209: the views draws record into, by state signature: fallback draws that write an MV texture vs certain rig draws
-    struct DrawView {std::atomic<std::uint64_t> key{};std::uint32_t vp_w{},vp_h{};std::uintptr_t view{},dsv{},rtv0{};float near_w{};std::array<std::atomic<std::uint64_t>,2> n{};};
+    // v1210: n[2] = MV-texture writers of another engine view (not applicable); `which` = the view's identity when first seen (2 the alternate
+    // one-view, 0/1 a paired eye view, -1 another view) and its view-projection (+0x7510: row norms of the 3x3 = the projection's x/y scales)
+    struct DrawView {std::atomic<std::uint64_t> key{};std::uint32_t vp_w{},vp_h{};std::uintptr_t view{},dsv{},rtv0{};float near_w{};std::array<std::atomic<std::uint64_t>,3> n{};int which{-1};float vp[16]{};bool vp_ok{};};
     inline static std::array<DrawView,16> draw_views_{};
-    static void draw_view_note(ID3D11DeviceContext* c,unsigned certain) noexcept {
+    static void draw_view_note(ID3D11DeviceContext* c,unsigned certain) noexcept { // certain: 0 fallback, 1 certain, 2 another view (n/a)
         UINT nv=1;D3D11_VIEWPORT vp{};c->RSGetViewports(&nv,&vp);
         ID3D11RenderTargetView* r0{};ID3D11DepthStencilView* d{};c->OMGetRenderTargets(1,&r0,&d);
         const auto res=[](ID3D11View* v) {std::uintptr_t a=0;if(v) {ID3D11Resource* r{};v->GetResource(&r);a=reinterpret_cast<std::uintptr_t>(r);if(r) r->Release();v->Release();}return a;};
         const std::uintptr_t rt=res(r0),ds=res(d);std::uintptr_t view=0;if(const auto source=pass_source_.load(std::memory_order_relaxed)) view=source().view;
         const std::uint64_t key=(static_cast<std::uint64_t>(vp.Width)<<48)^(static_cast<std::uint64_t>(vp.Height)<<32)^ds^(rt<<7)^(view<<13)|1;
         for(auto& e:draw_views_) {auto k=e.key.load(std::memory_order_acquire);
-            if(!k && e.key.compare_exchange_strong(k,key)) {e.vp_w=static_cast<std::uint32_t>(vp.Width);e.vp_h=static_cast<std::uint32_t>(vp.Height);e.view=view;e.dsv=ds;e.rtv0=rt;k=key;}
+            if(!k && e.key.compare_exchange_strong(k,key)) {e.vp_w=static_cast<std::uint32_t>(vp.Width);e.vp_h=static_cast<std::uint32_t>(vp.Height);e.view=view;e.dsv=ds;e.rtv0=rt;k=key;
+                e.which=view && view==alt_view_.load(std::memory_order_relaxed)?2:eye_of_view(view);e.vp_ok=view && read_ && read_(view+0x7510,e.vp,64);}
             if(k==key) {e.n[certain].fetch_add(1,std::memory_order_relaxed);return;}}
     }
     static std::string draw_views_json() {
         std::ostringstream o;o<<"{\"alt_view\":\""<<std::hex<<alt_view_.load()<<"\",\"views\":[";bool first=true;
         for(const auto& e:draw_views_) if(e.key.load()) {o<<(first?"":",")<<"{\"viewport\":["<<std::dec<<e.vp_w<<','<<e.vp_h<<"],\"view\":\""<<std::hex<<e.view<<"\",\"dsv\":\""<<e.dsv<<"\",\"rtv0\":\""<<e.rtv0
-            <<"\",\"fallback\":"<<std::dec<<e.n[0].load()<<",\"certain\":"<<e.n[1].load()<<'}';first=false;}
+            <<"\",\"fallback\":"<<std::dec<<e.n[0].load()<<",\"certain\":"<<e.n[1].load()<<",\"other_view_na\":"<<e.n[2].load()<<",\"which\":"<<e.which;
+            if(e.vp_ok) {o<<",\"vp\":[";for(int i=0;i<16;++i) o<<(i?",":"")<<e.vp[i];o<<"],\"scale_rows\":["<<std::hypot(e.vp[0],e.vp[1],e.vp[2])<<','<<std::hypot(e.vp[4],e.vp[5],e.vp[6])
+                <<"],\"scale_cols\":["<<std::hypot(e.vp[0],e.vp[4],e.vp[8])<<','<<std::hypot(e.vp[1],e.vp[5],e.vp[9])<<']';}
+            o<<'}';first=false;}
         o<<"]}";return o.str();
     }
     static void render_note(std::uint64_t display,RenderCount k) noexcept {
@@ -1229,6 +1239,9 @@ private:
             certainty(cert_previous_rows,own || have_content?cert_certain:tl_content_why_==3 || !applicable?cert_na:cert_fallback);
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
             if(!own) std::memcpy(prev,cur,64);
+            if(own && have_render && RigMask::probe_on.load(std::memory_order_relaxed)) { // v1210: the b2 bytes bind_pool writes, for the draw-time probe
+                static thread_local float want[max_floats];std::memcpy(want,sh->data,sh->size);scatter(s.layout,prev,want);RigMask::probe_arm(view.display,want,sh->size);
+            }
             return bind_pool(c,s,*sh,nullptr,prev);
         }
         // v1191: one-view frames: the held weapon/prop placed in this render's drawn hand, previous rows from this eye's previous render
@@ -1566,8 +1579,10 @@ public:
     // Around each game draw: binds this draw's corrected b2 copy when it needs one, and the game's b2 again after it.
     class DrawScope {
     public:
-        explicit DrawScope(ID3D11DeviceContext* c) noexcept:c_(c),s_(installed_?before(c):nullptr) {}
+        // v1210: a draw hook entered from inside another one (RigMask::nested_draw) is the same draw: the outer scope already bound its rows
+        explicit DrawScope(ID3D11DeviceContext* c) noexcept:c_(c),nested_(RigMask::nested_draw()),s_(installed_ && !nested_?before(c):nullptr) {}
         ~DrawScope() {
+            if(nested_) return;
             SkinMotion::restore(c_); // v1182: the engine's previous palette at t0 again
             if(!s_) return;
             if(const auto observe=wide_direct_cb_observer.load(std::memory_order_relaxed)) observe(c_,2,1,&s_->cb[1]);
@@ -1576,7 +1591,7 @@ public:
         DrawScope(const DrawScope&)=delete;
         DrawScope& operator=(const DrawScope&)=delete;
     private:
-        ID3D11DeviceContext* c_;ContextState* s_;
+        ID3D11DeviceContext* c_;bool nested_;ContextState* s_;
     };
 };
 // v1101 status, in arm_flicker.weapon_draw (and object-motion.json): per hand published/placed and skipped by stage, and every render pass

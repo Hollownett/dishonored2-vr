@@ -3825,6 +3825,17 @@ static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) 
     const bool tracing=d2vr::frame_order::on.load(std::memory_order_relaxed);
     const auto before=tracing?skin_row59(model):std::array<float,12>{};const double hash_before=tracing?skin_row_hash(model):0.;
     const bool wrote=image_skin_enabled && image_skin_commit(model);
+    // v1210 probe: the rig model's CPU palette right before the engine's upload, to compare with the one read after it (RigMask slot race)
+    static thread_local std::vector<std::uint8_t> before_bytes;before_bytes.clear();int probe_slot=-1;
+    if(d2vr::RigMask::probe_on.load(std::memory_order_relaxed)) try {
+        const auto m=reinterpret_cast<std::uintptr_t>(model);std::uintptr_t cpu{};signed char index{};std::uintptr_t buffer{};
+        for(int i=0;i<3;++i) if(image_skin_slots[i].model.load(std::memory_order_relaxed)==m) probe_slot=i;
+        D3D11_BUFFER_DESC bd{};
+        if(probe_slot>=0 && read_self(m+0x1fb2,&index,1) && (index==0 || index==1) && read_self(m+0x2008+static_cast<std::uintptr_t>(index)*0x38,&buffer,8) && d2vr::rig::pointer(buffer)) {
+            reinterpret_cast<ID3D11Buffer*>(buffer)->GetDesc(&bd);
+            if(bd.ByteWidth && bd.ByteWidth<=(1u<<16) && read_self(m+0x1ff8,&cpu,8) && d2vr::rig::pointer(cpu)) {before_bytes.resize(bd.ByteWidth);if(!read_self(cpu,before_bytes.data(),bd.ByteWidth)) before_bytes.clear();}
+        }
+    } catch(...) {before_bytes.clear();}
     const auto copied=original_skin_gpu_upload(model,context);
     // v1179 (rig_mask.hpp RigMask::skin_copied): the rig models' palette ring rotates here, on the context the engine uploaded on, once per
     // engine frame (called or not, copied or not: the current wrapper +0x2008 + (+0x1fb2)*0x38 holds this render's palette either way).
@@ -3841,8 +3852,9 @@ static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) 
                 const bool cpu_ok=bd.ByteWidth && bd.ByteWidth<=(1u<<16) && read_self(m+0x1ff8,&cpu,8) && d2vr::rig::pointer(cpu) &&
                     (bytes.resize(bd.ByteWidth),read_self(cpu,bytes.data(),bd.ByteWidth));
                 read_self(m+0x2008+static_cast<std::uintptr_t>(index^1)*0x38,&other,8);
+                const bool race=cpu_ok && before_bytes.size()==bytes.size() && std::memcmp(before_bytes.data(),bytes.data(),bytes.size())!=0; // v1210
                 d2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame,cpu_ok?bytes.data():nullptr,cpu_ok?bd.ByteWidth:0u,copied!=0,
-                    d2vr::rig::pointer(other)?reinterpret_cast<ID3D11Buffer*>(other):nullptr);
+                    d2vr::rig::pointer(other)?reinterpret_cast<ID3D11Buffer*>(other):nullptr,!image_skin_enabled || wrote,race);
             }
             break;
         }
@@ -12249,6 +12261,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         { // v1162: the rig stencil mask (performance mode only; build/no-stale-eye-rig: inert)
                             const bool rig_on=alternate_on() && stale_eye_rig_knob;
                             if(!rig_on) d2vr::RigMask::view=0;
+                            d2vr::RigMask::probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on(); // v1210 draw-time probe (diagnostics only)
                             d2vr::RigMask::enabled=rig_on;if(game_xr) {game_xr->stale_rig_masks=rig_on;game_xr->stale_rig_motion_rules=stale_eye_rig_motion_knob;}
                             if(rig_on) publish_rig_buffers();
                             d2vr::RigMask::present();

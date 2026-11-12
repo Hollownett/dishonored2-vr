@@ -18,8 +18,10 @@
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -195,7 +197,9 @@ public:
     // buffer DISCARD-mapped in another command list holds on this context, are not provable (v1198-v1207: whole renders of 40,000 px rig
     // vectors with a tag-matched slot). A frame without an upload writes the last uploaded palette (the wrappers still hold it). Until the
     // model's first upload is seen nothing is tagged (zero motion). `other`: the second wrapper, only for the fingerprint check.
-    static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame,const void* cpu,UINT cpu_bytes,bool uploaded,ID3D11Buffer* other=nullptr) noexcept {
+    // v1210 diagnostics: `commit` = the image skin rewrote the CPU palette right before this upload, `race` = the CPU palette read after the
+    // engine's upload differs from the one read just before it (something wrote it meanwhile); kept per slot with the bytes written (shadow).
+    static void skin_copied(ID3D11DeviceContext* c,unsigned model,ID3D11Buffer* current,std::uint32_t frame,const void* cpu,UINT cpu_bytes,bool uploaded,ID3D11Buffer* other=nullptr,bool commit=true,bool race=false) noexcept {
         if(!c || !current || model>=ring_.size() || !motion.load(std::memory_order_relaxed)) return;
         Ring& r=ring_[model];
         D3D11_BUFFER_DESC d{};current->GetDesc(&d);
@@ -227,6 +231,9 @@ public:
         // still reads the palette its tag names)
         r.tag[k].store(~0u,std::memory_order_release);
         c->UpdateSubresource(r.slot[k].Get(),0,nullptr,r.upload.data(),0,0);r.from_upload[k]=uploaded;
+        if(probe_on.load(std::memory_order_relaxed)) {r.shadow[k]=r.upload;r.commit[k]=commit;r.race[k]=uploaded && race;r.writer_deferred[k]=c->GetType()==D3D11_DEVICE_CONTEXT_DEFERRED;}
+        if(uploaded && race) races_.fetch_add(1,std::memory_order_relaxed);
+        if(!commit) no_commit_.fetch_add(1,std::memory_order_relaxed);
         r.tag[k].store(frame,std::memory_order_release);r.last.store(frame,std::memory_order_relaxed);
     }
     // v1208 diagnostic: every 32nd uploading frame, both engine wrappers are read back and compared with the CPU palette just uploaded (status
@@ -251,6 +258,7 @@ public:
             if(!cur_eq) {std::size_t i=0;while(i<f.cpu.size() && static_cast<const std::uint8_t*>(a.pData)[i]==f.cpu[i]) ++i;fp_first_diff_.store(i);}
             immediate->Unmap(f.oth.Get(),0);immediate->Unmap(f.cur.Get(),0);f.pending=false;
         }
+        poll_probes(immediate); // v1210
     }
     // dxgi_probe: the one-view mode (re)starts (the alternate view appears after paired frames or a mode change): every ring starts over.
     // v1207: the copy/compare counts per render (FsrTaa::poll_rig_pixels, keyed by the render's receipt display): [mask px, own px, wild-MV px]
@@ -343,14 +351,28 @@ public:
          <<",\"repeats\":"<<ring_repeats_.load()<<",\"late\":"<<ring_late_.load()<<",\"young\":"<<ring_young_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"held_draws\":"<<held_draws_.load()<<",\"target\":{\"on\":"<<(target_on.load()?"true":"false")<<",\"draws\":"<<target_draws_.load()
          <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
-         <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load()<<'}';
+         <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load();
+        // v1210: nested draw hooks (inert inner scopes), slot metadata counts, the draw-time probe: tally [wild][pal_eq][cb_eq] and notes
+        o<<",\"nested_scopes\":"<<nested_scopes_.load()<<",\"slot_races\":"<<races_.load()<<",\"slot_no_commit\":"<<no_commit_.load()
+         <<",\"draw_probe\":{\"on\":"<<(probe_on.load()?"true":"false")<<",\"fields\":\"still: pal!cb!,pal!cb,pal cb!,pal cb; wild: same\",\"tally\":[";
+        for(unsigned i=0;i<probe_tally_.size();++i) o<<(i?",":"")<<probe_tally_[i].load();
+        o<<"],\"dropped\":"<<probe_dropped_.load()<<",\"notes\":[";
+        {std::lock_guard<std::mutex> lock(mutex_);for(unsigned i=0;i<probe_notes_n_;++i) o<<(i?",":"")<<probe_notes_[i];}
+        o<<"]}}";
         return o.str();
     }
     // Around one game draw (job threads). Inert unless enabled and the thread's pass renders the alternate view. after() right after the
     // engine's draw, with every engine binding of that draw still in place.
     class Scope {
     public:
+        // v1210: a draw hook entered from inside another draw hook on this thread (rig_draws - replays == foreign_t0 == mod_ring in v1209:
+        // one d3d11 draw entry point calls another hooked one, and our own replays re-enter the hooks) is the SAME draw: the outer Scope owns
+        // it, the inner one is inert and leaves every thread-local of the outer alone (it used to reset them, see the outer's bound slot at
+        // t0 as "foreign", and re-run ObjectMotion on our replays). ObjectMotion::DrawScope asks nested_draw().
         Scope(ID3D11DeviceContext* c,std::uintptr_t pass_view,int pass=-1) noexcept {
+            nested_=tl_scope_depth_++>0;
+            if(nested_) {nested_scopes_.fetch_add(1,std::memory_order_relaxed);return;}
+            tl_probe_display_=~0ull;
             tl_rig_=false;tl_own_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_pass_=pass;
             if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;
             view_draws_.fetch_add(1,std::memory_order_relaxed);
@@ -362,12 +384,14 @@ public:
             if(tl_rig_) {rig_draws_.fetch_add(1,std::memory_order_relaxed);rig_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
         }
         void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {
+            if(nested_) return;
+            if(tl_probe_display_!=~0ull && c_) {probe_capture(c_);tl_probe_display_=~0ull;} // v1210: what this draw read, in GPU order
             if(tl_foreign_t0_) foreign_count_.store(args.count,std::memory_order_relaxed); // v1169 diagnostic: the draw's index/vertex count
             restore_t0(); // v1166: the engine's previous palette again before the replay (it sees the engine's bindings)
             if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets);
             c_=nullptr;
         }
-        ~Scope() {restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        ~Scope() {--tl_scope_depth_;if(nested_) return;restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
             c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
@@ -375,8 +399,9 @@ public:
         }
         Scope(const Scope&)=delete;Scope& operator=(const Scope&)=delete;
     private:
-        ID3D11DeviceContext* c_{};
+        ID3D11DeviceContext* c_{};bool nested_{};
     };
+    static bool nested_draw() noexcept {return tl_scope_depth_>1;} // inside a draw hook entered from another draw hook (v1210)
 private:
     struct Target {ID3D11Resource* depth{};Microsoft::WRL::ComPtr<ID3D11Resource> hold;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;UINT w{},h{};
         Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2> trg_rtv;std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>,2> trg_dsv;}; // v1190; v1199 two slices
@@ -403,7 +428,85 @@ private:
         std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,rig_ring_slots> slot;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,rig_ring_slots> view;
         std::array<std::atomic<std::uint32_t>,rig_ring_slots> tag{};UINT bytes{};
         std::atomic<bool> ready{};std::atomic<std::uint32_t> last{~0u};std::atomic<unsigned> run{};ID3D11Device* device{};
-        void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);from_upload[i]=false;}upload.clear();run.store(0);last.store(~0u);}};
+        std::array<std::vector<std::uint8_t>,rig_ring_slots> shadow;std::array<bool,rig_ring_slots> commit{},race{},writer_deferred{}; // v1210 probe
+        void clear() noexcept {for(unsigned i=0;i<rig_ring_slots;++i) {view[i].Reset();slot[i].Reset();tag[i].store(~0u,std::memory_order_relaxed);from_upload[i]=false;shadow[i].clear();}upload.clear();run.store(0);last.store(~0u);}};
+    // v1210 draw-time probe (diagnostics): for the first own rig draw of each model in a render, right after the engine's draw and on its
+    // context (GPU order), copies of what that draw read: t0 (our ring slot), t1 (the engine's current palette), b2 (our pool rows). Read
+    // back on the immediate context once the render's mask census is in (its command lists have executed) and compared with what the CPU
+    // meant to give it: the slot's shadow bytes and the pool bytes ObjectMotion wrote (probe_arm).
+    struct Probe {std::uint64_t display{~0ull};unsigned model{},state{},polls{};std::uint32_t tag{};bool deferred{},commit{},race{},writer_deferred{};
+        Microsoft::WRL::ComPtr<ID3D11Buffer> pal,cur,cb;std::vector<std::uint8_t> want_pal,want_cb;};
+    inline static std::array<Probe,32> probes_{};inline static unsigned probe_next_{};
+    inline static std::array<std::atomic<std::uint64_t>,8> probe_tally_{}; // [wild*4 + pal_eq*2 + cb_eq]
+    inline static std::array<std::string,12> probe_notes_{};inline static unsigned probe_notes_n_{};
+    inline static std::atomic<std::uint64_t> races_{},no_commit_{},nested_scopes_{},probe_dropped_{};
+    inline static thread_local unsigned tl_scope_depth_{};inline static thread_local std::uint64_t tl_probe_display_{~0ull};inline static thread_local std::vector<std::uint8_t> tl_probe_cb_;
+    static bool make_staging(ID3D11Device* device,ID3D11Resource* src,Microsoft::WRL::ComPtr<ID3D11Buffer>& out) noexcept {
+        Microsoft::WRL::ComPtr<ID3D11Buffer> b;if(!device || !src || FAILED(src->QueryInterface(IID_PPV_ARGS(&b)))) return false;
+        D3D11_BUFFER_DESC d{};b->GetDesc(&d);
+        if(out) {D3D11_BUFFER_DESC h{};out->GetDesc(&h);if(h.ByteWidth==d.ByteWidth && h.MiscFlags==(d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)) return true;out.Reset();}
+        d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags&=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;if(!d.MiscFlags) d.StructureByteStride=0;
+        return SUCCEEDED(device->CreateBuffer(&d,nullptr,&out));
+    }
+    static void probe_capture(ID3D11DeviceContext* c) noexcept { // Scope::after, right after the engine's draw (t0 still our slot, b2 our pool)
+        const unsigned model=tl_model_,k=tl_bound_slot_;if(model>=ring_.size() || k>=rig_ring_slots || !tl_current_) return;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> cb;c->VSGetConstantBuffers(2,1,&cb);Microsoft::WRL::ComPtr<ID3D11Resource> cur;tl_current_->GetResource(&cur);
+        Microsoft::WRL::ComPtr<ID3D11Device> device;c->GetDevice(&device);
+        if(!cb || !cur || !device) return;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Ring& r=ring_[model];
+            if(!r.ready.load(std::memory_order_relaxed) || r.tag[k].load(std::memory_order_relaxed)!=tl_bound_tag_ || !r.slot[k] || r.shadow[k].size()!=r.bytes || device.Get()!=r.device) return;
+            for(const auto& p:probes_) if(p.state && p.display==tl_probe_display_ && p.model==model) return; // one per render and model
+            Probe* p=nullptr;for(unsigned i=0;i<probes_.size() && !p;++i) {Probe& q=probes_[(probe_next_+i)%probes_.size()];if(q.state!=1) p=&q;}
+            if(!p) {probe_dropped_.fetch_add(1,std::memory_order_relaxed);return;}
+            ++probe_next_;p->state=0;
+            if(!make_staging(device.Get(),r.slot[k].Get(),p->pal) || !make_staging(device.Get(),cur.Get(),p->cur) || !make_staging(device.Get(),cb.Get(),p->cb)) return;
+            c->CopyResource(p->pal.Get(),r.slot[k].Get());c->CopyResource(p->cur.Get(),cur.Get());c->CopyResource(p->cb.Get(),cb.Get());
+            p->want_pal=r.shadow[k];p->want_cb=tl_probe_cb_;p->display=tl_probe_display_;p->model=model;p->tag=tl_bound_tag_;p->polls=0;
+            p->deferred=c->GetType()==D3D11_DEVICE_CONTEXT_DEFERRED;p->commit=r.commit[k];p->race=r.race[k];p->writer_deferred=r.writer_deferred[k];p->state=1;
+        } catch(...) {}
+    }
+    // max |translation| difference over the joints of two packed 3x4 palettes (metres; NaN-safe: a non-finite difference reads 1e9)
+    static double palette_gap(const float* a,const float* b,std::size_t bytes) noexcept {
+        double gap=0;for(std::size_t j=0;j+48<=bytes;j+=48) for(unsigned t:{3u,7u,11u}) {const double d=std::abs(double(a[j/4+t])-double(b[j/4+t]));gap=std::max(gap,d==d?d:1e9);}
+        return gap;
+    }
+    static void poll_probes(ID3D11DeviceContext* immediate) noexcept { // under mutex_
+        for(auto& p:probes_) if(p.state==1) {
+            std::uint32_t m[3]{};
+            if(!mask_counts(p.display,m)) {if(++p.polls>2000) p.state=0;continue;} // the render's census (its lists have executed) not in yet
+            D3D11_MAPPED_SUBRESOURCE a{},b{},cbm{};
+            if(FAILED(immediate->Map(p.pal.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&a)) || !a.pData) continue;
+            if(FAILED(immediate->Map(p.cur.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&b)) || !b.pData) {immediate->Unmap(p.pal.Get(),0);continue;}
+            if(FAILED(immediate->Map(p.cb.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&cbm)) || !cbm.pData) {immediate->Unmap(p.cur.Get(),0);immediate->Unmap(p.pal.Get(),0);continue;}
+            D3D11_BUFFER_DESC pd{},cd{};p.pal->GetDesc(&pd);p.cb->GetDesc(&cd);
+            const std::size_t pal_bytes=std::min<std::size_t>(pd.ByteWidth,p.want_pal.size()),cb_bytes=std::min<std::size_t>(cd.ByteWidth,p.want_cb.size());
+            const auto* gp=static_cast<const float*>(a.pData);const auto* gc=static_cast<const float*>(b.pData);const auto* gb=static_cast<const float*>(cbm.pData);
+            const bool pal_eq=pal_bytes && !std::memcmp(gp,p.want_pal.data(),pal_bytes),cb_eq=cb_bytes && !std::memcmp(gb,p.want_cb.data(),cb_bytes);
+            std::size_t pal_diff=0;for(std::size_t i=0;i<pal_bytes;++i) pal_diff+=static_cast<const std::uint8_t*>(a.pData)[i]!=p.want_pal[i];
+            const double slot_cur=palette_gap(gp,gc,pal_bytes),want_cur=palette_gap(reinterpret_cast<const float*>(p.want_pal.data()),gc,pal_bytes);
+            std::size_t cb_first=~std::size_t{0};for(std::size_t i=0;i+4<=cb_bytes && cb_first==~std::size_t{0};i+=4) if(std::memcmp(gb+i/4,p.want_cb.data()+i,4)) cb_first=i/4;
+            const bool wild=m[2]>0;probe_tally_[(wild?4u:0u)+(pal_eq?2u:0u)+(cb_eq?1u:0u)].fetch_add(1,std::memory_order_relaxed);
+            if((wild || ((!pal_eq || !cb_eq) && probe_notes_n_<4)) && probe_notes_n_<probe_notes_.size()) try { // wild renders first; at most 4 other mismatches
+                float want_f=0;if(cb_first!=~std::size_t{0}) std::memcpy(&want_f,p.want_cb.data()+cb_first*4,4);
+                std::ostringstream o;o<<"{\"display\":"<<p.display<<",\"model\":"<<p.model<<",\"tag\":"<<p.tag<<",\"wild\":"<<(wild?1:0)<<",\"pal_eq\":"<<(pal_eq?1:0)<<",\"pal_diff_bytes\":"<<pal_diff
+                 <<",\"slot_vs_cur_m\":"<<slot_cur<<",\"want_vs_cur_m\":"<<want_cur<<",\"cb_eq\":"<<(cb_eq?1:0)<<",\"cb_first_float\":"<<static_cast<long long>(cb_first==~std::size_t{0}?-1:static_cast<long long>(cb_first))
+                 <<",\"cb_gpu\":"<<(cb_first==~std::size_t{0}?0.f:gb[cb_first])<<",\"cb_cpu\":"<<want_f<<",\"draw_deferred\":"<<(p.deferred?1:0)<<",\"writer_deferred\":"<<(p.writer_deferred?1:0)
+                 <<",\"commit\":"<<(p.commit?1:0)<<",\"race\":"<<(p.race?1:0)<<",\"mask\":["<<m[0]<<','<<m[1]<<','<<m[2]<<"]}";
+                probe_notes_[probe_notes_n_++]=o.str();
+            } catch(...) {}
+            immediate->Unmap(p.cb.Get(),0);immediate->Unmap(p.cur.Get(),0);immediate->Unmap(p.pal.Get(),0);p.state=2;
+        }
+    }
+public:
+    inline static std::atomic<bool> probe_on{false}; // v1210: dxgi_probe, each Present: rig motion on and diagnostics on
+    // ObjectMotion, at an own rig draw: the b2 bytes it binds (its pool), for the draw-time probe of this render (display) and model
+    static void probe_arm(std::uint64_t display,const void* cb,UINT bytes) noexcept {
+        if(!probe_on.load(std::memory_order_relaxed) || display==~0ull || !cb || !bytes) return;
+        try {tl_probe_cb_.assign(static_cast<const std::uint8_t*>(cb),static_cast<const std::uint8_t*>(cb)+bytes);tl_probe_display_=display;} catch(...) {}
+    }
+private:
     struct Fingerprint {Microsoft::WRL::ComPtr<ID3D11Buffer> cur,oth;std::vector<std::uint8_t> cpu;bool pending{};};
     inline static std::array<Fingerprint,3> fingerprints_{};inline static std::array<std::atomic<std::uint64_t>,4> fp_{};inline static std::atomic<std::uint64_t> fp_first_diff_{~0ull};
     inline static std::atomic<std::uint64_t> uploads_{},no_upload_{},layout_refused_{};

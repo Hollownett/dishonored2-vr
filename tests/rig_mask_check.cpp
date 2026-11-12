@@ -121,6 +121,11 @@ static void run(bool d24,int mode) {
                 CHECK(d2vr::RigMask::previous_palette(c.Get(),0,3,true)); // v1208: frame 3 (no upload) is tagged with the last uploaded palette
             }
             const bool own=d2vr::RigMask::previous_palette(c.Get(),0,6,mode==1);CHECK(own==(mode==1));
+            { // v1210: a draw hook entered from inside this one (the same draw) is inert: the outer's state and its t0 binding survive it
+                d2vr::RigMask::Scope inner(c.Get(),1);CHECK(d2vr::RigMask::nested_draw());CHECK(d2vr::RigMask::draw_is_rig());
+                inner.after({2,3,1,0,0,0},draw,targets);
+            }
+            CHECK(!d2vr::RigMask::nested_draw() && d2vr::RigMask::draw_is_rig());
             ID3D11ShaderResourceView* t0{};c->VSGetShaderResources(0,1,&t0); // what the draw reads as its previous palette
             if(t0) {ComPtr<ID3D11Resource> r;t0->GetResource(&r);ComPtr<ID3D11Buffer> b;r.As(&b);
                 D3D11_BUFFER_DESC sd{};b->GetDesc(&sd);sd.Usage=D3D11_USAGE_STAGING;sd.BindFlags=0;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Buffer> st;
