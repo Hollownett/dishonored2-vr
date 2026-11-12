@@ -8,21 +8,27 @@
 #include <mutex>
 
 namespace d2vr {
-template<class V,std::size_t N=32> class BufferViews {
+// v1196: hashed (1024 slots, 16-slot probe window; the oldest in the window is replaced). v1195 sims still sent ~1% of one-view draws, rig
+// draws among them, to the newest view: the 32-slot LRU table was evicted by the many per-view buffers a frame writes before the draw looked up.
+template<class V,std::size_t N=1024> class BufferViews {
+    static_assert((N&(N-1))==0,"power of two");
+    static constexpr std::size_t probe=N<16?N:16;
     struct Slot {const void* buffer{};V view{};std::uint64_t stamp{};};
     std::array<Slot,N> slots_{};std::uint64_t clock_{};mutable std::mutex mutex_;
+    static std::size_t home(const void* b) noexcept {return static_cast<std::size_t>((reinterpret_cast<std::uintptr_t>(b)>>4)*0x9e3779b97f4a7c15ull>>40)&(N-1);}
 public:
     void store(const void* buffer,const V& view) noexcept {
         if(!buffer) return;
         std::lock_guard<std::mutex> lock(mutex_);
-        Slot* at=&slots_[0];
-        for(auto& s:slots_) {if(s.buffer==buffer) {at=&s;break;} if(s.stamp<at->stamp) at=&s;} // that buffer's slot, else the oldest
+        const std::size_t h=home(buffer);Slot* at=&slots_[h];
+        for(std::size_t i=0;i<probe;++i) {Slot& s=slots_[(h+i)&(N-1)];if(s.buffer==buffer) {at=&s;break;} if(s.stamp<at->stamp) at=&s;} // that buffer's slot, else the oldest in the window
         at->buffer=buffer;at->view=view;at->stamp=++clock_;
     }
     bool find(const void* buffer,V& out) const noexcept {
         if(!buffer) return false;
         std::lock_guard<std::mutex> lock(mutex_);
-        for(const auto& s:slots_) if(s.buffer==buffer) {out=s.view;return true;}
+        const std::size_t h=home(buffer);
+        for(std::size_t i=0;i<probe;++i) {const Slot& s=slots_[(h+i)&(N-1)];if(s.buffer==buffer) {out=s.view;return true;}}
         return false;
     }
     void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);slots_={};clock_=0;}

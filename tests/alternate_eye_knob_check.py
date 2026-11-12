@@ -276,3 +276,9 @@ assert 'r.shoulder=d2vr::HandClamp::carry_play(*reach_root,clamp_root,r.shoulder
 assert 'by_contact || !agreement_draws_clamp?in.body->position:in.clamp.position' in vis_src
 for k in ('legacy-clamp-play-lag','legacy-reach-lag','legacy-body-agreement'): assert k in probe
 print('PASS: v1195 drawn hands without the one-frame head lag (clamp play carry, reach shoulder carry, agreement draws the clamp pose)')
+
+# v1196: hand-chain trace (sim-pose-hold only), hashed b1 view table, newest_why counters
+assert 'if(d2vr::sim_pose_hold::on.load() && fs::exists(root/L"build"/L"hand-chain-trace"))' in probe and 'hand_trace.csv<<alt_display' in probe
+assert 'template<class V,std::size_t N=1024> class BufferViews' in (root / 'src' / 'buffer_views.hpp').read_text(encoding='utf-8')
+assert 'alt_newest_why_' in (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+print('PASS: v1196 hand-chain trace knob, hashed b1 view table, newest_why')

@@ -135,6 +135,16 @@
 #include "rig_target.hpp"
 #include "sim_pose_hold.hpp"
 static bool reach_shoulder_carry=true; // v1195: build/legacy-reach-lag (the reach shoulders carried with the camera root)
+// v1196 knob build/hand-chain-trace (simulated XR + sim-pose-hold only): artifacts/hand-chain-trace.csv, one row per hand per Setup with every
+// stage's inputs and outputs of the drawn-hand chain (the replay input for the chain tests). Capped at 60000 rows.
+struct HandChainTrace {
+    struct V {double x{},y{},z{};};
+    struct Side {V xr,raw,palm,target,clamp_out,clamp_stage,body,visual,drawn,shoulder;double reach_age{-1},max_wrist{};bool reach_valid{},reach_clamped{},clamp_ran{},validated{},held{},reacquired{},palm_answered{},yield{},body_present{},body_contact{},clamp_contact{},blending{};
+        int state{-1},source{-1};std::uint64_t request0{},answer0{},body_seq{};double body_weight{},gap{};};
+    bool on{};std::array<Side,2> side{};V play,play_x,root,root_x,head_origin,hand_centre;unsigned rows{};std::ofstream csv;
+};
+static HandChainTrace hand_trace;
+static HandChainTrace::V trace_v(const d2vr::Vec3& v) {return {v.x,v.y,v.z};}
 #include "taa_jitter_check.hpp"
 #include "vr_combat.hpp"
 #include "attack_intent.hpp"
@@ -8450,6 +8460,11 @@ void prepare_head_view(void* view) noexcept {
                             in.tip=clamp_tip[side];in.wall_tip=clamp_wall_tip[side];
                             native_grab.hand_contact().fill_clamp_input(side,in,clamp_exclude[side]); // loose props in reach (I2), last frame's met prop (I1)
                             clamped=hand_clamp.update(side,in);clamp_state[side]=clamped.state;clamp_post=in.post;
+                            if(hand_trace.on) {auto& t=hand_trace.side[side];t.clamp_ran=true;t.target=trace_v(target.position);t.clamp_out=trace_v(clamped.drawn.position);t.validated=clamped.validated;t.held=clamped.held;
+                                t.reacquired=clamped.reacquired;t.palm_answered=clamped.palm_answered;t.state=static_cast<int>(clamped.state);t.request0=clamped.request_ids[0];t.answer0=in.answer_ids[0];t.yield=clamp_yield;
+                                t.palm=trace_v(palm.position);t.reach_valid=reach_fresh && arm_reach.reach[side].valid;t.reach_clamped=reach_clamped;t.shoulder=trace_v(arm_reach.reach[side].shoulder);
+                                t.max_wrist=arm_reach.reach[side].max_wrist;t.reach_age=arm_reach.output_age_seconds;
+                                if(side==0) {hand_trace.root=trace_v(clamp_root.position);hand_trace.root_x=trace_v(clamp_root.basis[0]);if(in.play) {hand_trace.play=trace_v(in.play->position);hand_trace.play_x=trace_v(in.play->basis[0]);}}}
                             palm_unanswered=clamp_posted[side] && !clamped.palm_answered;
                             if(palm_unanswered)++status.unanswered;
                             {std::lock_guard<std::mutex> hand_lock(hand_state_mutex);
@@ -8495,6 +8510,7 @@ void prepare_head_view(void* view) noexcept {
                         const auto r=weapon_collision.update(side,dt,g.position,barrel_axis,blade,query,barrel_offset,blade_radius);
                         const auto composed=d2vr::compose_blade(hand_clamp,side,g.basis,g.position,r,met_prop);
                         g.position=composed.drawn;
+                        if(hand_trace.on) hand_trace.side[side].clamp_stage=trace_v(g.position);
                         event=r.event?r.event:clamped.event;haptic=r.haptic?r.haptic:clamped.haptic;
                         if(clamped.state==d2vr::ClampState::contact || r.contact) ++weapon_contact_frames;
                         if(r.blade_dir) { // rotate the hand basis so the weapon lies along the deflected blade axis
@@ -8811,6 +8827,8 @@ void prepare_head_view(void* view) noexcept {
                             in.body_behind_surface=d2vr::behind_held_planes(in.body->position,planes.data(),held);
                             in.world_hit_near=d2vr::world_hit_near_body(in.body->position,planes.data(),held);}
                         visual[side]=hand_visual_source.update(side,in);hand_visual_stats.note(side,visual[side]);
+                        if(hand_trace.on) {auto& t=hand_trace.side[side];t.body_present=in.body_ready && in.body.has_value();if(in.body) t.body=trace_v(in.body->position);t.body_seq=in.body_seq;
+                            t.body_contact=in.body_contact;t.clamp_contact=in.clamp_contact;t.source=static_cast<int>(visual[side].source);t.blending=visual[side].blending;t.body_weight=visual[side].body_weight;t.gap=visual[side].gap_m;}
                         drawn_body_weight[side]=visual[side].body_weight;   // B16 fix round 1: held things follow the drawn hand
                     }
                 }
@@ -8820,6 +8838,7 @@ void prepare_head_view(void* view) noexcept {
                 }
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) hands.grips[side]=d2vr::resolve_drawn_grip(visual[side],anchors[side]).pose;   // X-4 in one function
                 if(d2vr::sim_pose_hold::on.load()) {std::lock_guard<std::mutex> l(hand_stages_mutex);auto& st=hand_stage_slot(alt_display);for(unsigned side=0;side<2;++side) st.hand[side][4]=hands.grips[side].position;}
+                if(hand_trace.on) for(unsigned side=0;side<2;++side) hand_trace.side[side].visual=trace_v(hands.grips[side].position);
                 // Native hands 2c (user 2026-11-06: "hands should react to weapons and the sword, weapons should react to each other"): the two hands and the
                 // swords they hold are capsules pushed apart when they meet (hand_weapon_contact.hpp, 4 capsule pairs, no engine query), with a pulse on
                 // contact and a stronger one on a blade clash. A gun adds its barrel capsule (v1065).
@@ -9344,6 +9363,21 @@ void prepare_head_view(void* view) noexcept {
             warp_grips=hands.grips;warp_grip_bits=hands.hands; // v802: the hands as drawn this frame (stale-eye warp: did they hold still?)
             if(d2vr::sim_pose_hold::on.load()) {std::lock_guard<std::mutex> l(hand_stages_mutex);auto& st=hand_stage_slot(alt_display); // v1193 diagnostic
                 for(unsigned side=0;side<2;++side) st.hand[side][5]=hands.grips[side].position;st.head_origin=head_origin.position;st.hand_centre=hand_centre;st.centre=centre;}
+            if(hand_trace.on && hand_trace.rows<60000) try { // v1196: one row per hand (the chain of this Setup), then cleared
+                hand_trace.head_origin=trace_v(head_origin.position);hand_trace.hand_centre=trace_v(hand_centre);
+                const bool change=d2vr::sim_pose_hold::changes(alt_display,d2vr::alternate_parity_flip.load(),d2vr::sim_pose_hold::phase.load());
+                const auto v=[&](const HandChainTrace::V& a) {hand_trace.csv<<','<<a.x<<','<<a.y<<','<<a.z;};
+                for(unsigned side=0;side<2;++side) {
+                    auto& t=hand_trace.side[side];
+                    const auto& xr=game_xr->grip_locations[side].pose.position;t.xr={xr.x,xr.y,xr.z};t.raw=trace_v(raw_grips[side].position);t.drawn=trace_v(hands.grips[side].position);
+                    hand_trace.csv<<alt_display<<','<<alt_eye<<','<<(change?1:0)<<','<<side<<','<<((hands.hands>>side)&1u);
+                    v(t.xr);v(hand_trace.play);v(hand_trace.play_x);v(hand_trace.root);v(hand_trace.root_x);v(hand_trace.head_origin);v(hand_trace.hand_centre);
+                    v(t.raw);v(t.palm);hand_trace.csv<<','<<t.reach_valid<<','<<t.reach_age<<','<<t.max_wrist;v(t.shoulder);hand_trace.csv<<','<<t.reach_clamped;v(t.target);
+                    hand_trace.csv<<','<<t.clamp_ran<<','<<t.yield<<','<<t.validated<<','<<t.held<<','<<t.reacquired<<','<<t.palm_answered<<','<<t.state<<','<<t.request0<<','<<t.answer0;v(t.clamp_out);v(t.clamp_stage);
+                    hand_trace.csv<<','<<t.body_present<<','<<t.body_seq;v(t.body);hand_trace.csv<<','<<t.body_contact<<','<<t.clamp_contact<<','<<t.source<<','<<t.blending<<','<<t.body_weight<<','<<t.gap;
+                    v(t.visual);v(t.drawn);hand_trace.csv<<'\n';t=HandChainTrace::Side{};++hand_trace.rows;
+                }
+            } catch(...) {}
             for(unsigned side=0;side<2;++side) warp_palms[side]=hands.hands>>side&1u?drawn_palm_frame(side,hands.grips[side]).position:d2vr::Vec3{}; // v811
             const auto tracked_stamp=tracked_arms_requested?arm_tracking.publish(hands):d2vr::rig::ArmTrackingStamp{};
             d2vr::NativeHeldObject::note_epoch(hands.epoch);
@@ -15604,6 +15638,16 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 while(knob>>token) if(token=="phase=1") phase=1;
                 d2vr::sim_pose_hold::on=static_cast<bool>(knob.is_open() || fs::exists(root/L"build"/L"sim-pose-hold")) && simulated_vr_requested && simulated_gameplay_script_requested;
                 d2vr::sim_pose_hold::phase=phase;sim_pose_clock={};sim_pose_check={};
+                hand_trace.on=false;hand_trace.rows=0;if(hand_trace.csv.is_open()) hand_trace.csv.close();
+                if(d2vr::sim_pose_hold::on.load() && fs::exists(root/L"build"/L"hand-chain-trace")) { // v1196
+                    hand_trace.csv.open(output_directory/L"hand-chain-trace.csv",std::ios::trunc);hand_trace.csv.precision(9);
+                    hand_trace.csv<<"display,fresh_eye,change,side,tracked,xr_x,xr_y,xr_z,play_x,play_y,play_z,play_fx,play_fy,play_fz,root_x,root_y,root_z,root_fx,root_fy,root_fz,"
+                        "head_origin_x,head_origin_y,head_origin_z,hand_centre_x,hand_centre_y,hand_centre_z,raw_x,raw_y,raw_z,palm_x,palm_y,palm_z,reach_valid,reach_age_s,max_wrist,"
+                        "shoulder_x,shoulder_y,shoulder_z,reach_clamped,target_x,target_y,target_z,clamp_ran,yield,validated,held,reacquired,palm_answered,state,request0,answer0,"
+                        "clamp_out_x,clamp_out_y,clamp_out_z,clamp_stage_x,clamp_stage_y,clamp_stage_z,body_present,body_seq,body_x,body_y,body_z,body_contact,clamp_contact,source,blending,"
+                        "body_weight,gap,visual_x,visual_y,visual_z,drawn_x,drawn_y,drawn_z"<<'\n';
+                    hand_trace.on=static_cast<bool>(hand_trace.csv);
+                }
             }
             shadow_stability=ShadowStability{}; // v1161 diagnostic (see capture_shadow_stability)
             if(std::ifstream knob{root/L"build"/L"shadow-stability"}) {

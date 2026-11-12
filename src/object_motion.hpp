@@ -253,6 +253,7 @@ public:
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
         return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_draws\":"+std::to_string(alt_rig_.load())+",\"rig_own\":"+std::to_string(alt_rig_own_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())
             +",\"view_src\":["+[] {std::string o;for(unsigned i=0;i<5;++i) o+=(i?",":"")+std::to_string(alt_view_src_[i].load());return o;}()
+            +"],\"newest_why\":["+std::to_string(alt_newest_why_[0].load())+','+std::to_string(alt_newest_why_[1].load())+','+std::to_string(alt_newest_why_[2].load())
             +"],\"view_use\":["+[] {std::string o;for(unsigned i=0;i<5;++i) {o+=i?",[":"[";for(unsigned u=0;u<use_count;++u) o+=(u?",":"")+std::to_string(alt_view_use_[i][u].load());o+="]";}return o;}()+"]"
             +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]}";
     }
@@ -312,6 +313,7 @@ public:
     // b1 (of the newest frame / older), 4 the newest view anywhere (the pre-v1193 fallback); and per source, what used it (view_use)
     inline static thread_local unsigned tl_view_src_{};
     inline static std::array<std::atomic<std::uint64_t>,5> alt_view_src_{};
+    inline static std::array<std::atomic<std::uint64_t>,3> alt_newest_why_{}; // v1196: no b1 bound / own view of another buffer, b1 unknown / no own view, b1 unknown
     enum ViewUse : unsigned {use_held_mask,use_rig_target,use_rig_motion,use_place,use_fix,use_camera_only,use_near,use_count};
     inline static std::array<std::array<std::atomic<std::uint64_t>,use_count>,5> alt_view_use_{};
     static void view_use(ViewUse u) noexcept {alt_view_use_[tl_view_src_][u].fetch_add(1,std::memory_order_relaxed);}
@@ -675,7 +677,8 @@ private:
         else if(tl_view_src_==1) {out=s.view;ok=true;}
         else if(tl_view_src_==2) {out=shared;ok=true;if(out.frame!=newest) tl_view_src_=3;}
         else ok=latest(latest_eye_.load(std::memory_order_acquire),out) && out.frame==newest;
-        if(alternate()) alt_view_src_[tl_view_src_].fetch_add(1,std::memory_order_relaxed);
+        if(alternate()) {alt_view_src_[tl_view_src_].fetch_add(1,std::memory_order_relaxed);
+            if(tl_view_src_==4) alt_newest_why_[!s.cb[0]?0:(s.view_valid && s.view_buffer)?1:2].fetch_add(1,std::memory_order_relaxed);} // v1196
         if(!ok) return false;
         const int key=b1_eye(s.cb[0]);
         note_b1(s.cb[0],own,out.eye);
