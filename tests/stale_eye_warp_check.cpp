@@ -1316,7 +1316,8 @@ static void gpu_afw2() {
             if (truth.kind[i] == hand_kind && truth.kind[i - 1] == hand_kind && truth.kind[i + 1] == hand_kind) {
                 ++hand; hand_wrong += !((o >= lo - 12 && o <= hi + 12) || (grip > 0 && o >= llo - 12 && o <= lhi + 12));
             }
-            if (clear && o >= 95 && o <= 125) ++ghost;
+            // (v1209: the wall the hand uncovered may come from the fresh eye, its shading lifted 50 into the hand's levels: not a ghost)
+            if (clear && o >= 95 && o <= 125 && !(o >= llo - 3 && o <= lhi + 3)) ++ghost;
         }
         std::printf("afw2 D. moving hand, grip %s: hand %d/%d wrong, hand colour on the wall in %d px; scene %d/%d wrong (%d fresh), %u holes\n",
                     grip > 0 ? "over-moved" : "right", hand_wrong, hand, ghost, sa.wrong, sa.n, sa.lifted, a.holes);
@@ -1547,6 +1548,28 @@ static void gpu_afw2() {
         }
         std::printf("afw2 Q%d. hand 5 cm, %s: %d of %d hand px in this eye's own shading at the right place\n", q, q == 1 ? "own motion right, layer still" : "own motion 3 cm short, layer right", own, hand);
         CHECK(hand > 300 && own * 100 >= hand * 95);
+    }
+    // V. (v1205/v1209 swing: the place a fast hand left was filled with sparkle) the hand moves 9 cm a tick, its rig motion right, the rig
+    // target known: the place it left shows the wall behind (the fresh eye sees it), within the wall's own range there, no hand colour
+    for (const bool target : {true, false}) {
+        Scene ks; ks.hand = -0.09; ks.hand_walk = {0.18, 0, 0}; Scene ns = ks; ns.hand = 0.0; Scene lit = ns; lit.lift = 50;
+        const Frame k = render(here, ks), f = render(fresh_at, lit), truth = render(here, ns);
+        const auto rt = target_rig(here, ns.hand); rig_target = target ? rt.Get() : nullptr;
+        const auto a = run(true, here, here, fresh_at, k, f, -0.09, 0.0, true, true);
+        std::vector<unsigned char> codes;
+        if (std::getenv("AFW2_VERBOSE")) {warp.afw2->rig_debug = 1; codes = run(true, here, here, fresh_at, k, f, -0.09, 0.0, true, true).out; warp.afw2->rig_debug = 0;}
+        rig_target = nullptr;
+        int n = 0, bad = 0, lit_n = 0;
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const int i = y * W + x, o = a.out[i * 4];
+            bool inner = true; int lo = 255, hi = 0;
+            for (int d = -2; d <= 2; ++d) inner = inner && k.kind[i + d] == hand_kind && k.kind[i + d * W] == hand_kind && truth.kind[i + d] == wall_kind && truth.kind[i + d * W] == wall_kind;
+            if (!inner) continue;
+            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {lo = std::min(lo, truth.grey[i + dy * W + dx]); hi = std::max(hi, truth.grey[i + dy * W + dx]);}
+            ++n; const bool ok = o >= lo - 12 && o <= hi + 12, ok_lit = o >= lo + 50 - 12 && o <= hi + 50 + 12; bad += !ok && !ok_lit; lit_n += !ok && ok_lit; if (!ok && !ok_lit && !codes.empty() && bad <= 10) std::printf("   V bad (%d,%d): %d truth %d..%d code %ld\n", x, y, o, lo, hi, std::lround(std::pow((codes[i * 4] / 255.0 + 0.055) / 1.055, 2.4) * 255 / 20));
+        }
+        std::printf("afw2 V. a hand gone 9 cm, target %s: of %d px it left, %d not the wall (%d the wall in the fresh eye's shading)\n", target ? "used" : "none", n, bad, lit_n);
+        CHECK(n > 300 && bad * 100 <= n);
     }
     // E. a guard 2.5 m away walking 20 cm a tick (motion textures, both eyes), the camera 2 cm sideways: at its new place in this eye's own
     // shading, the wall at its old place. E'. the kept eye's motion texture says nothing (a vector it lacks: the guard just started): the fresh
