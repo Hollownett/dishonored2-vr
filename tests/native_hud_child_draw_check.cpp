@@ -108,6 +108,25 @@ int main(){
          assert(native_prompt_keep_grace(live,same,current,bound,offer,true,true)==0);     // takedown slot: another hint replaces at once, as before
          assert(native_prompt_keep_grace(live,same,current,bound,offer,false,false)==0);   // another window (node): replaced at once, as before
          assert(native_prompt_keep_grace(live,same,false,bound,offer,false,true)==0);}     // the new binding not current: nothing to hand over to
+        // v1233, sim v1232 native-prompt-blinks rows 195440453..195441562 (t=0 at the first): key 14 shown with art_age 78 and never refreshed, hidden
+        // at t=437 (art_age 515) with the hand still on the body; key 10 art landed at t=1109. Between, the game draws the window through the bare root
+        // (same element, binding not current, key 14 entry gone). The hand leaves at t=2000; its live target drops 250 ms later. Frames 11 ms.
+        {const auto run=[](bool v1233,UINT64& first_hide,UINT64& leave_hide){NativeHudPromptHold hold;first_hide=leave_hide=0;bool shown=true;
+            for(UINT64 t=0;t<3000;t+=11) {
+                const UINT64 art_age=t<1109?t+78:t<2000?0:t-2000;   // key 14 art from t=-78; key 10 art fresh until the hand leaves
+                const bool on=t<2000,live_hand=t<2250,remembered=t<2500;   // hand on the body / live target / 500 ms remembered target
+                if(art_age<=250) {hold.good(t,Vec3{},.3);shown=true;continue;}
+                // on the body: the bare root draws the same element, not current; gone: nothing drawn
+                const UINT64 g=native_prompt_keep_grace(on,on,false,false,remembered,false,false,v1233 && live_hand);
+                const bool keep=g && hold.holds(t,g);
+                if(!keep && shown) {auto& at=on?first_hide:leave_hide;if(!at) at=t;}
+                shown=keep;}};
+         UINT64 old_first{},old_leave{},new_first{},new_leave{};run(false,old_first,old_leave);run(true,new_first,new_leave);
+         assert(old_first>=400 && old_first<=450);   // the logged hide (t=437)
+         assert(new_first==0);                       // v1233: held until the key 10 art lands
+         assert(new_leave && new_leave<=old_leave && new_leave-2000<=500);}   // leaving: no later than before (art age 250 + gap 250)
+        assert(native_prompt_keep_grace(true,true,false,false,false,false,false,true)==0);   // live offer alone (no same-object offer): nothing held
+        assert(native_prompt_keep_grace(true,false,true,false,true,false,false,true)==0);    // another element drawn fresh: replaced at once
         // v1228 NativeBodyPromptStats on the logged v1209 interval at 179860156 (4694 ms on one body, first shown at 78 ms, three
         // retained->hand re-bind gaps of 15-63 ms): v1216 = one flicker interval; with the gap hold (no gaps) = clean; frames 11 ms.
         const auto replay=[](bool gaps){NativeBodyPromptStats s;const std::uintptr_t body=0x7181600;

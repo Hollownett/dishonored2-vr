@@ -59,11 +59,15 @@ struct NativeHudPromptHold {
 // while the hand target (its own 500 ms hold) still names the same object. 250 ms rides those out and lets a prompt linger at most that long.
 // v1225 handover (sim v1222: the window rebound from one object's prompt to ANOTHER object's, crop 459 -> 372, and stayed blank 62 ms until the
 // new art landed): the same window (node) now bound to another object keeps the old art at most 100 ms (p95 art latency 78 ms), never longer.
+// v1233 (sim v1232: a body's carry prompt hid twice for 0.5-0.67 s with the hand still on the body, art_age 515 at each hide): the game drops
+// the window's bindings (retained key 10 -> 14 -> none) and draws it through the bare prompt root, so no new art lands for up to ~940 ms
+// past the last good frame and the 250 ms gap ran out. While the hand's LIVE target (not its 500 ms remembered one) is still the art's
+// object, slot 0 keeps the takedown hold (1300 ms): the same rule as the kill/choke hint. live_offer drops <= 250 ms after the hand leaves.
 inline UINT64 native_prompt_keep_grace(bool live,bool live_same_element,bool live_current,bool held_still_bound,bool offer_same_object,bool takedown_slot,
-        bool live_same_window=false) noexcept {
+        bool live_same_window=false,bool live_offer=false) noexcept {
     const bool same_live=live && live_same_element && live_current;
     const UINT64 kept=live && live_same_element && (same_live || held_still_bound)?600:0;
-    if(offer_same_object && !same_live && (!live || live_same_element || !live_current)) return takedown_slot?1300:std::max<UINT64>(kept,250);
+    if(offer_same_object && !same_live && (!live || live_same_element || !live_current)) return takedown_slot || live_offer?1300:std::max<UINT64>(kept,250);
     if(!takedown_slot && !kept && live && !live_same_element && live_current && live_same_window) return 100;
     return kept;
 }

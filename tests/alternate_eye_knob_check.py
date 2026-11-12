@@ -504,3 +504,10 @@ assert 'if((role_==Role::ready || (role_==Role::other && offered_victim!=refused
 assert 'else if(role_==Role::ready) {role_=Role::other;refused_=offered_victim;}' in vc32 and '{role_=Role::ready;victim_=refused_=0;return {};}' in vc32
 assert 'const std::uint32_t entry=role_==Role::ready && !offered_victim?active_victim:offered_victim;' in vc32 and '{role_=Role::choke;victim_=entry;}' in vc32
 print('PASS: v1232 combat choke: a still-held grip takes a later offer')
+# v1233: a slot-0 prompt keeps the takedown hold (1300 ms) while the hand's LIVE target is still the art's object (sim v1232: a body's carry prompt hid
+# at art_age 515 with the hand on the body while the game drew the window through the bare prompt root); status prompt_live_holds, prompt_target_hides
+hd33 = (root / 'src' / 'native_hud_child_draw.hpp').read_text(encoding='utf-8')
+assert 'bool live_same_window=false,bool live_offer=false) noexcept {' in hd33 and 'return takedown_slot || live_offer?1300:std::max<UINT64>(kept,250);' in hd33
+assert 'const auto live_hand=offer_same && hand_gap?native_interaction_aim.qualified_target(now):std::nullopt;' in probe
+assert 'live_scope.child.node==c.child.node && live_scope.child.epoch==c.child.epoch,live_offer):0;' in probe and '++prompt_target_hides[!fresh?2:live_same?0:1];' in probe
+print('PASS: v1233 hand prompt held while the live hand target is its object')
