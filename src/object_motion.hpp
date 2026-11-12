@@ -395,6 +395,7 @@ public:
     inline static std::array<std::array<std::atomic<std::uint64_t>,5>,cert_consumers> alt_cert_why_{};
     inline static thread_local unsigned tl_content_why_{};
     static void certainty(CertConsumer k,CertOutcome o) noexcept {
+        if(o==cert_fallback && tl_content_why_==5) o=cert_na; // v1212: no eye render published: not applicable
         alt_cert_[k][o].fetch_add(1,std::memory_order_relaxed);
         if(o==cert_fallback) alt_cert_why_[k][tl_content_why_<5?tl_content_why_:0].fetch_add(1,std::memory_order_relaxed);
     }
@@ -736,8 +737,19 @@ private:
     // v1203: fit 1e-5 (was 1e-4): a model skew of a jitter shear's size (1e-4..1e-3) could cancel the wrong render's shear; skewed models
     // go to the Gram test (previous rows) instead
     inline static std::atomic<double> content_fit_{1e-4},content_ratio_{4.0},content_floor_{2e-6};
-    enum ContentOutcome : unsigned {content_certain,content_ambiguous,content_none_fit,content_other_pass,content_no_candidates,content_tie_same_eye,content_certain_gram,content_outcomes};
+    enum ContentOutcome : unsigned {content_certain,content_ambiguous,content_none_fit,content_other_pass,content_no_candidates,content_tie_same_eye,content_certain_gram,content_no_render,content_outcomes};
     inline static std::array<std::atomic<std::uint64_t>,content_outcomes> content_outcome_{};
+    // v1212: the draw's engine frame (RigMask::frame_fn; the newest published record's when unknown)
+    static std::uint32_t draw_frame() noexcept {const auto fn=RigMask::frame_fn.load(std::memory_order_relaxed);return fn?fn():newest_frame_.load(std::memory_order_relaxed);}
+    // v1212 (v1211 stillprobe: ~37k rig and 81k world draws after the sim's last render, at a frozen newest record and 2120x2288+ viewports): a draw
+    // recorded more than PrevMvpTable::gens engine frames after the newest published eye record belongs to no eye render being published (menu,
+    // teardown, flat camera): no receipt, not an eye render -> not applicable (tl_content_why_ 5), never a fallback
+    static bool no_render_published() noexcept {
+        const auto fn=RigMask::frame_fn.load(std::memory_order_relaxed);if(!fn) return false;
+        const std::uint32_t now=fn(),newest=newest_frame_.load(std::memory_order_relaxed);
+        return newest && now>newest && now-newest>PrevMvpTable::gens;
+    }
+    static bool content_na() noexcept {return tl_content_why_==3 || tl_content_why_==5;} // another pass's view, or no eye render published
     inline static std::array<std::array<std::atomic<std::uint64_t>,11>,2> content_hist_{}; // [0] best, [1] second best
     inline static std::array<std::atomic<std::uint64_t>,2> content_tick_{}; // tick: picked the newest of its eye / an older one
     // v1201: content vs the v1199 same-job b1 view: agree, other eye, same eye and content's render newer, same eye and content's older
@@ -923,7 +935,7 @@ private:
             if(v && alt && v!=alt) {content_outcome_[content_other_pass].fetch_add(1,std::memory_order_relaxed);tl_content_why_=3;return false;}
         }
         refresh_candidates();
-        if(tl_cand_n_<1) {content_outcome_[content_no_candidates].fetch_add(1,std::memory_order_relaxed);tl_content_why_=4;return false;}
+        if(tl_cand_n_<1) {const bool none=no_render_published();content_outcome_[none?content_no_render:content_no_candidates].fetch_add(1,std::memory_order_relaxed);tl_content_why_=none?5u:4u;return false;}
         double shear[8]{};unsigned eyes[8]{};std::uint32_t frames[8]{};
         for(int i=0;i<tl_cand_n_;++i) {const auto& c=tl_cand_[static_cast<std::size_t>(i)];shear[i]=rows_shear(c.p,rows);eyes[i]=c.view.eye;frames[i]=c.view.frame;}
         bool tied=false;
@@ -948,9 +960,10 @@ private:
                 content_tick_[0].fetch_add(1,std::memory_order_relaxed);return true;
             }
         }
+        if(pick<0 && no_render_published()) {content_outcome_[content_no_render].fetch_add(1,std::memory_order_relaxed);tl_content_why_=5;return false;} // v1212
         if(pick==-1) {
             none_fit_kind_[tl_draw_kind_<3?tl_draw_kind_:2][decade(shear[best])].fetch_add(1,std::memory_order_relaxed);
-            const auto f=newest_frame_.load(std::memory_order_relaxed);
+            const auto f=draw_frame(); // v1212: the draw's own engine frame (was the newest published record's)
             for(auto m=none_fit_first_.load();f<m && !none_fit_first_.compare_exchange_weak(m,f);) {}
             for(auto m=none_fit_last_.load();f>m && !none_fit_last_.compare_exchange_weak(m,f);) {}
             if(tl_draw_kind_==0) { // v1211: unnamed rig draws: first/last engine frame and the number of separate spans (a gap > 8 frames starts one)
@@ -967,7 +980,7 @@ private:
     static std::string content_json() {
         std::string o="{\"outcome\":{\"certain\":"+std::to_string(content_outcome_[0].load())+",\"ambiguous\":"+std::to_string(content_outcome_[1].load())
             +",\"none_fit\":"+std::to_string(content_outcome_[2].load())+",\"other_pass\":"+std::to_string(content_outcome_[3].load())+",\"no_candidates\":"+std::to_string(content_outcome_[4].load())
-            +",\"certain_same_eye_tie\":"+std::to_string(content_outcome_[5].load())+",\"certain_gram\":"+std::to_string(content_outcome_[6].load())+"}";
+            +",\"certain_same_eye_tie\":"+std::to_string(content_outcome_[5].load())+",\"certain_gram\":"+std::to_string(content_outcome_[6].load())+",\"no_render_na\":"+std::to_string(content_outcome_[content_no_render].load())+"}";
         for(unsigned h=0;h<2;++h) {o+=h?",\"second_log10\":[":",\"best_log10\":[";for(unsigned k=0;k<11;++k) o+=(k?",":"")+std::to_string(content_hist_[h][k].load());o+="]";}
         o+=",\"tick\":["+std::to_string(content_tick_[0].load())+','+std::to_string(content_tick_[1].load())+"],\"vs_job\":["+std::to_string(content_vs_job_[0].load())+','+std::to_string(content_vs_job_[1].load())
             +','+std::to_string(content_vs_job_[2].load())+','+std::to_string(content_vs_job_[3].load())+"]";
@@ -1228,24 +1241,25 @@ private:
             else if(have_content && view.receipt) table_.insert(view.eye,view.frame,cur,prev); // a history reset: recorded for the next render
             const bool rows_own=kind==PrevMvpTable::other_last;
             RigMask::tl_bound_slot_=~0u;RigMask::tl_bound_tag_=~0u;RigMask::tl_bound_buffer_=0;
-            const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);
-            if(have_render) RigMask::capture_drawn(c,view.frame); // v1211: this render's slot = the current palette this draw binds (t1), in GPU order
+            // v1212: the slot of the previous render is taken only together with the rows its capturing draw drew (hash of `prev` = the chain's rows)
+            const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own,rows_own?hash64(prev)|1u:0u);
+            if(have_render) RigMask::capture_drawn(c,view.frame,hash64(cur)|1u); // v1211: this render's slot = the current palette this draw binds (t1), in GPU order
             if(have_render) rig_record(c,view.display,cur,engine,own?prev:cur,static_cast<unsigned>(kind),own,chained);
             draw_view_note(c,have_render?1u:0u);
             // status rig_zero_why: [first frame (cur == prev), chain miss, chain unproven (the second hop), palette (no slot tagged with the
             // previous render), no content view (or no receipt record), history reset]
             // v1208: an unnamed rig draw that does not write the eye's motion-vector target (another view's depth pass) is not applicable
-            const bool applicable=have_render || note_pass_fallback(c,true);
+            const bool applicable=have_render || (tl_content_why_!=5 && note_pass_fallback(c,true)); // v1212: no eye render published: n/a
             if(!own && applicable) rig_zero_why_[!have_render?4:!view.has_prev?5:kind==PrevMvpTable::same?0:kind==PrevMvpTable::miss?1:kind==PrevMvpTable::unproven?2:3].fetch_add(1,std::memory_order_relaxed);
             if(!applicable) rig_na_.fetch_add(1,std::memory_order_relaxed);
             else render_note(have_render?view.display:newest_display_.load(std::memory_order_relaxed),own?rr_rig_own:have_render?rr_rig_zero:rr_rig_zero_unnamed);
             if(have_render && rows_own && !own) render_note(view.display,rr_rig_palette_miss);
             if(have_view) view_use(use_rig_motion);
-            certainty(cert_previous_rows,own || have_content?cert_certain:tl_content_why_==3 || !applicable?cert_na:cert_fallback);
+            certainty(cert_previous_rows,own || have_content?cert_certain:content_na() || !applicable?cert_na:cert_fallback);
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
             if(!own) std::memcpy(prev,cur,64);
             if(own && have_render && RigMask::probe_on.load(std::memory_order_relaxed)) { // v1210: the b2 bytes bind_pool writes, for the draw-time probe
-                static thread_local float want[max_floats];std::memcpy(want,sh->data,sh->size);scatter(s.layout,prev,want);RigMask::probe_arm(view.display,want,sh->size);
+                static thread_local float want[max_floats];std::memcpy(want,sh->data,sh->size);scatter(s.layout,prev,want);RigMask::probe_arm(view.display,want,sh->size,view.frame,view.eye,s.layout);
             }
             return bind_pool(c,s,*sh,nullptr,prev);
         }
@@ -1319,16 +1333,16 @@ private:
         // v1206: an alternate draw whose render content cannot name has no provable previous render: zero motion (its error is at most the jitter
         // step, never the other eye's parallax), not recorded, counted. Another pass's view (shadow, light): left as the engine made it.
         if(alt && (!have_content || !view.receipt) && !alt_view_heuristic.load(std::memory_order_relaxed) && have_prev) {
-            if(tl_content_why_==3) {certainty(cert_previous_rows,cert_na);return false;}
+            if(content_na()) {certainty(cert_previous_rows,cert_na);return false;} // v1212: + no eye render published
             if(note_pass_fallback(c,false)) {certainty(cert_previous_rows,cert_fallback);alt_uncertain_.fetch_add(1,std::memory_order_relaxed);render_note(newest_display_.load(std::memory_order_relaxed),rr_uncertain);}
             else certainty(cert_previous_rows,cert_na); // v1208: not the eye's motion-vector target: not applicable (still zero motion)
             if(mode_.load(std::memory_order_relaxed)<1) return false;
             std::memcpy(prev,cur,64);return bind_pool(c,s,*sh,nullptr,prev);
         }
-        if(!have_view) {count(untagged);if(alt) {alt_untagged_.fetch_add(1,std::memory_order_relaxed);if(have_prev) {certainty(cert_previous_rows,tl_content_why_==3?cert_na:cert_fallback);if(tl_content_why_!=3) note_raw();}}return false;} // v1201: another pass's view (shadow): n/a
+        if(!have_view) {count(untagged);if(alt) {alt_untagged_.fetch_add(1,std::memory_order_relaxed);if(have_prev) {certainty(cert_previous_rows,content_na()?cert_na:cert_fallback);if(!content_na()) note_raw();}}return false;} // v1201: another pass's view (shadow): n/a
         if(!have_prev) {count(no_rows);return false;}
         // The current rows must be this view's: a stale shadow or another view's constants never are.
-        if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);if(alt && tl_content_why_!=3) note_raw();return false;}
+        if(!affine(view.inv[0],cur) && !affine(view.inv[1],cur)) {count(guard_fail);if(alt && !content_na()) note_raw();return false;}
         // v1206 alternate: exactly the receipt's previous render (a reset: recorded, camera-only = no motion)
         auto kind=PrevMvpTable::miss;
         if(!alt) kind=table_.fix(view.eye,view.frame,cur,prev,1u);

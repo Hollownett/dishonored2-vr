@@ -209,7 +209,7 @@ assert 'if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fres
 assert 'const bool view_render=RigMask::take_view_draws()>0;' in fsr and 'c->ClearRenderTargetView(rig_target.Get(),far_value);' in fsr
 assert 'if(e.rig_live && e.rig_srv.p) {' in fsr and '++motion_rig_masks;' in fsr
 assert '(mvScale.z>0?(rig==0 || (mvScale.w>0 && rig==255)):proj.y/(d+proj.x)>=proj.z)' in mp  # v1179: 255 = own motion, 254 = rig without
-assert 'const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own);' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1207 (was v1204/v1206): no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
+assert 'const bool own=RigMask::previous_palette(c,have_render?static_cast<int>(view.eye):-1,rows_own?view.prev_frame:~0u,rows_own,' in om and 'const bool rows_own=kind==PrevMvpTable::other_last;' in om  # v1207 (was v1204/v1206): no view needed and 'if(!own) std::memcpy(prev,cur,64);' in om  # v1166: own palette + own rows, or both current
 assert 'restore_t0(); // v1166' in rig and 'k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}' in fsr
 assert 'd2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame,' in probe and 'o[i.xy]=held?253:own?255:rig?254:0;' in rig  # v1179 ring + per-pixel validity; v1183 held class 253
 assert 'if(!c || !pass_view || !enabled.load(std::memory_order_relaxed) || pass_view!=view.load(std::memory_order_relaxed)) return;' in rig
@@ -414,7 +414,7 @@ rm6 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om6 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 assert 'nested_=tl_scope_depth_++>0;' in rm6 and '~Scope() {--tl_scope_depth_;if(nested_) return;' in rm6 and 'void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {\n            if(nested_) return;' in rm6
 assert 'nested_(RigMask::nested_draw()),s_(installed_ && !nested_?before(c):nullptr)' in om6 and 'if(nested_) return;\n            SkinMotion::restore(c_);' in om6
-assert 'probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on();' in probe and 'RigMask::probe_arm(view.display,want,sh->size);' in om6
+assert 'probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on();' in probe and 'RigMask::probe_arm(view.display,want,sh->size,' in om6
 assert 'v && v!=alt_view_.load(std::memory_order_relaxed)) {' in om6
 print('PASS: v1210 nested draw hooks, draw-time rig probe, other-view MV writers')
 
@@ -422,5 +422,14 @@ print('PASS: v1210 nested draw hooks, draw-time rig probe, other-view MV writers
 rm7 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om7 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 assert 'c->CopyResource(r.slot[k].Get(),cur.Get());' in rm7 and 'UpdateSubresource(r.slot' not in rm7
-assert 'if(have_render) RigMask::capture_drawn(c,view.frame);' in om7
+assert 'if(have_render) RigMask::capture_drawn(c,view.frame,' in om7
 print('PASS: v1211 rig ring slots from the drawn current palette')
+# v1212: a rig slot is taken only with the rows its capturing draw drew (one draw of the previous render), wild-render dumps + skin log,
+# draws recorded while no eye render is published are not applicable
+rm8 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+om8 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'if(rows && r.rows[k]!=rows) {pair_rows_mismatch_.fetch_add(1,std::memory_order_relaxed);return nullptr;}' in rm8 and 'r.rows[k]=rows;' in rm8
+assert 'rows_own,rows_own?hash64(prev)|1u:0u);' in om8 and 'RigMask::capture_drawn(c,view.frame,hash64(cur)|1u);' in om8
+assert 'if(o==cert_fallback && tl_content_why_==5) o=cert_na;' in om8 and 'now-newest>PrevMvpTable::gens;' in om8
+assert '!image_skin_enabled || wrote,race,skin_why);' in probe and 'dump(p,"wild");' in rm8
+print('PASS: v1212 rig pair from one draw, wild-render dumps, no-render draws n/a')

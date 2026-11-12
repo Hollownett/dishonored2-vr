@@ -3456,22 +3456,24 @@ static SkinGpuUploadFn original_skin_gpu_upload{};
 // v861: right before the render's GPU copy of a body or arm skin, its CPU array gets the image's own pose (Driver::image_arm/image_body) in the frame
 // the model is drawn in (its live model+0x1860), through the engine's skin writer 0x25f200(model, packed 3x4 rows; joint count rounded up to 8),
 // which also sets the dirty count so this copy happens. The tick's upload stays for the engine's own readers.
+static thread_local unsigned image_skin_why=1; // v1212 (RigMask skin log): 0 wrote, 1 not active, 2 busy, 3 model unreadable, 4 no image pose
 static bool image_skin_commit(void* model) noexcept {
+    image_skin_why=1;
     try {
         const auto m=reinterpret_cast<std::uintptr_t>(model);
         unsigned slot=3;for(unsigned i=0;i<3;++i) if(image_skin_slots[i].model.load(std::memory_order_relaxed)==m) slot=i;
         const int kind=slot<3?image_skin_slots[slot].kind.load():0;
         if(slot>2 || kind==0 || !capturing.load(std::memory_order_acquire)) return false;
-        if(image_skin_slots[slot].uploading.load()) {++image_skin_busy;return false;}   // the tick is writing this skin right now
+        if(image_skin_slots[slot].uploading.load()) {++image_skin_busy;image_skin_why=2;return false;}   // the tick is writing this skin right now
         std::array<float,15> live{};std::uintptr_t desc{};short joints{};
         if(!read_self(m+0x1860,live.data(),sizeof(live)) || !read_self(m+0x1fe8,&desc,8) || !desc || !read_self(desc+0x50,&desc,8) || !desc ||
-           !read_self(desc+0x78,&joints,2) || joints!=(slot<2?69:20)) {++image_skin_misses[slot];return false;}
+           !read_self(desc+0x78,&joints,2) || joints!=(slot<2?69:20)) {++image_skin_misses[slot];image_skin_why=3;return false;}
         alignas(16) std::array<float,72*12> packed{};
         const auto pack=[&](const auto& palette) {for(std::size_t j=0;j<palette.size();++j) {const auto r=d2vr::rig::affine_rows(palette[j]);std::memcpy(&packed[j*12],r.data(),sizeof(r));}};
-        if(slot<2) {const auto pose=full_body.image_arm(slot,live,frames.load(),kind==2);if(!pose) {++image_skin_misses[slot];return false;}pack(*pose);}
-        else {const auto pose=full_body.image_body(live,frames.load());if(!pose) {++image_skin_misses[slot];return false;}pack(*pose);}
+        if(slot<2) {const auto pose=full_body.image_arm(slot,live,frames.load(),kind==2);if(!pose) {++image_skin_misses[slot];image_skin_why=4;return false;}pack(*pose);}
+        else {const auto pose=full_body.image_body(live,frames.load());if(!pose) {++image_skin_misses[slot];image_skin_why=4;return false;}pack(*pose);}
         reinterpret_cast<void(__fastcall*)(void*,const float*)>(image_base+0x25f200)(model,packed.data());
-        ++image_skin_writes[slot];return true;
+        ++image_skin_writes[slot];image_skin_why=0;return true;
     } catch(...) {return false;}
 }
 // v1162: the skin-palette buffers of the rig's skinned models (both arms, the full-body avatar: the models the arm upload hook names), both
@@ -3824,7 +3826,7 @@ static std::array<float,12> skin_row59(void* model) noexcept {   // frame-order 
 static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) {
     const bool tracing=d2vr::frame_order::on.load(std::memory_order_relaxed);
     const auto before=tracing?skin_row59(model):std::array<float,12>{};const double hash_before=tracing?skin_row_hash(model):0.;
-    const bool wrote=image_skin_enabled && image_skin_commit(model);
+    image_skin_why=1;const bool wrote=image_skin_enabled && image_skin_commit(model);const unsigned skin_why=image_skin_why; // v1212
     // v1210 probe: the rig model's CPU palette right before the engine's upload, to compare with the one read after it (RigMask slot race)
     static thread_local std::vector<std::uint8_t> before_bytes;before_bytes.clear();int probe_slot=-1;
     if(d2vr::RigMask::probe_on.load(std::memory_order_relaxed)) try {
@@ -3854,7 +3856,7 @@ static std::uint64_t __fastcall skin_gpu_upload_hook(void* model,void* context) 
                 read_self(m+0x2008+static_cast<std::uintptr_t>(index^1)*0x38,&other,8);
                 const bool race=cpu_ok && before_bytes.size()==bytes.size() && std::memcmp(before_bytes.data(),bytes.data(),bytes.size())!=0; // v1210
                 d2vr::RigMask::skin_copied(d3d,i,reinterpret_cast<ID3D11Buffer*>(buffer),frame,cpu_ok?bytes.data():nullptr,cpu_ok?bd.ByteWidth:0u,copied!=0,
-                    d2vr::rig::pointer(other)?reinterpret_cast<ID3D11Buffer*>(other):nullptr,!image_skin_enabled || wrote,race);
+                    d2vr::rig::pointer(other)?reinterpret_cast<ID3D11Buffer*>(other):nullptr,!image_skin_enabled || wrote,race,skin_why);
             }
             break;
         }
@@ -12262,6 +12264,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             const bool rig_on=alternate_on() && stale_eye_rig_knob;
                             if(!rig_on) d2vr::RigMask::view=0;
                             d2vr::RigMask::probe_on=rig_on && d2vr::RigMask::motion.load() && d2vr::diag::on(); // v1210 draw-time probe (diagnostics only)
+                            d2vr::RigMask::rig_turns_now=full_body.rig_turns(); // v1212 skin log
+                            if(d2vr::RigMask::probe_on && d2vr::RigMask::dump_dir.empty()) try {d2vr::RigMask::dump_dir=output_directory.always().wstring();} catch(...) {} // v1212 wild-render dumps
                             d2vr::RigMask::enabled=rig_on;if(game_xr) {game_xr->stale_rig_masks=rig_on;game_xr->stale_rig_motion_rules=stale_eye_rig_motion_knob;}
                             if(rig_on) publish_rig_buffers();
                             d2vr::RigMask::present();
