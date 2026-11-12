@@ -612,3 +612,12 @@ assert 'if(lens_view_skipped(view)) {++(lens_active.load()?lens_stats.post_in:le
 assert 'const bool hold=scope_hold || lens_hold;' in probe and '<< ",\\"timepiece\\":" << lens_status_json()' in probe
 assert 'lens_guard_enabled=head_requested && !fs::exists(root/L"build"/L"no-lens-guard");' in probe and 'view_trace_enabled=fs::exists(root/L"build"/L"view-trace");' in probe
 print('PASS: v1246 secondary-view guard')
+# v1247: arm slip - the GPU skin copy expresses the image palette in the rig frame of the Setup the render draws (eye Setups only, latched at the
+# first eye Begin), not the live frame a later tick moved; bitwise-equal frames untouched, > 0.3 m skipped; status arm_slip; build/no-arm-slip-fix
+wd47 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+om47 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'static Slip slip(const float* snap,const float* live,double player_mps) noexcept {' in wd47 and 'if(!std::memcmp(snap,live,15*sizeof(float)))' in wd47
+assert 'if(claimed && arm_slip_fix) arm_snap_note_setup();' in probe and 'if(eye>=0 && arm_slip_fix) arm_snap_latch(frames.load());' in probe
+assert '==d2vr::weapon_draw::HandLock::slip_applied) live=snap.frame;' in probe and 'arm_slip_fix=!fs::exists(root/L"build"/L"no-arm-slip-fix");' in probe
+assert '<<",\\"arm_slip\\":"<<weapon_draw::HandLock::slip_json()' in om47
+print('PASS: v1247 arm slip fix')

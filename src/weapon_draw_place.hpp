@@ -1253,7 +1253,28 @@ public:
         }
         return o+"}";
     }
-    static void clear() noexcept {std::lock_guard<std::mutex> l(m_);hand_={};copy_={};cells_={};arm_={};want_.store(0);}
+    // v1247 arm slip: the camera of a render and the cb2 model frame of its arm/body draws come from the same frontend (the Setup the render
+    // draws, after that tick's stages); the GPU skin copy runs later in the render and read the arm model's LIVE frame, which the next tick may
+    // already have moved. The image palette is then expressed in the wrong frame and the drawn arm slips by the rig's motion. The copy expresses
+    // it in the frame snapshotted at that Setup instead (dxgi_probe arm_snap_*). slip(): whether to use the snapshot - bitwise equal frames:
+    // no-op (untouched); non-finite or > 0.3 m / 0.5 rad apart (teleport, level load, time shift): skipped, live kept; else applied.
+    enum Slip:unsigned {slip_noop,slip_applied,slip_skipped};
+    static Slip slip(const float* snap,const float* live,double player_mps) noexcept {
+        if(!std::memcmp(snap,live,15*sizeof(float))) {slip_n_[slip_noop].fetch_add(1,std::memory_order_relaxed);return slip_noop;}
+        const Mat a=model_of(snap),b=model_of(live);const double d=distance(a,b),r=frame_angle(a,b);
+        if(!finite(a) || !finite(b) || !(d<=.3) || !(r<=.5)) {slip_n_[slip_skipped].fetch_add(1,std::memory_order_relaxed);return slip_skipped;}
+        slip_n_[slip_applied].fetch_add(1,std::memory_order_relaxed);
+        std::lock_guard<std::mutex> l(m_);add(slip_mm_[speed_of(player_mps)],d*1000.,mm_edge);
+        return slip_applied;
+    }
+    static std::string slip_json() {
+        static constexpr const char* sn[speeds]={"still","walk","run"};
+        std::string o="{\"applied\":"+std::to_string(slip_n_[slip_applied].load())+",\"noop\":"+std::to_string(slip_n_[slip_noop].load())+",\"skipped_large\":"+std::to_string(slip_n_[slip_skipped].load())+",\"mm\":{";
+        std::lock_guard<std::mutex> l(m_);
+        for(unsigned s=0;s<speeds;++s) o+=std::string(s?",":"")+"\""+sn[s]+"\":"+hist_json(slip_mm_[s],mm_edge);
+        return o+"}}";
+    }
+    static void clear() noexcept {std::lock_guard<std::mutex> l(m_);hand_={};copy_={};cells_={};arm_={};slip_mm_={};for(auto& n:slip_n_) n.store(0);want_.store(0);}
 private:
     struct Hist {std::array<std::uint64_t,bins> n{};double max{};};
     struct Cell {Hist mm{},deg{};};
@@ -1273,6 +1294,7 @@ private:
     inline static std::array<Copy,2> copy_{};
     inline static std::array<Hand,2> hand_{};
     inline static std::array<std::array<std::array<Cell,hand_speeds>,speeds>,kinds> cells_{};
-    inline static std::array<Hist,speeds> arm_{};
+    inline static std::array<Hist,speeds> arm_{},slip_mm_{};
+    inline static std::array<std::atomic<std::uint64_t>,3> slip_n_{};
 };
 } // namespace d2vr::weapon_draw

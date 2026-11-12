@@ -1758,6 +1758,7 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<",\"severed_draws\":"<<weapon_draw::Place::severed_json() // v1240
        <<",\"placed_view_frame\":["<<placed_view_frame_[0].load()<<','<<placed_view_frame_[1].load()<<','<<placed_view_frame_[2].load()<<','<<placed_view_frame_[3].load()<<']'
        <<",\"hand_lock\":"<<weapon_draw::HandLock::json() // v1243
+       <<",\"arm_slip\":"<<weapon_draw::HandLock::slip_json() // v1247
        <<",\"shadow_place\":["<<shadow_place_[0].load()<<','<<shadow_place_[1].load()<<','<<shadow_place_[2].load()<<','<<shadow_place_[3].load()<<']' // v1238
        <<",\"skip\":[";
     // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when

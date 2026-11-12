@@ -1640,6 +1640,19 @@ static bool attachment_pose_installed=false;
 static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame (v1214: declared before the arm upload hook)
 struct ImageSkinSlot {std::atomic<std::uintptr_t> model{};std::atomic<int> kind{};std::atomic<bool> uploading{};};   // v864 kind: 0 keep the upload, 1 tracked palette, 2 contact raw palette
 static std::array<ImageSkinSlot,3> image_skin_slots{};
+// v1247 arm slip (weapon_draw_place.hpp HandLock::slip): each rig model's frame at the eye Setup (the frontend that composes the render's camera and
+// its arm/body cb2 rows), latched at the eye-0 begin of the render that draws it; the GPU skin copy expresses the image palette in that frame
+// instead of the live one a later tick may have moved. Lens/secondary Setups and Begins never reach these (early returns). build/no-arm-slip-fix: v1246.
+static bool arm_slip_fix=true;
+static std::mutex arm_snap_mutex;
+struct ArmSnap {bool ok{};std::uintptr_t model{};std::array<float,15> frame{};};
+static std::array<ArmSnap,3> arm_snap_setup{},arm_snap_render{};static std::uint64_t arm_snap_render_frame=~0ull;
+static void arm_snap_note_setup() noexcept {
+    std::array<ArmSnap,3> s{};
+    for(unsigned i=0;i<3;++i) if(const auto m=image_skin_slots[i].model.load(std::memory_order_relaxed)) {s[i].model=m;s[i].ok=read_self(m+0x1860,s[i].frame.data(),sizeof s[i].frame);}
+    std::lock_guard<std::mutex> l(arm_snap_mutex);arm_snap_setup=s;
+}
+static void arm_snap_latch(std::uint64_t frame) noexcept {std::lock_guard<std::mutex> l(arm_snap_mutex);if(arm_snap_render_frame==frame) return;arm_snap_render=arm_snap_setup;arm_snap_render_frame=frame;}
 static std::atomic<std::uint64_t> image_skin_writes[3]{},image_skin_misses[3]{},image_skin_busy{},image_skin_kinds[3][4]{},image_skin_gaps[3]{},image_skin_fallback_causes[3]{};   // kinds: per slot, uploads of each kind (v1213: 3 = VR arms held over a tick fallback); gaps: held, intended, unheld
 static bool weapon_place_enabled{};   // v864: build/weapon-image-place: held weapons moved to the image's hand at the render's begin (opt-in until a sim shows the render reads it)
 static std::atomic<std::uint64_t> weapon_place_writes{},weapon_place_skips{};
@@ -1786,6 +1799,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     spyglass_lens_enabled=fs::exists(root/L"build"/L"spyglass-lens");   // v960 (user, headset v951: "the zoom is bad, it worked in the Saturday builds"): the native zoom is the default again, the v880 lens is opt-in
     full_body.legacy_root_carry(legacy_carry);player_velocity={};player_speed=0;
     full_body.legacy_root_yaw(fs::exists(root/L"build"/L"legacy-root-yaw-carry"));
+    arm_slip_fix=!fs::exists(root/L"build"/L"no-arm-slip-fix");   // v1247: the image palette in the Setup's rig frame (off = v1246)
     image_skin_enabled=!fs::exists(root/L"build"/L"legacy-tick-skin");   // v861: build/legacy-tick-skin keeps each tick's arm and body upload as drawn
     // v862: with the image skin the drawn arms are the image's own sample; the v830 newer-sample refresh would move a solve an upload made before
     // the render began onto the next locate, so it is off then (it only served the tick's drawn upload).
@@ -2055,6 +2069,7 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
         if(head_requested) {
             if(claimed) cinematic_probe_setup(view); // G2 spike: records the view before any head write
             if(claimed) observe_eye_setup(view);
+            if(claimed && arm_slip_fix) arm_snap_note_setup();   // v1247: the rig models' frames this frontend composes with
             if(claimed) prepare_head_view(view);
             if(claimed) cinematic_probe_offset(view); // G2 spike offset experiment (knob text "offset", sim only); restore_head_view below puts it back
             // v794 (headset v793: entering an authored scene ended FSR/DLSS for the session): a Setup that planned its eye's temporal state
@@ -3527,6 +3542,11 @@ static bool image_skin_commit(void* model) noexcept {
         std::array<float,15> live{};std::uintptr_t desc{};short joints{};
         if(!read_self(m+0x1860,live.data(),sizeof(live)) || !read_self(m+0x1fe8,&desc,8) || !desc || !read_self(desc+0x50,&desc,8) || !desc ||
            !read_self(desc+0x78,&joints,2) || joints!=(slot<2?69:20)) {++image_skin_misses[slot];image_skin_why=3;return false;}
+        if(arm_slip_fix) {   // v1247: express the palette in the frame this render's draws were composed with (no-op when the tick has not moved it)
+            ArmSnap snap{};bool have=false;
+            {std::lock_guard<std::mutex> l(arm_snap_mutex);have=arm_snap_render_frame==frames.load() && arm_snap_render[slot].ok && arm_snap_render[slot].model==m;if(have) snap=arm_snap_render[slot];}
+            if(have && d2vr::weapon_draw::HandLock::slip(snap.frame.data(),live.data(),player_speed)==d2vr::weapon_draw::HandLock::slip_applied) live=snap.frame;
+        }
         alignas(16) std::array<float,72*12> packed{};
         const auto pack=[&](const auto& palette) {for(std::size_t j=0;j<palette.size();++j) {const auto r=d2vr::rig::affine_rows(palette[j]);std::memcpy(&packed[j*12],r.data(),sizeof(r));}};
         if(slot<2) {
@@ -6524,6 +6544,7 @@ void observe_eye_begin(void* view) noexcept {
             }
         }
         if(d2vr::ObjectMotion::held_mask.load(std::memory_order_relaxed) && d2vr::ObjectMotion::alternate()) publish_held_mask(); // v1183
+        if(eye>=0 && arm_slip_fix) arm_snap_latch(frames.load());   // v1247: the rig frames of the Setup this render draws (first eye Begin since the Present; one-view frames too)
         if(eye==0 && image_skin_enabled && full_body_requested && tracked_arms_requested) {full_body.begin_image(frames.load());   // v861: the image this render draws
             publish_weapon_draw(address);   // v930: its held weapons, placed at their draws
             if(weapon_place_enabled) place_weapons();
