@@ -1481,6 +1481,50 @@ static void gpu_afw2() {
         std::printf("afw2 P. a phantom stick in the rig target: %d of %d of its px not the wall behind it\n", bad, n);
         CHECK(n > 200 && bad == 0);
     }
+    // W. (v1197 in-game, street 4-9 and room 3/4/6/10/12/14/15: the engine's rig target drawn ~290 texels off, a camera one IPD beyond the
+    // fresh eye; both hands came out as striped floor) a still hand, the camera 1 cm sideways, the target drawn from a camera 12 cm to the
+    // side: the target as a whole disagrees with this eye's rig, so it is not used; the hand stays this eye's own, no hand where the target
+    // put one
+    {
+        Scene ks; ks.hand = 0.0; Scene ns = ks; Scene lit = ns; lit.lift = 50;
+        const Vec3 kc{0.032 - 0.01, 0, 0};
+        const Frame k = render(kc, ks), f = render(fresh_at, lit), truth = render(here, ns);
+        const auto rt = target_rig(Vec3{here.x + 0.12, here.y, here.z}, ns.hand); rig_target = rt.Get();
+        const auto a = run(true, kc, here, fresh_at, k, f, 0.0, 0.0, true, false);
+        rig_target = nullptr;
+        int hand = 0, wrong = 0, stray = 0, wall = 0;
+        for (int y = 2; y < static_cast<int>(H) - 2; ++y) for (int x = 2; x < static_cast<int>(W) - 2; ++x) {
+            const int i = y * W + x, o = a.out[i * 4];
+            int lo = 255, hi = 0; bool inner = true;
+            for (int d = -2; d <= 2; ++d) inner = inner && truth.kind[i + d] == truth.kind[i] && truth.kind[i + d * W] == truth.kind[i];
+            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {lo = std::min(lo, truth.grey[i + dy * W + dx]); hi = std::max(hi, truth.grey[i + dy * W + dx]);}
+            if (!inner) continue;
+            if (truth.kind[i] == hand_kind) {++hand; wrong += o < lo - 12 || o > hi + 12;}
+            if (truth.kind[i] == wall_kind) {++wall; stray += o < lo - 12 || o > hi + 12;}
+        }
+#ifdef AFW2_NO_STATS
+        const std::array<std::uint32_t, 4> st{2, 0, 0, 0};   // (the committed pass before v1197's stats: the image checks only)
+#else
+        const auto st = warp.afw2->rig_stats_wait();
+#endif
+        std::printf("afw2 W. rig target drawn from the wrong camera: hand %d of %d px wrong, wall %d of %d px wrong; stats: target %s, %u sampled target px, %u to the world\n",
+                    wrong, hand, stray, wall, st[0] == 1 ? "used" : st[0] == 2 ? "ignored" : "none", st[1], st[2]);
+        CHECK(hand > 300 && wrong * 100 <= hand && stray * 200 <= wall && st[0] == 2);
+    }
+#ifndef AFW2_NO_STATS
+    // W'. the right target in the same scene: used, almost none of its pixels resolved to the world
+    {
+        Scene ks; ks.hand = 0.0; Scene ns = ks; Scene lit = ns; lit.lift = 50;
+        const Vec3 kc{0.032 - 0.01, 0, 0};
+        const Frame k = render(kc, ks), f = render(fresh_at, lit);
+        const auto rt = target_rig(here, ns.hand); rig_target = rt.Get();
+        run(true, kc, here, fresh_at, k, f, 0.0, 0.0, true, false);
+        rig_target = nullptr;
+        const auto st = warp.afw2->rig_stats_wait();
+        std::printf("afw2 W'. the right rig target: %s, %u sampled target px, %u to the world\n", st[0] == 1 ? "used" : st[0] == 2 ? "ignored" : "none", st[1], st[2]);
+        CHECK(st[0] == 1 && st[1] > 20 && st[2] * 50 <= st[1]);
+    }
+#endif
     // E. a guard 2.5 m away walking 20 cm a tick (motion textures, both eyes), the camera 2 cm sideways: at its new place in this eye's own
     // shading, the wall at its old place. E'. the kept eye's motion texture says nothing (a vector it lacks: the guard just started): the fresh
     // eye's motion is handed to the kept texels it came from (scatter) and confirmed the same way

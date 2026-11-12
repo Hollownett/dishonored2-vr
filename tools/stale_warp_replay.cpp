@@ -437,6 +437,7 @@ int main(int argc, char** argv) {
             }
             if (layers.afw2 && warp.afw2) {const auto t = warp.afw2->hole_tiles(); std::printf("      afw2: %u target texels left empty after the fill; hole tiles %u of %u\n", warp.afw2->holes(), t[0], t[1]);}
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 votes (confirmed/refuted): head %u/%u left %u/%u right %u/%u; hands moving %d %d, masks %d\n", v[2], v[3], v[4], v[5], v[6], v[7], int(layers.hand_moving[0]), int(layers.hand_moving[1]), int(masks));}
+            if (layers.afw2 && warp.afw2) {const auto r = warp.afw2->rig_stats_wait(); std::printf("      afw2 rig stats: target %s, %u sampled target px, %u to the world (%.1f %%)\n", r[0] == 1 ? "used" : r[0] == 2 ? "IGNORED" : "none", r[1], r[2], r[1] ? 100.0 * r[2] / r[1] : 0.0);}
             return c;
         };
         const auto on = run(true), off = run(false);
