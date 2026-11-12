@@ -114,17 +114,6 @@ int main() {
     CHECK(SUCCEEDED(c->Map(out.Get(),0,D3D11_MAP_READ,0,&mo)));unsigned held=0;
     for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) held+=static_cast<const float*>(mo.pData)[y*(mo.RowPitch/4)+x*2+1]==253.f;
     c->Unmap(out.Get(),0);std::printf("held: %u px of class 253\n",held);CHECK(held*1000>=covered*999 && held<=covered+covered/1000+1);
-    // 2e. v1191: a held draw the engine rasterizes to nothing (its pixel shader discards; dump 8's invisible second sword) stays out of the target
-    {static const char discard_src[]="float4 main(float4 p:SV_Position):SV_Target{discard;return 0;}";ComPtr<ID3DBlob> code;ComPtr<ID3D11PixelShader> none;
-     CHECK(SUCCEEDED(D3DCompile(discard_src,sizeof discard_src-1,nullptr,nullptr,nullptr,"main","ps_5_0",0,0,&code,nullptr)));dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&none);
-     c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());c->PSSetShader(none.Get(),nullptr,0);
-     ID3D11ShaderResourceView* s=other_view.Get();c->VSSetShaderResources(0,1,&s);
-     {d2vr::RigMask::Scope scope(c.Get(),1);d2vr::RigMask::mark_held();d2vr::RigMask::mark_target(true);c->Draw(36,0);scope.after({2,36,1,0,0,0},draw,targets);}
-     c->PSSetShader(ps.Get(),nullptr,0);c->OMSetRenderTargets(0,nullptr,nullptr);
-     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws) && draws==1);
-     CHECK(SUCCEEDED(c->Map(out.Get(),0,D3D11_MAP_READ,0,&mo)));unsigned unseen=0;
-     for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) unseen+=static_cast<const float*>(mo.pData)[y*(mo.RowPitch/4)+x*2+1]!=0.f;
-     c->Unmap(out.Get(),0);std::printf("unseen held draw: %u px in the target\n",unseen);CHECK(unseen==0);}
     // 2d. a rig draw without its retarget makes the render invalid
     c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());
     {ID3D11ShaderResourceView* s=rig_view.Get();c->VSSetShaderResources(0,1,&s);

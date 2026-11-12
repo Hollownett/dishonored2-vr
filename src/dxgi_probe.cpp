@@ -2202,7 +2202,13 @@ static d2vr::PendingViews<XrView> alt_pending;
 static d2vr::PendingViews<d2vr::WarpCamera> alt_cameras; // v796: the game camera of each recorded view and companion (stale-eye parallax)
 static d2vr::PendingViews<d2vr::WarpPlaySpace> alt_play; // v1184: the play space of each, recorded with it (warp_play_space.hpp)
 static bool stale_afw2_knob=false; // v1184: build/afw2
-static std::array<d2vr::WorldTrackedPose,2> warp_grips{};static unsigned warp_grip_bits{}; // v802: this displayed frame's drawn hands, recorded with its cameras
+static std::array<d2vr::WorldTrackedPose,2> warp_grips{};static unsigned warp_grip_bits{};
+// v1193 diagnostic (sim-pose-hold truth dumps: "hands move on the frame after the pose changed"): each Setup's hand positions per stage of the
+// drawn-hand pipeline, keyed by display frame: 0 the XR grip (tracking space), 1 in the world (raw), 2 the palm, 3 after the clamp, 4 after
+// the hand-body visual choice, 5 drawn (after hand-weapon contact and the held clamp); plus the head origin and hand centre (game world / tracking).
+struct HandStages {UINT64 display{};std::array<std::array<d2vr::Vec3,6>,2> hand{};d2vr::Vec3 head_origin{},hand_centre{},centre{};};
+static std::array<HandStages,4> hand_stages{};static std::mutex hand_stages_mutex;
+static HandStages& hand_stage_slot(UINT64 display) {auto& h=hand_stages[display&3u];if(h.display!=display) h=HandStages{display};return h;} // v802: this displayed frame's drawn hands, recorded with its cameras
 static std::array<d2vr::Vec3,2> warp_palms{}; // v811: their drawn palms (the stale-eye warp's hand ownership)
 static double stale_near_range=d2vr::near_range_default; // v798: build/stale-near-range (metres; 0 = the kept image alone, v796)
 static std::atomic<UINT64> alt_plan_stamp{0}; // (display frame<<2)|(planned eye+1), planned at the Present two frames before the image shows; 0 = none
@@ -8771,6 +8777,9 @@ void prepare_head_view(void* view) noexcept {
                 // The raw controller poses are not read here: they keep driving intent (C9).
                 std::array<d2vr::VisualOutput,2> visual{};
                 for(unsigned side=0;side<2;++side) visual[side].drawn=hands.grips[side];
+                if(d2vr::sim_pose_hold::on.load()) {std::lock_guard<std::mutex> l(hand_stages_mutex);auto& st=hand_stage_slot(alt_display);
+                    for(unsigned side=0;side<2;++side) {const auto& t=game_xr->grip_locations[side].pose.position;
+                        st.hand[side][0]={t.x,t.y,t.z};st.hand[side][1]=raw_grips[side].position;st.hand[side][2]=palm_grips[side].position;st.hand[side][3]=hands.grips[side].position;}}
                 if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) {
                     const double visual_now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                     for(unsigned side=0;side<2;++side) {
@@ -8798,6 +8807,7 @@ void prepare_head_view(void* view) noexcept {
                     if(hand_body_requested.load(std::memory_order_relaxed) && d2vr::HandBodyRuntime::active()) for(unsigned side=0;side<2;++side) if(d2vr::HandBodyRuntime::contact_now(side)) locomotion_contact_bits|=1u<<side;
                 }
                 for(unsigned side=0;side<2;++side) if(hands.hands&(1u<<side)) hands.grips[side]=d2vr::resolve_drawn_grip(visual[side],anchors[side]).pose;   // X-4 in one function
+                if(d2vr::sim_pose_hold::on.load()) {std::lock_guard<std::mutex> l(hand_stages_mutex);auto& st=hand_stage_slot(alt_display);for(unsigned side=0;side<2;++side) st.hand[side][4]=hands.grips[side].position;}
                 // Native hands 2c (user 2026-11-06: "hands should react to weapons and the sword, weapons should react to each other"): the two hands and the
                 // swords they hold are capsules pushed apart when they meet (hand_weapon_contact.hpp, 4 capsule pairs, no engine query), with a pulse on
                 // contact and a stronger one on a blade clash. A gun adds its barrel capsule (v1065).
@@ -9320,6 +9330,8 @@ void prepare_head_view(void* view) noexcept {
                 native_grab.discover_contacts(); // the registry scan, off the physics thread
             }
             warp_grips=hands.grips;warp_grip_bits=hands.hands; // v802: the hands as drawn this frame (stale-eye warp: did they hold still?)
+            if(d2vr::sim_pose_hold::on.load()) {std::lock_guard<std::mutex> l(hand_stages_mutex);auto& st=hand_stage_slot(alt_display); // v1193 diagnostic
+                for(unsigned side=0;side<2;++side) st.hand[side][5]=hands.grips[side].position;st.head_origin=head_origin.position;st.hand_centre=hand_centre;st.centre=centre;}
             for(unsigned side=0;side<2;++side) warp_palms[side]=hands.hands>>side&1u?drawn_palm_frame(side,hands.grips[side]).position:d2vr::Vec3{}; // v811
             const auto tracked_stamp=tracked_arms_requested?arm_tracking.publish(hands):d2vr::rig::ArmTrackingStamp{};
             d2vr::NativeHeldObject::note_epoch(hands.epoch);
@@ -10972,6 +10984,17 @@ static void stale_truth_next() {
        <<",\"next_play_origin_m\":"<<play_origin<<",\"next_play_hands_m\":"<<play_hands<<",\"next_depth\":"<<(d.texture?"true":"false")
        <<",\"pose_hold\":{\"changes\":"<<d2vr::sim_pose_hold::changes_n.load()<<",\"holds\":"<<d2vr::sim_pose_hold::holds_n.load()
        <<",\"verified\":"<<d2vr::sim_pose_hold::verified.load()<<",\"broken\":"<<d2vr::sim_pose_hold::broken.load()<<"}";
+    { // v1193: where the drawn hands moved between the two Setups (stage residuals, mm, max over hands; see HandStages)
+        std::lock_guard<std::mutex> l(hand_stages_mutex);const auto& a=hand_stages[stale_next.frame&3u];const auto& c=hand_stages[game_xr->alternate_frame&3u];
+        if(a.display==stale_next.frame && c.display==game_xr->alternate_frame) {
+            add<<",\"next_stage_mm\":{\"xr_grip\":";
+            const char* names[6]{"xr_grip","world_raw","palm","clamp","visual","drawn"};
+            for(unsigned k=0;k<6;++k) {double m=0;for(unsigned side=0;side<2;++side) m=std::max(m,d2vr::length(a.hand[side][k]-c.hand[side][k])*1000);
+                if(k) add<<",\""<<names[k]<<"\":";add<<m;}
+            add<<",\"head_origin\":"<<d2vr::length(a.head_origin-c.head_origin)*1000<<",\"hand_centre\":"<<d2vr::length(a.hand_centre-c.hand_centre)*1000
+               <<",\"tracking_centre\":"<<d2vr::length(a.centre-c.centre)*1000<<'}';
+        } else add<<",\"next_stage_mm\":null";
+    }
     text.insert(end,add.str());std::ofstream(path,std::ios::trunc)<<text;
 }
 static void capture_stale_next(UINT eye,ID3D11Texture2D* image,std::uint64_t frame) noexcept {

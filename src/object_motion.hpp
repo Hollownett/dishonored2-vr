@@ -36,6 +36,7 @@
 #include "rig_mask.hpp"
 #include "skin_motion.hpp"
 #include "rig_target.hpp"
+#include "buffer_views.hpp"
 
 namespace d2vr {
 // Draws of the recent eye views keyed by their exact current rows -> the engine's original previous rows.
@@ -251,6 +252,7 @@ public:
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
         return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_draws\":"+std::to_string(alt_rig_.load())+",\"rig_own\":"+std::to_string(alt_rig_own_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())
+            +",\"views_by_b1\":"+std::to_string(alt_buffer_views_.load())+",\"views_newest\":"+std::to_string(alt_newest_views_.load())
             +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
@@ -305,6 +307,8 @@ public:
     // v1191 (knob build/alt-weapon-place): held weapons and props placed at their draws on one-view frames too (Place::place_one_view)
     inline static std::atomic<bool> alt_weapon_place{false};
     inline static std::atomic<std::uint64_t> alt_place_placed_{},alt_place_own_prev_{},alt_place_no_prev_{},alt_place_no_view_{};
+    // v1193: one-view draws without their own context's newest view: tagged by their bound b1's view / by the newest view (no b1 record)
+    inline static std::atomic<std::uint64_t> alt_buffer_views_{},alt_newest_views_{};
     // v1101: the placement gate (the knob build/no-weapon-draw-place sets weapon_mode 0; object-motion-mode 0 is diagnostic only).
     static bool weapon_draw_on(int weapon_mode,int mode) noexcept {return weapon_mode>=1 && mode>=1;}
     // v1140 (user, 2026-11-10: held props lag and wobble; the v1132 headset status had weapon_mode 0 and held_draw_placed [0,0]): the held-prop
@@ -361,6 +365,7 @@ private:
     // Inverse last rows of the eye's VP (both storage orders), its z row, and the view correction for unproven draws.
     struct View {std::uint32_t frame{};unsigned eye{};float inv[2][4]{};float z[4]{};float corr[16]{},camera[16]{};bool corr_ok{},camera_ok{};float vp[16]{};}; // v1183: vp (held mask)
     struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{};}; // view, view^T, VP, VP^T
+    inline static BufferViews<View> buffer_views_{}; // v1193: per b1 buffer, its last classified view
     struct Shadow {const void* buffer{};UINT size{};float data[max_floats]{};};
     struct ContextState { // a context is used by one thread at a time: no locks
         unsigned type{}; // 0 deferred, 1 immediate: whose original methods this context takes
@@ -656,7 +661,9 @@ private:
         const bool own=s.view_frame==newest;
         bool ok;
         if(own) {out=s.view;ok=s.view_valid;}
-        else ok=latest(latest_eye_.load(std::memory_order_acquire),out) && out.frame==newest;
+        // v1193 (buffer_views.hpp): one-view frames: the view written into the draw's bound b1, not the newest (the next render's, the other eye)
+        else if(alternate() && buffer_views_.find(s.cb[0],out)) {ok=true;alt_buffer_views_.fetch_add(1,std::memory_order_relaxed);}
+        else {ok=latest(latest_eye_.load(std::memory_order_acquire),out) && out.frame==newest;if(alternate()) alt_newest_views_.fetch_add(1,std::memory_order_relaxed);}
         if(!ok) return false;
         const int key=b1_eye(s.cb[0]);
         note_b1(s.cb[0],own,out.eye);
@@ -683,7 +690,7 @@ private:
             Shadow& sh=s->shadow(r);sh.buffer=r;sh.size=desc.ByteWidth;std::memcpy(sh.data,data,desc.ByteWidth);count(shadow_writes);
         } else if(s && kind==view_kind) {
             View view{};const bool valid=classify(static_cast<const float*>(data),desc.ByteWidth,view);
-            count(view_writes);s->view=view;s->view_valid=valid;s->view_frame=valid?view.frame:newest_frame_.load(std::memory_order_acquire);
+            count(view_writes);s->view=view;s->view_valid=valid;if(valid) buffer_views_.store(r,view); /* v1193 */ s->view_frame=valid?view.frame:newest_frame_.load(std::memory_order_acquire);
             if(valid) entry.misses.store(matched,std::memory_order_relaxed);
             else if(entry.misses.fetch_add(1,std::memory_order_relaxed)==15) entry.kind.store(ignored_kind,std::memory_order_relaxed);
         }

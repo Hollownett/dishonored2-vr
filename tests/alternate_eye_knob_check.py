@@ -248,9 +248,6 @@ assert 'RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,d
 assert 'alt_weapon_place_knob=fs::exists(root/L"build"/L"alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe
 assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev)' in om
 print('PASS: v1191 GPU spans, rig target rectangle copy, one-view weapon placement (knob alt-weapon-place)')
-rm_src=(root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
-assert 'if(pred) c->Begin(pred);' in rm_src and 'c->SetPredication(pred,FALSE);' in rm_src and 'c->SetPredication(engine_pred,engine_value);' in rm_src
-print('PASS: v1191 rig target replays only draws the mask replay saw (occlusion predicate)')
 
 # v1192: sim-pose-hold (simulated XR + gameplay script only): the script clock is sampled on eye-0-fresh frames, dumps only there, truth_next meta
 assert 'd2vr::sim_pose_hold::on=static_cast<bool>(knob.is_open() || fs::exists(root/L"build"/L"sim-pose-hold")) && simulated_vr_requested && simulated_gameplay_script_requested;' in probe
@@ -259,3 +256,9 @@ assert 'const UINT64 display=d2vr::alternate_display_frame(number);' in probe
 assert 'if(d2vr::sim_pose_hold::on.load() && !d2vr::sim_pose_hold::changes(game_xr->alternate_frame,' in probe and 'if(stale_next.truth) stale_truth_next();' in probe
 assert 'd2vr::sim_pose_hold::on.load()?0.f:finger_touch_params.pose_smooth' in probe
 print('PASS: v1192 sim-pose-hold (sim script only, clock phase, dumps on change frames, truth_next, no finger spring)')
+
+# v1193: one-view draws without their context's newest view take the view written into their bound b1 (buffer_views.hpp), not the newest
+om2=(root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert "else if(alternate() && buffer_views_.find(s.cb[0],out)) {ok=true;" in om2 and 'if(valid) buffer_views_.store(r,view);' in om2
+assert 'Predicate' not in (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+print('PASS: v1193 one-view draws tagged by their bound b1 view (rig target E, held mask, placement); v1191 predicate removed')
