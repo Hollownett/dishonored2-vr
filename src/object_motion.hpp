@@ -147,12 +147,15 @@ public:
     // by its engine rows (paired: fix, own frame = frame-1; alternate: fix_render to the receipt's own_frame), and its submitted rows are the
     // previous rows. False: not proven (the caller uses the camera-only rows of the current binding: no object motion relative to the hand).
     bool placed_previous(PrevMvpTable& placed,unsigned eye,std::uint32_t frame,std::uint32_t own_frame,bool alternate,const float* cur,
-            const float* engine_prev,const float* submitted,float* out) noexcept {
+            const float* engine_prev,const float* submitted,float* out,unsigned* why=nullptr) noexcept {
         float key[16];std::memcpy(key,engine_prev,64);
         const Kind k=alternate?fix_render(eye,frame,own_frame,cur,key,true):fix(eye,frame,cur,key,frame-own_frame);
         placed.insert(eye,frame,cur,submitted);
+        if(why) *why=k;
         if(k!=same && k!=own_last && k!=other_now && k!=other_last) return false;
-        return placed.find(eye,own_frame,key,out); // key = the engine rows of this eye's previous render of the draw (same: they did not change)
+        if(placed.find(eye,own_frame,key,out)) return true; // key = the engine rows of this eye's previous render of the draw (same: they did not change)
+        if(why) *why=kinds; // v1226: chained, but no submitted record of that draw (it was not placed there)
+        return false;
     }
 private:
     struct Slot {std::atomic<std::uint64_t> tag{};std::atomic<std::uint32_t> ready{};float cur[16]{},prev[16]{};};
@@ -568,6 +571,9 @@ private:
     inline static constexpr unsigned pass_slots=65;
     inline static std::array<std::atomic<std::uint64_t>,pass_slots> weapon_pass_near_{},weapon_pass_matched_{},weapon_pass_placed_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,pass_slots>,2> weapon_pass_side_{};
+    // v1226: per pass and eye, placed draws [current-only, previous proven, previous predicted (not proven)]; why not proven (PrevMvpTable kind, 6 = no submitted record)
+    inline static std::array<std::array<std::array<std::atomic<std::uint64_t>,3>,2>,pass_slots> weapon_pass_prev_{};
+    inline static std::array<std::atomic<std::uint64_t>,7> placed_fail_{};
     inline static std::array<std::atomic<std::uint64_t>,2> weapon_placed_side_{},weapon_alt_side_{};   // alt (v1072): placed from the previous read F
     inline static std::array<std::array<std::atomic<std::uint64_t>,weapon_draw::stages>,2> weapon_skip_side_{}; // per hand by rejection stage
     struct ViewsEntry {std::atomic<std::uint32_t> ready{};std::uint32_t previous0{},previous1{};weapon_draw::Views views{};};
@@ -1131,9 +1137,26 @@ private:
         // retag (built for paired frames, where both eyes share a frame) looks for the other eye's view of this frame, which never exists,
         // and drops the draw as untagged (b1_lost) whenever the view's rotating b1 buffers were last seen with the other eye.
         if(key<0 || static_cast<unsigned>(key)==out.eye || !b1_eye_on_.load(std::memory_order_relaxed) || alternate()) return true;
-        ok=latest(static_cast<unsigned>(key),out) && out.frame==newest; // that eye's view of this frame, else untagged
+        // v1226: latest_[eye] is published only by classify, which never names eye 1 in paired mode (a right-eye per-view write is matched to an
+        // eye-0 record first: every paired sim v1185-v1223 has right kinds all 0, b1_retagged 0, b1_lost ~ half the draws). Those right-eye draws
+        // were dropped as untagged and kept the engine's previous rows = the left eye's rows of the same frame: their motion vectors carried the
+        // eye separation (ghosting of moving rigid objects in the right eye). The eye's own record of the frame (snapshotted from its view) is
+        // the view, by construction; publishing it serves the following draws through latest_.
+        const std::uint32_t frame=out.frame;
+        ok=(latest(static_cast<unsigned>(key),out) && out.frame==newest) || (frame==newest && record_view(static_cast<unsigned>(key),frame,out));
         count(ok?b1_retagged:b1_lost);
         return ok;
+    }
+    inline static std::array<std::atomic<std::uint64_t>,2> record_views_{}; // v1226: [eye views built from records, of which the other eye's VP was identical]
+    static bool record_view(unsigned eye,std::uint32_t frame,View& out) noexcept {
+        std::lock_guard<std::mutex> lock(views_mutex_);
+        if(const auto view=eye_views_[eye&1u].load(std::memory_order_relaxed)) snapshot(eye&1u,view);
+        for(const auto& r:eye_records_[eye&1u]) if(r.valid && r.frame==frame) {
+            for(const auto& o:eye_records_[eye^1u]) if(o.valid && o.frame==frame && near16(o.m[2],r.m[2])) {record_views_[1].fetch_add(1,std::memory_order_relaxed);return false;} // not a distinct eye view: stay untagged
+            record_views_[0].fetch_add(1,std::memory_order_relaxed);
+            fill_view(eye&1u,r,out);return true;
+        }
+        return false;
     }
     // A write of a learned buffer: per-instance rows are shadowed for the draws, per-view constants classified.
     static void written(ID3D11DeviceContext* c,ID3D11Resource* r,const void* data,Learned& entry) noexcept {
@@ -1313,13 +1336,16 @@ private:
                 float placed[16]{},placed_prev[16]{},still[16]{};bool own_prev=false;
                 rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
                 const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh));
-                // v1218: this eye's previous render's submitted rows of the draw (receipt chain), else camera-only on the current binding
+                // v1218: this eye's previous render's submitted rows of the draw (receipt chain). v1226: else the predicted previous (this eye's
+                // previous binding * L: moved rigidly with the hand) when that render's binding exists, camera-only on the current binding only without it
                 if(r.side>=0 && have_prev && view.receipt && placed_history.load(std::memory_order_relaxed)) {
-                    float own[16];const bool predicted_own=own_prev;own_prev=false;
-                    if(view.has_prev) own_prev=table_.placed_previous(placed_,view.eye,view.frame,view.prev_frame,true,cur,engine,placed,own);
+                    float own[16];const bool predicted_own=own_prev;own_prev=false;unsigned why=0;
+                    if(view.has_prev) {
+                        own_prev=table_.placed_previous(placed_,view.eye,view.frame,view.prev_frame,true,cur,engine,placed,own,&why);
+                        if(!own_prev) placed_fail_[why<7?why:6].fetch_add(1,std::memory_order_relaxed);
+                    } else {table_.insert(view.eye,view.frame,cur,engine);placed_.insert(view.eye,view.frame,cur,placed);} // a history reset: recorded
                     if(own_prev && predicted_own) note_resid(1,own,placed_prev);
-                    else {table_.insert(view.eye,view.frame,cur,engine);placed_.insert(view.eye,view.frame,cur,placed);} // a history reset: recorded
-                    std::memcpy(placed_prev,own_prev?own:still,64);
+                    if(own_prev) std::memcpy(placed_prev,own,64);else if(!predicted_own) std::memcpy(placed_prev,still,64);
                 }
                 if(r.side>=0) {
                     alt_place_placed_.fetch_add(1,std::memory_order_relaxed);view_use(use_place);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
@@ -1353,12 +1379,19 @@ private:
                 const auto started=timed?__rdtsc():0;
                 const auto r=weapon_draw::Place::place(frame,&weapon_views,cur,have_prev?prev:nullptr,placed,placed_prev,
                     have_view?static_cast<int>(view.eye):-1,pass_eye,still,draw_key(s,*sh));
-                // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven), else camera-only
-                if(r.side>=0 && have_prev && placed_history.load(std::memory_order_relaxed)) {
-                    float own[16];const unsigned e=static_cast<unsigned>(r.eye);
-                    const bool proven=table_.placed_previous(placed_,e,frame,frame-1,false,cur,engine,placed,own);
-                    if(proven) note_resid(0,own,placed_prev);
-                    std::memcpy(placed_prev,proven?own:still,64);placed_prev_[proven?0:1].fetch_add(1,std::memory_order_relaxed);
+                // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven). v1226: else the predicted previous
+                // (prevVP(eye) * B_prev * L: the thing moved rigidly with the hand, exact with v1223's rigid L), never camera-only (a held thing is not
+                // world-fixed). Counted per pass and eye.
+                if(r.side>=0) {
+                    const unsigned e=static_cast<unsigned>(r.eye)&1u;
+                    if(!have_prev) weapon_pass_prev_[pass_index][e][0].fetch_add(1,std::memory_order_relaxed);
+                    else if(placed_history.load(std::memory_order_relaxed)) {
+                        float own[16];unsigned why=0;
+                        const bool proven=table_.placed_previous(placed_,e,frame,frame-1,false,cur,engine,placed,own,&why);
+                        if(proven) {note_resid(0,own,placed_prev);std::memcpy(placed_prev,own,64);}
+                        else placed_fail_[why<7?why:6].fetch_add(1,std::memory_order_relaxed);
+                        placed_prev_[proven?0:1].fetch_add(1,std::memory_order_relaxed);weapon_pass_prev_[pass_index][e][proven?1:2].fetch_add(1,std::memory_order_relaxed);
+                    }
                 }
                 if(timed) count(weapon_ticks,(__rdtsc()-started)*16);
                 if(r.hint>=0) weapon_pass_matched_[pass_index].fetch_add(1,std::memory_order_relaxed);
@@ -1632,6 +1665,7 @@ private:
         for(unsigned i=0;i<ticks;++i) json<<",\""<<names[i]<<"\":"<<stats_[i].load();
         json<<",\"weapon_us_per_present\":"<<weapon_us<<",\"weapon_mode\":"<<weapon_mode_.load()<<",\"held_placing\":"<<(held_placing_.load()?1:0)<<",\"weapon_published\":"<<weapon_draw::Place::published()
             <<",\"weapon_status\":"<<weapon_status_json();
+        json<<",\"record_views\":["<<record_views_[0].load()<<','<<record_views_[1].load()<<']'; // v1226: right-eye views built from the eye's record [built, refused: same VP as the other eye]
         json<<",\"b1_eye_mode\":"<<(b1_eye_on_.load()?1:0)<<",\"taa_b1\":\""; // v950: eyes' TAA b1; sampled draws' VS b1 "buffer:own L/own R/fallback"
         for(unsigned e=0;e<2;++e) for(const auto& p:taa_b1_[e]) json<<(e?'R':'L')<<std::hex<<reinterpret_cast<std::uintptr_t>(p.load())<<std::dec<<' ';
         json<<"\",\"vs_b1_sampled\":\"";
@@ -1677,6 +1711,12 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<",\"placed\":["<<weapon_placed_side_[0].load(std::memory_order_relaxed)<<','<<weapon_placed_side_[1].load(std::memory_order_relaxed)<<']'
        <<",\"alt\":["<<weapon_alt_side_[0].load(std::memory_order_relaxed)<<','<<weapon_alt_side_[1].load(std::memory_order_relaxed)<<']'
        <<",\"prev\":["<<placed_prev_[0].load(std::memory_order_relaxed)<<','<<placed_prev_[1].load(std::memory_order_relaxed)<<']' // v1218: [submitted previous proven, camera-only]
+       <<",\"paired_eyes\":{\"left\":["<<[&]{std::string k;for(unsigned i=0;i<PrevMvpTable::kinds;++i) k+=(i?",":"")+std::to_string(stats_[kind_l+i].load());return k;}()
+       <<"],\"right\":["<<[&]{std::string k;for(unsigned i=0;i<PrevMvpTable::kinds;++i) k+=(i?",":"")+std::to_string(stats_[kind_r+i].load());return k;}()
+       <<"],\"fixed\":["<<stats_[fixed_l].load()<<','<<stats_[fixed_r].load()<<"],\"b1_retagged\":"<<stats_[b1_retagged].load()<<",\"b1_lost\":"<<stats_[b1_lost].load()
+       <<",\"untagged\":"<<stats_[untagged].load()<<",\"record_views\":["<<record_views_[0].load()<<','<<record_views_[1].load()<<"]}" // v1226: kinds = same,own_last,other_now,other_last,unproven,miss
+       <<",\"prev_fail\":["<<placed_fail_[0].load()<<','<<placed_fail_[1].load()<<','<<placed_fail_[2].load()<<','<<placed_fail_[3].load()<<','
+       <<placed_fail_[4].load()<<','<<placed_fail_[5].load()<<','<<placed_fail_[6].load()<<']' // v1226: [same, own_last, other_now, other_last, unproven, miss, no submitted record]
        <<",\"v1216_prev_error\":"<<resid_json(0)<<",\"v1216_prev_error_alt\":"<<resid_json(1)
        <<",\"rigid_local\":"<<weapon_draw::RigidLocal::json() // v1223
        <<",\"skip\":[";
@@ -1709,7 +1749,10 @@ inline std::string ObjectMotion::weapon_status_json() {
         out<<",\"near\":"<<near_count<<",\"matched\":"<<weapon_pass_matched_[i].load(std::memory_order_relaxed)
            <<",\"placed\":"<<weapon_pass_placed_[i].load(std::memory_order_relaxed)
            <<",\"left\":"<<weapon_pass_side_[0][i].load(std::memory_order_relaxed)
-           <<",\"right\":"<<weapon_pass_side_[1][i].load(std::memory_order_relaxed)<<'}';
+           <<",\"right\":"<<weapon_pass_side_[1][i].load(std::memory_order_relaxed);
+        out<<",\"prev_by_eye\":[";   // v1226: per eye [current-only, previous proven, previous predicted]
+        for(unsigned e=0;e<2;++e) {out<<(e?",[":"[");for(unsigned k=0;k<3;++k) out<<(k?",":"")<<weapon_pass_prev_[i][e][k].load(std::memory_order_relaxed);out<<']';}
+        out<<"]}";
         first_pass=false;
     }
     out<<"]}";

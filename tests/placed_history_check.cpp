@@ -42,8 +42,8 @@ int main() {
             float cur[16],sub[16],out[16],want[16],old[16];engine_of(eye,n,cur);submitted_of(eye,n,sub);
             float engine[16];std::memcpy(engine,cached?cache:cur,64);std::memcpy(cache,cur,64);cached=true;
             for(int pass=0;pass<2;++pass) { // a depth and a velocity pass of the same draw
-                const bool ok=table->placed_previous(*placed,eye,n,n-1,false,cur,engine,sub,out);
-                if(n==10) {CHECK(!ok);continue;}
+                unsigned why=99;const bool ok=table->placed_previous(*placed,eye,n,n-1,false,cur,engine,sub,out,&why);
+                if(n==10) {CHECK(!ok);CHECK(why==(eye?unsigned{PrevMvpTable::unproven}:unsigned{PrevMvpTable::kinds}));continue;} // v1226 reasons
                 CHECK(ok);submitted_of(eye,n-1,want);CHECK(ok && worst(out,want)<1e-6);proven+=ok;
                 predicted_of(eye,n,n-1,old);v1216_worst=std::max(v1216_worst,worst(old,want));
             }

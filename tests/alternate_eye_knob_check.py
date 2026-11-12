@@ -480,3 +480,14 @@ assert 'RigidLocal::fold(s,raw[s] && side_reach[s]>0?ids[s]:0);' in wd23 and 'ou
 assert wd23.count('rigid_part(w,static_cast<unsigned>(candidate),use_alt,draw_key,frame,') == 2
 assert om23.count('draw_key(s,*sh)') == 2 and '<<",\\"rigid_local\\":"<<weapon_draw::RigidLocal::json()' in om23
 print('PASS: v1223 held things placed at B * rigid L (no-rigid-local)')
+# v1226: an unproven held draw keeps the predicted previous (previous binding * rigid L), never camera-only; status per pass/eye prev_by_eye, prev_fail
+om26 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'std::memcpy(placed_prev,proven?own:still,64);' not in om26 and 'if(proven) {note_resid(0,own,placed_prev);std::memcpy(placed_prev,own,64);}' in om26
+assert 'if(own_prev) std::memcpy(placed_prev,own,64);else if(!predicted_own) std::memcpy(placed_prev,still,64);' in om26
+assert '",\\"prev_by_eye\\":["' in om26 and '",\\"prev_fail\\":["' in om26
+print('PASS: v1226 held previous falls back to the rigid prediction (prev_by_eye, prev_fail)')
+# v1226: a paired right-eye draw whose b1 names eye 1 takes that eye's own record of the frame (latest_ is never published for eye 1 by classify)
+om26b = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert '(frame==newest && record_view(static_cast<unsigned>(key),frame,out));' in om26b and 'static bool record_view(unsigned eye,std::uint32_t frame,View& out) noexcept {' in om26b
+assert '<<",\\"paired_eyes\\":{\\"left\\":["' in om26b
+print('PASS: v1226 paired right-eye draws tagged from the eye record (paired_eyes, record_views)')
