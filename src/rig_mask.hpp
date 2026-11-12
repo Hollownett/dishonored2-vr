@@ -15,6 +15,7 @@
 // it, whatever its other outputs (checked on WARP with SV_Position not the first output, tests/rig_mask_check.cpp).
 // Knob build/no-stale-eye-rig (dxgi_probe): inert (no detection, no replay, no mask).
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
@@ -116,12 +117,20 @@ public:
         if(!depth || target_.depth!=depth || !target_.trg) return false;
         target_.trg->GetDesc(&d);return true;
     }
-    static bool take_target(ID3D11DeviceContext* c,ID3D11Resource* depth,ID3D11Texture2D* out,std::uint64_t& draws) {
+    // v1191: only the render rectangle (w x h at the top left) is copied and cleared (was the whole target: 54 MB a render at 2496x2688)
+    static bool take_target(ID3D11DeviceContext* c,ID3D11Resource* depth,ID3D11Texture2D* out,std::uint64_t& draws,UINT w=0,UINT h=0) {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
         {std::lock_guard<std::mutex> lock(mutex_);if(!depth || target_.depth!=depth || !target_.trg) return false;trg=target_.trg;rtv=target_.trg_rtv;dsv=target_.trg_dsv;}
         draws=target_draws_frame_.exchange(0,std::memory_order_relaxed);target_draws_last_.store(draws,std::memory_order_relaxed);const auto misses=target_misses_frame_.exchange(0,std::memory_order_relaxed);
-        if(out) c->CopyResource(out,trg.Get());
-        const float zero[4]{};c->ClearRenderTargetView(rtv.Get(),zero);c->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0.f,0);
+        D3D11_TEXTURE2D_DESC d{};trg->GetDesc(&d);
+        const bool part=w && h && w<=d.Width && h<=d.Height && (w<d.Width || h<d.Height);
+        const D3D11_BOX box{0,0,0,part?w:d.Width,part?h:d.Height,1};const D3D11_RECT rect{0,0,static_cast<LONG>(box.right),static_cast<LONG>(box.bottom)};
+        if(out) {if(part) c->CopySubresourceRegion(out,0,0,0,0,trg.Get(),0,&box);else c->CopyResource(out,trg.Get());}
+        const float zero[4]{};
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext1> c1;
+        if(part && SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c1)))) c1->ClearView(rtv.Get(),zero,&rect,1); // ClearView takes no depth views:
+        else c->ClearRenderTargetView(rtv.Get(),zero);
+        c->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0.f,0); // a depth clear stays whole (a fast clear on current GPUs)
         const bool valid=draws>0 && misses==0;(valid?target_valid_:target_invalid_).fetch_add(1,std::memory_order_relaxed);
         return valid;
     }
@@ -403,6 +412,14 @@ private:
         n.depth=depth;n.hold=depth;n.w=dd.Width;n.h=dd.Height;target_=n;created=true;
         return true;
     }
+    // v1191: one occlusion predicate per recording thread (each job thread records its own deferred context; Begin/End/SetPredication of
+    // one draw stay together in one command list, so reusing it draw after draw is in order on the GPU)
+    static ID3D11Predicate* visible_predicate(ID3D11DeviceContext* c) noexcept {
+        thread_local Microsoft::WRL::ComPtr<ID3D11Predicate> p;thread_local Microsoft::WRL::ComPtr<ID3D11Device> owner;
+        Microsoft::WRL::ComPtr<ID3D11Device> device;c->GetDevice(&device);
+        if(device!=owner) {p.Reset();owner=device;const D3D11_QUERY_DESC q{D3D11_QUERY_OCCLUSION_PREDICATE,D3D11_QUERY_MISC_PREDICATEHINT};if(device) device->CreatePredicate(&q,&p);}
+        return p.Get();
+    }
     static void replay(ID3D11DeviceContext* c,const DrawArgs& a,DrawFn draw,TargetsFn targets) noexcept {
         std::array<ID3D11RenderTargetView*,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs{};ID3D11DepthStencilView* dsv{};
         c->OMGetRenderTargets(static_cast<UINT>(rtvs.size()),rtvs.data(),&dsv);
@@ -435,14 +452,24 @@ private:
         ID3D11BlendState* blend{};float factor[4]{};UINT mask{};c->OMGetBlendState(&blend,factor,&mask);
         targets(c,1,&rig,dsv);
         c->PSSetShader(ps.Get(),nullptr,0);c->OMSetDepthStencilState(equal.Get(),0);c->OMSetBlendState(opaque.Get(),nullptr,0xffffffff);
+        // v1191: the target draws only what this render shows: a draw the engine rasterized to no visible depth (dump 8: a whole second sword
+        // that every eye's render leaves out, pixel shader discard or a failing depth test) passes no sample of the EQUAL mask replay, and this
+        // occlusion predicate then skips its target replay on the GPU (no readback).
+        ID3D11Predicate* pred=tl_target_ && trg_rtv && trg_dsv?visible_predicate(c):nullptr;
+        if(pred) c->Begin(pred);
         draw(c,a);
+        if(pred) c->End(pred);
         // v1190: the same draw in the stale eye's target camera (retargeted per-instance rows), nearest wins among the replayed draws
         if(tl_target_ && trg_rtv && trg_dsv) {
             const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);
             ID3D11RenderTargetView* t=trg_rtv.Get();
             if(bind && restore && bind(c)) {
                 targets(c,1,&t,trg_dsv.Get());c->PSSetShader(trg_ps.Get(),nullptr,0);c->OMSetDepthStencilState(nearest.Get(),0);
-                draw(c,a);restore(c);
+                ID3D11Predicate* engine_pred{};BOOL engine_value{};
+                if(pred) {c->GetPredication(&engine_pred,&engine_value);c->SetPredication(pred,FALSE);} // skipped when no sample passed
+                draw(c,a);
+                if(pred) {c->SetPredication(engine_pred,engine_value);if(engine_pred) engine_pred->Release();}
+                restore(c);
                 target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);
             } else {target_misses_.fetch_add(1,std::memory_order_relaxed);target_misses_frame_.fetch_add(1,std::memory_order_relaxed);}
         } else if(target_on.load(std::memory_order_relaxed) && !tl_target_) target_misses_frame_.fetch_add(1,std::memory_order_relaxed); // a rig/held draw without its retarget

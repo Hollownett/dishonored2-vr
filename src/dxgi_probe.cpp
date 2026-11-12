@@ -1882,10 +1882,27 @@ static UINT eye_boundary_rows{};
 void observe_eye_setup(void* view) noexcept;
 void observe_eye_begin(void* view) noexcept;
 static bool alt_shadow_share_knob=false; // v1189: build/alt-shadow-share (one-view frames share shadows like a paired second view)
+static std::string perf_spans_json();
+// v1191: GPU ms of the stale-eye warp call, the rig target's copy/clears and the motion pass over the run (ModGpuTimer spans; needs the
+// native-gpu-timing knob, reported with diagnostics on): count, mean, p95 (0.01 ms bins to 10 ms), max; one sample per timed frame with the span.
+static struct PerfSpans {
+    struct One {std::uint64_t n{};double sum{},max{};std::array<std::uint32_t,1001> bins{};
+        void add(double ms) {++n;sum+=ms;max=std::max(max,ms);++bins[static_cast<std::size_t>(std::clamp(ms*100.,0.,1000.))];}
+        double p95() const {if(!n) return 0;std::uint64_t want=(n*95+99)/100,at=0;for(std::size_t i=0;i<bins.size();++i) {at+=bins[i];if(at>=want) return i/100.;}return 10.;}};
+    std::array<One,3> span{};std::uint64_t last_sequence{};std::mutex mutex;
+} perf_spans;
+static std::string perf_spans_json() {
+    if(!d2vr::diag::on()) return "null";
+    std::lock_guard<std::mutex> lock(perf_spans.mutex);std::ostringstream o;o.precision(4);
+    const char* names[3]{"stale_warp","rig_target_copy","eye_motion"};o<<'{';
+    for(unsigned k=0;k<3;++k) {const auto& x=perf_spans.span[k];o<<(k?",":"")<<'"'<<names[k]<<"\":{\"n\":"<<x.n<<",\"mean\":"<<(x.n?x.sum/x.n:0.)<<",\"p95\":"<<x.p95()<<",\"max\":"<<x.max<<'}';}
+    o<<'}';return o.str();
+}
 // v1190 (rig_target.hpp): the fresh camera, the stale eye's target camera and its FOV tangents, recorded at prepare_head_view; Setup's end
 // turns them into E with the view's final matrices and publishes it. Render thread only.
 static struct RigTargetPending {bool valid{};d2vr::WorldTrackedPose fresh{},target{};double l{},r{},u{},d{};} rig_target_pending;
-static bool rig_target_knob=false;static std::atomic<std::uint64_t> rig_target_published{},rig_target_refused{};
+static bool rig_target_knob=false,alt_weapon_place_knob=false; // v1191: build/alt-weapon-place
+static std::atomic<std::uint64_t> rig_target_published{},rig_target_refused{};
 void cinematic_probe_setup(void* view) noexcept;void cinematic_probe_offset(void* view) noexcept;void cinematic_probe_begin(void* view) noexcept; // G2 spike, build/cinematic-probe
 void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
     d2vr::CrashOperation operation("native eye begin");
@@ -1993,13 +2010,15 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
                 // static world only. +0x7858 = +0x7850 makes it 0, as in paired frames: every MV is then the jittered displacement against
                 // the rows its draw used, which is what FSR/DLSS (MV jittered) and the native TAA dejitter expect. Nothing else reads +0x7858
                 // (exe scan: 0x3586a0 only; shaders read cb_jittervectors.xy only); the next Setup rolls it from the seeded +0x7850 again.
-                if(!alternate_taa_runtime.failed.load() && rig_target_knob && rig_target_pending.valid) { // v1190: E for this render's rig target
-                    rig_target_pending.valid=false;
-                    const auto at=reinterpret_cast<std::uintptr_t>(view);float vp[16]{},v[16]{},pr[16]{};std::uint32_t frame{};d2vr::rig_target::M4 e{};
-                    if(read_self(at+0x7510,vp,64) && read_self(at+0x7450,v,64) && read_self(at+0x7390,pr,64) && read_self(at+0x77b4,&frame,4) &&
-                       d2vr::rig_target::retarget(d2vr::rig_target::widen(vp),d2vr::rig_target::widen(v),d2vr::rig_target::widen(pr),rig_target_pending.fresh,rig_target_pending.target,
-                           rig_target_pending.l,rig_target_pending.r,rig_target_pending.u,rig_target_pending.d,e)) {d2vr::rig_target::book().publish(vp,e,frame);++rig_target_published;}
-                    else ++rig_target_refused;
+                if(!alternate_taa_runtime.failed.load() && (rig_target_knob || alt_weapon_place_knob)) { // v1190: E for this render's rig target; v1191 + prev VP
+                    const bool want_e=rig_target_knob && rig_target_pending.valid;rig_target_pending.valid=false;
+                    const auto at=reinterpret_cast<std::uintptr_t>(view);float vp[16]{},v[16]{},pr[16]{},prev_vp[16]{};std::uint32_t frame{};d2vr::rig_target::M4 e{};
+                    if(read_self(at+0x7510,vp,64) && read_self(at+0x7450,v,64) && read_self(at+0x7390,pr,64) && read_self(at+0x7590,prev_vp,64) && read_self(at+0x77b4,&frame,4)) {
+                        const bool has_e=want_e && d2vr::rig_target::retarget(d2vr::rig_target::widen(vp),d2vr::rig_target::widen(v),d2vr::rig_target::widen(pr),rig_target_pending.fresh,rig_target_pending.target,
+                            rig_target_pending.l,rig_target_pending.r,rig_target_pending.u,rig_target_pending.d,e);
+                        d2vr::rig_target::book().publish(vp,e,has_e,prev_vp,frame);
+                        if(has_e) ++rig_target_published;else if(want_e) ++rig_target_refused;
+                    } else if(want_e) ++rig_target_refused;
                 }
                 if(alternate_taa_runtime.failed.load()) {}
                 else if(alt_mv_jittered.load(std::memory_order_relaxed)) { // the roll at 0x375a98 is pinned by alternate_taa::verified_abi
@@ -10503,7 +10522,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"motion_refusals\":" << (game_xr?game_xr->stale_motion_refusals():0) << ",\"motion_textures\":[" << fsr_taa.motion_passes.load() << ',' << fsr_taa.motion_refused.load() << ',' << fsr_taa.motion_srv_misses.load() << ',' << fsr_taa.motion_other_tests.load() << ',' << fsr_taa.motion_no_other.load() << ']'
                << ",\"motion_other_still_px\":" << d2vr::eye_motion_other_still_px
                << ",\"rig_copies\":" << fsr_taa.rig_copies.load()
-               << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0) << '}' << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
+               << ",\"afw2\":{\"on\":" << (stale_afw2_knob?"true":"false") << ",\"passes\":" << (game_xr?game_xr->stale_afw2_passes():0) << '}' << ",\"cross_eye_history\":" << d2vr::CrossEyeHistory::json() << ",\"skin_motion\":" << d2vr::SkinMotion::json() << ",\"perf_gpu_ms\":" << perf_spans_json() << ",\"rig_target\":{\"on\":" << (rig_target_knob?"true":"false") << ",\"published\":" << rig_target_published.load() << ",\"refused\":" << rig_target_refused.load() << '}' << ",\"held_mask\":{\"on\":" << (d2vr::ObjectMotion::held_mask.load()?"true":"false") << ",\"matches\":" << d2vr::ObjectMotion::held_matches() << '}' << ",\"rig_mask\":" << d2vr::RigMask::json() << ",\"rig_mask_pixels\":[" << fsr_taa.rig_pixels[0].load() << ',' << fsr_taa.rig_pixels[1].load() << "],\"rig_mask_near_misses\":[" << fsr_taa.rig_near_misses[0].load() << ',' << fsr_taa.rig_near_misses[1].load() << ']' << ",\"rig_mask_own_pixels\":[" << fsr_taa.rig_own_pixels[0].load() << ',' << fsr_taa.rig_own_pixels[1].load() << ']' // v1162
                << ",\"rig_mask_renders\":" << fsr_taa.rig_live_renders.load() << ",\"rig_mask_motion\":" << fsr_taa.motion_rig_masks.load() << ",\"rig_motion_renders\":" << fsr_taa.motion_rig_moving.load()
                << ",\"rig_mask_warps\":[" << (game_xr?game_xr->stale_rig_warps:0) << ',' << (game_xr?game_xr->stale_rig_one_sided:0) << ']'
                << ",\"stale_parts\":[" << (game_xr?game_xr->stale_fresh_part:0) << ',' << (game_xr?game_xr->stale_kept_part:0) << ']'
@@ -14927,6 +14946,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
             const bool split_timed=native_gpu_requested && native_gpu_prepared;
             const d2vr::PhaseGpu split_phase=split_timed?native_gpu_summary.last_phase:d2vr::PhaseGpu{};
             const d2vr::ModGpu split_mod=split_timed?d2vr::mod_gpu_timer().stats().last:d2vr::ModGpu{};
+            if(split_timed && split_mod.valid) { // v1191: each timed frame once
+                const auto sequence=d2vr::mod_gpu_timer().stats().last_sequence;std::lock_guard<std::mutex> perf_lock(perf_spans.mutex);
+                if(sequence!=perf_spans.last_sequence) {
+                    perf_spans.last_sequence=sequence;
+                    const unsigned ids[3]{static_cast<unsigned>(d2vr::ModSpan::stale_warp),static_cast<unsigned>(d2vr::ModSpan::rig_target),static_cast<unsigned>(d2vr::ModSpan::eye_motion)};
+                    for(unsigned k=0;k<3;++k) if(split_mod.ms[ids[k]]>0) perf_spans.span[k].add(split_mod.ms[ids[k]]);
+                }
+            }
             if(split_timed) gpu_pass_window.feed(native_gpu_summary.last_sequence,native_gpu_summary.last_pass,&split_mod);
             const d2vr::ReplayFrame split_replay=ecl_replay_take();
             frame_split.feed(split_stamps,split_prev_enter_ns,1'000'000'000,split_gpu_ns,split_span_ns,&split_phase,&split_mod,alternate_on(),&split_replay);
@@ -16113,7 +16140,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share"); // v1189
         rig_target_knob=fs::exists(root/L"build"/L"stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob; // v1190
         d2vr::RigMask::target_bind=&d2vr::ObjectMotion::target_bind;d2vr::RigMask::target_restore=&d2vr::ObjectMotion::target_restore;
-        if(!rig_target_knob) d2vr::rig_target::book().clear();
+        alt_weapon_place_knob=fs::exists(root/L"build"/L"alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191
+        if(!rig_target_knob && !alt_weapon_place_knob) d2vr::rig_target::book().clear();
         d2vr::ObjectMotion::held_mask=fs::exists(root/L"build"/L"stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames
         d2vr::CrossEyeHistory::frame_fn=+[]() noexcept {std::uint32_t v{};read_self(image_base+d2vr::taa_history::frame_counter_rva,&v,4);return v;};
         d2vr::RigMask::frame_fn=d2vr::CrossEyeHistory::frame_fn.load(); // v1185: the rig ring gate

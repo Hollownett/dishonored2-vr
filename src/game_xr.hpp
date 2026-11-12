@@ -2884,7 +2884,8 @@ public:
                         StaleRig kept_rig=stale_rig_mask(eye),fresh_rig=fresh_now?stale_rig_mask(fresh_eye):StaleRig{};
                         if(!kept_rig.texture || !fresh_rig.texture) {if(kept_rig.texture || fresh_rig.texture) ++stale_rig_one_sided;kept_rig={};fresh_rig={};}
                         else if(stale_layers_[eye]) ++stale_rig_warps;
-                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion,kept_rig,fresh_rig,stale_rig_target(eye)):stale_warp_->apply(processed,*h);
+                        {ModGpuScope warp_scope(context_.Get(),ModSpan::stale_warp); // v1191 timing (old path or AFW v2)
+                        processed=stale_layers_[eye]?stale_warp_->apply(processed,*h,&*stale_layers_[eye],kept_depth,fresh_image,fresh_depth,kept_motion,fresh_motion,kept_rig,fresh_rig,stale_rig_target(eye)):stale_warp_->apply(processed,*h);}
                         if(stale_warp_->parallax_passes==parallax_before) stale_layers_[eye].reset(); // depth refused: rotation only, the reticle too
                         if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
                         stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;

@@ -59,21 +59,29 @@ inline void apply(const M4& e,const float* rows,float* out) {
 // Published at each one-view Setup (render thread), looked up by a draw's view-projection (exact: the classified per-view write's VP).
 class Book {
 public:
-    void publish(const float* vp,const M4& e,std::uint32_t frame) noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);Entry& x=ring_[next_++%ring_.size()];std::memcpy(x.vp,vp,64);x.e=e;x.frame=frame;x.valid=true;
+    // v1191: also the render's previous view-projection (view+0x7590 after Setup: this eye's previous render on one-view frames); has_e false
+    // when only that was wanted (alt-weapon-place without the rig target)
+    void publish(const float* vp,const M4& e,bool has_e,const float* prev_vp,std::uint32_t frame) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);Entry& x=ring_[next_++%ring_.size()];std::memcpy(x.vp,vp,64);x.e=e;x.has_e=has_e;
+        std::memcpy(x.prev_vp,prev_vp,64);x.frame=frame;x.valid=true;
     }
     bool find(const float* vp,M4& e) const noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
-        for(const auto& x:ring_) if(x.valid && !std::memcmp(x.vp,vp,64)) {e=x.e;return true;}
+        for(const auto& x:ring_) if(x.valid && x.has_e && !std::memcmp(x.vp,vp,64)) {e=x.e;return true;}
+        return false;
+    }
+    bool find_prev(const float* vp,M4& prev) const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for(const auto& x:ring_) if(x.valid && !std::memcmp(x.vp,vp,64)) {prev=widen(x.prev_vp);return true;}
         return false;
     }
     void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);for(auto& x:ring_) x.valid=false;}
     bool latest(M4& e,std::uint32_t& frame) const noexcept {
         std::lock_guard<std::mutex> lock(mutex_);if(!next_) return false;const Entry& x=ring_[(next_-1)%ring_.size()];
-        if(!x.valid) return false;e=x.e;frame=x.frame;return true;
+        if(!x.valid || !x.has_e) return false;e=x.e;frame=x.frame;return true;
     }
 private:
-    struct Entry {float vp[16]{};M4 e{};std::uint32_t frame{};bool valid{};};
+    struct Entry {float vp[16]{},prev_vp[16]{};M4 e{};std::uint32_t frame{};bool valid{},has_e{};};
     mutable std::mutex mutex_;std::array<Entry,4> ring_{};unsigned next_{};
 };
 inline Book& book() {static Book b;return b;}

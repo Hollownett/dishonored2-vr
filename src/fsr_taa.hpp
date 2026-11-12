@@ -1162,7 +1162,9 @@ private:
                             if(dev) dev->Release();
                         }
                         std::uint64_t draws{};
-                        se.rig_target_valid=RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws) && se.rig_target.p;se.rig_target_draws=draws;
+                        {ModGpuScope target_scope(c,ModSpan::rig_target); // v1191 timing
+                         se.rig_target_valid=RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h) && se.rig_target.p;}
+                        se.rig_target_draws=draws;
                         se.rig_target_w=depth_w;se.rig_target_h=depth_h;
                     }
                 }
@@ -1194,7 +1196,9 @@ private:
                     k.mv_scale[2]=1;if(e.rig_motion) {k.mv_scale[3]=1;++motion_rig_moving;}
                     ++motion_rig_masks;
                 }
-                if(e.mv_srv.p && motion_pass_.dispatch(c,e.mv_srv.p,e.depth_srv.p,e.motion_uav.p,k,e.rig_live?e.rig_srv.p:nullptr)) {e.motion_valid=true;e.motion_w=depth_w;e.motion_h=depth_h;++motion_passes;}
+                bool dispatched=false;
+                if(e.mv_srv.p) {ModGpuScope motion_scope(c,ModSpan::eye_motion);dispatched=motion_pass_.dispatch(c,e.mv_srv.p,e.depth_srv.p,e.motion_uav.p,k,e.rig_live?e.rig_srv.p:nullptr);} // v1191 timing
+                if(dispatched) {e.motion_valid=true;e.motion_w=depth_w;e.motion_h=depth_h;++motion_passes;}
             }
             if(!e.motion_valid) ++motion_refused;
         }

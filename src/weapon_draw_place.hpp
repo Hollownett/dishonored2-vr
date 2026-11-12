@@ -451,6 +451,8 @@ public:
             out.bound=true;out.bound_frame=*bound[s];
             out.delta=mul(*bound[s],inverse_model);
             Last& l=last_[s];
+            if(l.valid && l.frame!=frame) {older2_[s]=older_[s];older_[s]=l;} // v1191: the last two earlier publishes (one-view frames: the other
+            else if(!l.valid) older_[s]=older2_[s]={};                       // eye's render one frame back, this eye's previous render two back)
             if(l.valid && l.frame==frame) {out.prev=l.prev;out.relative=l.relative;out.prev_frame=l.prev_frame;out.have_prev=l.have_prev;}
             else if(l.valid && frame-l.frame<ring) {out.prev=mul(l.placed,inverse_model);out.relative=mul(l.model,inverse_model);out.prev_frame=l.frame;out.have_prev=true;}
             else {out.prev=out.delta;out.relative=identity();}
@@ -477,7 +479,7 @@ public:
         }
         publish_bound(frame,raw,bound_ptr);
     }
-    static void clear() noexcept {for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
+    static void clear() noexcept {for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};older_={};older2_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
     static std::uint64_t published(unsigned side) noexcept {return side<2?published_side_[side].load(std::memory_order_relaxed):0;}
     static std::uint32_t latest_frame() noexcept {return latest_frame_.load(std::memory_order_acquire);}
@@ -598,8 +600,46 @@ public:
         return result;
     }
 
+    // v1191 one-view frames (knob build/alt-weapon-place): place one draw of the render published last, in the one view that draws it.
+    // vp = the draw's view-projection (its classified per-view write), prev_vp = this eye's previous render's (the seeded view+0x7590).
+    // The part's model rows m = inverse(vp) * rows match a published side by orientation and reach (as place()); current = vp * delta * m
+    // (delta = B * inverse(F): the drawn hand's binding this render); previous = prev_vp * (B_own_prev * inverse(F)) * m with B_own_prev the
+    // bound frame of the publish two engine frames back (this eye's previous render); without it, prev_vp * delta * m (the hand still,
+    // the camera's motion only; Result::alt false and stage placed_tagged count that). Returns the side, else -1.
+    static Result place_one_view(const Mat& vp,const Mat& prev_vp,const float* cur,float* cur_out,float* prev_out,bool& own_prev) noexcept {
+        Result result;own_prev=false;
+        if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return result;
+        const std::uint32_t frame=latest_frame();
+        const Slot* slot=slot_of(frame);if(!slot) return result;
+        Mat inv{};if(!inverse(vp,inv)) {result.stage=no_views;return result;}
+        const Rows m=model_rows(inv.data(),cur);
+        const double tol=axes_tol.load(std::memory_order_relaxed);
+        int candidate=-1;double best=-1;bool use_alt=false;
+        for(unsigned side=0;side<2;++side) {
+            const Side& w=slot->side[side];if(!w.valid || !w.bound) continue;
+            for(int alt=0;alt<2;++alt) {
+                if(alt && !w.alt) continue;
+                const Mat& f=alt?w.alt_model:w.model;
+                if(!same_orientation(m,f,tol)) continue;
+                const double d=origin_distance(m,f);
+                if(d<=reach_of(w) && (best<0 || d<best)) {best=d;candidate=static_cast<int>(side);use_alt=alt!=0;}
+            }
+        }
+        if(candidate<0) {result.stage=rejected;return result;}
+        const Side& w=slot->side[static_cast<unsigned>(candidate)];
+        const Mat model=full(m);const Mat& delta=use_alt?w.alt_delta:w.delta;
+        const Mat now=mul(mul(vp,delta),model);
+        Mat before=mul(mul(prev_vp,delta),model);
+        const Last& o=older2_[static_cast<unsigned>(candidate)];
+        Mat inverse_f{};
+        if(o.valid && frame-o.frame==2 && inverse(use_alt?w.alt_model:w.model,inverse_f)) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;}
+        for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
+        if(!still(*slot,frame)) {result.stage=rejected;return result;}
+        result.side=candidate;result.eye=-1;result.alt=use_alt;result.stage=placed_pass;return result;
+    }
 private:
     struct Last {bool valid{},have_prev{};std::uint32_t frame{},prev_frame{};Mat model{},placed{},prev{},relative{};};
+    inline static std::array<Last,2> older_{},older2_{};
     struct Read {bool cur_ok{},prior_ok{};std::uint32_t cur_frame{};std::uintptr_t cur_id{},prior_id{};Mat cur{},prior{};};
     inline static std::array<Read,2> reads_{};
     inline static std::array<Slot,ring> ring_{};

@@ -239,5 +239,15 @@ print('PASS: v1189 no shadow sharing on one-view frames (knob alt-shadow-share)'
 # v1190: rig target (knob stale-eye-rig-target): retargeted rig/held replay, published per render for the stale eye, t15 of AFW v2
 assert 'rig_target_knob=fs::exists(root/L"build"/L"stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob;' in probe
 assert 'game_xr->stale_eye_rig_target(other,target.Get(),tw,th,number,tv);' in probe and 'stale_layers_[eye]->rig_target=static_cast<bool>(stale_rig_target(eye).texture);' in xr
-assert 'd2vr::rig_target::book().publish(vp,e,frame);' in probe
+assert 'd2vr::rig_target::book().publish(vp,e,has_e,prev_vp,frame);' in probe
 print('PASS: v1190 rig target routing (knob, E at Setup, replay, per-render hand-off to the stale eye)')
+
+# v1191: GPU spans (stale warp, rig target copy, motion pass), rectangle copy of the rig target, one-view weapon placement (knob alt-weapon-place)
+assert 'ModGpuScope warp_scope(context_.Get(),ModSpan::stale_warp);' in xr and 'ModSpan::rig_target' in fsr and 'ModSpan::eye_motion' in fsr
+assert 'RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h)' in fsr
+assert 'alt_weapon_place_knob=fs::exists(root/L"build"/L"alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe
+assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev)' in om
+print('PASS: v1191 GPU spans, rig target rectangle copy, one-view weapon placement (knob alt-weapon-place)')
+rm_src=(root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
+assert 'if(pred) c->Begin(pred);' in rm_src and 'c->SetPredication(pred,FALSE);' in rm_src and 'c->SetPredication(engine_pred,engine_value);' in rm_src
+print('PASS: v1191 rig target replays only draws the mask replay saw (occlusion predicate)')

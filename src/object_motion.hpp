@@ -250,7 +250,8 @@ public:
     static std::string alternate_status_json() {
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
         for(unsigned k=0;k<PrevMvpTable::kinds;++k) s+=(k?",":"")+std::to_string(alt_kinds_[k].load(std::memory_order_relaxed));
-        return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_draws\":"+std::to_string(alt_rig_.load())+",\"rig_own\":"+std::to_string(alt_rig_own_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())+"}";
+        return s+"],\"resnapped\":"+std::to_string(alt_resnapped_.load())+",\"camera_only\":"+std::to_string(alt_camera_.load())+",\"rig_draws\":"+std::to_string(alt_rig_.load())+",\"rig_own\":"+std::to_string(alt_rig_own_.load())+",\"untagged\":"+std::to_string(alt_untagged_.load())
+            +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -299,7 +300,11 @@ public:
         return installed_;
     }
     // v930: the held weapons' placement is wanted (mod installed, not opted out) / the probe is on / a probe line (any thread).
-    static bool weapon_wanted() noexcept {return installed_ && weapon_mode_.load(std::memory_order_relaxed)>=1 && mode_.load(std::memory_order_relaxed)>=1;}
+    static bool weapon_wanted() noexcept {return installed_ && mode_.load(std::memory_order_relaxed)>=1 &&
+        (weapon_mode_.load(std::memory_order_relaxed)>=1 || (alt_weapon_place.load(std::memory_order_relaxed) && alternate()));}
+    // v1191 (knob build/alt-weapon-place): held weapons and props placed at their draws on one-view frames too (Place::place_one_view)
+    inline static std::atomic<bool> alt_weapon_place{false};
+    inline static std::atomic<std::uint64_t> alt_place_placed_{},alt_place_own_prev_{},alt_place_no_prev_{},alt_place_no_view_{};
     // v1101: the placement gate (the knob build/no-weapon-draw-place sets weapon_mode 0; object-motion-mode 0 is diagnostic only).
     static bool weapon_draw_on(int weapon_mode,int mode) noexcept {return weapon_mode>=1 && mode>=1;}
     // v1140 (user, 2026-11-10: held props lag and wobble; the v1132 headset status had weapon_mode 0 and held_draw_placed [0,0]): the held-prop
@@ -717,7 +722,8 @@ private:
         if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);return false;}
         // v1040: no previous rows and no weapon placement: the draw ends in no_rows below whatever the view says. Skip the view lookup,
         // the pass callback and the row gather (the b1 agree/untagged diagnostics no longer count these draws).
-        if(!has_previous(s.layout,sh->size) && !weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed))) {
+        const bool one_view_place=alt_weapon_place.load(std::memory_order_relaxed) && alternate() && mode_.load(std::memory_order_relaxed)>=1; // v1191
+        if(!has_previous(s.layout,sh->size) && !weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed)) && !one_view_place) {
             count(motion);count(no_rows);return false;
         }
         View view{};
@@ -776,6 +782,21 @@ private:
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
             if(!own) std::memcpy(prev,cur,64);
             return bind_pool(c,s,*sh,nullptr,prev);
+        }
+        // v1191: one-view frames: the held weapon/prop placed in this render's drawn hand, previous rows from this eye's previous render
+        if(near_draw && one_view_place && have_view) {
+            rig_target::M4 prev_vp{};
+            if(rig_target::book().find_prev(view.vp,prev_vp)) {
+                float placed[16]{},placed_prev[16]{};bool own_prev=false;
+                rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
+                const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev);
+                if(r.side>=0) {
+                    alt_place_placed_.fetch_add(1,std::memory_order_relaxed);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
+                    if(RigMask::target_wanted()) {rig_target::M4 e{};const bool ok=rig_target::book().find(view.vp,e);if(ok) {rig_target::apply(e,placed,tl_target_rows_);tl_target_s_=&s;tl_target_sh_=sh;}RigMask::mark_target(ok);}
+                    if(!bind_pool(c,s,*sh,placed,have_prev?placed_prev:nullptr)) return false;
+                    count(view.eye?fixed_r:fixed_l);return true;
+                }
+            } else alt_place_no_view_.fetch_add(1,std::memory_order_relaxed);
         }
         if(near_draw && !alt && weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed))) {
             count(weapon_near);

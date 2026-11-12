@@ -38,10 +38,12 @@ enum class Phase : unsigned {pre=0,eye0=1,eye1=2,hook=3};
 constexpr unsigned phase_count=4;
 inline const char* phase_name(unsigned p) noexcept {static const char* const n[phase_count]{"pre","eye0","eye1","hook"};return n[p<phase_count?p:0];}
 // The mod's own GPU work, timed with timestamp pairs (mod_gpu_timer.hpp). Reported as mod_gpu_ms_p50.
-enum class ModSpan : unsigned {fsr_eye0=0,fsr_eye1,aa_sharpen,eye_copy,eye_overlay,layer_overlays,eye_capture};
-constexpr unsigned mod_span_count=7;
+// v1191: stale_warp (the stale-eye warp call, old path or AFW v2), rig_target (the rig target's copy-out and clears), eye_motion (the motion
+// pass) run inside other spans (FSR's, the layer submit) and are not added to the mod total (mod_span_summed).
+enum class ModSpan : unsigned {fsr_eye0=0,fsr_eye1,aa_sharpen,eye_copy,eye_overlay,layer_overlays,eye_capture,stale_warp,rig_target,eye_motion};
+constexpr unsigned mod_span_count=10,mod_span_summed=7;
 inline const char* mod_span_name(unsigned i) noexcept {
-    static const char* const n[mod_span_count]{"fsr_eye0","fsr_eye1","aa_sharpen","eye_copy","eye_overlay","layer_overlays","eye_capture"};
+    static const char* const n[mod_span_count]{"fsr_eye0","fsr_eye1","aa_sharpen","eye_copy","eye_overlay","layer_overlays","eye_capture","stale_warp","rig_target","eye_motion"};
     return n[i<mod_span_count?i:0];
 }
 struct PhaseGpu {double ms[phase_count]{};unsigned lists[phase_count]{};bool valid{};}; // one timer frame, summed per phase
@@ -126,7 +128,7 @@ public:
         phase_valid_[slot]=phases && phases->valid;mod_valid_[slot]=mod && mod->valid;
         for(unsigned i=0;i<phase_count;++i) {phase_ms_[i][slot]=phase_valid_[slot]?static_cast<float>(phases->ms[i]):0.f;phase_lists_[i][slot]=phase_valid_[slot]?static_cast<std::uint16_t>(std::min(phases->lists[i],65535u)):0;}
         for(unsigned i=0;i<mod_span_count;++i) mod_ms_[i][slot]=mod_valid_[slot]?static_cast<float>(mod->ms[i]):0.f;
-        mod_sum_[slot]=0.f;if(mod_valid_[slot]) for(unsigned i=0;i<mod_span_count;++i) mod_sum_[slot]+=mod_ms_[i][slot];
+        mod_sum_[slot]=0.f;if(mod_valid_[slot]) for(unsigned i=0;i<mod_span_summed;++i) mod_sum_[slot]+=mod_ms_[i][slot];
         replay_valid_[slot]=replay && replay->valid;
         if(replay_valid_[slot]) {
             for(unsigned i=0;i<phase_count;++i) {replay_ns_[i][slot]=replay->ns[i];replay_lists_[i][slot]=replay->lists[i];}
