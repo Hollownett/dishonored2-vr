@@ -1,0 +1,6 @@
+{"segments": [
+ {"start_ms": 0, "end_ms": 300, "input": {"move_x": 0.0}, "command": "equip pistol"},
+ {"start_ms": 300, "end_ms": 2000, "input": {"move_x": 0.0}},
+ {"start_ms": 2000, "end_ms": 2300, "input": {"left_grip": 1.0}, "command": "extra left crossbow"},
+ {"start_ms": 2300, "end_ms": 9000, "input": {"left_grip": 1.0}, "left_hand_offset": [0.0, 0.0, 0.0]}
+]}

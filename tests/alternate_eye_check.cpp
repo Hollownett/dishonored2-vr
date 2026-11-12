@@ -46,6 +46,23 @@ static void menus_and_authored_render_paired() {
     CHECK(step(c, 12, true, false) == -1);
     CHECK(step(c, 13, true, false) == 1);
 }
+// v1219: the spyglass scope holds paired frames for its duration, then one paired hand-over frame, then alternation resumes.
+static void spyglass_scope_holds_paired_frames() {
+    CHECK(!alternate_plan_paired_hold(false, true, 1.f));
+    CHECK(alternate_plan_paired_hold(false, true, 1.5f));
+    CHECK(!alternate_plan_paired_hold(false, false, 1.5f));  // lens / native-zoom modes: no scope
+    CHECK(alternate_plan_paired_hold(true, false, 1.f));
+    AlternateEye a;
+    for (std::uint64_t f = 1; f < 10; ++f) step(a, f);
+    const float zoom[] = {1.03f, 2.f, 4.f, 4.f, 2.f, 1.02f};
+    std::uint64_t f = 10;
+    for (float m : zoom) CHECK(step(a, f++, true, alternate_plan_paired_hold(false, true, m)) == -1);
+    CHECK(step(a, f, true, alternate_plan_paired_hold(false, true, 1.f)) == -1);  // hand-over: nothing kept while zoomed is reused
+    ++f;
+    CHECK(step(a, f, true, alternate_plan_paired_hold(false, true, 1.f)) == static_cast<int>(f & 1u));
+    ++f;
+    CHECK(step(a, f, true, alternate_plan_paired_hold(false, true, 1.f)) == static_cast<int>(f & 1u));
+}
 static void epoch_change_renders_paired_once() {
     AlternateEye a;
     for (std::uint64_t f = 1; f < 8; ++f) step(a, f);
@@ -474,6 +491,7 @@ int main() {
     paired_frames_never_trip_the_miss_fallback();
     parity_alternates_in_gameplay();
     menus_and_authored_render_paired();
+    spyglass_scope_holds_paired_frames();
     epoch_change_renders_paired_once();
     eye_older_than_two_frames_not_submitted();
     stale_eye_keeps_its_render_pose();

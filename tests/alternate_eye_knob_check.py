@@ -83,7 +83,7 @@ assert probe.count('alternate_enabled') == 1 or 'game_xr->alternate_enabled' in 
 after = between(probe, 'void alternate_after_present(', 'bool capture_texture(')
 assert 'alt_plan.rendered(eye,number)' in after
 assert 'const UINT64 next_display=d2vr::alternate_display_frame(number);' in after   # the plan is for the frame the next Setup SHOWS
-assert 'alt_plan.eye_for_frame(next_display,free_gameplay,authored,epoch_changed)' in after and 'number+1' not in after
+assert 'alt_plan.eye_for_frame(next_display,free_gameplay,hold,epoch_changed)' in after and 'number+1' not in after  # v1219: hold = authored or scope
 assert 'alt_plan_stamp=(next_display<<2)|static_cast<UINT64>(next+1);' in after
 assert 'if(d2vr::alternate_install_descriptor(gameplay,next)) alternate_select_descriptor(next<0);' in after   # v791: the wheel gets two views
 assert 'if(gameplay) alternate_select_descriptor(next<0);' not in after
@@ -245,7 +245,7 @@ print('PASS: v1190 rig target routing (knob, E at Setup, replay, per-render hand
 assert 'ModGpuScope warp_scope(context_.Get(),ModSpan::stale_warp);' in xr and 'ModSpan::rig_target' in fsr and 'ModSpan::eye_motion' in fsr
 assert 'RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h,static_cast<unsigned>(job.eye))' in fsr
 assert 'd2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe  # v1198: default on in alternate mode (pin below)
-assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev)' in om
+assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still)' in om
 print('PASS: v1191 GPU spans, rig target rectangle copy, one-view weapon placement (knob alt-weapon-place)')
 
 # v1192: sim-pose-hold (simulated XR + gameplay script only): the script clock is sampled on eye-0-fresh frames, dumps only there, truth_next meta
@@ -457,3 +457,18 @@ assert 'rig_forensics_knob=fs::exists(root/L"build"/L"rig-forensics");' in probe
 assert 'if(probe_on.load(std::memory_order_relaxed)) { // v1212 skin log' in rm11
 assert 'if(d2vr::RigMask::probe_on && d2vr::RigMask::dump_dir.empty())' in probe and 'if(!probe_on.load(std::memory_order_relaxed) || display==~0ull' in rm11
 print('PASS: v1216 rig forensics only with build/rig-forensics')
+# v1219: the spyglass scope holds paired frames in performance mode (the warp cannot rebuild the narrowed right view; the mask needs a fresh
+# right image); the plan's authored flag carries it, so the first free frame after the scope is paired too; status alternate_eye.scope_held
+ae = (root / 'src' / 'alternate_eye.hpp').read_text(encoding='utf-8')
+assert 'inline bool alternate_plan_paired_hold(bool authored, bool scope_enabled, float scope_m) noexcept {return authored || (scope_enabled && scope_m > 1.f);}' in ae
+ap = between(probe, 'void alternate_after_present(', '\nbool capture_texture(')
+assert 'const bool hold=d2vr::alternate_plan_paired_hold(authored,spyglass_scope_enabled,spyglass_scope_m.load(std::memory_order_relaxed));' in ap
+assert 'const int next=alt_plan.eye_for_frame(next_display,free_gameplay,hold,epoch_changed);' in ap
+assert '<< ",\\"scope_held\\":" << alt_scope_held.load()' in probe
+print('PASS: v1219 spyglass scope holds paired frames in performance mode')
+# v1218: a placed (held) draw's previous rows are the rows this eye's previous render submitted for it (both modes), else camera-only; build/no-placed-history: off
+om18 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'placed_history.store(!std::filesystem::exists(knobs_/L"no-placed-history",error),std::memory_order_relaxed); // v1218' in om18
+assert 'inline static std::atomic<bool> placed_history{true};' in om18
+assert om18.count('table_.placed_previous(placed_,') == 2
+print('PASS: v1218 placed draws keep their submitted previous rows (no-placed-history)')

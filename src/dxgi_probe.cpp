@@ -107,6 +107,7 @@
 #include "vr_controls.hpp"
 #include "arm_state.hpp"
 #include "held_copy.hpp"
+#include "copy_draw_grip.hpp"
 #include "native_weapon_hands.hpp"
 #include "native_ranged_fire.hpp"
 #include "native_gadget_drop.hpp"
@@ -918,7 +919,7 @@ static constexpr unsigned native_hud_destination(unsigned slot) noexcept {
 }
 static constexpr bool native_prompt_slot(unsigned slot) noexcept {return slot==0 || slot==d2vr::takedown_capture_slot;}
 static std::array<d2vr::NativeHudPromptHold,2> native_hud_prompt_holds; // slot 0, takedown slot
-static d2vr::OfferHold takedown_kill_hold,takedown_choke_hold;static std::atomic<UINT64> takedown_gap_holds{}; // v1141: held kill/choke sensor offers (one control thread writes them)
+static d2vr::OfferHold takedown_kill_hold,takedown_choke_hold;static std::atomic<UINT64> takedown_gap_holds{},prompt_gap_holds{}; // v1141 (v1220: slot-0 hand-target gaps): held kill/choke sensor offers (one control thread writes them)
 static d2vr::NativeHudPromptHold& native_hud_prompt_hold=native_hud_prompt_holds[0];
 static d2vr::NativeHudPromptHold& prompt_hold(unsigned slot) noexcept {return native_hud_prompt_holds[slot==0?0:1];}
 static thread_local unsigned native_hud_art_slot{};
@@ -2218,6 +2219,7 @@ void mono_view_fallback(const char* reason) noexcept;
 // parity, and the other eye is resubmitted from its kept image and render pose. State: 0 off, 1 on, 2 fallback to paired (session).
 // The knob also turns mono_view_state on, so every mono branch applies; alternation only changes WHICH eye pose the one view takes and what is copied.
 static std::atomic<int> alt_eye_state{0};
+static std::atomic<UINT64> alt_scope_held{0}; // v1219: frames planned paired because the spyglass scope was up
 static std::atomic<UINT64> alt_alternated{0},alt_paired{0},alt_fallbacks{0}; // submitted tracked frames with one fresh eye; submitted tracked free-gameplay frames with both eyes fresh; session fallbacks
 static d2vr::AlternateMismatch alt_mismatch_run; // consecutive plan/observation disagreements (prepare_head_view, under log_mutex)
 // The views each Setup wrote, keyed by the display frame that shows its image (alternate_display_frame: the engine pipeline is one frame
@@ -3685,11 +3687,17 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 // A copy's offset is relative to the controller grip. Bind it to the DRAWN hand like a native weapon: the grip the drawn
                 // joint 59 stands for (joint 59 = grip * grip_to_attachment). image_grip is the raw tracked grip (menu space in a menu,
                 // the v1014 16 m rejections) and ignores the arm's reach clamp, so the copy would float off the drawn hand.
-                if(const auto joint=full_body.image_world(hand,59,now))
-                    image=d2vr::body::mul(*joint,d2vr::body::inverse(full_body.attachment_target(hand,d2vr::fullbody::Xf{})));
+                const auto joint=full_body.image_world(hand,59,now);
+                const auto grip=full_body.image_grip(hand,now);
+                if(joint) image=d2vr::body::mul(*joint,d2vr::body::inverse(full_body.attachment_target(hand,d2vr::fullbody::Xf{})));
                 if(copy.offset_valid) {
-                    d2vr::weapon_draw::candidate_from_offset(d2vr::weapon_draw::model_of(copy.offset.data()),candidate,identity,
+                    const auto offset=d2vr::weapon_draw::model_of(copy.offset.data());
+                    // v1221: under a gun clip joint 59 is not grip * grip_to_attachment; bind against the drawn joint through this render's grip (copy_draw_grip.hpp)
+                    const bool joint_space=joint && grip;
+                    if(joint_space) image=*joint;
+                    d2vr::weapon_draw::candidate_from_offset(joint_space?d2vr::weapon_draw::copy_joint_grip(weapon_mat(*joint),weapon_mat(*grip),offset):offset,candidate,identity,
                         copy.kind?copy.kind:d2vr::weapon_draw::write_mirror,copy.write_serial?copy.write_serial:copy.serial,now);
+                    if(joint_space) candidate.space=d2vr::weapon_draw::space_joint59;
                 } else {
                     // An older producer without the applied offset: derive G from its read and the live frame. Still only a candidate;
                     // the binder validates it and the exact offset wins as soon as one arrives.
@@ -7000,18 +7008,24 @@ void publish_native_hud_art(UINT64 now) {
             // v1142: the capture snapshot keeps its last image with no age limit, so "no hint drawn now" is never !live_scope (v1141's test:
             // takedown_gap_holds stayed 0 and the art went 250 ms after the hint). The gap is: the held offer is still on the NPC this art
             // was captured for, and no fresh capture of a DIFFERENT element owns the slot.
-            const auto take_gap=slot==d2vr::takedown_capture_slot && c.texture?takedown_prompt(now):std::nullopt;
-            const bool takedown_gap=take_gap && c.child.target.object==take_gap->identity.object && c.child.target.generation==take_gap->identity.generation &&
-                !same_live && (!live_scope || d2vr::native_hud_child_same_element(live_scope.child,c.child) ||
-                               !d2vr::NativeHudChildDraw::scope_current(live_scope.child,game_xr->pose_epoch(),now));
-            if(native_prompt_slot(slot) && c.texture && (takedown_gap || (live_scope && d2vr::native_hud_child_same_element(live_scope.child,c.child) &&
-               (same_live || (d2vr::NativeHudChildDraw::scope_current(c.child,game_xr->pose_epoch(),now) &&
-               (!c.child.retained_entry || d2vr::native_prompt_entry::refresh(read_self,image_base,*c.child.retained_entry)))))) &&
-               hold.holds(now,takedown_gap?1300:600) && c.metadata.epoch==game_xr->pose_epoch()) {   // v1146: a takedown gap lasts as long as the held offer can
+            // v1220: slot 0 has the same gap for the hand/gaze target (native_prompt_keep_grace): its object is still the prompt target.
+            const bool take_slot=slot==d2vr::takedown_capture_slot;
+            const auto take_gap=take_slot && c.texture?takedown_prompt(now):std::nullopt;
+            const auto hand_gap=slot==0 && c.texture?native_interaction_aim.prompt_target(now):std::nullopt;
+            const bool offer_same=take_gap?c.child.target.object==take_gap->identity.object && c.child.target.generation==take_gap->identity.generation:
+                hand_gap && (c.child.retained_entry?c.child.retained_entry->owner==hand_gap->owner:
+                    c.child.target.object==hand_gap->identity.object && c.child.target.generation==hand_gap->identity.generation);
+            const bool live_same=live_scope && d2vr::native_hud_child_same_element(live_scope.child,c.child);
+            const UINT64 grace=native_prompt_slot(slot) && c.texture?d2vr::native_prompt_keep_grace(static_cast<bool>(live_scope),live_same,
+                live_scope && d2vr::NativeHudChildDraw::scope_current(live_scope.child,game_xr->pose_epoch(),now),
+                live_same && !same_live && d2vr::NativeHudChildDraw::scope_current(c.child,game_xr->pose_epoch(),now) &&
+                    (!c.child.retained_entry || d2vr::native_prompt_entry::refresh(read_self,image_base,*c.child.retained_entry)),offer_same,take_slot):0;
+            const bool takedown_gap=take_gap && grace==1300;
+            if(grace && hold.holds(now,grace) && c.metadata.epoch==game_xr->pose_epoch()) {   // v1146: a takedown gap lasts as long as the held offer can
                 D3D11_TEXTURE2D_DESC d{};c.texture->GetDesc(&d);
                 if(game_xr->native_art_source(destination,false,c.texture.Get(),D3D11_BOX{0,0,0,d.Width,d.Height,1},c.metadata.owner,
                     c.metadata.epoch,now,hold.point,hold.width_for(d.Width))) {
-                    native_hud_next_scopes[slot]=c.child;native_hud_next_ticks[slot]=now;if(takedown_gap) ++takedown_gap_holds;return;}
+                    native_hud_next_scopes[slot]=c.child;native_hud_next_ticks[slot]=now;if(takedown_gap) ++takedown_gap_holds;else if(slot==0 && offer_same && !same_live) ++prompt_gap_holds;return;}
             }
             clear();};
         const auto& compact=native_hud_compact_art[slot];const auto& metadata=compact.metadata;
@@ -7079,6 +7093,9 @@ void publish_native_hud_art(UINT64 now) {
                 std::optional<d2vr::Vec3> placed;
                 if(anchor && frame.epoch==metadata.epoch)
                     placed=d2vr::native_marker_world_point(*anchor,frame,metadata.epoch,frames.load()-1,now,now);
+                // v1220: an entry the game has just withdrawn (it rebinds the window to the hand target) is a gap, not a lost anchor: head_ahead
+                // flashed the prompt in front of the face for a frame and made that the held point (v1216 log: one fallback per rebind).
+                if(!placed && !d2vr::native_prompt_entry::refresh(read_self,image_base,entry)) {fail();continue;}
                 if(!placed) {
                     ++prompt_anchor_fallbacks;
                     if(!head_ahead()) {fail();continue;}
@@ -10189,7 +10206,13 @@ void alternate_after_present(UINT64 number,bool gameplay,bool free_gameplay,bool
     // The descriptor installed now shapes the Setup made before the next Present, whose image shows one Present later still (the engine pipeline
     // is one frame deep): the plan is for that display frame.
     const UINT64 next_display=d2vr::alternate_display_frame(number);
-    const int next=alt_plan.eye_for_frame(next_display,free_gameplay,authored,epoch_changed);
+    // v1219 (headset v1216: "in performance mode lens (scope) don't work at all, very bad render"): the scope's right view is rendered with a
+    // narrowed projection, which the stale-eye warp cannot carry (it takes the kept zoomed image as full-FOV and fills it from the unzoomed
+    // left eye), and the mask is only drawn when the right eye is fresh. While the scope runs every frame is paired, as for an authored scene;
+    // the first free frame after it is paired too (AlternateEye refresh), so no zoomed image is ever kept into alternation.
+    const bool hold=d2vr::alternate_plan_paired_hold(authored,spyglass_scope_enabled,spyglass_scope_m.load(std::memory_order_relaxed));
+    if(hold && !authored && free_gameplay) ++alt_scope_held;
+    const int next=alt_plan.eye_for_frame(next_display,free_gameplay,hold,epoch_changed);
     alt_plan_stamp=(next_display<<2)|static_cast<UINT64>(next+1);
     alt_planned_single[next_display&1]=next>=0?1:0;
     // v791: a paired plan is installed outside gameplay too (the weapon wheel keeps the world rendering; see alternate_install_descriptor)
@@ -10631,7 +10654,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                    <<",\"releases\":"<<lv.releases<<",\"shoves\":"<<d2vr::NativeWeaponHands::living_shoves.load()<<'}';return o.str();}() << ",\"perf\":" << [&]{std::lock_guard<std::mutex> l(perf_meter_mutex);return perf_meter.json();}() << ",\"pacer\":" << (game_xr?game_xr->pacer_status_json():std::string("null")) << ",\"frame_split\":" << frame_split_status_json()
                << ",\"mono_view\":\"" << (mono_view_state.load()==1?"on":mono_view_state.load()==2?"fallback":"off") << "\",\"mono_view_frames\":" << mono_view_frames.load()
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
-               << ",\"paired\":" << alt_paired.load() << ",\"fallbacks\":" << alt_fallbacks.load()
+               << ",\"paired\":" << alt_paired.load() << ",\"scope_held\":" << alt_scope_held.load() << ",\"fallbacks\":" << alt_fallbacks.load()
                << ",\"parity_flip\":" << (d2vr::alternate_parity_flip.load()?"true":"false") << ",\"band_bursts\":" << alt_band_bursts
                << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
                << ",\"stale_warp_failures\":" << (game_xr?game_xr->stale_eye_warp_failures:0)
@@ -10683,7 +10706,7 @@ std::string feedback_status_json() {    std::ostringstream out;
            << ",\"art_view\":" << (game_xr?static_cast<unsigned>(game_xr->native_eye_art_art_view):0)
            << ",\"last_call\":\"" << (game_xr?game_xr->native_eye_art_last_call:std::string()) << "\"}"
            << ",\"offered_choke_spawn\":" << offered_choke_spawn.load()
-           << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_gap_holds\":" << takedown_gap_holds.load() << ",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"sun_sprite_aspect\":[" << d2vr::SunSpriteAspect::state() << ',' << d2vr::SunSpriteAspect::applied() << ']' << ",\"sun_sprite_shape\":[" << d2vr::SunSpriteShape::state() << ',' << d2vr::SunSpriteShape::calls() << ']' << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << ",\"left_power\":" << (left_power.load()?"true":"false") << "}"
+           << ",\"prompt_shows_hides\":[" << prompt_shows.load() << ',' << prompt_hides.load() << "],\"takedown_flips\":" << takedown_flips.load() << ",\"takedown_gap_holds\":" << takedown_gap_holds.load() << ",\"prompt_gap_holds\":" << prompt_gap_holds.load() <<",\"takedown_hints\":" << d2vr::NativeHudChildDraw::takedown_hints.load() << ",\"takedown_anchor\":{\"enabled\":" << (prompt_target_anchor?"true":"false") << ",\"frames\":" << takedown_anchor_frames.load() << ",\"object_conflicts\":" << takedown_anchor_object_conflicts.load() << '}' << ",\"npc_blade_contacts\":" << npc_blade_contacts.load() << ",\"contact_hits\":[" << d2vr::NativeInteractionAim::melee_applied_.load() << ',' << d2vr::NativeInteractionAim::melee_rejected_.load() << ',' << d2vr::NativeInteractionAim::melee_faults_.load() << ']' << ",\"contact_rejects\":[" << d2vr::NativeInteractionAim::melee_why_[0].load() << ',' << d2vr::NativeInteractionAim::melee_why_[1].load() << ',' << d2vr::NativeInteractionAim::melee_why_[2].load() << ']' << ",\"corpse_chops\":" << d2vr::NativeMelee::chops.load() << ",\"sun_sprite_aspect\":[" << d2vr::SunSpriteAspect::state() << ',' << d2vr::SunSpriteAspect::applied() << ']' << ",\"sun_sprite_shape\":[" << d2vr::SunSpriteShape::state() << ',' << d2vr::SunSpriteShape::calls() << ']' << ",\"tip_speed\":[" << tip_speed_now[0].load() << ',' << tip_speed_now[1].load() << ']' << ",\"slash_speed\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?slash_speed_factor:1.f) << ",\"slash_scene_rate\":{\"enabled\":" << (d2vr::NativeSlashSceneRate::process_owner().enabled()?"true":"false") << ",\"accelerations\":" << d2vr::NativeSlashSceneRate::process_owner().accelerations() << ",\"setter_failures\":" << d2vr::NativeSlashSceneRate::process_owner().setter_failures() << "}" << ",\"block_unequip_vetoes\":" << d2vr::NativeBlockEligibility::process_owner().vetoes() << ",\"takedown_range\":" << (native_interaction_aim.takedown_ranges_applied()?"true":"false") << ",\"takedown_kill_rules\":" << native_interaction_aim.takedown_range_kill_rules() << ",\"layer\":" << d2vr::NativeHeldObject::layer_json() << ",\"release_watch\":" << d2vr::NativeInteractionAim::release_watch_json() << ",\"held_clamp\":{\"enabled\":" << (held_clamp_enabled?"true":"false") << ",\"sweeps\":" << held_clamp_status.sweeps.load() << ",\"hits\":" << held_clamp_status.hits.load() << ",\"self_hits\":" << held_clamp_status.self_hits.load() << ",\"clamped_frames\":" << held_clamp_status.clamped_frames.load() << ",\"cast_us\":" << held_clamp_status.cast_us.load() << ",\"cast_us_max\":" << held_clamp_status.cast_us_max.load() << ",\"no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"held_clamp_no_bounds\":" << held_clamp_status.no_bounds.load() << ",\"overlap_on_release\":" << held_clamp_status.overlap_on_release.load() << ",\"release_depen_frames\":" << held_clamp_status.release_depen_frames.load() << ",\"release_overlap_unresolved\":" << held_clamp_status.release_overlap_unresolved.load() << ",\"drawn_hand_gap_m\":" << held_clamp_status.drawn_hand_gap_m.load() << ",\"layer_at_release\":" << held_clamp_status.layer_at_release.load() << ",\"forced_drops\":" << held_clamp_status.forced_drops.load() << ",\"releases\":" << held_clamp_status.releases.load() << ",\"layer_reasserts\":" << d2vr::NativeHeldObject::layers_reasserted.load() << ",\"depen_writes\":" << native_grab.depen_writes_.load() << ",\"depen_rejected\":" << native_grab.depen_rejected_.load() << "}" << ",\"barrel_aim\":{\"ok\":" << barrel_ok.load() << ",\"bad_frame\":" << barrel_bad_frame.load() << ",\"no_model\":" << barrel_no_model.load() << ",\"gun_item_frames\":" << gun_item_frames.load() << ",\"name_miss_frames\":" << gun_name_miss_frames.load() << "},\"gadget_aim\":{\"enabled\":" << (gadget_hand_aim_enabled?"true":"false") << ",\"placement\":[" << d2vr::NativeGadgetAim::placement_calls.load() << ',' << d2vr::NativeGadgetAim::placement_swapped.load() << "],\"throw_hit\":[" << d2vr::NativeGadgetAim::throw_calls.load() << ',' << d2vr::NativeGadgetAim::throw_swapped.load() << "],\"stale\":" << d2vr::NativeGadgetAim::stale.load() << ",\"bad_pointer\":" << d2vr::NativeGadgetAim::bad_pointer.load() << ",\"restore_skipped\":" << d2vr::NativeGadgetAim::restore_skipped.load() << ",\"palm\":" << d2vr::NativeGadgetAim::palm_placements.load() << ",\"left_gadget\":" << (left_gadget.load()?"true":"false") << ",\"left_power\":" << (left_power.load()?"true":"false") << "}"
                << ",\"grenade_throw\":{\"enabled\":" << (grenade_hand_throw_enabled?"true":"false") << ",\"calls\":" << d2vr::NativeGrenadeThrow::calls.load() << ",\"rewritten\":" << d2vr::NativeGrenadeThrow::rewritten.load() << ",\"not_grenade\":" << d2vr::NativeGrenadeThrow::not_grenade.load() << ",\"no_gesture\":" << d2vr::NativeGrenadeThrow::no_gesture.load() << ",\"faults\":" << d2vr::NativeGrenadeThrow::faults.load() << ",\"last_speed\":" << d2vr::NativeGrenadeThrow::last_speed.load() << ",\"last_delay_ms\":" << d2vr::NativeGrenadeThrow::last_delay_ms.load() << ",\"scene_rate\":" << d2vr::NativeGrenadeThrow::scene_rate.load() << ",\"scenes_sped\":" << d2vr::NativeGrenadeThrow::scenes_sped.load() << "}"
                << ",\"ocean_eval\":{\"enabled\":" << (ocean_eval_gate_enabled?"true":"false") << ",\"dispatches\":" << d2vr::NativeOceanEval::dispatches.load() << ",\"skipped\":" << d2vr::NativeOceanEval::skipped.load() << "}"
                << ",\"held_object\":{\"installed\":" << (held_object_installed?"true":"false") << ",\"placed\":" << d2vr::NativeHeldObject::placed.load() << ",\"rejected_targets\":" << d2vr::NativeHeldObject::rejected_targets.load() << ",\"anchored\":" << d2vr::NativeHeldObject::anchored.load() << ",\"sim_invulnerable_blocked\":" << d2vr::NativeSimInvulnerable::blocked.load() << ",\"swarm_kill_skipped\":" << d2vr::NativeSwarmKillGuard::skipped.load() << ",\"swarm_why\":[" << d2vr::NativeMelee::swarm_why[0].load() << ',' << d2vr::NativeMelee::swarm_why[1].load() << ',' << d2vr::NativeMelee::swarm_why[2].load() << ',' << d2vr::NativeMelee::swarm_why[3].load() << "],\"thrown\":" << d2vr::NativeHeldObject::thrown.load() << ",\"throw_kept\":" << d2vr::NativeHeldObject::throw_kept.load() << ",\"throws\":" << held_throws.load() << ",\"drops\":" << held_drops.load() << "}"
@@ -11308,13 +11331,13 @@ static void capture_shadow_stability(unsigned eye,ID3D11Texture2D* texture,UINT6
 static void capture_final_eye(unsigned eye,ID3D11Texture2D* texture) noexcept {
     static UINT64 next{};static unsigned count{},message_count{};
     const auto now=GetTickCount64();
-    if(eye<2 && simulated_gameplay_script_requested && game_xr && game_xr->spyglass_magnification>1.5f) { // v881: the spyglass lens as drawn, a pair a second, six
+    if(eye<2 && simulated_gameplay_script_requested && game_xr && (game_xr->spyglass_magnification>1.5f || game_xr->spyglass_scope_mag>1.5f)) { // v881: the spyglass lens as drawn, a pair a second, six (v1219: the scope too)
         static UINT64 lens_next{};static unsigned lens_pairs{};static bool lens_pair{};
         if(eye==0) {lens_pair=lens_pairs<6 && now>=lens_next;if(lens_pair) {lens_next=now+1000;++lens_pairs;}}
         if(lens_pair) try {const auto pixels=diag_readback_rgba(texture);if(!pixels.bytes.empty()) {
             const auto stem=L"xr-spyglass-"+std::to_wstring(lens_pairs)+(eye?L"-right":L"-left");
             std::ofstream(output_directory/(stem+L".rgba"),std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(pixels.bytes.data()),static_cast<std::streamsize>(pixels.bytes.size()));
-            std::ofstream(output_directory/(stem+L".json"),std::ios::trunc) << "{\"width\":" << pixels.width << ",\"height\":" << pixels.height << ",\"magnification\":" << game_xr->spyglass_magnification << '}';}} catch(...) {}
+            std::ofstream(output_directory/(stem+L".json"),std::ios::trunc) << "{\"width\":" << pixels.width << ",\"height\":" << pixels.height << ",\"magnification\":" << game_xr->spyglass_magnification << ",\"scope_mag\":" << game_xr->spyglass_scope_mag << '}';}} catch(...) {}
     }
     capture_alt_band(eye,texture,now);
     capture_climb_pair(eye,texture,now);

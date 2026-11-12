@@ -513,7 +513,9 @@ public:
     // One draw: cur/prev = its cb2 rows; pass_eye names the eye of the render pass (exact). A bound side is placed in every pass
     // (current-only colour layouts included); a side without a valid G reports `unbound` and the caller keeps the engine's rows.
     template<class Get>
-    static Result place(std::uint32_t frame,Get&& get_views,const float* cur,const float* prev,float* cur_out,float* prev_out,int tag_eye=-1,int pass_eye=-1) noexcept {
+    // v1218: still_out (optional) = the camera-only previous of the current binding (this eye's previous view * delta * M; no previous view:
+    // the current rows), the fallback when the submitted previous cannot be proven (ObjectMotion, PrevMvpTable::placed_previous).
+    static Result place(std::uint32_t frame,Get&& get_views,const float* cur,const float* prev,float* cur_out,float* prev_out,int tag_eye=-1,int pass_eye=-1,float* still_out=nullptr) noexcept {
         Result result;
         if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return result;
         const Slot* slot=slot_of(frame);
@@ -594,6 +596,11 @@ public:
         const Mat now=mul(mul(vp,delta),m);
         const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],prev_eye),m):mul(mul(vp,prev_eye),m);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
+        if(still_out) {
+            const bool view_before=views.prev_frame[candidate]==w.prev_frame && w.prev_frame && views.prev_ok[candidate][eye];
+            const Mat still=view_before?mul(mul(views.prev_vp[candidate][eye],delta),m):now;
+            for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(still[i]);
+        }
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
         result.side=candidate;result.eye=eye;result.alt=use_alt;
         result.stage=pass_eye_ok?placed_pass:tagged?placed_tagged:last_frame?placed_last_frame:placed_same_frame;
@@ -606,7 +613,7 @@ public:
     // (delta = B * inverse(F): the drawn hand's binding this render); previous = prev_vp * (B_own_prev * inverse(F)) * m with B_own_prev the
     // bound frame of the publish two engine frames back (this eye's previous render); without it, prev_vp * delta * m (the hand still,
     // the camera's motion only; Result::alt false and stage placed_tagged count that). Returns the side, else -1.
-    static Result place_one_view(const Mat& vp,const Mat& prev_vp,const float* cur,float* cur_out,float* prev_out,bool& own_prev) noexcept {
+    static Result place_one_view(const Mat& vp,const Mat& prev_vp,const float* cur,float* cur_out,float* prev_out,bool& own_prev,float* still_out=nullptr) noexcept {
         Result result;own_prev=false;
         if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return result;
         const std::uint32_t frame=latest_frame();
@@ -630,6 +637,7 @@ public:
         const Mat model=full(m);const Mat& delta=use_alt?w.alt_delta:w.delta;
         const Mat now=mul(mul(vp,delta),model);
         Mat before=mul(mul(prev_vp,delta),model);
+        if(still_out) for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(before[i]); // v1218: camera-only, the current binding
         const Last& o=older2_[static_cast<unsigned>(candidate)];
         Mat inverse_f{};
         if(o.valid && frame-o.frame==2 && inverse(use_alt?w.alt_model:w.model,inverse_f)) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;}

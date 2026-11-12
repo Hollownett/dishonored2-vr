@@ -143,6 +143,9 @@ inline bool alternate_free_gameplay(bool gameplay, bool settings_open) noexcept 
 inline bool alternate_single_view_allowed(bool authored, bool settings_open) noexcept {return !authored && !settings_open;}
 // An eye image may be kept for later frames only if it was made in free gameplay (never a cut, takedown, menu or settings image).
 inline bool alternate_may_keep(bool gameplay, bool authored, bool settings_open) noexcept {return gameplay && !authored && !settings_open;}
+// v1219: frames the plan keeps paired: an authored scene, or the spyglass scope up (its right view is rendered with a narrowed projection the
+// stale-eye warp cannot rebuild, and its mask is drawn on a fresh right image only). `scope_m` is the scope's factor (1 = none).
+inline bool alternate_plan_paired_hold(bool authored, bool scope_enabled, float scope_m) noexcept {return authored || (scope_enabled && scope_m > 1.f);}
 // Whether the Present installs the descriptor of its plan (planned_eye -1 = paired). A paired plan is installed in every state: the world keeps
 // rendering behind the weapon wheel (logic mask 256, gameplay false), and with the single-view descriptor left in place every Setup there
 // disagreed with the paired plan, was dropped, and the session fell back after 30 frames (headset v790). A single view is planned only in gameplay.

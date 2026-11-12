@@ -51,6 +51,18 @@ struct NativeHudPromptHold {
     bool holds(UINT64 now,UINT64 grace=600) const noexcept {return tick && now>=tick && now-tick<=grace;} // 600: rides out takedown sensor flicker
     void reset() noexcept {tick=0;}
 };
+// How long past its last good placement a prompt slot keeps its last art on a failed frame (0 = clear it now).
+// Same element still live: the v692 one-frame hold (600 ms). v1141/v1146 takedown gap (1300 ms): the mod still offers the art's own NPC and no
+// fresh capture of a DIFFERENT element owns the slot. v1220 (user, headset v1216: body prompts "not very stable, same problem as the kill/choke"):
+// the same gap for the hand/gaze prompt - the game withdraws its retained HUD entry and rebinds the same window to the hand target every
+// ~0.75 s on a body, and the new binding's art lands 15-78 ms later (1670 logged gaps with the target still offered: p50 31, p95 78, 98.9 % <= 250 ms)
+// while the hand target (its own 500 ms hold) still names the same object. 250 ms rides those out and lets a prompt linger at most that long.
+inline UINT64 native_prompt_keep_grace(bool live,bool live_same_element,bool live_current,bool held_still_bound,bool offer_same_object,bool takedown_slot) noexcept {
+    const bool same_live=live && live_same_element && live_current;
+    const UINT64 kept=live && live_same_element && (same_live || held_still_bound)?600:0;
+    if(offer_same_object && !same_live && (!live || live_same_element || !live_current)) return takedown_slot?1300:std::max<UINT64>(kept,250);
+    return kept;
+}
 // The flat prompt is allowed only when no interaction target exists and no world art is
 // committed or held. Other kinds keep the committed-image rule.
 inline bool native_hud_keep_flat(NativeHudChildKind kind,bool target_exists,bool replacement_ready,bool held) noexcept {

@@ -81,6 +81,25 @@ int main(){
     NativeHudPromptHold hold;assert(!hold.holds(1000));hold.good(1000,Vec3{},.24);
     assert(hold.holds(1600) && !hold.holds(1601) && !hold.holds(999));hold.reset();assert(!hold.holds(1000));
     hold.good(1000,Vec3{},.3,300);assert(hold.width_for(100)>.0999 && hold.width_for(100)<.1001 && hold.width_for(0)==.3); // v692: the scale is held, not the width
+    { // v1220 native_prompt_keep_grace: the takedown slot and a slot-0 frame without a same-object offer keep the v1146 rule exactly
+        const auto old_rule=[](bool live,bool same,bool current,bool bound,bool offer,bool take)->UINT64{
+            const bool same_live=live && same && current;const bool gap=take && offer && !same_live && (!live || same || !current);
+            return gap || (live && same && (same_live || bound))?(gap?1300:600):0;};
+        for(unsigned m=0;m<64;++m) {const bool l=m&1,s=m&2,c=m&4,b=m&8,o=m&16,t=m&32;
+            if(t || !o) assert(native_prompt_keep_grace(l,s,c,b,o,t)==old_rule(l,s,c,b,o,t));}
+        // Replay of the v1216 headset log (native-prompt-blinks.jsonl, a body prompt): every ~750 ms the retained HUD entry is withdrawn and the
+        // same window rebinds to the hand target; 3-5 frames (15-78 ms) pass before the new binding's art lands. Frame = 11 ms (90 Hz).
+        unsigned old_hides{},new_hides{};
+        for(UINT64 t=0;t<10000;t+=11) {const UINT64 phase=t%750;
+            if(phase>=50) continue;   // good frames: nothing fails
+            const bool snapshot_old=phase<30;   // the capture still holds the withdrawn binding's image, then the new binding is captured
+            const bool live=true,same=true,current=!snapshot_old,bound=false,offer=true;   // the hand target still names the body
+            old_hides+=old_rule(live,same,current,bound,offer,false)==0;new_hides+=native_prompt_keep_grace(live,same,current,bound,offer,false)==0;}
+        assert(old_hides>=30 && new_hides==0);
+        assert(native_prompt_keep_grace(true,false,true,false,true,false)==0); // a fresh capture of ANOTHER element replaces it at once
+        assert(native_prompt_keep_grace(true,true,false,false,false,false)==0); // no target any more: the prompt goes as before
+        assert(native_prompt_keep_grace(false,false,false,false,true,false)==250 && native_prompt_keep_grace(false,false,false,false,true,true)==1300);
+    }
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,true,false,false)); // target exists: never flat
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,false,false,true));
     assert(!native_hud_keep_flat(NativeHudChildKind::prompt,false,false,false)); // VR-only: never flat, even without a target

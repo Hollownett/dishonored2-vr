@@ -138,6 +138,22 @@ public:
         if(!find_window(got,own)) return unproven;
         std::memcpy(prev,got,64);return other_last;
     }
+    // v1218 (user, v1216 headset: "loose props have a lot of ghosting when I carry them", stereo and performance mode): a held thing is
+    // re-placed at its draws (weapon_draw_place.hpp), so its history holds the rows the mod SUBMITTED, not the engine's. Its previous rows were
+    // predicted (prev VP * B_prev * inverse(F) * M), which equals what was drawn only when the draw's part offset inverse(F)*M is the same in
+    // both renders; a carried physics prop's frame F is not the frame its draws were composed from every render (and a draw the placement
+    // missed was drawn at F), so the motion vector was wrong by the change of that error - the ghosting. Now by construction: `placed` maps
+    // (eye, render, the draw's engine rows) -> the rows submitted for it; this table's chain names this eye's previous render of the same draw
+    // by its engine rows (paired: fix, own frame = frame-1; alternate: fix_render to the receipt's own_frame), and its submitted rows are the
+    // previous rows. False: not proven (the caller uses the camera-only rows of the current binding: no object motion relative to the hand).
+    bool placed_previous(PrevMvpTable& placed,unsigned eye,std::uint32_t frame,std::uint32_t own_frame,bool alternate,const float* cur,
+            const float* engine_prev,const float* submitted,float* out) noexcept {
+        float key[16];std::memcpy(key,engine_prev,64);
+        const Kind k=alternate?fix_render(eye,frame,own_frame,cur,key,true):fix(eye,frame,cur,key,frame-own_frame);
+        placed.insert(eye,frame,cur,submitted);
+        if(k!=same && k!=own_last && k!=other_now && k!=other_last) return false;
+        return placed.find(eye,own_frame,key,out); // key = the engine rows of this eye's previous render of the draw (same: they did not change)
+    }
 private:
     struct Slot {std::atomic<std::uint64_t> tag{};std::atomic<std::uint32_t> ready{};float cur[16]{},prev[16]{};};
     std::array<Slot,2*gens*slots> slots_{};
@@ -308,6 +324,7 @@ public:
             +"],\"newest_why\":["+std::to_string(alt_newest_why_[0].load())+','+std::to_string(alt_newest_why_[1].load())+','+std::to_string(alt_newest_why_[2].load())
             +"],\"view_use\":["+[] {std::string o;for(unsigned i=0;i<view_sources;++i) {o+=i?",[":"[";for(unsigned u=0;u<use_count;++u) o+=(u?",":"")+std::to_string(alt_view_use_[i][u].load());o+="]";}return o;}()+"]"
             +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]"
+            +",\"weapon_place_v1216_prev_error\":"+resid_json(1) // v1218: weapon_place[1] = submitted previous proven, [2] = camera-only
             +",\"view_mode\":\""+(alt_view_heuristic.load()?"heuristic":"certain")+"\",\"certainty\":{"+[] {std::string o; // v1199: per consumer [certain, fell back]
                 static constexpr const char* names[cert_consumers]{"rig_target","placement","previous_rows","held_mask"};
                 for(unsigned k=0;k<cert_consumers;++k) {o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+','+std::to_string(alt_cert_[k][2].load())+']';
@@ -379,6 +396,7 @@ public:
         (weapon_mode_.load(std::memory_order_relaxed)>=1 || (alt_weapon_place.load(std::memory_order_relaxed) && alternate()));}
     // v1191 (knob build/alt-weapon-place): held weapons and props placed at their draws on one-view frames too (Place::place_one_view)
     inline static std::atomic<bool> alt_weapon_place{false};
+    inline static std::atomic<bool> placed_history{true}; // v1218: placed draws' previous rows = their submitted previous (off: build/no-placed-history)
     inline static std::atomic<std::uint64_t> alt_place_placed_{},alt_place_own_prev_{},alt_place_no_prev_{},alt_place_no_view_{};
     // v1194: where a one-view draw's view came from: 0 own newest write, 1 own older write of its bound b1, 2/3 another context's write of its
     // b1 (of the newest frame / older), 4 the newest view anywhere (the pre-v1193 fallback); and per source, what used it (view_use)
@@ -488,6 +506,22 @@ private:
     static constexpr unsigned context_slots=64,learned_slots=1u<<14;
 
     inline static PrevMvpTable table_;
+    inline static PrevMvpTable placed_; // v1218: placed draws, engine rows -> submitted rows (PrevMvpTable::placed_previous)
+    inline static std::array<std::atomic<std::uint64_t>,2> placed_prev_{}; // v1218 paired: previous rows [proven submitted, camera-only]
+    // v1218 A/B without a second build: per mode (0 paired, 1 alternate) the v1216 predicted previous vs the proven submitted one, at the model
+    // origin in milli-NDC (~px at a 2000 px wide eye): [sum, draws, max]. The predicted previous is no longer bound when the chain proves.
+    inline static std::array<std::array<std::atomic<std::uint64_t>,3>,2> placed_resid_{};
+    static void note_resid(unsigned mode,const float* proven,const float* predicted) noexcept {
+        const double d=origin_motion(proven,predicted);if(!(d<1e6)) return;
+        const auto v=static_cast<std::uint64_t>(d*1000.0); // micro-NDC
+        placed_resid_[mode][0].fetch_add(v,std::memory_order_relaxed);placed_resid_[mode][1].fetch_add(1,std::memory_order_relaxed);
+        for(auto m=placed_resid_[mode][2].load(std::memory_order_relaxed);v>m && !placed_resid_[mode][2].compare_exchange_weak(m,v);) {}
+    }
+    static std::string resid_json(unsigned mode) {
+        const auto n=placed_resid_[mode][1].load();
+        return "{\"draws\":"+std::to_string(n)+",\"mean_mndc\":"+std::to_string(n?placed_resid_[mode][0].load()/1000.0/static_cast<double>(n):0.)
+            +",\"max_mndc\":"+std::to_string(placed_resid_[mode][2].load()/1000.0)+'}';
+    }
     inline static std::array<std::atomic<ID3D11DeviceContext*>,context_slots> context_keys_{};
     inline static std::array<std::atomic<ContextState*>,context_slots> context_states_{};
     inline static std::array<Learned,learned_slots> learned_{};
@@ -1273,9 +1307,17 @@ private:
         if(near_draw && one_view_place && have_content) {
             rig_target::M4 prev_vp{};
             if(rig_target::book().find_prev(view.vp,prev_vp)) {
-                float placed[16]{},placed_prev[16]{};bool own_prev=false;
+                float placed[16]{},placed_prev[16]{},still[16]{};bool own_prev=false;
                 rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
-                const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev);
+                const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still);
+                // v1218: this eye's previous render's submitted rows of the draw (receipt chain), else camera-only on the current binding
+                if(r.side>=0 && have_prev && view.receipt && placed_history.load(std::memory_order_relaxed)) {
+                    float own[16];const bool predicted_own=own_prev;own_prev=false;
+                    if(view.has_prev) own_prev=table_.placed_previous(placed_,view.eye,view.frame,view.prev_frame,true,cur,engine,placed,own);
+                    if(own_prev && predicted_own) note_resid(1,own,placed_prev);
+                    else {table_.insert(view.eye,view.frame,cur,engine);placed_.insert(view.eye,view.frame,cur,placed);} // a history reset: recorded
+                    std::memcpy(placed_prev,own_prev?own:still,64);
+                }
                 if(r.side>=0) {
                     alt_place_placed_.fetch_add(1,std::memory_order_relaxed);view_use(use_place);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
                     certainty(cert_placement,true);
@@ -1303,11 +1345,18 @@ private:
                     const std::uint32_t latest=weapon_draw::Place::latest_frame();
                     if(latest && weapon_draw::Place::slot_of(latest)) frame=latest;
                 }
-                float placed[16]={},placed_prev[16]={};
+                float placed[16]={},placed_prev[16]={},still[16]={};
                 static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
                 const auto started=timed?__rdtsc():0;
                 const auto r=weapon_draw::Place::place(frame,&weapon_views,cur,have_prev?prev:nullptr,placed,placed_prev,
-                    have_view?static_cast<int>(view.eye):-1,pass_eye);
+                    have_view?static_cast<int>(view.eye):-1,pass_eye,still);
+                // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven), else camera-only
+                if(r.side>=0 && have_prev && placed_history.load(std::memory_order_relaxed)) {
+                    float own[16];const unsigned e=static_cast<unsigned>(r.eye);
+                    const bool proven=table_.placed_previous(placed_,e,frame,frame-1,false,cur,engine,placed,own);
+                    if(proven) note_resid(0,own,placed_prev);
+                    std::memcpy(placed_prev,proven?own:still,64);placed_prev_[proven?0:1].fetch_add(1,std::memory_order_relaxed);
+                }
                 if(timed) count(weapon_ticks,(__rdtsc()-started)*16);
                 if(r.hint>=0) weapon_pass_matched_[pass_index].fetch_add(1,std::memory_order_relaxed);
                 if(r.stage) {count(static_cast<Counter>(weapon_stage+r.stage));if(r.hint>=0) weapon_skip_side_[static_cast<unsigned>(r.hint)][r.stage].fetch_add(1,std::memory_order_relaxed);}
@@ -1533,6 +1582,7 @@ private:
         const bool draw_place_knob=std::filesystem::exists(knobs_/L"weapon-draw-place",error);
         const bool no_draw_place_knob=std::filesystem::exists(knobs_/L"no-weapon-draw-place",error);
         weapon_mode_.store(draw_place_knob && !no_draw_place_knob?1:0,std::memory_order_relaxed);
+        placed_history.store(!std::filesystem::exists(knobs_/L"no-placed-history",error),std::memory_order_relaxed); // v1218
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)
@@ -1622,6 +1672,8 @@ inline std::string ObjectMotion::weapon_status_json() {
     out<<"{\"published\":["<<weapon_draw::Place::published(0)<<','<<weapon_draw::Place::published(1)<<']'
        <<",\"placed\":["<<weapon_placed_side_[0].load(std::memory_order_relaxed)<<','<<weapon_placed_side_[1].load(std::memory_order_relaxed)<<']'
        <<",\"alt\":["<<weapon_alt_side_[0].load(std::memory_order_relaxed)<<','<<weapon_alt_side_[1].load(std::memory_order_relaxed)<<']'
+       <<",\"prev\":["<<placed_prev_[0].load(std::memory_order_relaxed)<<','<<placed_prev_[1].load(std::memory_order_relaxed)<<']' // v1218: [submitted previous proven, camera-only]
+       <<",\"v1216_prev_error\":"<<resid_json(0)
        <<",\"skip\":[";
     // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when
     // a draw was actually placed, and the out-of-bounds pointer faulted every status poll after a save load. The static_asserts
