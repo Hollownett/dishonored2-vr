@@ -279,6 +279,10 @@ class NativeInteractionAim {
     mutable std::atomic<UINT64> sphere_point_fallbacks_{},sphere_missing_reference_{};
     std::atomic<UINT64> loot_hand_los_{},loot_eye_los_{}; // H16: stage-0 loot LOS calls swept from the clamped palm / left at the eye (no clamped palm)
     std::atomic<UINT64> body_hand_los_{},body_eye_los_{}; // v1228: the same for downed characters (carry)
+    // v1236: downed-body LOS calls passed by the hand-on-it rule; the last downed-body LOS verdict (1 native pass, 2 hand pass, 3 blocked, hand
+    // not on it) with its owner, tick and the hand's distance to the grab's part (9999: the grab focus is not this body)
+    std::atomic<UINT64> body_hand_on_passes_{};std::atomic<std::uintptr_t> body_los_owner_{};std::atomic<UINT64> body_los_tick_{};
+    std::atomic<unsigned> body_los_verdict_{},body_los_hand_mm_{};
     std::atomic<UINT64> palm_beam_fallbacks_{}; // hand-mode cycles ordered by the v610 beam because the palm probe was invalid
     std::atomic<UINT64> hand_range_origins_{};
     std::atomic<UINT64> character_gaze_admitted_{},character_gaze_declined_{};
@@ -1919,6 +1923,19 @@ private:
                     qualified_result=result&~std::uintptr_t{0xff};
                     if(output)*output=0;
                 } else preserve_native_los=true;
+            } else if(character && *character && physical_grab_ && hand_judged_los(false,true,rig::value<std::uint8_t>(read_,owner+0xd1).value_or(0))) {
+                // v1236 (headset v1233: the grab focus stayed on a body for 1.3 s while this LOS dropped it from the game's Use target): a downed
+                // body under the hand passes like a bottle does, measured at the ragdoll part the grab's palm pick has under this hand.
+                const auto hand=pickup_hand(observed_scope->hand);
+                const auto focus=physical_grab_->focus_cached(static_cast<unsigned>(observed_scope->side),GetTickCount64());
+                const bool focused=hand && focus && focus->entity==owner;
+                const bool on=focused && downed_body_hand_on(*hand,focus->bounds?std::optional<std::pair<Vec3,Vec3>>{{focus->bounds->minimum,focus->bounds->maximum}}:std::nullopt,
+                    focus->pose.position);
+                const bool native_ok=(result&0xffu)==0;
+                if(on && !native_ok) {qualified_result=result&~std::uintptr_t{0xff};if(output)*output=0;++body_hand_on_passes_;}
+                body_los_owner_.store(owner,std::memory_order_relaxed);body_los_tick_.store(GetTickCount64(),std::memory_order_relaxed);
+                body_los_verdict_.store(native_ok?1u:on?2u:3u,std::memory_order_relaxed);
+                body_los_hand_mm_.store(focused?static_cast<unsigned>(std::min(9999.,focus->contact_distance(*hand)*1000)):9999u,std::memory_order_relaxed);
             }
         }
         const bool loot_los_armed=loot_los_capture_.armed;loot_los_capture_.armed=false;
@@ -3020,6 +3037,10 @@ public:
     UINT64 loot_eye_los() const {return loot_eye_los_.load();}
     UINT64 body_hand_los() const {return body_hand_los_.load();}
     UINT64 body_eye_los() const {return body_eye_los_.load();}
+    UINT64 body_hand_on_passes() const {return body_hand_on_passes_.load();}
+    struct BodyLosVerdict {std::uintptr_t owner{};UINT64 tick{};unsigned verdict{},hand_mm{};};
+    BodyLosVerdict body_los_verdict() const {return {body_los_owner_.load(std::memory_order_relaxed),body_los_tick_.load(std::memory_order_relaxed),
+        body_los_verdict_.load(std::memory_order_relaxed),body_los_hand_mm_.load(std::memory_order_relaxed)};}
     // Hands plan Task 4 interface (Task 15 grab_focus): the active floor/drawer loot fix branch. 'H' (fix round 1, ruling H16): loot LOS is
     // swept from the clamped palm (the floor coin under a cot's rail was blocked by the cot's hull from the eye; docs/native-use-los-3b7b90.md).
     static constexpr char loot_fix_branch() noexcept {return 'H';}

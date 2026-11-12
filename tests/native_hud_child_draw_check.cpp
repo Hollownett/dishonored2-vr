@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <tuple>
 extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID) {return MH_OK;}
 namespace {
 alignas(8) std::array<std::byte,0x1668> fixture_file{};
@@ -108,25 +109,48 @@ int main(){
          assert(native_prompt_keep_grace(live,same,current,bound,offer,true,true)==0);     // takedown slot: another hint replaces at once, as before
          assert(native_prompt_keep_grace(live,same,current,bound,offer,false,false)==0);   // another window (node): replaced at once, as before
          assert(native_prompt_keep_grace(live,same,false,bound,offer,false,true)==0);}     // the new binding not current: nothing to hand over to
-        // v1233, sim v1232 native-prompt-blinks rows 195440453..195441562 (t=0 at the first): key 14 shown with art_age 78 and never refreshed, hidden
-        // at t=437 (art_age 515) with the hand still on the body; key 10 art landed at t=1109. Between, the game draws the window through the bare root
-        // (same element, binding not current, key 14 entry gone). The hand leaves at t=2000; its live target drops 250 ms later. Frames 11 ms.
-        {const auto run=[](bool v1233,UINT64& first_hide,UINT64& leave_hide){NativeHudPromptHold hold;first_hide=leave_hide=0;bool shown=true;
-            for(UINT64 t=0;t<3000;t+=11) {
-                const UINT64 art_age=t<1109?t+78:t<2000?0:t-2000;   // key 14 art from t=-78; key 10 art fresh until the hand leaves
-                const bool on=t<2000,live_hand=t<2250,remembered=t<2500;   // hand on the body / live target / 500 ms remembered target
-                if(art_age<=250) {hold.good(t,Vec3{},.3);shown=true;continue;}
-                // on the body: the bare root draws the same element, not current; gone: nothing drawn
-                const UINT64 g=native_prompt_keep_grace(on,on,false,false,remembered,false,false,v1233 && live_hand);
-                const bool keep=g && hold.holds(t,g);
-                if(!keep && shown) {auto& at=on?first_hide:leave_hide;if(!at) at=t;}
-                shown=keep;}};
-         UINT64 old_first{},old_leave{},new_first{},new_leave{};run(false,old_first,old_leave);run(true,new_first,new_leave);
-         assert(old_first>=400 && old_first<=450);   // the logged hide (t=437)
-         assert(new_first==0);                       // v1233: held until the key 10 art lands
-         assert(new_leave && new_leave<=old_leave && new_leave-2000<=500);}   // leaving: no later than before (art age 250 + gap 250)
-        assert(native_prompt_keep_grace(true,true,false,false,false,false,false,true)==0);   // live offer alone (no same-object offer): nothing held
-        assert(native_prompt_keep_grace(true,false,true,false,true,false,false,true)==0);    // another element drawn fresh: replaced at once
+        // v1236 (headset v1233: body prompts up 66 % of the target time, 3 of 17 never): the hand stays on one body for 10 s while the game draws its
+        // prompt only 30 % of the time (300 ms bursts every 1 s, the first at 200 ms); the art is kept once a burst lasted 150 ms. The v1232 rule
+        // (game art <= 250 ms old, then a 250 ms gap) flickers every second; v1236 is up 100 % from the first kept art and gone the frame the hand
+        // leaves. Frames 11 ms.
+        {const std::uintptr_t body=0x7181600;
+         const auto run=[&](bool v1236){NativeBodyPromptStats s;std::uintptr_t art_body{};UINT64 last_fresh{},burst_from{};bool kept_any_frame_after_art=true;UINT64 leave_shown_ms{};
+            for(UINT64 t=0;t<11000;t+=11) {
+                const bool on=t<10000;const std::uintptr_t under=on?body:0;
+                const bool fresh=on && (t%1000)>=200 && (t%1000)<500;
+                if(fresh) {if(!burst_from || t-last_fresh>11) burst_from=t;last_fresh=t;if(t-burst_from>=150) art_body=body;}
+                const bool gap_hold=!fresh && last_fresh && t-last_fresh<=500;   // v1232: art up to 250 ms old + the 250 ms gap
+                const auto miss=body_prompt_cached(under,art_body,true,false,true);
+                const bool shown=fresh || (v1236?miss==BodyPromptMiss::none:gap_hold && on);
+                if(art_body && on && !shown) kept_any_frame_after_art=false;
+                if(!on && shown) leave_shown_ms+=11;
+                s.update(1000000+t,under,shown,miss,shown && !fresh);
+            }
+            s.close();return std::make_tuple(s,kept_any_frame_after_art,leave_shown_ms);};
+         const auto [old_s,old_kept,old_leave]=run(false);const auto [new_s,new_kept,new_leave]=run(true);
+         assert(old_s.intervals==1 && old_s.flicker==1 && old_s.hides_total>=8 && !old_kept);
+         assert(new_s.intervals==1 && new_s.flicker==0 && new_s.hides_total==0 && new_kept && new_leave==0);
+         std::cout<<"v1236 body replay: shown "<<new_s.shown_ms<<"/"<<new_s.target_ms<<" ms, first "<<new_s.first_ms_max<<", cached "<<new_s.cached<<" fresh "<<new_s.fresh
+             <<" (v1232 rule: shown "<<old_s.shown_ms<<", hides "<<old_s.hides_total<<")\n"<<std::flush;
+         assert(new_s.shown_ms>=10000-209-160 && old_s.shown_ms<8000 &&new_s.first_ms_max>=200 && new_s.first_ms_max<=220 && new_s.cached>new_s.fresh);}
+        // v1236 hand-on-it pass for a downed body: measured at the grab's ragdoll part under the hand (a shin box 0.6-1.0 m from the pelvis
+        // origin), never at the origin. Hand 20 cm above the shin and 1 m from the origin: qualifies (the origin alone would not); 60 cm: not.
+        {const std::optional<std::pair<Vec3,Vec3>> shin{{Vec3{.6,0,-.1},Vec3{1.,.15,.1}}};const Vec3 origin{0,0,0};
+         const Vec3 on_shin{.95,.35,0},off_shin{.95,.75,0};
+         assert(length(on_shin-origin)>1. && downed_body_hand_on(on_shin,shin,origin) && !downed_body_hand_on(on_shin,std::nullopt,origin));
+         assert(!downed_body_hand_on(off_shin,shin,origin));
+         assert(downed_body_hand_on(Vec3{.8,.2,0},std::nullopt,Vec3{.8,0,0}) && !downed_body_hand_on(Vec3{.8,.3,0},std::nullopt,Vec3{.8,0,0}));}   // no box: its point, 25 cm
+        // Never drawn: the game never offered a prompt for this body, so it has no art (the miss says so; no invented art), and the run is "never".
+        {NativeBodyPromptStats s;for(UINT64 t=0;t<=800;t+=11) {const auto m=body_prompt_cached(0x10,0,false,false,true);assert(m==BodyPromptMiss::no_art);s.update(5000+t,0x10,false,m);}
+         s.update(7000,0,false);assert(s.intervals==1 && s.never==1);}
+        assert(body_prompt_cached(0,0x10,true,false,true)==BodyPromptMiss::not_targeted);   // the hand left: hidden at once
+        assert(body_prompt_cached(0x20,0x10,true,false,true)==BodyPromptMiss::no_art);      // another body: never the first body's art
+        assert(body_prompt_cached(0x10,0x10,true,true,true)==BodyPromptMiss::other_prompt); // the game draws another prompt: it replaces at once
+        assert(body_prompt_cached(0x10,0x10,false,false,true)==BodyPromptMiss::no_art);     // art of an older pose epoch
+        assert(body_prompt_cached(0x10,0x10,true,false,false)==BodyPromptMiss::no_anchor);
+        {NativeBodyPromptStats s;for(UINT64 t=0;t<=1000;t+=11) {const bool shown=t<400 || t>=600;   // one hide by another prompt, then back
+             s.update(5000+t,0x10,shown,shown?BodyPromptMiss::none:BodyPromptMiss::other_prompt);}
+         s.update(7000,0,false);assert(s.hides_total==1 && s.hide_reasons[static_cast<unsigned>(BodyPromptMiss::other_prompt)]==1);}
         // v1228 NativeBodyPromptStats on the logged v1209 interval at 179860156 (4694 ms on one body, first shown at 78 ms, three
         // retained->hand re-bind gaps of 15-63 ms): v1216 = one flicker interval; with the gap hold (no gaps) = clean; frames 11 ms.
         const auto replay=[](bool gaps){NativeBodyPromptStats s;const std::uintptr_t body=0x7181600;

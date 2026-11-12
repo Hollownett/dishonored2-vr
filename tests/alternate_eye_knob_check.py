@@ -477,8 +477,8 @@ wd23 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
 om23 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
 assert 'weapon_draw::RigidLocal::on.store(!std::filesystem::exists(knobs_/L"no-rigid-local",error),std::memory_order_relaxed); // v1223' in om23
 assert 'RigidLocal::fold(s,raw[s] && side_reach[s]>0?ids[s]:0);' in wd23 and 'out.rigid=side_reach[s]>0;' in wd23
-assert wd23.count('rigid_part(w,static_cast<unsigned>(candidate),use_alt,draw_key,frame,') == 2
-assert om23.count('draw_key(s,*sh)') == 2 and '<<",\\"rigid_local\\":"<<weapon_draw::RigidLocal::json()' in om23
+assert wd23.count('rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,') == 2  # v1237: the matched frame (F, previous read, child)
+assert om23.count('draw_key(s,*sh)') == 3 and '<<",\\"rigid_local\\":"<<weapon_draw::RigidLocal::json()' in om23
 print('PASS: v1223 held things placed at B * rigid L (no-rigid-local)')
 # v1226: an unproven held draw keeps the predicted previous (previous binding * rigid L), never camera-only; status per pass/eye prev_by_eye, prev_fail
 om26 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
@@ -495,7 +495,7 @@ print('PASS: v1226 paired right-eye draws tagged from the eye record (paired_eye
 # status in_step per publisher path (physical / use / bind)
 wd31 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
 assert 'static constexpr unsigned settle_n=3,early_n=2,cands=6,window=45,' in wd31 and 'if(c.renders-c.settled_last>window)' in wd31
-assert probe.count('d2vr::weapon_draw::RigidLocal::set_path(hand,d2vr::weapon_draw::RigidLocal::path_') == 3
+assert probe.count('held_placed(hand,d2vr::weapon_draw::RigidLocal::path_') == 3  # v1237: through held_placed (census kind + children)
 print('PASS: v1231 rigid local by consensus, in_step per publisher path')
 # v1232/v1235: OfferedChokeGrip - a held `other` squeeze takes a later offer only for the NPC its press was on (press_npc, never refused at the press);
 # a ready re-press takes the running game choke only when this owner chose that victim (click -> release -> press again)
@@ -505,16 +505,51 @@ assert '(offered_victim?offered_victim:active_victim && active_victim==choked_?a
 assert 'else if(role_==Role::ready) {role_=Role::other;refused_=offered_victim;pressed_npc_=press_npc;}' in vc32
 assert 'control_active_choke,choke_occupied,(cs?raw.right_trigger:raw.left_trigger)>.35f,choke_press_npc);' in probe
 print('PASS: v1235 combat choke: later offer only for the pressed NPC, re-press takes back its own choke')
-# v1233: a slot-0 prompt keeps the takedown hold (1300 ms) while the hand's LIVE target is still the art's object (sim v1232: a body's carry prompt hid
-# at art_age 515 with the hand on the body while the game drew the window through the bare prompt root); status prompt_live_holds, prompt_target_hides
-hd33 = (root / 'src' / 'native_hud_child_draw.hpp').read_text(encoding='utf-8')
-assert 'bool live_same_window=false,bool live_offer=false) noexcept {' in hd33 and 'return takedown_slot || live_offer?1300:std::max<UINT64>(kept,250);' in hd33
-assert 'const auto live_hand=offer_same && hand_gap?native_interaction_aim.qualified_target(now):std::nullopt;' in probe
-assert 'live_scope.child.node==c.child.node && live_scope.child.epoch==c.child.epoch,live_offer):0;' in probe and '++prompt_target_hides[!fresh?2:live_same?0:1];' in probe
-print('PASS: v1233 hand prompt held while the live hand target is its object')
 # v1234: a render with no composition names its holder (Binder::observe 5-arg): a different holder drops G, never the old weapon's grip on the new one
 # (dual-wield toss/swap); sanity is per hold (Binder::idle when the hand holds nothing)
 wd34 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
 assert 'if(!candidate.identity) {candidate.identity=held;candidate.source=held_source;candidate.space=held_space;}' in wd34 and 'if(s.sanity_idle) {s.sanity_idle=false;' in wd34
 assert 'd2vr::weapon_draw::Binder::observe(hand,candidate,identity,held_source,held_space);' in probe and '{d2vr::weapon_draw::Binder::idle(hand);continue;}' in probe
 print('PASS: v1234 binder drops G for a different holder; sanity per hold')
+# v1236 (v1233's 1300 ms live-offer hold removed): a downed body under the hand (live Use target or grab focus) shows its own last kept prompt art
+# with no time limit; status body_prompt first_ms_max / cached_frames / fresh_frames / hides_by
+hd36 = (root / 'src' / 'native_hud_child_draw.hpp').read_text(encoding='utf-8')
+assert 'live_offer' not in hd36 and 'return takedown_slot?1300:std::max<UINT64>(kept,250);' in hd36
+assert 'inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,std::uintptr_t art_body,bool art_current,bool other_prompt_drawn,bool anchor) noexcept {' in hd36
+assert 'if(slot==0 && body_prompt_from_cache(now,destination,live_scope)) return;' in probe and 'body_prompt_keep(context,compact,art_owner,point,art_width,depth,now);' in probe
+assert 'native_body_prompt_stats.update(now,hand_body(now),shown,' in probe and 'prompt_live_holds' not in probe
+ia36 = (root / 'src' / 'native_interaction_aim.hpp').read_text(encoding='utf-8')
+sp36 = (root / 'src' / 'selection_policy.hpp').read_text(encoding='utf-8')
+assert 'return part?hand_pickup_in_range(probe,part->first,part->second):hand_pickup_in_range(probe,part_point,part_point);' in sp36
+assert 'const bool focused=hand && focus && focus->entity==owner;' in ia36 and 'if(on && !native_ok) {qualified_result=result&~std::uintptr_t{0xff};if(output)*output=0;++body_hand_on_passes_;}' in ia36
+assert ',\\"use_refused\\":{\\"other_owner\\":' in probe
+print('PASS: v1236 body prompt from its kept art while the body is under the hand; a downed body passes the hand-on-it LOS rule at its grabbed part')
+# v1237: held things - children of the held entity (+0xb0/+0xb8) are matched with the thing's delta; RigidLocal recycles the stalest cluster
+# instead of refusing new draws; census per kind (mixed / no_mv / near-unplaced) and per pass near_unplaced
+wd37 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+om37 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'for(auto& c:cs) if(c.active && c.age>=2 && (!free_slot || c.age>free_slot->age)) free_slot=&c;' in wd37
+assert 'static const Mat& frame_of(const Side& w,int h) noexcept {return h<=0?w.model:h==1?w.alt_model:h<hist0?w.extra[static_cast<std::size_t>(h-2)]:w.hist[static_cast<std::size_t>(h-hist0)];}' in wd37  # v1239: + earlier reads
+assert 'if(!has_frame(w,h) || (h && !(w.bound && pass_eye_ok))) continue;' in wd37 and 'enum Path:unsigned {path_unknown,path_physical,path_use,path_bind,path_severed};' in wd37
+assert om37.count('weapon_draw::Place::census(r,r.side>=0 && have_prev)') == 2 and '<<",\\"held_census\\":"<<weapon_draw::Place::census_json()' in om37
+assert 'if(read_self(thing[hand]+0xb0,&list,sizeof list) && list && read_self(thing[hand]+0xb8,&count,sizeof count) && count<=64) {' in probe
+assert 'd2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon);' in probe and 'd2vr::weapon_draw::Place::stage(hand,kind,kids.data(),n);' in probe
+print('PASS: v1237 held children placed with the thing, cluster recycling, held census')
+# v1238: the sticking hold feeds the goal's own velocity (hand * relative; build/legacy-hand-feed: the hand's); held things' shadow-map draws are
+# placed with them (view+0x7510 of the pass view; build/no-held-shadow-place); status hold_sync (motor lag / drawn-hand gap by player speed)
+pg38 = (root / 'src' / 'physical_grab.hpp').read_text(encoding='utf-8')
+ng38 = (root / 'src' / 'native_grab.hpp').read_text(encoding='utf-8')
+om38 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'const auto feed=!now?hand_feed:carry+(hand_feed-carry)*fade;' in pg38 and 'Vec3 feed_velocity() const {return goal_feed && goal_ok_?goal_velocity_:velocity_;}' in pg38
+assert 'PhysicalGrab::goal_feed=!std::filesystem::exists(root/L"build"/L"legacy-hand-feed",ec);' in ng38 and 'hold_sync().motor(' in ng38
+assert 'if(read_(pass_view+0x7510,lvp,64)) {' in om38 and 'held_shadow_place.store(!std::filesystem::exists(knobs_/L"no-held-shadow-place",error),std::memory_order_relaxed); // v1238' in om38
+assert '<< ",\\"hold_sync\\":" << d2vr::hold_sync().json()' in probe and 'd2vr::hold_sync().drawn(kind,player_speed,' in probe
+print('PASS: v1238 goal-velocity feed, held shadow placement, hold_sync status')
+# v1239: a held thing's draw matches any of the publisher's last 8 distinct reads (exact, sampled) or, with a settled L, is predicted
+# (raw_draw = m * inverse(L) near the latest read; resting twins and taken clusters refused; never a sample); status held_census.<kind>.match
+wd39 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+assert 'static Prediction predict(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m,double gate,double gate_rad,RefOf&& ref_of) noexcept {' in wd39
+assert 'out.gate_m=std::min(.05+mps*.05,out.reach);' in wd39 and wd39.count('predict_place(*slot,full(') == 2
+assert 'const Mat x=predicted?predicted_x:rigid_part(' in wd39 and '\\"match\\":"+match_json(k)' in wd39
+print('PASS: v1239 held things matched through the read ring and the predicted rigid match')
+

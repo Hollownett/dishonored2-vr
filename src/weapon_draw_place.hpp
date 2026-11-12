@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -79,6 +80,17 @@ inline double distance(const Mat& a,const Mat& b) noexcept {
 inline double angle(const Mat& a,const Mat& b) noexcept {
     const double trace=a[0]*b[0]+a[4]*b[4]+a[8]*b[8]+a[1]*b[1]+a[5]*b[5]+a[9]*b[9]+a[2]*b[2]+a[6]*b[6]+a[10]*b[10];
     return std::acos(std::clamp((trace-1)*.5,-1.,1.));
+}
+// The angle between two frames' rotations with each axis normalised (model frames carry scales).
+inline double frame_angle(const Mat& a,const Mat& b) noexcept {
+    double t=0;
+    for(int c=0;c<3;++c) {
+        double na=0,nb=0,d=0;
+        for(int r=0;r<3;++r) {const double x=a[static_cast<std::size_t>(r*4+c)],y=b[static_cast<std::size_t>(r*4+c)];na+=x*x;nb+=y*y;d+=x*y;}
+        if(!(na>1e-12 && nb>1e-12)) return 3.14159265358979323846;
+        t+=d/std::sqrt(na*nb);
+    }
+    return std::acos(std::clamp((t-1)*.5,-1.,1.));
 }
 // A native model frame (model+0x1860: origin, three axis rows, three scales; 15 floats) as the column-vector model matrix:
 // column c is axis c * scale c, the last column the origin.
@@ -416,7 +428,10 @@ struct Views {
     Mat prev_vp[2][2]{},prev_inv[2][2]{};
 };
 enum Stage:unsigned {rejected,no_views,no_certificate,far_away,ambiguous,unbound,placed_same_frame,placed_last_frame,placed_tagged,placed_pass,stages};
-struct Result {int side{-1},eye{-1},hint{-1};Stage stage{rejected};bool alt{};};   // alt (v1072): placed from the previous read F
+// alt (v1072): placed from the previous read F. extra (v1237): matched one of the held thing's attached children's frames.
+// near_side/near_like (v1237 census, unplaced draws only): the draw's model origin is within a published side's reach (of F, the previous
+// read or a child); like = its axes are also within 0.1 rad of that frame (the held thing composed at another pose, a part we did not place).
+struct Result {int side{-1},eye{-1},hint{-1};Stage stage{rejected};bool alt{},extra{};int near_side{-1};bool near_like{};bool predicted{};int age{};}; // v1239: predicted match / ring age
 
 struct Side {
     bool valid{},have_prev{},bound{},rigid{};   // rigid (v1223): a held thing (reach > 0): its draws use RigidLocal's settled L
@@ -432,6 +447,16 @@ struct Side {
     // the PREVIOUS read F of the same thing: a moving thing then missed every match (a held thing's 2 cm reach; a turning weapon's 0.004
     // axes) and stayed at the engine's lagging pose for that render - the flicker. alt = that previous read, with its own exact delta/prev.
     bool alt{};Mat alt_model{},alt_delta{};std::array<Mat,2> alt_prev_eye{};
+    // v1237 (user v1233: "the helmet was completely out of place" on a carried severed head): entities the engine binds to the held thing
+    // (its +0xb0 children: a helmet, a hat) follow F rigidly but have their own model frame, so a draw of one never matched F's axes and stayed
+    // at the engine's lagging pose beside the placed thing. Their frames are matched too; delta is the held thing's (B * inverse(F)).
+    static constexpr unsigned max_extra=4;
+    unsigned extras{};std::array<Mat,max_extra> extra{};
+    // v1239 (held things only): the publisher's earlier distinct reads of the thing (ages 1..7, the previous read included), each an exact
+    // match of the tick it was read at (frame index 2+max_extra+j), and the predicted-match gates from the thing's speed (0.05 s of motion).
+    static constexpr unsigned max_hist=7;
+    unsigned hists{};std::array<Mat,max_hist> hist{};std::array<unsigned,max_hist> hist_age{};
+    double gate_m{},gate_rad{};
 };
 struct Slot {std::atomic<std::uint32_t> ready{};std::array<Side,2> side{};};
 
@@ -450,33 +475,91 @@ class RigidLocal {
 public:
     inline static std::atomic<bool> on{true};
     static constexpr double agree_m=.0005,agree_rad=.0035,gate_m=.12; // gate: a draw one or two 16 ms ticks off at 3 m/s is still the same draw
-    static constexpr unsigned settle_n=3,early_n=2,cands=6,window=45,clusters=8,max_age=240,paths=4; // window: ~0.5 s at 90 Hz
-    enum Path:unsigned {path_unknown,path_physical,path_use,path_bind};
+    static constexpr unsigned settle_n=3,early_n=2,cands=6,window=45,clusters=8,max_age=240,paths=5; // window: ~0.5 s at 90 Hz
+    enum Path:unsigned {path_unknown,path_physical,path_use,path_bind,path_severed}; // v1237: severed = a physically held arkSeveredLimb part
     static constexpr unsigned bins=11; // deviation histogram edges in mm: .05 .1 .2 .5 1 2 5 10 20 50, then above
     static void set_path(unsigned side,unsigned path) noexcept {if(side<2) path_[side].store(path<paths?path:0u,std::memory_order_relaxed);}
     // Draw time: the L to place this draw with; false = none (place with the measured one). Records the render's sample.
-    static bool use(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& measured,Mat& out) noexcept {
+    // v1239: ref = the frame L is relative to (0 the thing, 2+k its child k); draw_m = the draw's model: this exact match takes the cluster
+    // for this render (a predicted draw of another object is then refused).
+    static bool use(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& measured,Mat& out,unsigned ref=0,const Mat* draw_m=nullptr) noexcept {
         if(side>1 || !on.load(std::memory_order_relaxed)) return false;
         std::lock_guard<std::mutex> lock(mutex_);
         auto& cs=side_[side];Cluster* best=nullptr;double best_d=gate_m;Cluster* free_slot=nullptr;
         for(auto& c:cs) {
             if(!c.active) {if(!free_slot) free_slot=&c;continue;}
-            if(c.key!=key) continue;
+            if(c.key!=key || c.ref!=ref) continue;
             const double d=distance(c.anchor,measured);
             if(d<best_d) {best_d=d;best=&c;}
         }
-        if(!best) {if(!free_slot) {++unsettled_;return false;} *free_slot=Cluster{};free_slot->active=true;free_slot->key=key;free_slot->anchor=measured;best=free_slot;}
+        // v1237 (user v1233 session: unsettled_draws 24,292 of 73,771 with 66 settles and 16 resets): a full side refused every new draw for the
+        // rest of the hold (a cluster was freed only after 240 renders unused). The cluster unused longest (not drawn for >= 2 renders) is recycled.
+        if(!best && !free_slot) {
+            for(auto& c:cs) if(c.active && c.age>=2 && (!free_slot || c.age>free_slot->age)) free_slot=&c;
+            if(free_slot) ++evictions_;
+        }
+        if(!best) {if(!free_slot) {++unsettled_;++unsettled_why_[0];return false;} *free_slot=Cluster{};free_slot->active=true;free_slot->key=key;free_slot->ref=ref;free_slot->anchor=measured;best=free_slot;}
         best->age=0;
+        if(draw_m) {
+            if(best->taken_frame!=frame+1) {best->taken_frame=frame+1;best->taken_m=*draw_m;}
+            else if(!best->taken_exact && !same_object(best->taken_m,*draw_m)) {remember(side,key,frame,best->taken_m);best->taken_m=*draw_m;} // a predicted taker was another object
+            best->taken_exact=true;
+        }
+        unsigned active=0;for(const auto& c:cs) active+=c.active?1u:0u;if(active>active_max_) active_max_=active;
         if(best->pending_frame!=frame+1) {best->pending=measured;best->pending_frame=frame+1;}
-        if(best->settled_ok) {out=best->settled;++settled_uses_;return true;}
-        if(const Cand* c=best->top();c && c->hits>=early_n) {out=c->value;++early_uses_;return true;}
-        ++unsettled_;return false;
+        const auto used=[&](const Mat& l) { // v1237 diagnostics: a draw placed >5 mm from its own measured L (out of step, or a key shared by two parts),
+            if(distance(l,measured)>.005 || angle(l,measured)>.0175) ++far_uses_;   // and draws of one cluster in one render placed with different L
+            if(best->used_frame==frame+1) {const double d=distance(l,best->used)*1000.;if(d>.05) {++render_disagree_;if(d>render_disagree_mm_) render_disagree_mm_=d;}}
+            else {best->used_frame=frame+1;best->used=l;}
+        };
+        if(best->settled_ok) {out=best->settled;++settled_uses_;used(out);return true;}
+        if(const Cand* c=best->top();c && c->hits>=early_n) {out=c->value;++early_uses_;used(out);return true;}
+        ++unsettled_;++unsettled_why_[1];used(measured);return false;
+    }
+    // v1239 predicted match: a draw no read matches (composed from a tick the publisher did not read) is recognised through a SETTLED L of its
+    // key: raw_draw = m * inverse(L) is the thing's pose the draw implies. Accepted when it is a rigid frame like the latest one (axes lengths
+    // within 2 %, orthogonal), within w.gate_m / w.gate_rad of the latest frame, not an object seen unplaced at that exact pose this or the
+    // last two renders (a resting twin: a stack of plates), and the cluster not taken this render by another object (an exact match always
+    // wins; between two predicted ones the first is placed, and a nearer later one takes the cluster from the next pass on). Never a sample.
+    // why: 0 no settled cluster of this key, 1 not rigid, 2 far, 3 turned, 4 taken, 5 taken by a farther one (this draw takes over).
+    struct Prediction {bool ok{};unsigned ref{},why{};Mat x{};double mm{},deg{};};
+    template<class RefOf>
+    static Prediction predict(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m,double gate,double gate_rad,RefOf&& ref_of) noexcept {
+        Prediction p;
+        if(side>1 || !on.load(std::memory_order_relaxed)) return p;
+        std::lock_guard<std::mutex> lock(mutex_);
+        Cluster* best=nullptr;Mat best_ref{};double best_d=0,best_a=0;
+        for(auto& c:side_[side]) {
+            if(!c.active || !c.settled_ok || c.key!=key) continue;
+            const Mat* r=ref_of(c.ref);Mat il{};
+            if(!r || !inverse(c.settled,il)) continue;
+            const Mat raw=mul(m,il);
+            if(!like_frame(raw,*r)) {p.why=std::max(p.why,1u);continue;}
+            const double d=distance(raw,*r);if(!(d<=gate)) {p.why=std::max(p.why,2u);continue;}
+            const double a=frame_angle(raw,*r);if(!(a<=gate_rad)) {p.why=std::max(p.why,3u);continue;}
+            if(!best || d<best_d) {best=&c;best_ref=*r;best_d=d;best_a=a;}
+        }
+        if(!best) return p;
+        for(const auto& o:others_[side]) if(o.frame && o.key==key && frame+1-o.frame<=3 && same_object(o.m,m)) {p.why=4;return p;}
+        if(best->taken_frame==frame+1 && !same_object(best->taken_m,m)) {
+            if(best->taken_exact || best_d>=best->taken_d) {p.why=4;return p;}
+            remember(side,key,frame,best->taken_m);best->taken_m=m;best->taken_d=best_d;p.why=5;return p;
+        }
+        if(best->taken_frame!=frame+1) {best->taken_frame=frame+1;best->taken_exact=false;best->taken_m=m;best->taken_d=best_d;}
+        best->age=0;
+        p.ok=true;p.ref=best->ref;p.x=mul(best_ref,best->settled);p.mm=best_d*1000.;p.deg=best_a*57.29577951308232;
+        return p;
+    }
+    // v1239: an unplaced draw near a held thing (another object, or the thing itself at a pose no read or prediction accepted).
+    static void other(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m) noexcept {
+        if(side>1) return;
+        std::lock_guard<std::mutex> lock(mutex_);remember(side,key,frame,m);
     }
     // Publish time (render boundary): the last render's samples into each cluster's consensus; a changed held thing resets the side.
     static void fold(unsigned side,std::uintptr_t id) noexcept {
         if(side>1) return;
         std::lock_guard<std::mutex> lock(mutex_);
-        if(id!=id_[side]) {if(id_[side]) ++resets_;id_[side]=id;side_[side]={};return;}
+        if(id!=id_[side]) {if(id_[side]) ++resets_;id_[side]=id;side_[side]={};others_[side]={};return;}
         const unsigned path=path_[side].load(std::memory_order_relaxed);
         for(auto& c:side_[side]) {
             if(!c.active) continue;
@@ -504,14 +587,17 @@ public:
             else if(const Cand* t2=c.top()) c.anchor=t2->value;
         }
     }
-    static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};}
+    static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};others_={};}
     static std::uint64_t settles() noexcept {std::lock_guard<std::mutex> lock(mutex_);return settles_;}
     static std::string json() {
         std::lock_guard<std::mutex> lock(mutex_);
         std::string o="{\"on\":"+std::string(on.load()?"true":"false")+",\"samples\":"+std::to_string(samples_)+",\"settles\":"+std::to_string(settles_)
             +",\"settled_draws\":"+std::to_string(settled_uses_)+",\"early_draws\":"+std::to_string(early_uses_)+",\"unsettled_draws\":"+std::to_string(unsettled_)
-            +",\"outliers\":"+std::to_string(outliers_)+",\"follows\":"+std::to_string(follows_)+",\"resets\":"+std::to_string(resets_);
-        static constexpr const char* path_names[paths]={"unknown","physical","use","bind"};
+            +",\"outliers\":"+std::to_string(outliers_)+",\"follows\":"+std::to_string(follows_)+",\"resets\":"+std::to_string(resets_)
+            +",\"unsettled_why\":["+std::to_string(unsettled_why_[0])+","+std::to_string(unsettled_why_[1])+"],\"evictions\":"+std::to_string(evictions_) // v1237: [no cluster, too few hits]
+            +",\"active_max\":"+std::to_string(active_max_)+",\"far_uses\":"+std::to_string(far_uses_)
+            +",\"render_disagree\":"+std::to_string(render_disagree_)+",\"render_disagree_mm\":"+std::to_string(render_disagree_mm_);
+        static constexpr const char* path_names[paths]={"unknown","physical","use","bind","severed"};
         o+=",\"in_step\":{";   // per publisher path: samples [agreeing with the settled L, not] = read and draw in step / out of step
         for(unsigned p=0;p<paths;++p) o+=std::string(p?",":"")+"\""+path_names[p]+"\":["+std::to_string(step_seen_[p][0])+","+std::to_string(step_seen_[p][1])+"]";
         o+="}";
@@ -530,11 +616,40 @@ public:
 private:
     struct Cand {Mat value{};unsigned hits{},last{};};
     struct Cluster {
-        bool active{},settled_ok{};std::uint64_t key{};Mat anchor{},settled{},pending{};std::array<Cand,cands> cand{};
-        unsigned renders{},settled_last{},age{};std::uint32_t pending_frame{};
+        bool active{},settled_ok{};std::uint64_t key{};Mat anchor{},settled{},pending{},used{};std::array<Cand,cands> cand{};
+        unsigned renders{},settled_last{},age{};std::uint32_t pending_frame{},used_frame{};
+        unsigned ref{};std::uint32_t taken_frame{};bool taken_exact{};Mat taken_m{};double taken_d{};   // v1239: L's frame; this render's taker
         const Cand* top() const noexcept {const Cand* t=nullptr;for(const auto& k:cand) if(k.hits && (!t || k.hits>t->hits || (k.hits==t->hits && k.last>t->last))) t=&k;return t;}
     };
     static bool agree(const Mat& a,const Mat& b) noexcept {return distance(a,b)<=agree_m && angle(a,b)<=agree_rad;}
+    // v1239: one object's model (the same draw in another eye or pass) vs another object's
+    static bool same_object(const Mat& a,const Mat& b) noexcept {return distance(a,b)<=.001 && frame_angle(a,b)<=.01;}
+    // a rigid frame with the reference's axis lengths (its scales), orthogonal, right-handed like it
+    static bool like_frame(const Mat& a,const Mat& r) noexcept {
+        if(!finite(a)) return false;
+        double n[3]{};
+        for(int c=0;c<3;++c) {
+            double na=0,nr=0;for(int k=0;k<3;++k) {const auto i=static_cast<std::size_t>(k*4+c);na+=a[i]*a[i];nr+=r[i]*r[i];}
+            na=std::sqrt(na);nr=std::sqrt(nr);if(!(nr>1e-9) || !(std::abs(na/nr-1.)<=.02)) return false;n[c]=na;
+        }
+        for(int x=0;x<3;++x) for(int y=x+1;y<3;++y) {
+            double d=0;for(int k=0;k<3;++k) d+=a[static_cast<std::size_t>(k*4+x)]*a[static_cast<std::size_t>(k*4+y)];
+            if(!(std::abs(d/(n[x]*n[y]))<=.02)) return false;
+        }
+        const auto det=[](const Mat& g) {return g[0]*(g[5]*g[10]-g[6]*g[9])-g[1]*(g[4]*g[10]-g[6]*g[8])+g[2]*(g[4]*g[9]-g[5]*g[8]);};
+        return det(a)*det(r)>0;
+    }
+    struct Other {std::uint64_t key{};std::uint32_t frame{};Mat m{};};   // frame = render + 1 (0 = empty)
+    static constexpr unsigned others_n=24;
+    inline static std::array<std::array<Other,others_n>,2> others_{};
+    static void remember(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m) noexcept {
+        Other* slot=&others_[side][0];
+        for(auto& o:others_[side]) {
+            if(o.frame && o.key==key && same_object(o.m,m)) {o.frame=frame+1;return;}   // a resting object: the same entry, refreshed
+            if(!o.frame || o.frame<slot->frame) slot=&o;
+        }
+        *slot=Other{key,frame+1,m};
+    }
     static void note(std::array<std::uint64_t,bins>& h,std::uint64_t& max_um,std::uint64_t& max_mdeg,const Mat& a,const Mat& b) noexcept {
         static constexpr double edge[bins]={.05,.1,.2,.5,1,2,5,10,20,50,1e9};
         const double mm=distance(a,b)*1000.,deg=angle(a,b)*57.29577951308232;
@@ -548,6 +663,8 @@ private:
     inline static std::array<std::atomic<unsigned>,2> path_{};
     inline static std::array<std::array<std::uint64_t,2>,paths> step_seen_{};
     inline static std::uint64_t samples_{},settles_{},settled_uses_{},early_uses_{},unsettled_{},outliers_{},follows_{},resets_{};
+    inline static std::array<std::uint64_t,2> unsettled_why_{};inline static std::uint64_t evictions_{},far_uses_{},render_disagree_{};
+    inline static unsigned active_max_{};inline static double render_disagree_mm_{};
     inline static std::array<std::uint64_t,bins> dev_{},step_{};
     inline static std::uint64_t dev_max_um_{},dev_max_mdeg_{},step_max_um_{},step_max_mdeg_{};
 };
@@ -563,10 +680,12 @@ public:
     // delta*F as the bound frame.
     static constexpr double alt_max_m=.6;   // a previous read farther than this from F is another thing or a teleport, never an alternative
     static void publish_bound(std::uint32_t frame,const std::array<const float*,2>& raw,const std::array<const Mat*,2>& bound,const std::array<double,2>& side_reach={0.,0.},
-            const std::array<std::uintptr_t,2>& ids={0,0}) noexcept {
+            const std::array<std::uintptr_t,2>& ids={0,0},double now_s=-1) noexcept {
+        if(now_s<0) now_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         Slot& slot=ring_[frame%ring];
         slot.ready.store(0,std::memory_order_release);
         for(unsigned s=0;s<2;++s) {
+            roll_census(s,frame);kind_[s].store(0,std::memory_order_relaxed);
             Side& out=slot.side[s];out=Side{};
             Mat model{},inverse_model{};
             Read& rd=reads_[s];
@@ -576,10 +695,18 @@ public:
             if(!finite(model) || !inverse(model,inverse_model)) {last_[s]={};rd={};continue;}
             if(rd.cur_ok && rd.cur_frame!=frame) {rd.prior=rd.cur;rd.prior_id=rd.cur_id;rd.prior_ok=true;}   // a republish of the same render keeps its prior
             rd.cur=model;rd.cur_id=ids[s];rd.cur_frame=frame;rd.cur_ok=true;
+            if(rd.ring_id!=ids[s] || !ids[s]) {rd.ring_n=0;rd.ring_id=ids[s];}   // v1239: the ring holds one thing's distinct reads
+            if(!rd.ring_n || distance(rd.ring[0],model)>1e-7 || frame_angle(rd.ring[0],model)>1e-7) {
+                for(unsigned k=std::min<unsigned>(rd.ring_n,Side::max_hist);k>0;--k) {rd.ring[k]=rd.ring[k-1];rd.ring_t[k]=rd.ring_t[k-1];}
+                rd.ring[0]=model;rd.ring_t[0]=now_s;rd.ring_n=std::min<unsigned>(rd.ring_n+1,Side::max_hist+1);
+            }
             out.valid=true;out.model=model;out.reach=side_reach[s];out.rigid=side_reach[s]>0;
             if(!bound[s] || !finite(*bound[s])) {last_[s]={};continue;}   // no G yet: no placement, no previous chain
             out.bound=true;out.bound_frame=*bound[s];
             out.delta=mul(*bound[s],inverse_model);
+            for(unsigned k=0;k<staged_[s].extras && out.extras<Side::max_extra;++k) if(finite(staged_[s].extra[k]) && distance(staged_[s].extra[k],model)<=alt_max_m) out.extra[out.extras++]=staged_[s].extra[k];
+            if(out.extras) children_.fetch_add(out.extras,std::memory_order_relaxed);
+            kind_[s].store(staged_[s].kind,std::memory_order_relaxed);
             Last& l=last_[s];
             if(l.valid && l.frame!=frame) {older2_[s]=older_[s];older_[s]=l;} // v1191: the last two earlier publishes (one-view frames: the other
             else if(!l.valid) older_[s]=older2_[s]={};                       // eye's render one frame back, this eye's previous render two back)
@@ -593,9 +720,21 @@ public:
                 out.alt=true;out.alt_model=rd.prior;out.alt_delta=mul(*bound[s],inverse_prior);
                 out.alt_prev_eye[0]=out.alt_prev_eye[1]=mul(mul(out.prev,model),inverse_prior);   // B_prev * inverse(F_prior)
             }
+            if(out.rigid && ids[s]) {   // v1239: the earlier distinct reads (exact matches of their ticks) and the predicted-match gates
+                for(unsigned k=1;k<rd.ring_n && out.hists<Side::max_hist;++k) {
+                    const Mat& h=rd.ring[k];
+                    if(distance(h,model)>alt_max_m || (out.alt && distance(h,out.alt_model)<=1e-7 && frame_angle(h,out.alt_model)<=1e-7)) continue;
+                    out.hist[out.hists]=h;out.hist_age[out.hists++]=k;
+                }
+                double mps=0,rps=0;   // the thing's speed: the latest read against the newest earlier read at least 8 ms old
+                for(unsigned k=1;k<rd.ring_n;++k) if(const double dt=now_s-rd.ring_t[k];dt>=.008) {mps=distance(model,rd.ring[k])/dt;rps=frame_angle(model,rd.ring[k])/dt;break;}
+                out.gate_m=std::min(.05+mps*.05,out.reach);
+                out.gate_rad=std::min((10.+rps*57.29577951308232*.05)/57.29577951308232,45./57.29577951308232);
+            }
             l={true,out.have_prev,frame,out.prev_frame,model,*bound[s],out.prev,out.relative};
             published_side_[s].fetch_add(1,std::memory_order_relaxed);
         }
+        staged_={};
         latest_frame_.store(frame,std::memory_order_release);
         slot.ready.store(frame+1,std::memory_order_release);
         published_.fetch_add(1,std::memory_order_relaxed);
@@ -608,6 +747,44 @@ public:
             if(finite(bound[s])) bound_ptr[s]=&bound[s];
         }
         publish_bound(frame,raw,bound_ptr);
+    }
+    // v1237 census (user v1233: plates, teacups, parts and bodies ghost at any speed). Per held-thing kind: renders a side was published bound,
+    // renders in which it was placed somewhere AND a near draw of the same axes stayed unplaced (mixed: two images of one thing), renders placed
+    // without any draw carrying previous rows (no motion vector of its own: the TAA/upscaler reprojects it as background), renders with no draw
+    // placed at all; and per draw placed / with previous rows / child-matched / unplaced near-like / unplaced near-other.
+    enum Kind:unsigned {kind_none,kind_weapon,kind_prop,kind_use,kind_bind,kind_severed,kinds};
+    // Publisher, before publish_bound: what this side holds and the frames of the entities bound to it (children, max Side::max_extra).
+    static void stage(unsigned s,unsigned kind,const Mat* extra=nullptr,unsigned n=0) noexcept {
+        if(s>1) return;
+        staged_[s].kind=kind<kinds?kind:0u;
+        for(unsigned k=0;extra && k<n && staged_[s].extras<Side::max_extra;++k) staged_[s].extra[staged_[s].extras++]=extra[k];
+    }
+    // ObjectMotion, per draw that reached the placement (rig draws excluded): its result and whether previous rows were written for it.
+    static void census(const Result& r,bool with_prev) noexcept {
+        const int s=r.side>=0?r.side:r.near_side;if(s<0 || s>1) return;
+        const unsigned k=kind_[static_cast<unsigned>(s)].load(std::memory_order_relaxed);
+        auto& d=draws_[k];
+        if(r.side>=0) {
+            d[0].fetch_add(1,std::memory_order_relaxed);if(with_prev) d[1].fetch_add(1,std::memory_order_relaxed);if(r.extra) d[2].fetch_add(1,std::memory_order_relaxed);
+            bits_[static_cast<unsigned>(s)].fetch_or(with_prev?3u:1u,std::memory_order_relaxed);
+        } else {
+            d[r.near_like?3:4].fetch_add(1,std::memory_order_relaxed);
+            if(r.near_like) bits_[static_cast<unsigned>(s)].fetch_or(4u,std::memory_order_relaxed);
+        }
+    }
+    static std::string census_json() {
+        static constexpr const char* names[kinds]={"none","weapon","prop","use","bind","severed"};
+        std::string o="{";
+        for(unsigned k=1;k<kinds;++k) {
+            o+=std::string(k>1?",":"")+"\""+names[k]+"\":{\"renders\":"+std::to_string(renders_[k][0].load())+",\"mixed\":"+std::to_string(renders_[k][1].load())
+              +",\"no_mv\":"+std::to_string(renders_[k][2].load())+",\"unplaced\":"+std::to_string(renders_[k][3].load())
+              +",\"draws\":{\"placed\":"+std::to_string(draws_[k][0].load())+",\"with_prev\":"+std::to_string(draws_[k][1].load())+",\"child\":"+std::to_string(draws_[k][2].load())
+              +",\"near_like\":"+std::to_string(draws_[k][3].load())+",\"near_other\":"+std::to_string(draws_[k][4].load())+"},\"match\":"+match_json(k)+"}";
+        }
+        // v1239: predicted matches, how far the draw's implied pose was from the latest read (mm edges 1 2 5 10 20 50 100 200; deg .25 .5 1 2 5 10 20 45)
+        o+=",\"predicted_offset\":{\"mm\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::to_string(pred_mm_[i].load());
+        o+="],\"deg\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::to_string(pred_deg_[i].load());
+        return o+"]},\"children_published\":"+std::to_string(children_.load())+'}';
     }
     static void clear() noexcept {RigidLocal::clear();for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};older_={};older2_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
@@ -658,22 +835,20 @@ public:
         const bool pass_eye_ok=pass_eye==0 || pass_eye==1;
         Rows cur_model[2]{};
         for(unsigned e=0;e<2;++e) if(views.ok[e] && (!pass_eye_ok || static_cast<int>(e)==pass_eye)) cur_model[e]=model_rows(views.inv[e].data(),cur);
-        double side_distance[2]={-1,-1};bool side_oriented=false,alt_hit[2]={false,false};
+        double side_distance[2]={-1,-1};bool side_oriented=false;int hit[2]={0,0};   // hit: frame_of index (0 F, 1 previous read, 2+k child k)
         for(unsigned s=0;s<2;++s) {
             const Side& w=slot->side[s];
             if(!w.valid) continue;
             for(unsigned e=0;e<2;++e) {
                 if(!views.ok[e] || (pass_eye_ok && static_cast<int>(e)!=pass_eye)) continue;
-                if(same_orientation(cur_model[e],w.model,tol)) {
+                // v1072: the previous read, v1237: the children (only in a pass with a known eye: the certificate paths compare against F)
+                for(int h=0;h<frames_end(w);++h) {   // v1239: the earlier reads of a held thing too
+                    if(!has_frame(w,h) || (h && !(w.bound && pass_eye_ok))) continue;
+                    const Mat& f=frame_of(w,h);
+                    if(!same_orientation(cur_model[e],f,tol)) continue;
                     side_oriented=true;
-                    const double d=origin_distance(cur_model[e],w.model);
-                    if(d<=reach_of(w) && (side_distance[s]<0 || d<side_distance[s])) {side_distance[s]=d;alt_hit[s]=false;}
-                }
-                // v1072: the previous read (only in a pass with a known eye: the certificate paths compare against F)
-                if(w.alt && w.bound && pass_eye_ok && same_orientation(cur_model[e],w.alt_model,tol)) {
-                    side_oriented=true;
-                    const double d=origin_distance(cur_model[e],w.alt_model);
-                    if(d<=reach_of(w) && (side_distance[s]<0 || d<side_distance[s])) {side_distance[s]=d;alt_hit[s]=true;}
+                    const double d=origin_distance(cur_model[e],f);
+                    if(d<=reach_of(w) && (side_distance[s]<0 || d<side_distance[s])) {side_distance[s]=d;hit[s]=h;}
                 }
             }
         }
@@ -686,6 +861,11 @@ public:
         }
         else if(side_distance[0]>=0) candidate=0;
         else if(side_distance[1]>=0) candidate=1;
+        bool predicted=false;Mat predicted_x{};
+        if(candidate<0 && pass_eye_ok && views.ok[pass_eye]) {   // v1239: no read matches: the predicted match (held things with a settled L)
+            int ref=0;
+            if(predict_place(*slot,full(cur_model[pass_eye]),draw_key,frame,candidate,ref,predicted_x)) {predicted=true;hit[candidate]=ref;}
+        }
         if(candidate<0) {result.stage=side_oriented?far_away:rejected;return result;}
         result.hint=candidate;
         const Side& w=slot->side[static_cast<unsigned>(candidate)];
@@ -717,13 +897,16 @@ public:
             }
         }
         const Rows& model=cur_model[eye];
-        const bool use_alt=alt_hit[candidate];
-        if(!(origin_distance(model,use_alt?w.alt_model:w.model)<=reach_of(w))) {result.stage=far_away;return result;}
+        const int h=hit[candidate];const bool use_alt=h==1,use_hist=h>=hist0;const Mat& matched=frame_of(w,h);
+        if(!predicted && !(origin_distance(model,matched)<=reach_of(w))) {result.stage=far_away;return result;}
         const Mat m=full(model);
         const Mat vp=views.vp[eye];
         const bool previous=w.have_prev && w.prev_eye_ok[eye] && views.prev_frame[candidate]==w.prev_frame && views.prev_ok[candidate][eye];
-        const Mat& delta=use_alt?w.alt_delta:w.delta;const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:w.prev_eye[static_cast<unsigned>(eye)];
-        const Mat x=rigid_part(w,static_cast<unsigned>(candidate),use_alt,draw_key,frame,m);   // v1223: F_used * settled L (else M)
+        Mat hist_delta{},hist_prev{};
+        if(use_hist && !rebase(w,h,static_cast<unsigned>(eye),hist_delta,hist_prev)) {result.stage=rejected;return result;}
+        const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:w.delta;
+        const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:use_hist?hist_prev:w.prev_eye[static_cast<unsigned>(eye)];
+        const Mat x=predicted?predicted_x:rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,m,h);   // v1223: F_used * settled L (else M); v1239: predicted = F * L
         const Mat now=mul(mul(vp,delta),x);
         const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],prev_eye),x):mul(mul(vp,prev_eye),x);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
@@ -733,9 +916,85 @@ public:
             for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(still[i]);
         }
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
-        result.side=candidate;result.eye=eye;result.alt=use_alt;
+        result.side=candidate;result.eye=eye;result.alt=use_alt;result.extra=h>1 && h<hist0;result.predicted=predicted;result.age=age_of(w,h);
         result.stage=pass_eye_ok?placed_pass:tagged?placed_tagged:last_frame?placed_last_frame:placed_same_frame;
+        note_match(static_cast<unsigned>(candidate),result);
         return result;
+    }
+    // v1237 census: Place::place, plus for a draw it did not place whether that draw sits within a published side's reach (Result::near_side).
+    template<class Get>
+    static Result place(std::uint32_t frame,Get&& get_views,const float* cur,const float* prev,float* cur_out,float* prev_out,int tag_eye,int pass_eye,float* still_out,std::uint64_t draw_key,bool census_near) noexcept {
+        Result r=place(frame,get_views,cur,prev,cur_out,prev_out,tag_eye,pass_eye,still_out,draw_key);
+        if(r.side>=0 || !census_near || r.stage==no_views || !(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return r;
+        const Slot* slot=slot_of(frame);if(!slot) return r;
+        const Views* v=get_views(frame,slot->side[0].valid?slot->side[0].prev_frame:0,slot->side[1].valid?slot->side[1].prev_frame:0);
+        const unsigned e=pass_eye==0 || pass_eye==1?static_cast<unsigned>(pass_eye):tag_eye==1?1u:0u;
+        if(v && v->ok[e]) near_of(*slot,model_rows(v->inv[e].data(),cur),r);
+        return r;
+    }
+    // Which bound side's F / previous read / child this unplaced draw's model is within reach of (nearest), and whether its axes nearly agree.
+    static void near_of(const Slot& slot,const Rows& m,Result& r) noexcept {
+        double best=-1;const Mat mm=full(m);
+        for(unsigned s=0;s<2;++s) {
+            const Side& w=slot.side[s];if(!w.valid || !w.bound) continue;
+            for(int h=0;h<2+static_cast<int>(w.extras);++h) {
+                if(h==1 && !w.alt) continue;
+                const Mat& f=frame_of(w,h);const double d=origin_distance(m,f);
+                if(d>reach_of(w) || (best>=0 && d>=best)) continue;
+                best=d;r.near_side=static_cast<int>(s);r.near_like=axes_angle(mm,f)<.1;
+            }
+        }
+    }
+    // The angle between two frames' rotations with each axis normalised (model frames carry scales).
+    static double axes_angle(const Mat& a,const Mat& b) noexcept {return frame_angle(a,b);}
+    static constexpr int hist0=2+static_cast<int>(Side::max_extra);   // v1239: frame index of the first earlier read
+    static const Mat& frame_of(const Side& w,int h) noexcept {return h<=0?w.model:h==1?w.alt_model:h<hist0?w.extra[static_cast<std::size_t>(h-2)]:w.hist[static_cast<std::size_t>(h-hist0)];}
+    static int frames_end(const Side& w) noexcept {return hist0+static_cast<int>(w.hists);}
+    static bool has_frame(const Side& w,int h) noexcept {return h<=0 || (h==1 && w.alt) || (h>1 && h<hist0 && h-2<static_cast<int>(w.extras)) || (h>=hist0 && h<frames_end(w));}
+    static int age_of(const Side& w,int h) noexcept {return h==1?1:h>=hist0?static_cast<int>(w.hist_age[static_cast<std::size_t>(h-hist0)]):0;}
+    // v1239: delta / previous binding for a draw composed from an earlier read f_h: B * inverse(f_h), B_prev * inverse(f_h)
+    static bool rebase(const Side& w,int h,unsigned eye,Mat& delta,Mat& prev_eye) noexcept {
+        Mat inv_h{};if(!inverse(frame_of(w,h),inv_h)) return false;
+        const Mat r=mul(w.model,inv_h);delta=mul(w.delta,r);prev_eye=mul(w.prev_eye[eye&1u],r);return true;
+    }
+    // v1239: the predicted match of this draw (model m) on a held side; an unplaced near draw is remembered (a resting twin is never pulled in)
+    static RigidLocal::Prediction predicted(const Side& w,unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m) noexcept {
+        RigidLocal::Prediction p;
+        if(!w.valid || !w.bound || !w.rigid) return p;
+        p=RigidLocal::predict(side,key,frame,m,w.gate_m,w.gate_rad,[&](unsigned ref)->const Mat* {
+            return ref==0?&w.model:ref>=2 && ref-2<w.extras?&w.extra[ref-2]:nullptr;});
+        if(p.ok) {   // how far the thing would have popped without the prediction: raw_draw vs the latest read
+            static constexpr double mm_edge[9]={1,2,5,10,20,50,100,200,1e9},deg_edge[9]={.25,.5,1,2,5,10,20,45,1e9};
+            unsigned i=0;while(i<8 && !(p.mm<=mm_edge[i])) ++i;pred_mm_[i].fetch_add(1,std::memory_order_relaxed);
+            i=0;while(i<8 && !(p.deg<=deg_edge[i])) ++i;pred_deg_[i].fetch_add(1,std::memory_order_relaxed);
+        } else {
+            if(p.why) match_[kind_[side].load(std::memory_order_relaxed)][m_refused+std::min(p.why,4u)-1].fetch_add(1,std::memory_order_relaxed);
+            if(p.why!=5 && distance(m,w.model)<=reach_of(w)) RigidLocal::other(side,key,frame,m);
+        }
+        return p;
+    }
+    // v1239 status: per kind, placed draws by match (now, earlier read by age 1..7, predicted) and predicted refusals
+    enum MatchSlot:unsigned {m_now,m_age1,m_predicted=8,m_refused,m_slots=m_refused+4};
+    static void note_match(unsigned side,const Result& r) noexcept {
+        if(side>1) return;
+        const unsigned k=kind_[side].load(std::memory_order_relaxed);
+        match_[k][r.predicted?m_predicted:std::min(static_cast<unsigned>(r.age),7u)].fetch_add(1,std::memory_order_relaxed);
+    }
+    static std::string match_json(unsigned k) {
+        auto& a=match_[k];
+        std::string o="{\"exact_now\":"+std::to_string(a[m_now].load())+",\"exact_history\":[";
+        for(unsigned i=m_age1;i<m_predicted;++i) o+=(i>m_age1?",":"")+std::to_string(a[i].load());
+        o+="],\"predicted\":"+std::to_string(a[m_predicted].load())+",\"refused\":{\"not_rigid\":"+std::to_string(a[m_refused].load())
+          +",\"far\":"+std::to_string(a[m_refused+1].load())+",\"turned\":"+std::to_string(a[m_refused+2].load())+",\"taken\":"+std::to_string(a[m_refused+3].load())+"}}";
+        return o;
+    }
+    // the matching side's predicted placement for place(): x = ref_latest * L, the thing's delta and previous binding
+    static bool predict_place(const Slot& slot,const Mat& m,std::uint64_t key,std::uint32_t frame,int& side_out,int& ref_out,Mat& x) noexcept {
+        for(unsigned s=0;s<2;++s) {   // ponytail: side 0 first; two hands holding twins within each other's gate would need a nearest-of-both pick
+            const auto p=predicted(slot.side[s],s,key,frame,m);
+            if(p.ok) {side_out=static_cast<int>(s);ref_out=static_cast<int>(p.ref);x=p.x;return true;}
+        }
+        return false;
     }
 
     // v1191 one-view frames (knob build/alt-weapon-place): place one draw of the render published last, in the one view that draws it.
@@ -752,42 +1011,71 @@ public:
         Mat inv{};if(!inverse(vp,inv)) {result.stage=no_views;return result;}
         const Rows m=model_rows(inv.data(),cur);
         const double tol=axes_tol.load(std::memory_order_relaxed);
-        int candidate=-1;double best=-1;bool use_alt=false;
+        int candidate=-1,hit=0;double best=-1;
         for(unsigned side=0;side<2;++side) {
             const Side& w=slot->side[side];if(!w.valid || !w.bound) continue;
-            for(int alt=0;alt<2;++alt) {
-                if(alt && !w.alt) continue;
-                const Mat& f=alt?w.alt_model:w.model;
+            for(int h=0;h<frames_end(w);++h) {   // F, the previous read, v1237: the children, v1239: the earlier reads
+                if(!has_frame(w,h)) continue;
+                const Mat& f=frame_of(w,h);
                 if(!same_orientation(m,f,tol)) continue;
                 const double d=origin_distance(m,f);
-                if(d<=reach_of(w) && (best<0 || d<best)) {best=d;candidate=static_cast<int>(side);use_alt=alt!=0;}
+                if(d<=reach_of(w) && (best<0 || d<best)) {best=d;candidate=static_cast<int>(side);hit=h;}
             }
         }
-        if(candidate<0) {result.stage=rejected;return result;}
+        bool predicted=false;Mat predicted_x{};
+        if(candidate<0 && predict_place(*slot,full(m),draw_key,frame,candidate,hit,predicted_x)) predicted=true;   // v1239
+        if(candidate<0) {result.stage=rejected;near_of(*slot,m,result);return result;}
         const Side& w=slot->side[static_cast<unsigned>(candidate)];
-        const Mat model=rigid_part(w,static_cast<unsigned>(candidate),use_alt,draw_key,frame,full(m));const Mat& delta=use_alt?w.alt_delta:w.delta; // v1223
+        const bool use_alt=hit==1,use_hist=hit>=hist0;const Mat& matched=frame_of(w,hit);
+        Mat hist_delta{},hist_prev{};
+        if(use_hist && !rebase(w,hit,0,hist_delta,hist_prev)) {result.stage=rejected;return result;}
+        const Mat model=predicted?predicted_x:rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,full(m),hit);
+        const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:w.delta; // v1223
         const Mat now=mul(mul(vp,delta),model);
         Mat before=mul(mul(prev_vp,delta),model);
         if(still_out) for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(before[i]); // v1218: camera-only, the current binding
         const Last& o=older2_[static_cast<unsigned>(candidate)];
         Mat inverse_f{};
-        if(o.valid && frame-o.frame==2 && inverse(use_alt?w.alt_model:w.model,inverse_f)) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;}
+        if(o.valid && frame-o.frame==2 && inverse(use_alt || use_hist?matched:w.model,inverse_f)) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;}
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
-        result.side=candidate;result.eye=-1;result.alt=use_alt;result.stage=placed_pass;return result;
+        result.side=candidate;result.eye=-1;result.alt=use_alt;result.extra=hit>1 && hit<hist0;result.predicted=predicted;result.age=age_of(w,hit);result.stage=placed_pass;
+        note_match(static_cast<unsigned>(candidate),result);return result;
     }
     // v1223: a held thing's part as F_used * L with L the settled rigid local transform (RigidLocal), so delta * part = B * L whatever frame
-    // the engine composed this draw from; otherwise the draw's own model rows m (v1222).
-    static Mat rigid_part(const Side& w,unsigned side,bool use_alt,std::uint64_t key,std::uint32_t frame,const Mat& m) noexcept {
+    // the engine composed this draw from; otherwise the draw's own model rows m (v1222). f = the frame the draw matched (F, previous read, child).
+    // v1239: h = the matched frame index (L is kept per frame it is relative to: the thing or child k); the draw takes its cluster this render.
+    static Mat rigid_part(const Side& w,unsigned side,const Mat& f,std::uint64_t key,std::uint32_t frame,const Mat& m,int h=0) noexcept {
         if(!w.rigid) return m;
-        const Mat& f=use_alt?w.alt_model:w.model;Mat inv_f{},l{};
-        if(!inverse(f,inv_f) || !RigidLocal::use(side,key,frame,mul(inv_f,m),l)) return m;
+        Mat inv_f{},l{};
+        if(!inverse(f,inv_f) || !RigidLocal::use(side,key,frame,mul(inv_f,m),l,h>1 && h<hist0?static_cast<unsigned>(h):0u,&m)) return m;
         return mul(f,l);
     }
 private:
+    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};};
+    inline static std::array<Staged,2> staged_{};
+    inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
+    inline static std::array<std::uint32_t,2> census_frame_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,4>,kinds> renders_{};   // [renders, mixed, no_mv, unplaced]
+    inline static std::array<std::array<std::atomic<std::uint64_t>,5>,kinds> draws_{};     // [placed, with_prev, child, near_like, near_other]
+    inline static std::atomic<std::uint64_t> children_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,m_slots>,kinds> match_{};   // v1239
+    inline static std::array<std::atomic<std::uint64_t>,9> pred_mm_{},pred_deg_{};
+    // The render published last for this side ends here: its tallies into its kind (a republish of the same render adds nothing).
+    static void roll_census(unsigned s,std::uint32_t frame) noexcept {
+        if(census_frame_[s]==frame+1) return;
+        census_frame_[s]=frame+1;
+        const unsigned k=kind_[s].load(std::memory_order_relaxed),b=bits_[s].exchange(0,std::memory_order_relaxed);
+        if(!k || k>=kinds) return;
+        auto& r=renders_[k];r[0].fetch_add(1,std::memory_order_relaxed);
+        if((b&1u) && (b&4u)) r[1].fetch_add(1,std::memory_order_relaxed);
+        if((b&1u) && !(b&2u)) r[2].fetch_add(1,std::memory_order_relaxed);
+        if(!(b&1u)) r[3].fetch_add(1,std::memory_order_relaxed);
+    }
     struct Last {bool valid{},have_prev{};std::uint32_t frame{},prev_frame{};Mat model{},placed{},prev{},relative{};};
     inline static std::array<Last,2> older_{},older2_{};
-    struct Read {bool cur_ok{},prior_ok{};std::uint32_t cur_frame{};std::uintptr_t cur_id{},prior_id{};Mat cur{},prior{};};
+    struct Read {bool cur_ok{},prior_ok{};std::uint32_t cur_frame{};std::uintptr_t cur_id{},prior_id{};Mat cur{},prior{};
+        std::uintptr_t ring_id{};unsigned ring_n{};std::array<Mat,Side::max_hist+1> ring{};std::array<double,Side::max_hist+1> ring_t{};}; // v1239: distinct reads, newest first
     inline static std::array<Read,2> reads_{};
     inline static std::array<Slot,ring> ring_{};
     inline static std::array<Last,2> last_{};

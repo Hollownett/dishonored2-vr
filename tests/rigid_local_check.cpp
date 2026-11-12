@@ -21,6 +21,7 @@ static std::array<float,15> raw_of(const Mat& m) {
 }
 static double worst(const float* a,const Mat& b) {double w=0;for(int i=0;i<16;++i) w=std::max(w,std::abs(a[i]-b[static_cast<std::size_t>(i)]));return w;}
 static Mat vp_of(double eye_x) {Mat v=identity();v[0]=1.2;v[5]=0;v[6]=1.2;v[9]=0;v[10]=0;v[11]=0.01;v[12]=0;v[13]=1;v[14]=0;v[15]=0.4;v[3]=eye_x;return v;}
+static Mat inverse_of(const Mat& m) {Mat o{};inverse(m,o);return o;}
 static bool same(const Mat& a,const Mat& b) {return distance(a,b)<=RigidLocal::agree_m && angle(a,b)<=RigidLocal::agree_rad;}
 static unsigned rng=12345u;static double uni() {rng=rng*1664525u+1013904223u;return (rng>>8)*(1.0/16777216.0);}
 static Mat mismatch_of(const Mat& l) { // the body's motion over one or two 16 ms ticks at 0.5-3 m/s and up to 4 rad/s, in its own frame
@@ -95,7 +96,40 @@ int main() {
         CHECK(before>1e-3);   // render 1 had only raw samples (one in step, one 1 cm off)
         CHECK(after<1e-5);    // both eyes of every later render: exactly B * L, the off renders included
     }
+    { // v1237: a side whose 8 clusters were all taken by draws that are gone (passes / meshes drawn earlier in the hold) still settles a new draw.
+      // Before v1237 a full side refused every new key until a cluster sat unused for 240 renders (user v1233 session: 33 % unsettled draws).
+        RigidLocal::clear();RigidLocal::fold(1,0x91);
+        for(std::uint64_t k=0;k<RigidLocal::clusters;++k) RigidLocal::use(1,100+k,frame,l_true,out);
+        RigidLocal::fold(1,0x91);++frame;
+        unsigned settled_at=0;
+        for(unsigned r=1;r<=12;++r) {const bool placed=RigidLocal::use(1,200,frame,l_true,out);RigidLocal::fold(1,0x91);++frame;if(placed && !settled_at && same(out,l_true)) settled_at=r;}
+        std::printf("full side, new draw: placed with the settled L from render %u\n",settled_at);
+        CHECK(settled_at>0 && settled_at<=8);
+    }
+    { // v1237: a part bound to the held thing (a helmet on a carried head) has its own axes: matched by its child frame, moved by the thing's delta
+        RigidLocal::clear();
+        const Mat f=rigid(0.3,0.1,0.3,0.05),b=rigid(0.35,0.12,0.31,0.06);
+        const Mat child=mul(f,axis_angle(0,1,0,.9));   // the helmet's model frame: 52 degrees off the head's axes
+        const auto raw=raw_of(f);const std::array<const float*,2> raws{nullptr,raw.data()};const std::array<const Mat*,2> bounds{nullptr,&b};
+        const Mat vp=vp_of(0.032);
+        Mat drawn=mul(vp,child);float cur[16],now[16],prev[16];for(int i=0;i<16;++i) cur[i]=static_cast<float>(drawn[static_cast<std::size_t>(i)]);
+        bool own=false;
+        Place::publish_bound(400,raws,bounds,{0,0.5},{0,0x99});
+        auto r=Place::place_one_view(vp,vp,cur,now,prev,own,nullptr,43);
+        CHECK(r.side<0 && r.near_side==1 && !r.near_like);   // without the child frame: left at the engine pose (counted near-other)
+        Place::stage(1,Place::kind_severed,&child,1);
+        Place::publish_bound(401,raws,bounds,{0,0.5},{0,0x99});
+        r=Place::place_one_view(vp,vp,cur,now,prev,own,nullptr,43);
+        CHECK(r.side==1 && r.extra);
+        const double e=worst(now,mul(mul(mul(vp,b),inverse_of(f)),child));
+        std::printf("child frame placed with the held thing's delta: error %.2g\n",e);
+        CHECK(e<1e-5);
+        Place::census(r,true);
+        Place::publish_bound(402,raws,bounds,{0,0.5},{0,0x99});   // closes render 401 (kind severed, placed, with previous rows)
+        const std::string census=Place::census_json();std::printf("%s\n",census.c_str());
+        CHECK(census.find("\"severed\":{\"renders\":1,\"mixed\":0,\"no_mv\":0,\"unplaced\":0,\"draws\":{\"placed\":1,\"with_prev\":1,\"child\":1")!=std::string::npos);
+    }
     if(failures) {std::printf("rigid_local_check: %d failure(s)\n",failures);return 1;}
-    std::printf("PASS: rigid_local_check (consensus settle, early candidate, steady mismatch not followed, genuine change, reset, 30/60/85%% mismatch, both eyes)\n");
+    std::printf("PASS: rigid_local_check (consensus settle, early candidate, steady mismatch not followed, genuine change, reset, 30/60/85%% mismatch, both eyes, full side recycles, child frames)\n");
     return 0;
 }

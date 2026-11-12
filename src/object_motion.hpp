@@ -573,6 +573,12 @@ private:
     inline static std::array<std::array<std::atomic<std::uint64_t>,pass_slots>,2> weapon_pass_side_{};
     // v1226: per pass and eye, placed draws [current-only, previous proven, previous predicted (not proven)]; why not proven (PrevMvpTable kind, 6 = no submitted record)
     inline static std::array<std::array<std::array<std::atomic<std::uint64_t>,3>,2>,pass_slots> weapon_pass_prev_{};
+    inline static std::array<std::array<std::atomic<std::uint64_t>,2>,pass_slots> weapon_pass_near_unplaced_{}; // v1237: [same axes, other]
+    inline static std::array<std::atomic<std::uint64_t>,2> placed_view_frame_{}; // v1237: placed draws whose view frame [is, is not] the publish's
+    inline static std::array<std::atomic<std::uint64_t>,4> shadow_place_{}; // v1238: held-shadow draws [not a held thing's, placed, near a held thing unplaced, VP unreadable]
+public:
+    inline static std::atomic<bool> held_shadow_place{true}; // v1238: build/no-held-shadow-place
+private:
     inline static std::array<std::atomic<std::uint64_t>,7> placed_fail_{};
     inline static std::array<std::atomic<std::uint64_t>,2> weapon_placed_side_{},weapon_alt_side_{};   // alt (v1072): placed from the previous read F
     inline static std::array<std::array<std::atomic<std::uint64_t>,weapon_draw::stages>,2> weapon_skip_side_{}; // per hand by rejection stage
@@ -1234,10 +1240,10 @@ private:
         const bool have_content=have_view && !(alternate() && tl_view_heuristic_); // v1205: the render named by content (paired: any view)
         // The pass this draw is recorded in, when build/native-gpu-timing or build/shadow-share (or the weapon placement itself, which
         // installs the pass map) is on: its id and the eye its view names. A v1101 pass job's view is one of the eye views for a view pass.
-        int pass=-1,pass_eye=-1;
+        int pass=-1,pass_eye=-1;std::uintptr_t pass_view=0;
         if(const auto source=pass_source_.load(std::memory_order_relaxed)) {
             const DrawPass p=source();
-            pass=p.pass;
+            pass=p.pass;pass_view=p.view;
             if(p.view) for(unsigned e=0;e<2;++e) if(eye_views_[e].load(std::memory_order_relaxed)==p.view) {pass_eye=static_cast<int>(e);break;}
         }
         float z_local[4]{};
@@ -1273,6 +1279,21 @@ private:
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool near_draw=cur[15]>0.01f && cur[15]<near_w;
         const bool alt=alternate(); // v1151: the held-weapon placement is a paired-mode binder; alternate draws take the general path
+        // v1238 (user v1235: carried props unstable while moving; status SHADOWS_DYNAMIC near 870k, matched 0): a held thing's shadow-map draws were
+        // left at the engine's physics pose, so its shadow (on the hand, the body, the thing itself) moved against the placed thing with every
+        // change of speed. A pass whose view is not an eye view has its own view-projection at view+0x7510 (as the eye views); a draw of it that
+        // matches a held thing's frame there (axes within 0.004, as every placement) is placed with the same B * L. A wrong or unreadable VP matches
+        // nothing and changes nothing. Current rows only (a shadow pass writes no motion). build/no-held-shadow-place: off.
+        if(near_draw && pass>=0 && pass_eye<0 && pass_view && read_ && held_shadow_place.load(std::memory_order_relaxed) && mode_.load(std::memory_order_relaxed)>=1 &&
+           placing_mode()==1 && !RigMask::draw_is_rig()) {
+            float lvp[16];
+            if(read_(pass_view+0x7510,lvp,64)) {
+                const weapon_draw::Mat vp=weapon_draw::widen(lvp);float placed[16],unused[16];bool own=false;
+                const auto r=weapon_draw::Place::place_one_view(vp,vp,cur,placed,unused,own,nullptr,draw_key(s,*sh));
+                shadow_place_[r.side>=0?1:r.near_side>=0?2:0].fetch_add(1,std::memory_order_relaxed);
+                if(r.side>=0) return bind_pool(c,s,*sh,placed,nullptr);
+            } else shadow_place_[3].fetch_add(1,std::memory_order_relaxed);
+        }
         // v1162: a rig draw (rig_mask.hpp: binds an arm/body skin buffer) keeps the engine's own rows in alternate mode: the mod re-poses
         // those models per render (image skin), so no table row of them is this eye's true previous; the warp's hand layers own their pixels.
         // v1166: no longer the raw rows. The eye's own previous rows (the two-hop chain) together with the eye's own previous palette
@@ -1336,6 +1357,7 @@ private:
                 float placed[16]{},placed_prev[16]{},still[16]{};bool own_prev=false;
                 rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
                 const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh));
+                if(!RigMask::draw_is_rig()) weapon_draw::Place::census(r,r.side>=0 && have_prev); // v1237
                 // v1218: this eye's previous render's submitted rows of the draw (receipt chain). v1226: else the predicted previous (this eye's
                 // previous binding * L: moved rigidly with the hand) when that render's binding exists, camera-only on the current binding only without it
                 if(r.side>=0 && have_prev && view.receipt && placed_history.load(std::memory_order_relaxed)) {
@@ -1377,8 +1399,14 @@ private:
                 float placed[16]={},placed_prev[16]={},still[16]={};
                 static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
                 const auto started=timed?__rdtsc():0;
+                const bool rig=RigMask::draw_is_rig();
                 const auto r=weapon_draw::Place::place(frame,&weapon_views,cur,have_prev?prev:nullptr,placed,placed_prev,
-                    have_view?static_cast<int>(view.eye):-1,pass_eye,still,draw_key(s,*sh));
+                    have_view?static_cast<int>(view.eye):-1,pass_eye,still,draw_key(s,*sh),!rig);
+                // v1237 census: per pass, unplaced draws within a held thing's reach [same axes, other]; placed draws whose classified view is
+                // another engine frame than the publish they were placed from (the two eyes of one render on different hand poses)
+                if(r.side<0 && r.near_side>=0) weapon_pass_near_unplaced_[pass_index][r.near_like?0:1].fetch_add(1,std::memory_order_relaxed);
+                if(r.side>=0 && have_view) placed_view_frame_[view.frame==frame?0:1].fetch_add(1,std::memory_order_relaxed);
+                if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev);
                 // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven). v1226: else the predicted previous
                 // (prevVP(eye) * B_prev * L: the thing moved rigidly with the hand, exact with v1223's rigid L), never camera-only (a held thing is not
                 // world-fixed). Counted per pass and eye.
@@ -1620,6 +1648,7 @@ private:
         weapon_mode_.store(draw_place_knob && !no_draw_place_knob?1:0,std::memory_order_relaxed);
         placed_history.store(!std::filesystem::exists(knobs_/L"no-placed-history",error),std::memory_order_relaxed); // v1218
         weapon_draw::RigidLocal::on.store(!std::filesystem::exists(knobs_/L"no-rigid-local",error),std::memory_order_relaxed); // v1223
+        held_shadow_place.store(!std::filesystem::exists(knobs_/L"no-held-shadow-place",error),std::memory_order_relaxed); // v1238
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)
@@ -1719,6 +1748,9 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<placed_fail_[4].load()<<','<<placed_fail_[5].load()<<','<<placed_fail_[6].load()<<']' // v1226: [same, own_last, other_now, other_last, unproven, miss, no submitted record]
        <<",\"v1216_prev_error\":"<<resid_json(0)<<",\"v1216_prev_error_alt\":"<<resid_json(1)
        <<",\"rigid_local\":"<<weapon_draw::RigidLocal::json() // v1223
+       <<",\"held_census\":"<<weapon_draw::Place::census_json() // v1237
+       <<",\"placed_view_frame\":["<<placed_view_frame_[0].load()<<','<<placed_view_frame_[1].load()<<']'
+       <<",\"shadow_place\":["<<shadow_place_[0].load()<<','<<shadow_place_[1].load()<<','<<shadow_place_[2].load()<<','<<shadow_place_[3].load()<<']' // v1238
        <<",\"skip\":[";
     // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when
     // a draw was actually placed, and the out-of-bounds pointer faulted every status poll after a save load. The static_asserts
@@ -1752,7 +1784,7 @@ inline std::string ObjectMotion::weapon_status_json() {
            <<",\"right\":"<<weapon_pass_side_[1][i].load(std::memory_order_relaxed);
         out<<",\"prev_by_eye\":[";   // v1226: per eye [current-only, previous proven, previous predicted]
         for(unsigned e=0;e<2;++e) {out<<(e?",[":"[");for(unsigned k=0;k<3;++k) out<<(k?",":"")<<weapon_pass_prev_[i][e][k].load(std::memory_order_relaxed);out<<']';}
-        out<<"]}";
+        out<<"],\"near_unplaced\":["<<weapon_pass_near_unplaced_[i][0].load(std::memory_order_relaxed)<<','<<weapon_pass_near_unplaced_[i][1].load(std::memory_order_relaxed)<<"]}"; // v1237
         first_pass=false;
     }
     out<<"]}";

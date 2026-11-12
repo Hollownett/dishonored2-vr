@@ -84,6 +84,8 @@ class PhysicalGrab {
     WorldTrackedPose previous_{},relative_{};
     // Velocity has its own baseline so same-quantum samples keep their motion while previous_/tick_ track the newest pose.
     Vec3 velocity_{},velocity_origin_{};
+    Vec3 goal_velocity_{},goal_origin_{};bool goal_ok_=false;   // v1238: the hold goal's velocity (sample's EMA; ok = a baseline from this hold)
+    Vec3 goal_point(const WorldTrackedPose& hand) const {return hand.position+grab_world(hand,relative_.position);}
     // Hand-to-limb contact point in the object's own frame (snatch grab: the bind stores it, the first command is zero).
     Vec3 contact_local_{};
     DwellTimer lag_timer_{lag_release_s};
@@ -120,6 +122,8 @@ public:
     // v1074: the hold itself - the held body's pose in the sampled hand's frame (target() = hand * relative). The draw places the thing with it.
     const WorldTrackedPose& relative() const noexcept {return relative_;}
     const Vec3& velocity() const {return velocity_;}
+    inline static bool goal_feed=true;   // v1238: feed the goal's velocity (false: the hand's, v1090; lab A/B and build/legacy-hand-feed)
+    Vec3 feed_velocity() const {return goal_feed && goal_ok_?goal_velocity_:velocity_;}
     double recovery_s() const {return recovery_s_;}
 #ifdef D2VR_TESTING
     void set_recovery_for_tests(double seconds) {recovery_s_=seconds;}
@@ -132,7 +136,7 @@ public:
             // A fresh released sample is sufficient to rearm at a new epoch;
             // held grips and unusable/reset samples never acquire on return.
             armed_=valid_input && epoch!=epoch_ && grip<.35f && (!tick_ || tick>=tick_);
-            valid_sample_=false;pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=at_s;return false;
+            valid_sample_=false;pressed_=false;velocity_={};epoch_=epoch;tick_=tick;previous_=hand;velocity_origin_=hand.position;goal_ok_=false;velocity_tick_=tick;velocity_at_s_=at_s;return false;
         }
         const auto displacement=hand.position-previous_.position;
         // Check discontinuities even at duplicate or slow accepted timestamps,
@@ -141,8 +145,8 @@ public:
         // round the player's pivot in one step (45 deg: 0.77 x its distance from the pivot), past this jump rule when the arm is out or the player
         // stands off his play-space centre. A HELD grip still squeezed continues from the new hand: the press and the hold stay, the jump is not
         // hand motion (no throw velocity from it). A real teleport (a blink) still ends the hold through the motor's 1.5 m lag rule.
-        if(!(length(displacement)<=.5) && held_ && pressed_ && grip>=.35f) {velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=at_s;sample_at_s_=at_s;valid_sample_=true;return true;}
-        if(!(length(displacement)<=.5)) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=at_s;return false;}
+        if(!(length(displacement)<=.5) && held_ && pressed_ && grip>=.35f) {velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;goal_ok_=false;velocity_tick_=tick;velocity_at_s_=at_s;sample_at_s_=at_s;valid_sample_=true;return true;}
+        if(!(length(displacement)<=.5)) {valid_sample_=false;armed_=pressed_=false;velocity_={};tick_=tick;previous_=hand;velocity_origin_=hand.position;goal_ok_=false;velocity_tick_=tick;velocity_at_s_=at_s;return false;}
         // Samples inside one clock quantum leave velocity (and its baseline) alone; their motion enters the next spaced sample.
         const bool precise=at_s>0 && velocity_at_s_>0 && at_s>=velocity_at_s_;
         if(precise?at_s-velocity_at_s_>=.004:tick-velocity_tick_>=grab_velocity_min_ms) {
@@ -150,6 +154,13 @@ public:
             const double weight=1-std::exp(-dt/.035);
             velocity_=velocity_*(1-weight)+grab_limit((hand.position-velocity_origin_)*(1/dt),12)*weight;
             velocity_origin_=hand.position;velocity_tick_=tick;
+            // v1238: the goal's own velocity (the hold point hand * relative, not the hand origin): a turning hand or player swings the goal round
+            // the hand, and the hand's velocity alone left ~omega*r/stick_gain of steady lag (8 mm at 2 rad/s and 15 cm); the same weights and limit
+            const auto goal=goal_point(hand);
+            // the hand's 35 ms average: the samples' clock is their arrival on the game thread, not the pose's time, and a shorter average passes
+            // that jitter on (lab: +-2 ms arrival jitter at 6 m/s, 12 ms average 27 mm vs 15 mm)
+            goal_velocity_=goal_ok_?goal_velocity_*(1-weight)+grab_limit((goal-goal_origin_)*(1/dt),12)*weight:velocity_;
+            goal_origin_=goal;goal_ok_=held_;
         }
         if(grip<.35f) {armed_=true;pressed_=false;}
         else if(armed_ && grip>=.45f) pressed_=true;
@@ -161,13 +172,13 @@ public:
     void keep_fresh(const WorldTrackedPose& hand,std::uint64_t epoch,std::uint64_t tick) {
         if(!valid_sample_ || epoch!=epoch_ || tick<tick_ || tick-tick_>grab_pose_freshness_ms || !grab_pose_valid(hand) ||
            length(hand.position-previous_.position)>.5) return;
-        tick_=tick;previous_=hand;velocity_origin_=hand.position;velocity_tick_=tick;velocity_at_s_=0;
+        tick_=tick;previous_=hand;velocity_origin_=hand.position;goal_ok_=false;velocity_tick_=tick;velocity_at_s_=0;
     }
     // B16: the hand this grab samples moved by a known step (a coupling to the hand body began or ended, the body snapped): continue from it
     // without reading the step as hand motion (no 0.5 m discontinuity release, no throw velocity from it); the press, the hold and the clock stay.
     void rebase(const WorldTrackedPose& hand) {
         if(!valid_sample_ || !grab_pose_valid(hand)) return;
-        previous_=hand;velocity_origin_=hand.position;velocity_at_s_=0;
+        previous_=hand;velocity_origin_=hand.position;goal_ok_=false;velocity_at_s_=0;
     }
     bool bind(const WorldTrackedPose& object) {return bind(object,object.position);}
     bool bind(const WorldTrackedPose& object,Vec3 contact,double maximum_contact=.3) {
@@ -181,7 +192,7 @@ public:
         contact_local_=grab_local(object,contact-object.position);
         slide_r0_=relative_.position;slide_o0_=relative_.position+grab_local(previous_,grab_world(object,contact_local_));slide_s_=0;slide_done_=legacy_lag_;
         recovery_s_=0;chain_integral_={};lag_timer_.reset();has_released_=false;forced_release_=false;reason_=ReleaseReason::none;last_anchor_=contact;
-        second_.reset();held_=true;return true;
+        second_.reset();goal_ok_=false;held_=true;return true;
     }
     // The grasped point: object origin plus the stored contact offset in the object's current frame (valid while held()).
     Vec3 anchor(const WorldTrackedPose& object) const {return object.position+grab_world(object,contact_local_);}
@@ -224,12 +235,13 @@ public:
     // v1062 seat: move the held thing by `world` (m) relative to the hand, from now on (the drawn hand lay in it: finger_ik.hpp held_standoff).
     void nudge(Vec3 world) {
         if(!held_ || !valid_sample_ || !finite(world)) return;
-        const auto v=grab_local(previous_,world);relative_.position=relative_.position+v;slide_r0_=slide_r0_+v;
+        const auto v=grab_local(previous_,world);relative_.position=relative_.position+v;slide_r0_=slide_r0_+v;goal_origin_=goal_origin_+world;   // v1238: a seat step is no goal motion
     }
     void reseat(const WorldTrackedPose& object) {
         if(!held_ || !valid_sample_ || !grab_pose_valid(object)) return;
         relative_.position=grab_local(previous_,object.position-previous_.position);
         for(unsigned i=0;i<3;++i) relative_.basis[i]=grab_local(previous_,object.basis[i]);
+        goal_ok_=false;
     }
     // `reason`: open_fist only for a grip-open, lag for a blocked-carry release, lifecycle for a handoff or tracking loss (default).
     // Bookkeeping only happens when a hold actually ends, so releasing an idle lane keeps the cooldown, reason and anchor.
@@ -290,7 +302,8 @@ public:
         // old at a game frame (90 Hz publications, ~81 fps frames), so at 6 m/s the goal trailed 0-15 cm by a different amount every frame (the lab
         // tests/held_run_jitter_check.cpp). Led by the hand's own velocity over that age (at most lead_max_s); off without precise times.
         const double lead=in.now_s>0 && sample_at_s_>0 && in.now_s>=sample_at_s_?std::min(in.now_s-sample_at_s_,lead_max_s):0.;
-        const auto led=[&]{auto g=target();g.position=g.position+velocity_*lead;return g;};
+        const Vec3 hand_feed=feed_velocity();   // v1238: the goal's own velocity
+        const auto led=[&]{auto g=target();g.position=g.position+hand_feed*lead;return g;};
         auto goal=led();auto error=goal.position-object.position;
         auto lag=length(anchor(goal)-anchor(object));
         if(in.corpse) {
@@ -314,7 +327,7 @@ public:
         const bool stick=!in.corpse || in.stick;   // v1075: a held prop; v1084: a corpse limb too (build/legacy-weighted-hold: the capped law for it)
         const Vec3 carry=stick && finite(in.carrier) && length(in.carrier)<=10?in.carrier:Vec3{};
         const auto fade=now>=source?std::exp(-double(age>32?age-32:0)*.001/.035):0.;
-        const auto feed=!now?velocity_:carry+(velocity_-carry)*fade;
+        const auto feed=!now?hand_feed:carry+(hand_feed-carry)*fade;
         // Stale frame (a game-thread hitch: raw dt beyond dt_max): the hand kept moving while no motor ran, so `error` holds the whole stall.
         // Closing it at the normal gain would command a jump (0.4 m x 18 = 7 m/s) and whip the chain; scale the error term by dt_max/dt so the
         // catch-up speed a stall can ask for stays what a normal frame could (smooth catch-up, as the hand lags and then closes in Bonelab).

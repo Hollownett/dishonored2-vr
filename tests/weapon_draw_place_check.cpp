@@ -109,6 +109,133 @@ static void check_placed(const Published& p,unsigned side,const Mat& part,const 
     }
 }
 
+// ---- v1239: a held thing drawn from another engine tick than the publisher read. Ticks are 11 ms; the publisher reads tick n at render n,
+// a draw is composed from tick n-lag (lag > 0: an older tick, matched by the read ring; lag < 0: a newer one, only the predicted match).
+static const double tick_s=.011;
+static Mat held_pose(double t,double v,double w_deg,const Mat& start) {   // translates along (0.8,0.6,0) at v, turns about (.3,.2,1) at w
+    Mat m=mul(rot(.3,.2,1,w_deg/57.29577951308232*t),start);
+    m[3]=start[3]+.8*v*t;m[7]=start[7]+.6*v*t;m[11]=start[11];return m;
+}
+static void publish_held(std::uint32_t frame,const Mat& f,const Mat& b,std::uintptr_t id,int render) {
+    Wp w;for(unsigned e=0;e<2;++e) {w.vp[e]=vp_of(eye_pose(render,e),render);w.inv[e]=inv(w.vp[e]);}
+    frames_seen[frame]=w;
+    const auto raw=raw_of(f);std::array<const float*,2> rp{raw.data(),nullptr};std::array<const Mat*,2> bp{&b,nullptr};
+    Place::stage(0,Place::kind_prop);
+    Place::publish_bound(frame,rp,bp,{.5,0.},{id,0},render*tick_s);
+}
+// One draw of model m in eye e; true when placed, with the world error of the placement against `want` (B * part) and of the previous rows.
+static Result draw_held(std::uint32_t frame,const Mat& m,unsigned e,const Mat* want,double& err,const Mat* want_prev=nullptr,double* err_prev=nullptr) {
+    const Wp& w=frames_seen.at(frame);
+    const auto c=floats(mul(w.vp[e],m));std::array<float,16> o{},q{};
+    const Result r=Place::place(frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,0x1239);
+    err=0;
+    if(r.side>=0 && want) {
+        const auto got=Place::model_rows(w.inv[e].data(),o.data());
+        for(std::size_t i=0;i<12;++i) err=std::max(err,std::abs(got[i]-(*want)[i]));
+        if(want_prev && err_prev) {const auto it=frames_seen.find(frame-1);if(it!=frames_seen.end()) *err_prev=std::max(*err_prev,worst_rows(q.data(),floats(mul(it->second.vp[e],*want_prev)).data()));}
+    }
+    return r;
+}
+static bool old_match(const Mat& m,const Mat& f_now,const Mat& f_prev) {   // what v1238 could match: F or the previous read, axes within 0.004
+    Place::Rows r{};for(std::size_t i=0;i<12;++i) r[i]=m[i];
+    return Place::same_orientation(r,f_now,.004) || Place::same_orientation(r,f_prev,.004);
+}
+static void v1239_lab(const Mat& part) {
+    const Mat hold=rigid(rot(1,0,0,.2),.03,-.02,.01);   // B = F * hold: the drawn hand is not the engine's frame
+    const Mat start=rigid(rot(0,0,1,.4),-91.7,-92.4,4.9);
+    std::uint32_t frame=30000;
+    const int lags[5]={0,1,2,-1,-2};
+    // A. speeds 0.5-6 m/s, turns 30-400 deg/s: every draw after the first three renders placed at B * part in both eyes
+    {
+        long draws=0,placed=0,old_unplaced=0,predicted=0,history=0;double worst=0,worst_prev=0,one_view_worst=0;long one_view=0;
+        std::uintptr_t id=0xa000;
+        for(const double v:{.5,2.,6.}) for(const double w_deg:{30.,120.,400.}) {
+            Place::clear();++id;frame+=100;
+            for(int n=0;n<45;++n,++frame) {
+                const Mat f=held_pose(n*tick_s,v,w_deg,start),b=mul(f,hold);
+                publish_held(frame,f,b,id,n);
+                const int lag=n<3?0:lags[n%5];
+                const Mat m=mul(held_pose((n-lag)*tick_s,v,w_deg,start),part),want=mul(b,part);
+                const Mat want_prev=mul(mul(held_pose((n-1)*tick_s,v,w_deg,start),hold),part);
+                for(unsigned e=0;e<2;++e) {
+                    double err=0;
+                    const Result r=draw_held(frame,m,e,&want,err,n>3?&want_prev:nullptr,&worst_prev);
+                    if(n<3) continue;
+                    ++draws;placed+=r.side==0;worst=std::max(worst,err);predicted+=r.predicted;history+=r.side==0 && !r.predicted && r.age>=2;
+                    if(!old_match(m,f,held_pose((n-1)*tick_s,v,w_deg,start))) ++old_unplaced;
+                }
+                if(n>=3) {   // performance mode: the same draw in one view
+                    const Wp& wp=frames_seen.at(frame);const auto c=floats(mul(wp.vp[1],m));std::array<float,16> o{},q{};bool own=false;
+                    const Result r=Place::place_one_view(wp.vp[1],wp.vp[1],c.data(),o.data(),q.data(),own,nullptr,0x1239);
+                    if(r.side==0) {++one_view;const auto got=Place::model_rows(wp.inv[1].data(),o.data());for(std::size_t i=0;i<12;++i) one_view_worst=std::max(one_view_worst,std::abs(got[i]-want[i]));}
+                }
+            }
+        }
+        std::printf("v1239 moving held thing: draws=%ld before(v1238 unmatched)=%ld after placed=%ld (history %ld, predicted %ld) worst=%.2e m prev worst=%.2e one-view %ld/%ld worst=%.2e\n",
+            draws,old_unplaced,placed,history,predicted,worst,worst_prev,one_view,draws/2,one_view_worst);
+        CHECK(placed==draws && worst<1e-4 && worst_prev<2e-4 && old_unplaced>draws/2 && one_view==draws/2 && one_view_worst<1e-4);
+    }
+    // B. the first renders of a hold: a newer-tick draw stays unplaced until L settled from exact draws (as v1238), then is predicted
+    {
+        Place::clear();frame+=100;bool early_unplaced=true,exact_ok=true,late_ok=true;
+        for(int n=0;n<12;++n,++frame) {
+            const Mat f=held_pose(n*tick_s,2,120,start),b=mul(f,hold);publish_held(frame,f,b,0xb001,n);
+            const int lag=n<3?-1:n<6?0:-1;const Mat m=mul(held_pose((n-lag)*tick_s,2,120,start),part),want=mul(b,part);
+            for(unsigned e=0;e<2;++e) {
+                double err=0;const Result r=draw_held(frame,m,e,&want,err);
+                if(n<3) early_unplaced=early_unplaced && r.side<0;
+                else if(n<6) exact_ok=exact_ok && r.side==0 && !r.predicted && err<1e-4;
+                else late_ok=late_ok && r.side==0 && r.predicted && err<1e-4;
+            }
+        }
+        std::printf("v1239 hold start: renders 0-2 newer-tick unplaced=%d, 3-5 exact=%d, 6+ predicted=%d\n",int(early_unplaced),int(exact_ok),int(late_ok));
+        CHECK(early_unplaced && exact_ok && late_ok);
+    }
+    // C/D/E. other objects of the same key, drawn BEFORE the held one in every eye pass: never placed; the held one always placed after settle
+    const auto twins=[&](const char* tag,double v,double w_deg,const Mat& held_start,auto&& other_of,int renders) {
+        Place::clear();frame+=100;long other_placed=0,held_placed=0,held_draws=0;
+        for(int n=0;n<renders;++n,++frame) {
+            const Mat f=held_pose(n*tick_s,v,w_deg,held_start),b=mul(f,hold);publish_held(frame,f,b,0xc000+static_cast<std::uintptr_t>(renders),n);
+            const int lag=n<3?0:lags[n%5];const Mat m=mul(held_pose((n-lag)*tick_s,v,w_deg,held_start),part),want=mul(b,part);
+            const Mat o=other_of(n);
+            for(unsigned e=0;e<2;++e) {
+                double err=0;
+                other_placed+=draw_held(frame,mul(o,part),e,nullptr,err).side>=0;
+                const Result r=draw_held(frame,m,e,&want,err);
+                if(n>=3) {++held_draws;held_placed+=r.side==0 && err<1e-4;}
+            }
+        }
+        std::printf("v1239 %s: other placed %ld, held placed %ld/%ld\n",tag,other_placed,held_placed,held_draws);
+        CHECK(other_placed==0 && held_placed==held_draws);
+    };
+    {   // C: a resting twin 12 cm from a held plate moving on a 4 cm circle (1 m/s, 120 deg/s), its axes 5 degrees off the held one's start
+        const Mat rest=rigid(mul(rot(1,0,0,5/57.29577951308232),start),start[3]+.12,start[7],start[11]);
+        Place::clear();frame+=100;long other_placed=0,held_placed=0,held_draws=0;
+        for(int n=0;n<60;++n,++frame) {
+            const auto circle=[&](int k) {const double a=k*tick_s*25.;Mat m=mul(rot(.3,.2,1,120/57.29577951308232*k*tick_s),start);m[3]=start[3]+.04*std::cos(a);m[7]=start[7]+.04*std::sin(a);m[11]=start[11];return m;};
+            const Mat f=circle(n),b=mul(f,hold);publish_held(frame,f,b,0xc001,n);
+            const int lag=n<3?0:lags[n%5];const Mat m=mul(circle(n-lag),part),want=mul(b,part);
+            for(unsigned e=0;e<2;++e) {
+                double err=0;other_placed+=draw_held(frame,mul(rest,part),e,nullptr,err).side>=0;
+                const Result r=draw_held(frame,m,e,&want,err);if(n>=3) {++held_draws;held_placed+=r.side==0 && err<1e-4;}
+            }
+        }
+        std::printf("v1239 resting twin 12 cm: other placed %ld, held placed %ld/%ld\n",other_placed,held_placed,held_draws);
+        CHECK(other_placed==0 && held_placed==held_draws);
+    }
+    {   // D: the held plate (2 m/s, 120 deg/s) passes a resting twin at 5 cm; the twin's axes are the held one's at the closest pass, 3 degrees off
+        const double pass_t=14*tick_s;const Mat at=held_pose(pass_t,2,120,start);
+        const Mat rest=rigid(mul(rot(1,0,0,3/57.29577951308232),at),at[3]-.6*.05,at[7]+.8*.05,at[11]);
+        twins("twin passed at 5 cm",2,120,start,[&](int) {return rest;},30);
+    }
+    {   // E: an object of the same key 0.3 m away moving with the held one but turning differently (about x, 200 deg/s, 90 degrees off)
+        twins("turning object 0.3 m away",2,120,start,[&](int n) {
+            Mat m=mul(rot(1,0,0,(90+200*n*tick_s)/57.29577951308232),start);const Mat f=held_pose(n*tick_s,2,120,start);
+            m[3]=f[3]-.18;m[7]=f[7]+.24;m[11]=f[11];return m;},45);
+    }
+    std::printf("v1239 status: %s\n",Place::census_json().c_str());
+}
+
 int main() {
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
     const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
@@ -419,6 +546,37 @@ int main() {
         std::printf("v1072 race: alt placed %d/11, current placed %d/11, worst %.2e, prev worst %.2e\n",alt_ok,cur_ok,worst,worst_prev);
     }
 
+    // ---- v1237: a child bound to the held thing (own axes) is placed in every eye pass with the thing's delta; an unplaced draw near the
+    // thing with nearly its axes is reported near_like (the census counts it as a second image of the thing) ------------------------------
+    {
+        Place::clear();
+        const Mat f=rigid(rot(0,0,1,.7),-91.6,-92.4,4.95),b=rigid(rot(0,0,1,.75),-91.62,-92.38,4.97);
+        const Mat child=mul(f,rigid(rot(1,0,0,.8),0,0,.08));   // a helmet: 46 degrees off, 8 cm along the head's z
+        const std::uint32_t frame=900;
+        int placed_eyes=0;double worst=0;
+        for(int pass=0;pass<2;++pass) {   // before / after the child frame is published
+            if(pass) Place::stage(0,Place::kind_severed,&child,1);
+            const Published p=publish_frame(frame+static_cast<std::uint32_t>(pass),f,true,b,Mat{},false,Mat{},30);
+            const Wp& w=frames_seen.at(p.frame);
+            for(unsigned e=0;e<2;++e) {
+                const auto c=floats(mul(w.vp[e],child));std::array<float,16> o{},q{};
+                const Result r=Place::place(p.frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,0,true);
+                if(!pass) {CHECK(r.side<0 && r.near_side==0 && !r.near_like);continue;}
+                if(r.side==0 && r.extra) ++placed_eyes;
+                worst=std::max(worst,worst_rows(o.data(),floats(mul(mul(mul(w.vp[e],b),inv(f)),child)).data()));
+            }
+            if(pass) { // the thing composed at another pose (a few degrees, 3 cm): unplaced, near_like
+                const Mat other=rigid(rot(0,0,1,.74),-91.58,-92.42,4.95);
+                const auto c=floats(mul(w.vp[1],other));std::array<float,16> o{},q{};
+                const Result r=Place::place(p.frame,provider,c.data(),nullptr,o.data(),q.data(),-1,1,nullptr,0,true);
+                CHECK(r.side<0 && r.near_side==0 && r.near_like);
+            }
+        }
+        std::printf("v1237 child frame: placed in %d/2 eye passes, worst %.2e\n",placed_eyes,worst);
+        CHECK(placed_eyes==2 && worst<2e-4);
+    }
+
+    v1239_lab(part);
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

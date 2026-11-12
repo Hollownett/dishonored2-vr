@@ -282,6 +282,13 @@ inline bool held_prompt_survives_cycle(std::uintptr_t held_owner,bool held_loot,
 inline constexpr bool hand_judged_los(bool takeable,bool character,std::uint8_t character_flags) noexcept {
     return takeable || (character && (character_flags&0x28u));
 }
+// v1236: a downed body's hand-on-it pass is the bottle's (hand_pickup_in_range, 25 cm from the tracked grip) measured against the ragdoll part
+// the grab's palm pick has under the hand (its box, else its point), never the body's origin: a body is 1.8 m long and its origin (pelvis /
+// spawn point) is > 25 cm from a hand on the chest, an arm or a leg.
+inline bool downed_body_hand_on(Vec3 hand,const std::optional<std::pair<Vec3,Vec3>>& part,Vec3 part_point) noexcept {
+    const auto probe=hand_sphere_probe(hand);
+    return part?hand_pickup_in_range(probe,part->first,part->second):hand_pickup_in_range(probe,part_point,part_point);
+}
 inline constexpr double loot_hand_los_max_m=1.0;   // the shared interaction volume is 0.45 m from the palm; a farther palm is not this hand's
 inline std::optional<Vec3> loot_los_hand_origin(bool takeable,bool hand_mode,const std::optional<Vec3>& clamped_palm,Vec3 point) noexcept {
     if(!takeable || !hand_mode || !clamped_palm || !finite(*clamped_palm) || !finite(point)) return std::nullopt;

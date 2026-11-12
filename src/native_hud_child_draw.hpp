@@ -59,37 +59,53 @@ struct NativeHudPromptHold {
 // while the hand target (its own 500 ms hold) still names the same object. 250 ms rides those out and lets a prompt linger at most that long.
 // v1225 handover (sim v1222: the window rebound from one object's prompt to ANOTHER object's, crop 459 -> 372, and stayed blank 62 ms until the
 // new art landed): the same window (node) now bound to another object keeps the old art at most 100 ms (p95 art latency 78 ms), never longer.
-// v1233 (sim v1232: a body's carry prompt hid twice for 0.5-0.67 s with the hand still on the body, art_age 515 at each hide): the game drops
-// the window's bindings (retained key 10 -> 14 -> none) and draws it through the bare prompt root, so no new art lands for up to ~940 ms
-// past the last good frame and the 250 ms gap ran out. While the hand's LIVE target (not its 500 ms remembered one) is still the art's
-// object, slot 0 keeps the takedown hold (1300 ms): the same rule as the kill/choke hint. live_offer drops <= 250 ms after the hand leaves.
 inline UINT64 native_prompt_keep_grace(bool live,bool live_same_element,bool live_current,bool held_still_bound,bool offer_same_object,bool takedown_slot,
-        bool live_same_window=false,bool live_offer=false) noexcept {
+        bool live_same_window=false) noexcept {
     const bool same_live=live && live_same_element && live_current;
     const UINT64 kept=live && live_same_element && (same_live || held_still_bound)?600:0;
-    if(offer_same_object && !same_live && (!live || live_same_element || !live_current)) return takedown_slot || live_offer?1300:std::max<UINT64>(kept,250);
+    if(offer_same_object && !same_live && (!live || live_same_element || !live_current)) return takedown_slot?1300:std::max<UINT64>(kept,250);
     if(!takedown_slot && !kept && live && !live_same_element && live_current && live_same_window) return 100;
     return kept;
+}
+// v1236 (user, headset v1233: "I simply point my hand on a corpse and this prompt appears", like a bottle's). The headset log shows the hand's
+// physical-grab focus on the body without a break (native-grab-decisions focus ...9696 197562609-197563921 and 197564593-197565937) while the
+// native Use target the game's prompt follows dropped it (prompt hidden with hand_target 0 at 197563328 and 197565109, art_age 266). So a
+// downed body under the hand (its live Use target or its grab focus) shows the last good art the game drew for THAT body, with no time
+// limit; it goes when the hand leaves it (<= 250 ms: live target 250 ms, grab focus 150 ms), when it is held/carried (the grab focus
+// resets), or when the game draws a different prompt. A body the game never drew a prompt for has no art (miss no_art).
+enum class BodyPromptMiss:unsigned {none,no_art,other_prompt,no_anchor,not_targeted,count};
+inline BodyPromptMiss body_prompt_cached(std::uintptr_t hand_body,std::uintptr_t art_body,bool art_current,bool other_prompt_drawn,bool anchor) noexcept {
+    if(!hand_body) return BodyPromptMiss::not_targeted;
+    if(!art_body || art_body!=hand_body || !art_current) return BodyPromptMiss::no_art;
+    if(other_prompt_drawn) return BodyPromptMiss::other_prompt;
+    return anchor?BodyPromptMiss::none:BodyPromptMiss::no_anchor;
 }
 // v1228: how well a body's carry prompt follows the hand. An interval is a run of frames whose prompt target is one body (a gap of up to
 // gap_ms without it continues the run); runs shorter than min_ms are not counted. Per counted run: never shown, first shown later than
 // late_ms, hidden again while the run lasted (flicker); plus the run time and the shown time. One thread (the HUD publish) updates it.
+// v1236: the run target is the body under the hand (live Use target or grab focus); first_ms_max = the slowest first show; each hide that
+// comes back is counted by the miss that hid it (BodyPromptMiss); cached/fresh = frames drawn from the body's kept art / the game's live art.
 struct NativeBodyPromptStats {
     static constexpr UINT64 gap_ms=300,min_ms=300,late_ms=300;
     std::uintptr_t body{};UINT64 start{},seen{},last{},run_ms{},run_shown{},first{};bool shown{},any{};unsigned hides{};
-    UINT64 intervals{},never{},late{},flicker{},target_ms{},shown_ms{},hides_total{};
+    BodyPromptMiss hid_by{};
+    UINT64 intervals{},never{},late{},flicker{},target_ms{},shown_ms{},hides_total{},first_ms_max{},cached{},fresh{};
+    std::array<UINT64,static_cast<unsigned>(BodyPromptMiss::count)> hide_reasons{};
     void close() noexcept {
-        if(body && seen-start>=min_ms) {++intervals;never+=!any;late+=any && first-start>late_ms;flicker+=hides>0;target_ms+=run_ms;shown_ms+=run_shown;hides_total+=hides;}
+        if(body && seen-start>=min_ms) {++intervals;never+=!any;late+=any && first-start>late_ms;flicker+=hides>0;target_ms+=run_ms;shown_ms+=run_shown;hides_total+=hides;
+            if(any) first_ms_max=std::max(first_ms_max,first-start);}
         body=0;
     }
-    void update(UINT64 now,std::uintptr_t target_body,bool prompt_shown) noexcept {
+    void update(UINT64 now,std::uintptr_t target_body,bool prompt_shown,BodyPromptMiss miss=BodyPromptMiss::none,bool from_cache=false) noexcept {
+        if(target_body && prompt_shown) ++(from_cache?cached:fresh);
         if(body && (now<last || (target_body && target_body!=body) || (!target_body && now-seen>gap_ms))) close();
         if(!body && target_body) {body=target_body;start=seen=last=now;run_ms=run_shown=0;any=false;hides=0;shown=prompt_shown;if(prompt_shown){any=true;first=now;}return;}
         if(!body) return;
         const UINT64 dt=now-last;last=now;if(target_body) seen=now;
         run_ms+=dt;if(prompt_shown) run_shown+=dt;
         if(prompt_shown && !any) {any=true;first=now;}
-        if(!shown && prompt_shown && any && first!=now) ++hides;   // a hide counts once the prompt comes back in the same run (the last fade is no flicker)
+        if(shown && !prompt_shown) hid_by=target_body?miss:BodyPromptMiss::not_targeted;
+        if(!shown && prompt_shown && any && first!=now) {++hides;++hide_reasons[static_cast<unsigned>(hid_by)];}   // a hide counts once the prompt comes back in the same run (the last fade is no flicker)
         shown=prompt_shown;
     }
 };

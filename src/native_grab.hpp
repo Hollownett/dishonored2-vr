@@ -29,6 +29,7 @@
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include "hold_sync.hpp"
 #include <limits>
 #include <cmath>
 namespace d2vr {
@@ -908,6 +909,7 @@ private:
         if(!result->write) return true; // no usable dt this tick: the hold continues
         if(!write(lane,side,body,result->motor)) return false;
         lane.last_motor=now;lane.last_motor_s=motor_s;lane.last_capped=result->capped;
+        hold_sync().motor(corpse?HoldSync::corpse:body.limb>=0?HoldSync::severed:HoldSync::prop,std::hypot(in.carrier.x,in.carrier.y),result->lag_m,result->capped);   // v1238
         if(body.limb>=0) {   // v1088: severed-limb-hold.csv "hold" - the held part against the hand, every write; the worst error once it has come in (0.3 s)
             const auto goal=lane.grab.target();const double err=length(goal.position-body.pose.position)*1000,rot=length(grab_rotation_error(body.pose,goal))*57.29578;
             const double gap=p.palm.valid && body.hull?hull_surface_distance(body.pose,*body.hull,p.palm.palm+p.palm.direction*rig::held_palm_depth)*1000:-1;
@@ -1691,6 +1693,7 @@ public:
          grip_slab_=!std::filesystem::exists(root/L"build"/L"no-grip-slab",ec);
          for(auto& l:lanes_) l.grab.set_legacy_lag_release(kill.legacy_corpse_lag_release);
          stick_hold_=!std::filesystem::exists(root/L"build"/L"legacy-weighted-hold",ec);
+         PhysicalGrab::goal_feed=!std::filesystem::exists(root/L"build"/L"legacy-hand-feed",ec);   // v1238: the hold goal's velocity feeds the motor
          configure_corpse(knobs.options);
          {std::ofstream note(loss_file_,std::ios::app);
           if(kill.no_corpse_grab) note<<"knob build/no-corpse-grab present: corpse bodies are not grab candidates\n";
