@@ -75,6 +75,32 @@ inline bool camera_matches(const std::array<float,3>& written_p,const std::array
     return true;
 }
 
+// v1265 (user, v1264 headset: "timepiece display render got broken ... regressed to a previous state before fix"; status camera_follow_own_none
+// [23442,3613,2]: 23.6% of lens frames took the independent-camera path, v1257 5.6%): follows() runs on the game thread right after the
+// Timepiece's update (0x44d230) against the PREPARED views, which that tick has not rebuilt yet: while the player camera turns, the basis is one
+// tick stale and fails the 0.02 test, and the frame was drawn as an independent camera (the Timepiece's flat pose, the engine's projection, one
+// image for both eyes). A camera that followed keeps following while its translation stays the one it followed with (a stale basis, a snap
+// turn); the translation used is the one from its last exact frame. It is an independent camera only when it never matched or its translation
+// moved away (latch_m), or the latch went latch_gap frames without a camera.
+struct FollowLatch {bool valid{};std::array<float,3> t{};std::uint64_t frame{};};
+enum class CameraPath : unsigned {follow,latched,own,none};
+inline constexpr float latch_m=1.f;inline constexpr std::uint64_t latch_gap=8;
+inline CameraPath follow_path(FollowLatch& l,bool basis_follows,const std::array<float,3>& t_now,std::uint64_t frame) noexcept {
+    for(float v:t_now) if(!std::isfinite(v)) {l.valid=false;return CameraPath::own;}
+    if(basis_follows) {l={true,t_now,frame};return CameraPath::follow;}
+    float d=0;for(std::size_t i=0;i<3;++i) d+=(t_now[i]-l.t[i])*(t_now[i]-l.t[i]);
+    if(l.valid && frame>=l.frame && frame<=l.frame+latch_gap && std::sqrt(d)<=latch_m) {l.frame=frame;return CameraPath::latched;}
+    l.valid=false;return CameraPath::own;
+}
+// v1265 certificate: the pixel grid a lens image is rendered in against the eye that composites it (the glass samples by screen position):
+// projection (view+0x7390), render rect (+0x7860) and resolution fraction (+0x78c0), read from the eye's view before the pass and from the
+// lens view at its Begin.
+struct Grid {std::array<float,16> projection{};std::array<std::int32_t,4> rect{};std::array<float,2> fraction{};};
+inline bool same_grid(const Grid& a,const Grid& b) noexcept {
+    for(std::size_t i=0;i<16;++i) if(!(std::abs(a.projection[i]-b.projection[i])<=1e-5f*(1.f+std::abs(b.projection[i])))) return false;
+    return a.rect==b.rect && a.fraction==b.fraction;
+}
+
 // Begin classification (status timepiece.begins).
 enum class Kind : unsigned {eye0,eye1,secondary,null_view,other};
 inline Kind classify(std::uintptr_t view,bool secondary_active,std::uintptr_t secondary_view,std::uintptr_t eye0,std::uintptr_t eye1) noexcept {

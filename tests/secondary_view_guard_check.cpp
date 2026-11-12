@@ -91,6 +91,29 @@ int main() {
      auto cb2=cb;cb2[0]+=2e-4f;CHECK(camera_matches(cp,cb,cp,cb) && camera_matches(cp,cb,cp,cb2));
      CHECK(!camera_matches(cp,cb,{39.80228f,-49.8292f,-298.3025f},cb));   // eye 1 is 6.4 cm away
      auto nan=cp;nan[1]=std::nanf("");CHECK(!camera_matches(cp,cb,nan,cb));}
+    {   // v1265 camera path: a following camera stays following through stale-basis ticks with its translation (v1264: 23.6% of lens frames fell
+        // to the independent path while turning); it is independent when it never matched, its translation moved away, or the latch aged out.
+        FollowLatch l;const std::array<float,3> t0{0,0,-600},walk{.08f,0,-600},blink{6.f,0,-600};
+        CHECK(follow_path(l,false,t0,10)==CameraPath::own);                 // never matched: an independent camera
+        CHECK(follow_path(l,true,t0,11)==CameraPath::follow && l.valid);
+        for(std::uint64_t f=12;f<40;++f) CHECK(follow_path(l,false,walk,f)==CameraPath::latched);   // a long turn while walking: every tick stale
+        CHECK(l.t[0]==0.f);                                                // the translation kept is the exact frame's
+        CHECK(follow_path(l,true,walk,40)==CameraPath::follow && l.t[0]==walk[0]);
+        CHECK(follow_path(l,false,blink,41)==CameraPath::own && !l.valid); // the translation moved 6 m: not the same camera relation
+        CHECK(follow_path(l,false,t0,42)==CameraPath::own);                 // and it stays independent until an exact match
+        CHECK(follow_path(l,true,t0,50)==CameraPath::follow);
+        CHECK(follow_path(l,false,t0,50+latch_gap+1)==CameraPath::own);     // no camera for longer than the gap (device folded)
+        CHECK(follow_path(l,true,t0,70)==CameraPath::follow && follow_path(l,false,{std::nanf(""),0,0},71)==CameraPath::own);
+        CHECK(follow_path(l,true,{0,0,600},80)==CameraPath::follow && l.t[2]==600.f);   // the time shift: a new exact relation
+    }
+    {   // v1265 grid certificate
+        Grid a{};for(std::size_t i=0;i<16;++i) a.projection[i]=static_cast<float>(i)*.25f;a.rect={0,0,2495,2687};a.fraction={1.f,1.f};
+        Grid b=a;CHECK(same_grid(a,b));
+        b.projection[0]+=1e-7f;CHECK(same_grid(a,b));
+        b=a;b.projection[2]+=.01f;CHECK(!same_grid(a,b));                 // another frustum (the engine's symmetric projection, the other eye)
+        b=a;b.rect={0,0,1921,2069};CHECK(!same_grid(a,b));                // another render rect
+        b=a;b.fraction={.77f,.77f};CHECK(!same_grid(a,b));                // another resolution fraction
+    }
     // v1257 shadows. Views A (eye 0) and B (eye 1); the Timepiece lens borrows B.
     {   // The v1256 root cause: the frame-start lens pass ran its jobs while the shadow share still held the previous frame's pair, so the
         // lens (view B) was the second eye: its five writers were skipped and its readers redirected to eye 0's setup.
