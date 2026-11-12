@@ -36,7 +36,7 @@ def main():
         try:
             s = np.fromfile(f'{variants[0][1]}/stale-warp-{n}-rigsrc.rgba', np.uint8).reshape(H, W, 4)[..., 0]
             code = np.rint(s / 40.0).astype(int)  # sRGB-encoded red: decode approximately
-            lin = (s / 255.0) ** 2.2 * 255 / 40  # the target is _SRGB: red was written linear code*40/255
+            lin = (s / 255.0) ** 2.2 * 255 / 20  # the target is _SRGB: red was written linear code*40/255
             code = np.rint(lin).astype(int)
             share = [(code[rig] == c).mean() * 100 for c in range(1, 7)]
             src = ' '.join(f'{v:4.1f}' for v in share) + f' (none {(code[rig] == 0).mean()*100:.1f})'

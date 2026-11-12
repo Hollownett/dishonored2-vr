@@ -174,7 +174,9 @@ struct StaleLayers {
     double fresh_part{.5},kept_part{.5};
     // v1167: the eye images' non-scene band at their right and bottom edges, fractions of the image (measured: up to 46 px of 2496 x 2688;
     // the caller may pass the exact one)
-    std::array<double,2> border{.0045,.0042}; // v1174: the narrow band (8-11 px), measured; wider (36-46 px) when the caller says so
+    // v1191: none by default: replays of v1170-hold and v1165-door (bands of 8-46 px) score better in the edge band with no band (hold
+    // 6.6-15 vs 8-19.7, door 7-17 vs 20-31 levels) and the v1183+ scenes have none (no edge rows the eyes share); the caller may pass one
+    std::array<double,2> border{0,0};
     // v1167: rig pixels by their own motion where both renders' rig motion is valid (rig_motion: kept, fresh); rig_motion_rules false
     // (knob no-stale-eye-rig-motion) keeps the hand and carried layers. Not used by the pass yet.
     bool rig_motion_rules{true};

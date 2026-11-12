@@ -66,6 +66,24 @@ class Afw2Pass {
     struct Buffer {Ptr<ID3D11Buffer> b;Ptr<ID3D11ShaderResourceView> srv;Ptr<ID3D11UnorderedAccessView> uav;};
     std::array<Buffer,2> motion_{},keys_{},landed_{},origins_{},near_{};Buffer fresh_keys_{},holes_{},votes_{};Ptr<ID3D11Buffer> holes_read_;
     UINT gw_{},gh_{},fw_{},fh_{};
+public:
+    static constexpr int profile_stages=9;
+private:
+    struct Probe {Ptr<ID3D11Query> disjoint;std::array<Ptr<ID3D11Query>,profile_stages+1> ts;bool waiting{};};
+    std::array<Probe,3> probes_{};unsigned probe_next_{};
+    bool collect_profile(bool wait=false) {
+        bool any=false;
+        for(auto& p:probes_) if(p.waiting) {
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+            if(context_->GetData(p.disjoint.Get(),&dj,sizeof dj,wait?0:D3D11_ASYNC_GETDATA_DONOTFLUSH)!=S_OK) continue;
+            std::array<UINT64,profile_stages+1> t{};bool ok=true;
+            for(int i=0;i<=profile_stages && ok;++i) ok=context_->GetData(p.ts[i].Get(),&t[i],sizeof(UINT64),wait?0:D3D11_ASYNC_GETDATA_DONOTFLUSH)==S_OK;
+            if(!ok) continue;
+            p.waiting=false;
+            if(!dj.Disjoint && dj.Frequency) {for(int i=0;i<profile_stages;++i) stage_ms[i]=double(t[i+1]-t[i])*1000.0/double(dj.Frequency);++profiled;any=true;}
+        }
+        return any;
+    }
     Ptr<ID3D11Texture2D> output_;Ptr<ID3D11RenderTargetView> output_rtv_;UINT ow_{},oh_{};
     static void checked(HRESULT r,const char* what) {if(FAILED(r)) throw std::runtime_error(std::string("AFW2: ")+what+" ("+std::to_string(r)+")");}
     Buffer buffer(UINT count,UINT stride) {
@@ -96,6 +114,13 @@ class Afw2Pass {
     }
 public:
     std::uint64_t passes{};
+    // v1191 per-pass GPU time: timestamp queries around each stage, read back a few passes late (never waits). stage_ms: the latest
+    // complete measurement, in stage_names order; profile=false: no queries issued.
+    static constexpr const char* stage_names[profile_stages]{"scatter","motion","repair","splat","origins","fresh_splat","crack+copies","fill","resolve"};
+    bool profile{true};
+    std::array<double,profile_stages> stage_ms{};std::uint64_t profiled{};
+    // tools: wait for this pass's timestamps (WARP replays)
+    bool profile_wait() {for(int n=0;n<200;++n) {if(collect_profile(true)) return true;} return false;}
     int rig_order{},rig_debug{};                                // v1190: inside the rig target, 0 this eye's kept rig first, 1 the fresh eye's first (tools)
     explicit Afw2Pass(ID3D11Device* device);
     // Holes left after the fill on the last pass (reads back and waits: tools and the lab only).
@@ -156,7 +181,7 @@ Texture2D freshColour : register(t2); Texture2D<float> freshDepth : register(t3)
 Texture2D<float4> keptMotion : register(t4); Texture2D<float4> freshMotion : register(t5);
 Texture2D<float> keptRig : register(t6); Texture2D<float> freshRig : register(t7);
 StructuredBuffer<float4> motionIn : register(t8); StructuredBuffer<uint> keysIn : register(t9);
-StructuredBuffer<uint> landedIn : register(t10); StructuredBuffer<uint2> nearIn : register(t14); StructuredBuffer<uint> originsIn : register(t11); StructuredBuffer<uint> freshKeysIn : register(t12);
+StructuredBuffer<uint> landedIn : register(t10); StructuredBuffer<uint2> nearIn : register(t14);  /* (the resolve reads it too: a hole the rig left) */ StructuredBuffer<uint> originsIn : register(t11); StructuredBuffer<uint> freshKeysIn : register(t12);
 RWStructuredBuffer<float4> motionOut : register(u0); RWStructuredBuffer<uint> keysOut : register(u1);
 RWStructuredBuffer<uint> landedOut : register(u2); RWStructuredBuffer<uint2> nearOut : register(u7); RWStructuredBuffer<uint> originsOut : register(u3);
 RWStructuredBuffer<uint> freshKeysOut : register(u4); RWStructuredBuffer<uint> holesOut : register(u5);
@@ -167,7 +192,7 @@ SamplerState linearSampler : register(s0);
 // y class (255 rig, 253 held, 0 none); render-sized, the target grid's texels
 Texture2D<float2> rigTarget : register(t15);
 // motion flags (w)
-static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128;
+static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128,kHeld=256;
 // key low bits
 static const uint kKeyRig=1,kKeyMoving=2,kKeyFlags=7,kSkyKey=8;
 static const uint kFilled=0x80000000u,kSeed=0x40000000u;
@@ -329,7 +354,7 @@ bool KeptRigOutline(int2 i,float a) {
             if(sm.w>0.5) {float3 c=sm.xyz;if(Chain(p,c,false,true)==1) {d=c;w|=kMoving;}}
             // a near thing that moved with no usable vector (a held prop outside the rig mask: its engine motion is ~300 px off, v1152):
             // the fresh eye no longer sees it here while it shows a mover within 8 texels: it stands down for the fresh eye's (FreshSplat)
-            else if(a<1.5 && flags.y>0) {float4 fm;if(Look(p,float3(0,0,0),false,fm)==-1 && FreshMoverNear(p)) w|=kDrop;}
+            else if(a<1.5 && flags.y>0 && rigMode.x<=0) {float4 fm;if(Look(p,float3(0,0,0),false,fm)==-1 && FreshMoverNear(p)) w|=kDrop;}
         }
     } else {
         w|=kRig;
@@ -343,6 +368,7 @@ bool KeptRigOutline(int2 i,float a) {
         const bool any_moving=parts.z>0 || parts.w>0;   // the head's rig (owner 1: a forearm nearer the eye than its palm) votes while a hand moves too
         if((owner>=2?moving:any_moving) && (r==1 || r==-1)) InterlockedAdd(handVotes[owner*2+(r==1?0:1)],1);
         w|=uint(owner)<<5;                          // the owner (bits 5-6): Splat drops a moving hand its look-ups refute as a whole
+        if(flags.x>0 && keptRig.Load(int3(i,0))<253.5/255) w|=kHeld;   // v1191: a held item (253) votes and stands down apart from the arm
         // v1190 outline votes: with the rig target, the rig's own outline moved by its motion must land on the target's outline (within 2
         // texels; 3 for a sword's thin blade): a flat hand confirms any wrong shift texel by texel, its outline does not (an exact silhouette, same grid, same tick)
         if(rigMode.x>0 && KeptRigOutline(i,a)) {
@@ -352,7 +378,8 @@ bool KeptRigOutline(int2 i,float a) {
                 if(RigTargetHas(c)) [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || !RigTargetHas(c+int2(round(dir*3)));}
                 else [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || RigTargetHas(c+int2(round(dir*3)));}
             }
-            InterlockedAdd(handVotes[10+owner*2+(on?0:1)],1);
+            const bool held=keptRig.Load(int3(i,0))<253.5/255;
+            InterlockedAdd(handVotes[(held?18:10)+owner*2+(on?0:1)],1);
         }
         if(r==1) w|=kConfirmed;
         if(r==2) w|=kOutside;
@@ -373,43 +400,56 @@ bool KeptRigOutline(int2 i,float a) {
         const float a=KeptAhead(i);
         const float px=a*abs(keptFov.y-keptFov.x)*grid.z;   // a texel at this depth, metres
         if(!(w&kConfirmed)) {
-            float best=1e9;
-            for(int y=-4;y<=4;++y) for(int x=-4;x<=4;++x) {
-                const int2 j=i+int2(x,y);
-                if(any(j<0) || any(j>=int2(grid.xy)) || x*x+y*y>=best) continue;
-                const float4 n=motionIn[Index(j)];const uint nw=uint(n.w);
-                if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(KeptAhead(j),a)) continue;
-                best=x*x+y*y;o=float4(n.xyz,((w|kConfirmed)&~kMoving)|(dot(n.xyz,n.xyz)>0?kMoving:0));
+            bool found=false;
+            [loop] for(int r=1;r<=4 && !found;++r) {
+                float best=1e9;
+                for(int y=-r;y<=r;++y) for(int x=-r;x<=r;++x) {
+                    if(max(abs(x),abs(y))!=r) continue;                       // the ring at Chebyshev distance r
+                    const int2 j=i+int2(x,y);
+                    if(any(j<0) || any(j>=int2(grid.xy)) || x*x+y*y>=best) continue;
+                    const float4 n=motionIn[Index(j)];const uint nw=uint(n.w);
+                    if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(KeptAhead(j),a)) continue;
+                    best=x*x+y*y;found=true;o=float4(n.xyz,((w|kConfirmed)&~kMoving)|(dot(n.xyz,n.xyz)>0?kMoving:0));
+                }
             }
         } else if(w&kMoving) {
-            int voters=0,agree=0;float3 pick=m.xyz;int pick_n=-1;
+            int voters=0,agree=0;
             for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) if(x!=0 || y!=0) {
                 const int2 j=i+int2(x,y);
                 if(any(j<0) || any(j>=int2(grid.xy))) continue;
                 const float4 n=motionIn[Index(j)];const uint nw=uint(n.w);
                 if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(KeptAhead(j),a)) continue;
                 ++voters;agree+=distance(n.xyz,m.xyz)<px;
-                int count=0;
-                for(int yy=-2;yy<=2;++yy) for(int xx=-2;xx<=2;++xx) {
-                    const int2 k=i+int2(xx,yy);
-                    if(any(k<0) || any(k>=int2(grid.xy))) continue;
-                    const float4 q=motionIn[Index(k)];
-                    count+=(uint(q.w)&(kConfirmed|kSky|kDrop))==kConfirmed && distance(q.xyz,n.xyz)<px;
-                }
-                if(count>pick_n) {pick_n=count;pick=n.xyz;}
             }
-            if(voters>=3 && agree*2<voters) o.xyz=pick;
+            if(voters>=3 && agree*2<voters) {                                 // outvoted: the motion most of them agree with
+                float3 pick=m.xyz;int pick_n=-1;
+                for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) if(x!=0 || y!=0) {
+                    const int2 j=i+int2(x,y);
+                    if(any(j<0) || any(j>=int2(grid.xy))) continue;
+                    const float4 n=motionIn[Index(j)];const uint nw=uint(n.w);
+                    if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(KeptAhead(j),a)) continue;
+                    int count=0;
+                    for(int yy=-2;yy<=2;++yy) for(int xx=-2;xx<=2;++xx) {
+                        const int2 k=i+int2(xx,yy);
+                        if(any(k<0) || any(k>=int2(grid.xy))) continue;
+                        const float4 q=motionIn[Index(k)];
+                        count+=(uint(q.w)&(kConfirmed|kSky|kDrop))==kConfirmed && distance(q.xyz,n.xyz)<px;
+                    }
+                    if(count>pick_n) {pick_n=count;pick=n.xyz;}
+                }
+                o.xyz=pick;
+            }
         }
     }
     motionOut[Index(i)]=o;
 }
 // rig group `owner` (1 the head's, 2 left, 3 right) moved some other way than its motions say: while its hand moves, its look-ups refute more
 // than a tenth of its texels (a flat hand confirms any shift within its own outline texel by texel, so only a clear majority counts)
-bool StandsDown(uint owner) {
+bool StandsDown(uint owner,bool held=false) {
     if(owner<1 || owner>3) return false;
     // v1190: with the rig target, its outline votes decide, moving or not (a hand whose grip stood still while the drawn hand moved): a
     // half of its outline off the target's stands it down (a third stood a sword hand down that had moved 3.6 mm: swing 8)
-    if(rigMode.x>0) {const uint on=handVotesIn[10+owner*2],off=handVotesIn[11+owner*2];return on+off>=16 && off*2>on+off;}
+    if(rigMode.x>0) {const uint b=(held?18:10)+owner*2,on=handVotesIn[b],off=handVotesIn[b+1];return on+off>=16 && off*2>on+off;}
     const bool moving=owner==1?parts.z>0 || parts.w>0:owner==2?parts.z>0:parts.w>0;
     return moving && handVotesIn[owner*2+1]*10>handVotesIn[owner*2]+handVotesIn[owner*2+1];
 }
@@ -421,6 +461,10 @@ bool StandsDown(uint owner) {
 // surface's squares meet edge to edge after the move instead of shrinking to their centres' depth. (A local float[4] of these, indexed in
 // the unrolled projection loop, miscompiled under fxc: every splat moved; computed per corner instead.)
 float CornerAhead(int2 i,int n,float a) {
+    // (v1191: on a flat stretch, the 2 axis neighbours toward this corner within 1 %, the centre's depth: 2 loads instead of 4)
+    const int2 o=int2(n&1,n>>1)*2-1;
+    const float bx=KeptAhead(clamp(i+int2(o.x,0),int2(0,0),int2(grid.xy)-1)),by=KeptAhead(clamp(i+int2(0,o.y),int2(0,0),int2(grid.xy)-1));
+    if(abs(bx-a)<0.01*a && abs(by-a)<0.01*a) return a+0.25*(bx-a)+0.25*(by-a);
     float sum=0,cnt=0;
     [unroll] for(int k=0;k<4;++k) {
         const float b=KeptAhead(clamp(i+int2(n&1,n>>1)-int2(k&1,k>>1),int2(0,0),int2(grid.xy)-1));
@@ -472,6 +516,7 @@ bool Lands(uint key,int2 j) {float a;return rigMode.x<=0 || !(key&kKeyRig) || Ri
 // Origins: a moving texel whose key won a target texel leaves its own index there (the resolve takes its motion back off)
 [numthreads(8,8,1)] void Origins(uint3 id : SV_DispatchThreadID) {
     if(any(id.xy>=uint2(grid.xy))) return;
+    if(!(uint(motionIn[Index(int2(id.xy))].w)&(kMoving|kRig))) return;   // (v1191: a still world texel has no motion to leave)
     uint key;int2 lo,hi;
     if(SplatOf(int2(id.xy),key,lo,hi) && (key&kKeyMoving))
         for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) if(keysIn[Index(int2(x,y))]==key) originsOut[Index(int2(x,y))]=Index(int2(id.xy));
@@ -503,7 +548,7 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
         const int2 j=i+int2(round(dir));
         seed=seed || (all(j>=0) && all(j<int2(grid.xy)) && keysIn[Index(j)]==0);
     }
-    keysOut[at]=key;landedOut[at]=Pack(i,false)|(seed?kSeed:0);originsOut[at]=origin;nearOut[at]=uint2(asuint(key!=0?0.0:1e9),key);
+    keysOut[at]=key;landedOut[at]=Pack(i,false)|(seed?kSeed:0);originsOut[at]=origin;nearOut[at]=uint2(asuint(key!=0?0.0:1e9),asuint(key!=0?((key&kKeyRig)?-KeyZ(key):KeyZ(key)):1e30));
     if(key==0) InterlockedOr(holesOut[1+Tile(i)],1);
 }
 // Fill (jump flood, steps fillStep.x decreasing to 1): an empty or filled texel takes, among itself and its 8 neighbours fillStep.x
@@ -512,9 +557,11 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
     if(any(id.xy>=uint2(grid.xy))) return;
     const int2 i=int2(id.xy);const uint at=Index(i);
     if(holesOut[1+Tile(i)]==0) return;                            // a tile without holes: both buffers already hold it
-    uint key=keysIn[at],landed=landedIn[at],origin=originsIn[at];const uint2 nr=nearIn[at];float nearest=asfloat(nr.x);uint near_key=nr.y;
+    uint key=keysIn[at],landed=landedIn[at],origin=originsIn[at];const uint2 nr=nearIn[at];float nearest=asfloat(nr.x),zfore=abs(asfloat(nr.y));bool fore_rig=asfloat(nr.y)<0;
     if(key==0 || (landed&kFilled)) {
-        // farther wins; on one surface (within its tolerance) the nearer place it was reached from (a Voronoi of the background's edge)
+        // v1191: the nearest seed that lies BEHIND the nearest surface around the hole (the foreground that uncovered it, the player's rig
+        // included); without one, the nearest seed (a crack within one surface). v1185-v1190 took the farthest seed in reach: swing 7 filled
+        // the place a sleeve left with a courtyard wall 10 m away instead of the ground right above it
         const int s=int(fillStep.x);
         float z=key==0?0:KeyZ(key),d=key==0?1e9:length(float2(Unpack(landed)-i));
         uint ks[8],ls[8],os[8];
@@ -523,26 +570,32 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
             ks[n]=0;ls[n]=0;os[n]=0;
             if(any(j<0) || any(j>=int2(grid.xy))) continue;
             const uint k=keysIn[Index(j)],l=landedIn[Index(j)];
-            if(k==0 || !(l&(kFilled|kSeed))) continue;             // a seed or what one filled
+            // a seed or what one filled; never the player's rig (v1190 swing 7: a sword 1.1 m away was the farthest seed beside a sleeve and
+            // its colour was stretched over the place the hand left; where the rig is, the rig target says so)
+            if(k==0 || !(l&(kFilled|kSeed))) continue;
+            if(KeyZ(k)<zfore) {zfore=KeyZ(k);fore_rig=(k&kKeyRig)!=0;}   // (the rig counts as the foreground, never as a source)
+            if(rigMode.x>0 && (k&kKeyRig)) continue;
             ks[n]=k;ls[n]=l;os[n]=originsIn[Index(j)];
-            const float dn=length(float2(Unpack(l)-i));if(dn<nearest) {nearest=dn;near_key=k;}
+            nearest=min(nearest,length(float2(Unpack(l)-i)));
         }
         // v1185 bound: a seed farther than twice the nearest one (+2 texels) counts only as far as the strip such a step can uncover
         // between the nearest seed's surface and its own: the camera's sideways step times the inverse-depth gap, plus the largest
         // displacement of anything that moved (Motion): a strip beside a near object takes its background, a crack beside a sleeve the
         // wall beside it, never a courtyard 60 texels away another hole's seeds offer (v1184 room: bright lines along the sleeve)
-        const float zf=KeyZ(near_key),moved=float(handVotesIn[8]);
+        const float zf=zfore,moved=float(handVotesIn[8]);
         #define BOUND(zk) (2*nearest+2+fillStep.z*max((zf<1e29?1/zf:0)-(zk<1e29?1/zk:0),0)+moved)
         bool held=key!=0 && d<=BOUND(z);                          // what it holds came from within the bound (else any candidate replaces it)
+        #define BEHIND(zz) ((zz)>=1e29 || (zz)>zfore*1.15+0.02)
+        bool behind=key!=0 && BEHIND(z);
         [unroll] for(int n=0;n<8;++n) {
             const uint k=ks[n],l=ls[n];if(k==0) continue;
             const float zk=KeyZ(k),dk=length(float2(Unpack(l)-i));
             if(dk>BOUND(zk)) continue;
-            const bool same=key!=0 && (zk>=1e29?z>=1e29:z<1e29 && abs(zk-z)<Tol(min(z,zk)));
-            if(key==0 || !held || (same?dk<d:zk>z)) {key=k;landed=(l&~(kFilled|kSeed))|kFilled;origin=os[n];z=zk;d=dk;held=true;}
+            const bool bk=BEHIND(zk);
+            if(key==0 || !held || (bk && !behind) || (bk==behind && dk<d)) {key=k;landed=(l&~(kFilled|kSeed))|kFilled;origin=os[n];z=zk;d=dk;held=true;behind=bk;}
         }
     }
-    keysOut[at]=key;landedOut[at]=landed;originsOut[at]=origin;nearOut[at]=uint2(asuint(nearest),near_key);
+    keysOut[at]=key;landedOut[at]=landed;originsOut[at]=origin;nearOut[at]=uint2(asuint(nearest),asuint(fore_rig?-zfore:zfore));
     if(fillStep.y>0 && key==0) InterlockedAdd(holesOut[0],1);
 }
 // FreshSplat (rig_from_fresh, v1173): while a hand moves, the fresh eye's rig texels splatted into the target grid on their own keys (the
@@ -617,9 +670,10 @@ float4 Clean(float2 q,float ahead) {
 }
 // v1190: the fresh eye's rig colour at fresh uv fu of a rig point fz metres ahead: the bilinear blend of the 2x2 colour pixels around fu
 // whose texel is rig at that depth (no colour of a post or wall beside the hand bleeds in); ok false: none of the four is
-// v1190 tools (rigMode.z): the source of a rig pixel as a colour code (1 kept, 2 fresh, 3 kept neighbour, 4 kept hidden-both, 5 fresh
-// neighbour, 6 fresh unmasked) instead of its colour
-float4 RigSource(float4 c,int code) {return rigMode.z>0?float4(code*40/255.0,0,0,1):c;}
+)HLSL" R"HLSL(// v1190 tools (rigMode.z): the source of a pixel as a colour code instead of its colour: rig 1 kept, 2 fresh, 3 kept neighbour, 4 kept
+// hidden-both, 5 fresh neighbour, 6 fresh unmasked; world 0 kept, 7 kept by the fill's stretch, 8 fresh beyond the kept view, 9 kept by
+// the turn (no key), 10 the fresh eye's near mover
+float4 RigSource(float4 c,int code) {return rigMode.z>0?float4(code*20/255.0,0,0,1):c;}
 float4 FreshRigSample(float2 fu,float fz,out bool ok) {
     const float2 p=fu*display.xy-0.5;const int2 i0=int2(floor(p));const float2 f=p-i0;
     float4 sum=0;float weight=0;
@@ -637,7 +691,7 @@ Vertex ResolveVS(uint id : SV_VertexID) {
     const float2 uv=float2((id<<1)&2,id&2);
     Vertex v;v.uv=uv;v.position=float4(uv*float2(2,-2)+float2(-1,1),0,1);return v;
 }
-// Resolve: the output pixel's target depth (its own texel's, or the fill's), the point on its ray (the filled texel's ray: the stretch),
+)HLSL" R"HLSL(// Resolve: the output pixel's target depth (its own texel's, or the fill's), the point on its ray (the filled texel's ray: the stretch),
 // back into the kept camera less the motion of the texel it came from, and this eye's own colour there.
 float4 ResolvePS(Vertex v) : SV_TARGET {
     const float2 uv=min(v.uv,validRect.xy);                       // v1174: the band rebuilt from the clamped edge
@@ -651,7 +705,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
         if(key==0 || zf<z-Tol(zf) || ((landed&kFilled) && zf<z)) {
             const float3 f=Apply(TF,Ray(targetFov,uv)*zf);
             const float2 fu=Project(freshFov,f);
-            if(f.z>1e-3 && InFresh(fu)) return Smooth(freshColour,min(fu,validRect.zw-2*display.zw));
+            if(f.z>1e-3 && InFresh(fu)) return RigSource(Smooth(freshColour,min(fu,validRect.zw-2*display.zw)),10);
         }
     }
     // v1190: the rig target decides the player's pixels. Rule 1: rig where the target has it and nothing of the world splatted here is
@@ -665,7 +719,8 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             const float3 r=Ray(targetFov,uv);
             float4 kept_c=0,fresh_c=0;bool kept_ok=false,fresh_ok=false;
             // (b) only from a group the fresh eye's votes did not stand down: a flat hand confirms a wrong grip texel by texel
-            const bool down=(key&kKeyMoving) && StandsDown((uint(motionIn[originsIn[at]].w)>>5)&3);
+            const uint wo=(key&kKeyMoving)?uint(motionIn[originsIn[at]].w):0;
+            const bool down=(key&kKeyMoving) && StandsDown((wo>>5)&3,(wo&kHeld)!=0);
             float4 kept_any=0;bool kept_any_ok=false;   // (the same from a group that stood down: only before showing what covered the rig)
             if(key_rig && abs(z-zr)<Tol(zr)) {
                 float3 pk=Apply(TK,r*z);if(key&kKeyMoving) pk-=motionIn[originsIn[at]].xyz;
@@ -683,7 +738,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
                 const int2 o=int2(n%5,n/5)-2;const int2 j=clamp(i+o,int2(0,0),int2(grid.xy)-1);const uint aj=Index(j);
                 const uint kj=keysIn[aj];float zj;
                 if(kj==0 || !(kj&kKeyRig) || (landedIn[aj]&kFilled) || !RigTargetAt(j,zj) || abs(KeyZ(kj)-zj)>=Tol(zj) || dot(o,o)>=best) continue;
-                if((kj&kKeyMoving) && StandsDown((uint(motionIn[originsIn[aj]].w)>>5)&3)) continue;
+                if((kj&kKeyMoving) && StandsDown((uint(motionIn[originsIn[aj]].w)>>5)&3,(uint(motionIn[originsIn[aj]].w)&kHeld)!=0)) continue;
                 best=dot(o,o);best_at=aj;
             }
             if(best<99) {
@@ -713,13 +768,14 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
                     if(InFresh(u) && FreshRigAt(j) && abs(FreshAhead(j)-f.z)<0.05+0.1*f.z) return RigSource(freshColour.Load(int3(px,0)),5);
                 }
                 if(kept_any_ok) return RigSource(kept_any,3);
-                return RigSource(Smooth(freshColour,fc),6);
+                // v1191 (in-game swing 8: a phantom second sword in the rig target): no eye has this class near here: not the rig; the
+                // world behind shows through (the resolve below), never noise or an inpaint over it
             }
         }
     }
     if(key==0) {                                                  // never black: the kept image by the camera turn alone
         const float3 d=Turn(TK,Ray(targetFov,uv));
-        return Smooth(keptColour,clamp(d.z>1e-6?Project(keptFov,d):uv,display.zw,validRect.xy-display.zw));
+        return RigSource(Smooth(keptColour,clamp(d.z>1e-6?Project(keptFov,d):uv,display.zw,validRect.xy-display.zw)),9);
     }
     bool filled=(landed&kFilled)!=0;
     // beyond the kept frame's view (a turn, a step sideways at the edge): no texel of this eye's own ever saw it, and a stretch from the
@@ -727,7 +783,10 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     if(filled) {
         const float3 o=z<1e29?Apply(TK,Ray(targetFov,uv)*z):Turn(TK,Ray(targetFov,uv));
         const float2 oq=o.z>1e-6?Project(keptFov,o):float2(-1,-1);
-        if(!InKept(oq)) {
+        // v1190 (swing 7: a hand's old place filled by stretching one row of texels over 6500 px): a hole wider than 4 texels where the rig
+        // target is known (the place a hand or held item left) takes the fresh eye's world surface on the ray, which sees it now
+        const bool wide=rigMode.x>0 && length(float2(Unpack(landed)-i))>4 && asfloat(nearIn[at].y)<0;
+        if(!InKept(oq) || wide) {
             const float3 r=Ray(targetFov,uv);float zf=min(z,1e4);float2 fu=float2(-1,-1);bool sky=false;
             [unroll] for(int n=0;n<3;++n) {
                 const float3 f=Apply(TF,r*zf);fu=f.z>1e-3?Project(freshFov,f):float2(-1,-1);
@@ -737,7 +796,8 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
                 const float k=dot(TF[2].xyz,r);if(k<=1e-6) break;
                 zf=max((a-TF[2].w)/k,1e-3);
             }
-            if(InFresh(fu)) return Smooth(freshColour,min(fu,validRect.zw-2*display.zw));
+            const int2 fj=clamp(int2(fu*freshGrid.xy),int2(0,0),int2(freshGrid.xy)-1);
+            if(InFresh(fu) && (!wide || !FreshRigAt(fj))) return RigSource(Smooth(freshColour,min(fu,validRect.zw-2*display.zw)),8);
         }
     }
     if(filled && z<1e29 && !(key&kKeyMoving)) {          // a filled texel whose own ray, at the background's depth, meets that surface in the
@@ -760,6 +820,8 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             const int2 j=clamp(i+int2(n%3,n/3)-1,int2(0,0),int2(grid.xy)-1);const uint at_j=Index(j);
             const uint k=keysIn[at_j];if(k==0 || (landedIn[at_j]&kFilled)) continue;
             const float zj=KeyZ(k);float2 qj;zs[n]=zj;
+            // (v1191 cost: a still texel of this pixel's own surface goes back to the same place: no projection)
+            if(n!=4 && !(k&kKeyMoving) && !(key&kKeyMoving) && zj<1e29 && z<1e29 && abs(zj-z)<0.002*z) continue;
             if(zj>=1e29) {const float3 d=Turn(TK,Ray(targetFov,uv));qj=d.z>1e-6?Project(keptFov,d):uv;}
             else {float3 pj=Apply(TK,Ray(targetFov,uv)*zj);if(k&kKeyMoving) pj-=motionIn[originsIn[at_j]].xyz;qj=pj.z>1e-4?Project(keptFov,pj):uv;}
             if(q0.x<-8) q0=qj; else apart=apart || length((qj-q0)*display.xy)>0.75;
@@ -783,7 +845,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             apart=apart || !here;
         }
     }
-    return apart?Clean(qc,z>=1e29?0:p.z):Smooth(keptColour,qc);
+    return RigSource(apart?Clean(qc,z>=1e29?0:p.z):Smooth(keptColour,qc),filled?7:0);
 }
 )HLSL";
     const auto compile=[&](const char* entry,const char* profile) {
@@ -802,7 +864,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     checked(device_->CreateSamplerState(&s,&sampler_),"sampler");
     D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;checked(device_->CreateRasterizerState(&r,&raster_),"rasterizer");
     D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthFunc=D3D11_COMPARISON_ALWAYS;checked(device_->CreateDepthStencilState(&ds,&depth_),"depth state");
-    votes_=buffer(20,4);
+    votes_=buffer(28,4);
     D3D11_BUFFER_DESC h{};h.ByteWidth=4;h.Usage=D3D11_USAGE_STAGING;h.CPUAccessFlags=D3D11_CPU_ACCESS_READ;h.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;h.StructureByteStride=4;
     checked(device_->CreateBuffer(&h,nullptr,&holes_read_),"holes read-back");
 }
@@ -851,6 +913,18 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
         ID3D11UnorderedAccessView* u[8]{};n=0;for(auto* x:uav) u[n++]=x;context_->CSSetUnorderedAccessViews(0,8,u,nullptr);
     };
     const auto go=[&](Stage s,UINT w,UINT h) {context_->CSSetShader(cs_[s].Get(),nullptr,0);context_->Dispatch((w+7)/8,(h+7)/8,1);};
+    collect_profile();
+    Probe* probe=nullptr;
+    if(profile) {
+        Probe& p=probes_[probe_next_];
+        if(!p.disjoint) {
+            D3D11_QUERY_DESC q{};q.Query=D3D11_QUERY_TIMESTAMP_DISJOINT;checked(device_->CreateQuery(&q,&p.disjoint),"profile query");
+            q.Query=D3D11_QUERY_TIMESTAMP;for(auto& t:p.ts) checked(device_->CreateQuery(&q,&t),"profile query");
+        }
+        if(!p.waiting) {probe=&p;probe_next_=(probe_next_+1)%probes_.size();context_->Begin(p.disjoint.Get());}
+    }
+    const auto mark=[&](int n) {if(probe) context_->End(probe->ts[n].Get());};
+    mark(0);
     const UINT zero[4]{};
     // 1 motion, 2 repair (0 -> 1)
     context_->ClearUnorderedAccessViewUint(votes_.uav.Get(),zero);
@@ -861,20 +935,23 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
         bind({},{nullptr,keys_[1].uav.Get()});go(scatter,fw,fh);
         bind({nullptr,keys_[1].srv.Get()},{motion_[1].uav.Get()});go(scatter_write,fw,fh);
     }
-    bind({motion_[1].srv.Get()},{motion_[0].uav.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,votes_.uav.Get()});go(motion,kw,kh);
-    bind({motion_[0].srv.Get()},{motion_[1].uav.Get()});go(repair,kw,kh);
+    mark(1);
+    bind({motion_[1].srv.Get()},{motion_[0].uav.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,votes_.uav.Get()});go(motion,kw,kh);mark(2);
+    bind({motion_[0].srv.Get()},{motion_[1].uav.Get()});go(repair,kw,kh);mark(3);
     // 3 splat (keys 0), 4 origins (origins 0); fresh rig keys
     context_->ClearUnorderedAccessViewUint(keys_[0].uav.Get(),zero);context_->ClearUnorderedAccessViewUint(origins_[0].uav.Get(),zero);
     context_->ClearUnorderedAccessViewUint(fresh_keys_.uav.Get(),zero);context_->ClearUnorderedAccessViewUint(holes_.uav.Get(),zero);
-    bind({motion_[1].srv.Get(),nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,keys_[0].uav.Get()});go(splat,kw,kh);
-    bind({motion_[1].srv.Get(),keys_[0].srv.Get(),nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,origins_[0].uav.Get()});go(origins,kw,kh);
+    bind({motion_[1].srv.Get(),nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,keys_[0].uav.Get()});go(splat,kw,kh);mark(4);
+    bind({motion_[1].srv.Get(),keys_[0].srv.Get(),nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,origins_[0].uav.Get()});go(origins,kw,kh);mark(5);
     const bool fresh_hands=hands && (L.hand_moving[0] || L.hand_moving[1]);
     if(fresh_hands || motions) {bind({nullptr,nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,nullptr,fresh_keys_.uav.Get()});go(fresh_splat,fw,fh);}
+    mark(6);
     // 5 crack (0 -> 1), 6 fill: jump flood 32 .. 1 (ping-pong)
     bind({nullptr,keys_[0].srv.Get(),nullptr,origins_[0].srv.Get()},{nullptr,keys_[1].uav.Get(),landed_[1].uav.Get(),origins_[1].uav.Get(),nullptr,holes_.uav.Get(),nullptr,near_[1].uav.Get()});go(crack,kw,kh);
     bind({},{});
     context_->CopyResource(keys_[0].b.Get(),keys_[1].b.Get());context_->CopyResource(landed_[0].b.Get(),landed_[1].b.Get());
     context_->CopyResource(origins_[0].b.Get(),origins_[1].b.Get());context_->CopyResource(near_[0].b.Get(),near_[1].b.Get());
+    mark(7);
     int from=1;
     for(int step=512;step>=1;step/=2) {      // ponytail: 10 passes cover a hole 1023 texels across; tile-skip them (Metro: hole tiles) if the GPU time asks
         upload(step,step==1);
@@ -883,19 +960,21 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
              {nullptr,keys_[to].uav.Get(),landed_[to].uav.Get(),origins_[to].uav.Get(),nullptr,holes_.uav.Get(),nullptr,near_[to].uav.Get()});go(fill,kw,kh);
         from=to;
     }
+    mark(8);
     bind({},{});ID3D11ShaderResourceView* none8[8]{};context_->CSSetShaderResources(0,8,none8);context_->CSSetShader(nullptr,nullptr,0);
     // 7 resolve at display size
     // (v1190: the resolve reads the rig masks and the hand votes too: the rig target's colour rules)
-    ID3D11ShaderResourceView* ps_in[14]{kept,kept_depth,fresh,fresh_depth,inputs[4],inputs[5],inputs[6],inputs[7],motion_[1].srv.Get(),keys_[from].srv.Get(),landed_[from].srv.Get(),
-                                        origins_[from].srv.Get(),fresh_keys_.srv.Get(),votes_.srv.Get()};
+    ID3D11ShaderResourceView* ps_in[15]{kept,kept_depth,fresh,fresh_depth,inputs[4],inputs[5],inputs[6],inputs[7],motion_[1].srv.Get(),keys_[from].srv.Get(),landed_[from].srv.Get(),
+                                        origins_[from].srv.Get(),fresh_keys_.srv.Get(),votes_.srv.Get(),near_[from].srv.Get()};
     const D3D11_VIEWPORT vp{0,0,float(width),float(height),0,1};
     context_->RSSetViewports(1,&vp);context_->RSSetState(raster_.Get());context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->OMSetDepthStencilState(depth_.Get(),0);context_->OMSetBlendState(nullptr,nullptr,0xffffffff);
     context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
-    context_->PSSetShaderResources(0,14,ps_in);
+    context_->PSSetShaderResources(0,15,ps_in);
     auto* rtv=output_rtv_.Get();context_->OMSetRenderTargets(1,&rtv,nullptr);
     context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);context_->Draw(3,0);
-    ID3D11ShaderResourceView* none13[14]{};context_->PSSetShaderResources(0,14,none13);context_->OMSetRenderTargets(0,nullptr,nullptr);
+    mark(9);if(probe) {context_->End(probe->disjoint.Get());probe->waiting=true;}
+    ID3D11ShaderResourceView* none13[15]{};context_->PSSetShaderResources(0,15,none13);context_->OMSetRenderTargets(0,nullptr,nullptr);
     ++passes;
     return output_.Get();
 }

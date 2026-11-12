@@ -392,6 +392,8 @@ int main(int argc, char** argv) {
             if (!rows.empty()) rt_t = place(rows, kdb, 8, DXGI_FORMAT_R32G32_FLOAT, kdw, kdh);
         }
         const StaleRig rig_target_in = rt_t ? StaleRig{rt_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleRig{};
+        // v1191 STALE_REPLAY_BORDER=0: no band at all (the game's default after v1191)
+        if (const char* bz = std::getenv("STALE_REPLAY_BORDER"); bz && std::string(bz) == "0") layers.border = {0.0, 0.0};
         // v1187 STALE_REPLAY_BORDER=auto: the eye image's band measured as the bottom rows / right columns the kept and fresh images share
         // (mean difference under 1 level: the band is colour only and the same in both eyes; scene rows differ by parallax). None: no band.
         if (const char* bd = std::getenv("STALE_REPLAY_BORDER"); bd && std::string(bd) == "auto" && kb.w == W && kb.h == H && fb.w == W && fb.h == H) {
@@ -427,6 +429,11 @@ int main(int argc, char** argv) {
                                                  masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}, rig_target_in));
                 warp.afw2->rig_debug = 0;
                 std::ofstream(out + "/stale-warp-" + std::to_string(n) + "-rigsrc.rgba", std::ios::binary).write(reinterpret_cast<const char*>(src.data()), static_cast<std::streamsize>(src.size()));
+            }
+            if (layers.afw2 && warp.afw2 && warp.afw2->profile_wait()) {  // v1191: per-pass time (WARP: relative only)
+                std::printf("      afw2 passes ms:"); double sum = 0;
+                for (int k = 0; k < Afw2Pass::profile_stages; ++k) {std::printf(" %s %.1f", Afw2Pass::stage_names[k], warp.afw2->stage_ms[k]); sum += warp.afw2->stage_ms[k];}
+                std::printf(" | total %.1f\n", sum);
             }
             if (layers.afw2 && warp.afw2) {const auto t = warp.afw2->hole_tiles(); std::printf("      afw2: %u target texels left empty after the fill; hole tiles %u of %u\n", warp.afw2->holes(), t[0], t[1]);}
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 votes (confirmed/refuted): head %u/%u left %u/%u right %u/%u; hands moving %d %d, masks %d\n", v[2], v[3], v[4], v[5], v[6], v[7], int(layers.hand_moving[0]), int(layers.hand_moving[1]), int(masks));}
