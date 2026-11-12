@@ -33,6 +33,16 @@ int main() {
     const double good=std::abs(via(e_r)[0]-truth[0]),bad=std::abs(via(e_next)[0]-truth[0]);
     std::printf("retarget error (NDC x): b1 view %.2g, newest view %.3f (~%.0f px at 1922 wide)\n",good,bad,bad*961);
     CHECK(good<1e-9 && bad>.1);
+    // v1194: the remaining window. One b1 reused by both renders: the next render's write lands in the shared table before this render's
+    // late draws are recorded; the recording context's own snapshot (it wrote R's view into that b1) still names R.
+    {int shared_b1=0;views.store(&shared_b1,r);const View own_snapshot=r;views.store(&shared_b1,next);
+     View table{};CHECK(views.find(&shared_b1,table) && table.frame==101);
+     const unsigned src=view_source(false,true,true,&shared_b1,&shared_b1,true);
+     CHECK(src==1 && (src==1?own_snapshot:table).frame==100);
+     CHECK(view_source(true,true,true,&shared_b1,&shared_b1,true)==0);    // own newest write
+     CHECK(view_source(false,true,true,&b_r,&shared_b1,true)==2);         // own write was another buffer: the b1 table
+     CHECK(view_source(false,true,false,nullptr,&shared_b1,false)==4);    // nothing known: the newest (counted)
+     CHECK(view_source(false,false,true,&shared_b1,&shared_b1,true)==4);} // paired frames keep the old rule
     // eviction keeps the newest buffers
     int more[4]{};for(auto& b:more) views.store(&b,View{});CHECK(!views.find(&b_r,got) && views.find(&more[3],got));
     if(failures) {std::printf("buffer_views_check: %d failure(s)\n",failures);return 1;}

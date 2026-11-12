@@ -259,6 +259,10 @@ print('PASS: v1192 sim-pose-hold (sim script only, clock phase, dumps on change 
 
 # v1193: one-view draws without their context's newest view take the view written into their bound b1 (buffer_views.hpp), not the newest
 om2=(root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
-assert "else if(alternate() && buffer_views_.find(s.cb[0],out)) {ok=true;" in om2 and 'if(valid) buffer_views_.store(r,view);' in om2
+assert 'tl_view_src_=view_source(own,alt,s.view_valid,s.view_buffer,s.cb[0],b1_known);' in om2 and 'if(valid) buffer_views_.store(r,view);' in om2
 assert 'Predicate' not in (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 print('PASS: v1193 one-view draws tagged by their bound b1 view (rig target E, held mask, placement); v1191 predicate removed')
+
+# v1194: the recording context's own snapshot of its bound b1 wins on one-view frames; view source and per-consumer use counters
+assert 's->view_buffer=valid?r:nullptr;' in om2 and 'if(tl_view_src_==1) {out=s.view;ok=true;}' in om2 and '\\"view_use\\":[' in om2
+print('PASS: v1194 view source (own record-time b1 snapshot, b1 table, newest) and per-consumer counters')
