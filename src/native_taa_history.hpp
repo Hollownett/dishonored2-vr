@@ -266,6 +266,10 @@ class NativeTaaHistory {
             // Snapshots are copied only after ready_ is observed (maintain() writes them before setting it).
             taa_history::PassInputs in{base_,{eye_views_[0].load(),eye_views_[1].load()}};
             in.capture_metadata=temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed) && metadata_enabled_.load();
+            if(const auto skip=skip_view.load()) { // v1246: a secondary pass that borrowed an eye's view object keeps the engine history (no eye twins)
+                std::uintptr_t view{};
+                if(read_(reinterpret_cast<std::uintptr_t>(ctx)+taa_history::ctx_view,&view,8) && skip(view)) {++skipped_views;return false;}
+            }
             if(alternate_) {
                 in.single_view=alternate_->single_view.load();std::uintptr_t view{};
                 if(in.single_view && read_(reinterpret_cast<std::uintptr_t>(ctx)+taa_history::ctx_view,&view,8) && view==in.single_view)
@@ -287,6 +291,8 @@ class NativeTaaHistory {
         return false;
     }
 public:
+    inline static std::atomic<bool (*)(std::uintptr_t) noexcept> skip_view{}; // v1246
+    inline static std::atomic<std::uint64_t> skipped_views{};
     // Diagnostic observer, called on the pass's job thread after a planned eye pass is recorded.
     void (*after_pass)(void* ctx,int eye)=nullptr;
     using DiagnosticJob=void (*)(bool,void*,temporal_census::Token&) noexcept;

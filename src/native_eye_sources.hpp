@@ -12,6 +12,8 @@ class NativeEyeSources {
 public:
     void invalidate() noexcept {if(++epoch_==0) epoch_=1;sources_={};}
     std::uint64_t epoch() const noexcept {return epoch_;}
+    std::uintptr_t address(unsigned eye) const noexcept {return eye<sources_.size()?sources_[eye].address:0;} // v1245 view trace
+    std::uint64_t frame(unsigned eye) const noexcept {return eye<sources_.size()?sources_[eye].frame:0;}
     bool publish(unsigned eye,std::uintptr_t address,std::uint64_t frame,std::uint32_t thread,std::uint32_t owner_thread) noexcept {
         if(eye>=sources_.size() || !address || !thread || thread!=owner_thread) return false;
         sources_[eye]={address,frame,epoch_,thread};return true;

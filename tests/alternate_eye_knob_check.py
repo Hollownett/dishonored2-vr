@@ -598,3 +598,17 @@ assert 'else if(game_xr && d2vr::unpaired_gameplay_flat(unpaired_gameplay_run,ga
 assert 'gameplay && !unpaired_flat,authored_camera || cutscene_immersive,' in probe and ',\\"unpaired_gameplay\\":{\\"flat_frames\\":' in probe
 assert 'request_obstruction(side,*body,true);++press_rehovers_;' in ng44 and '<<",\\"press_rehovers\\":"<<los.press_rehovers' in probe
 print('PASS: v1244 unpaired gameplay flat fallback, eye pair repeat tolerance, aged hover press re-ask')
+# v1245 (diagnostic): native-view-trace.csv - every Setup before/after and every Begin while stereo (Timepiece view census)
+assert 'view_trace("begin",view,index,begin_order,_ReturnAddress());' in probe and 'view_trace("setup_out",view,claimed?1:0,head_wrote?1:0,trace_caller);' in probe
+assert 'view_trace_csv.open(output/L"native-view-trace.csv",std::ios::trunc);' in probe
+print('PASS: v1245 view trace')
+# v1246: secondary-view guard (Timepiece lens borrows the eye-1 view object): lens Begin/Setup are no eye, eye view re-created after it
+svg46 = (root / 'src' / 'secondary_view_guard.hpp').read_text(encoding='utf-8')
+th46 = (root / 'src' / 'native_taa_history.hpp').read_text(encoding='utf-8')
+assert 'inline constexpr std::uintptr_t render_rva=0x366590,set_rva=0x366970,def_copy_rva=0x444c0,setup_wrapper_rva=0x374b60,eye_fraction_rva=0x22fd9f0;' in svg46
+assert 'if(kind==d2vr::secondary_view::Kind::secondary) {' in probe and 'if(lens_active.load(std::memory_order_relaxed) && view && reinterpret_cast<std::uintptr_t>(view)==lens_view.load()) {lens_setup(view,window_rect,render_rect);return;}' in probe
+assert 'if(claimed && head_wrote && lens_guard_enabled) lens_record(view,window_rect);' in probe and 'reinterpret_cast<Wrapper>(image_base+sv::setup_wrapper_rva)(' in probe
+assert 'if(lens_view_skipped(view)) {++(lens_active.load()?lens_stats.post_in:lens_stats.post_after);return -1;}' in probe and 'if(read_(reinterpret_cast<std::uintptr_t>(ctx)+taa_history::ctx_view,&view,8) && skip(view)) {++skipped_views;return false;}' in th46
+assert 'const bool hold=scope_hold || lens_hold;' in probe and '<< ",\\"timepiece\\":" << lens_status_json()' in probe
+assert 'lens_guard_enabled=head_requested && !fs::exists(root/L"build"/L"no-lens-guard");' in probe and 'view_trace_enabled=fs::exists(root/L"build"/L"view-trace");' in probe
+print('PASS: v1246 secondary-view guard')

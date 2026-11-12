@@ -38,6 +38,7 @@
 #include "context_barriers.hpp"
 #include "context_state.hpp"
 #include "native_eye_sources.hpp"
+#include "secondary_view_guard.hpp"
 #include "body_anchor.hpp"
 #include "head_calibration.hpp"
 #include "native_audio_listener.hpp"
@@ -1901,9 +1902,33 @@ static std::uintptr_t eye_view_allocation{};
 static std::array<UINT64,3> eye_camera_owner{};
 static std::atomic<UINT64> eye_begin_calls{0},eye_begin_matches{0};
 static std::ofstream eye_boundary_csv;
+// v1246 secondary-view guard (Timepiece lens; src/secondary_view_guard.hpp). The engine's secondary pass borrows the eye-1 view object in
+// stereo: its Setup/Begin are not an eye (no eye source, pair, frame split, shadow share, per-eye TAA/FSR/DLSS pass), it is drawn from the
+// eye-0 camera moved by the secondary camera's translation (the other timeline), and the borrowed eye view is re-created from its own
+// Setup record (engine def copy + its head write + engine Setup, history rows kept) before that eye renders. build/no-lens-guard: v1245.
+static bool lens_guard_enabled=true;
+using LensRenderFn=void (__fastcall*)(void*,void*);
+using LensOwnerFn=std::uintptr_t (__fastcall*)(void*,void*,void*,void*);
+static LensRenderFn original_lens_render{};static LensOwnerFn original_lens_owner{};
+static std::atomic<bool> lens_active{false},lens_replaying{false};static std::atomic<std::uintptr_t> lens_view{0};
+static std::array<d2vr::secondary_view::Record,2> lens_records{}; // render thread (Setup hook, secondary render hook)
+static std::array<std::byte,d2vr::secondary_view::window_size> head_written_window{}; // the window the last head write put in the view
+static std::mutex lens_camera_mutex;
+static struct LensCamera {bool valid{},follows{};std::array<float,3> position{},translation{};std::array<float,9> basis{};UINT64 frame{};} lens_camera; // game thread -> render thread
+static struct LensStats {
+    std::atomic<UINT64> frames{},owner_cameras{},setups{},camera_follow{},camera_own{},camera_none{},replays{},replay_exact{},replay_differs{},post_in{},post_after{},
+        taa_skips{},resets{},alt_held{},last_frame{};
+    std::array<std::atomic<UINT64>,5> begins{},refused{};std::array<std::atomic<UINT64>,3> borrowed{}; // Kind order; Refusal order; [eye0 view, eye1 view, other]
+    std::atomic<bool> eye_after{false};std::atomic<int> state{0};
+} lens_stats;
+static std::array<float,3> lens_eye0_position{};static bool lens_eye0_seen{};
+void __fastcall lens_render_hook(void* renderer,void* entry);
+std::uintptr_t __fastcall lens_owner_hook(void* owner,void* a,void* b,void* c);
+bool lens_view_skipped(std::uintptr_t view) noexcept {return view && view==lens_view.load() && (lens_active.load() || (lens_stats.last_frame.load()==frames.load() && !lens_stats.eye_after.load()));}
 static UINT eye_boundary_rows{};
 void observe_eye_setup(void* view) noexcept;
 void observe_eye_begin(void* view) noexcept;
+void view_trace(const char* kind,void* view,int index,int order,void* caller) noexcept; // v1245 diagnostic
 static bool alt_shadow_share_knob=false; // v1189: build/alt-shadow-share (one-view frames share shadows like a paired second view)
 static std::string perf_spans_json();
 // v1191: GPU ms of the stale-eye warp call, the rig target's copy/clears and the motion pass over the run (ModGpuTimer spans; needs the
@@ -1934,6 +1959,18 @@ static std::atomic<std::uint64_t> rig_target_published{},rig_target_refused{};
 void cinematic_probe_setup(void* view) noexcept;void cinematic_probe_offset(void* view) noexcept;void cinematic_probe_begin(void* view) noexcept; // G2 spike, build/cinematic-probe
 void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
     d2vr::CrashOperation operation("native eye begin");
+    { // v1246: classify every Begin; the secondary pass (Timepiece lens) is no eye: none of the per-eye observers below see it
+        const auto address=reinterpret_cast<std::uintptr_t>(view);
+        const auto kind=d2vr::secondary_view::classify(address,lens_active.load(),lens_view.load(),d2vr::PostTonemapPass::eye_views[0].load(),d2vr::PostTonemapPass::eye_views[1].load());
+        if(capturing.load() && lens_guard_enabled) ++lens_stats.begins[static_cast<std::size_t>(kind)];
+        if(kind==d2vr::secondary_view::Kind::secondary) {
+            view_trace("lens_begin",view,index,-1,_ReturnAddress());
+            letterbox_gate.begin_pass();
+            original_eye_begin(backend,world,view,index);
+            return;
+        }
+        if(address && address==lens_view.load()) lens_stats.eye_after=true; // the borrowed view's own eye Begin: later passes of it are the eye's
+    }
     int begin_order=-1; // 0 for the first non-null view begun since the last Present, 1 for the second, ...
     { // frame split: name the eye by view address (the identity the paired XR path uses), never by the raw index
         const auto stamp_ns=d2vr::GameXr::cpu_time_ns();
@@ -1957,6 +1994,7 @@ void __fastcall eye_begin_hook(void* backend,void* world,void* view,int index) {
         shadow_share.on_eye_begin(share_order,address,gate,
             static_cast<std::uint32_t>(flags_a)|(static_cast<std::uint32_t>(flags_b)<<8),valid);
     }
+    view_trace("begin",view,index,begin_order,_ReturnAddress());
     letterbox_gate.begin_pass();
     if(native_marker_probe_installed) native_marker_probe.eye_phase(index==0?1u:2u);
     {const auto diag_t0=std::chrono::steady_clock::now(); // task 3b: eye_boundary + native_eye_capture observer CPU (includes the capture CopyResource encode)
@@ -2000,13 +2038,19 @@ void __fastcall setup_hook(void* view,int* window_rect,int* render_rect);
 // The registered trampoline survives stopped sessions. Select the current mode
 // on every call so a desktop run cannot leave VR using its observation callback.
 void alt_taa_trace(void* view) noexcept; // build/alt-taa-trace (diagnostic): the one view object's address, jitter and rolled previous-matrix words
+void lens_setup(void* view,int* window_rect,int* render_rect) noexcept;
+void lens_record(void* view,int* prepared) noexcept;
 void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
+    // v1246: the replay of a borrowed eye view is the engine's own Setup only; the secondary pass's Setup gets the lens camera
+    if(lens_replaying.load(std::memory_order_relaxed)) {original_setup.load(std::memory_order_acquire)(view,window_rect,render_rect);view_trace("replay_out",view,-1,-1,nullptr);return;}
+    if(lens_active.load(std::memory_order_relaxed) && view && reinterpret_cast<std::uintptr_t>(view)==lens_view.load()) {lens_setup(view,window_rect,render_rect);return;}
     const auto previous_operation=d2vr::crash_operation;
     d2vr::crash_operation="native view setup";
     const auto original=original_setup.load(std::memory_order_acquire);
     const bool claimed=head_depth.fetch_add(1,std::memory_order_acq_rel)==0;
     bool setup_completed=false;
     if(claimed) {alternate_taa_setup_ready=false;if(GetCurrentThreadId()==xr_present_thread) alternate_taa_runtime.cancel_plan();}
+    void* const trace_caller=_ReturnAddress();view_trace("setup_in",view,-1,-1,trace_caller);
     __try {
         if(head_requested) {
             if(claimed) cinematic_probe_setup(view); // G2 spike: records the view before any head write
@@ -2026,6 +2070,7 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
             const auto dlss_setup_input=claimed?begin_dlss_setup_observation(view):std::optional<temporal_eye::SetupObservation>{};
             bool dlss_jitter_written=false;
             original(view,window_rect,render_rect);setup_completed=true;
+            view_trace("setup_out",view,claimed?1:0,head_wrote?1:0,trace_caller);
             if(claimed) alt_taa_trace(view);
             if(claimed && forced_view_jitter && view_jitter_abi) { // see d2vr::engine_taa_jitter
                 *reinterpret_cast<d2vr::TaaJitter*>(static_cast<std::byte*>(view)+0x7850)=*forced_view_jitter;forced_view_jitter.reset();++view_jitter_writes;dlss_jitter_written=true;
@@ -2055,6 +2100,7 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
                     jitter[1]=jitter[0];++alt_mv_jitter_writes;
                 }
             }
+            if(claimed && head_wrote && lens_guard_enabled) lens_record(view,window_rect); // v1246: what this eye's own Setup consumed and left
             if(claimed) complete_dlss_setup_observation(dlss_setup_input,dlss_jitter_written);
         } else setup_hook(view,window_rect,render_rect);
     } __finally {
@@ -6355,6 +6401,15 @@ void observe_eye_setup(void* view) noexcept {
                 if(taa_history_installed) {taa_history.clear_eye_views();taa_history.reset_histories();}
                 if(fsr_taa.enabled.load()) fsr_taa.request_reset();
             }
+            if(eye==0) { // v1246: a camera jump (Timepiece time shift: 600 m) restarts the eyes' temporal histories, as a new camera does
+                float jump{};for(int axis=0;axis<3;++axis) jump=std::max(jump,std::abs(pose->position[axis]-lens_eye0_position[axis]));
+                if(lens_eye0_seen && jump>50.f) {
+                    if(taa_history_installed) taa_history.reset_histories();
+                    if(fsr_taa.enabled.load()) fsr_taa.request_reset();
+                    ++lens_stats.resets;
+                }
+                lens_eye0_position=pose->position;lens_eye0_seen=true;
+            }
             if(!eye_sources.publish(static_cast<unsigned>(eye),address,frames.load(),GetCurrentThreadId(),gpu_render_thread.load())) return;
             if(taa_history_installed && !mono) taa_history.publish_eye_view(static_cast<unsigned>(eye),address);
             d2vr::PostTonemapPass::eye_views[static_cast<std::size_t>(eye)]=address;
@@ -6486,6 +6541,187 @@ void observe_eye_begin(void* view) noexcept {
                              << ',' << eye << ',' << bindings << ',' << (same_context?1:0) << '\n';
         }
     } catch(...) {callback_failed=true;}
+}
+
+// v1245 view trace (Timepiece, diagnostic; with the eye-boundary knob): every Setup (before and after the original) and every Begin while
+// stereo, <= 6000 rows -> native-view-trace.csv. The view's own pose and its render copy (+0x39d0, what a Begin draws), the engine caller,
+// the prepared slot whose position it matches, the eye-source verdict inputs and the Timepiece player states 68/69/70.
+static std::ofstream view_trace_csv;static unsigned view_trace_rows{};static std::mutex view_trace_mutex;static bool view_trace_enabled=false; // v1246: knob build/view-trace
+void view_trace(const char* kind,void* view,int index,int order,void* caller) noexcept {
+    if(!view_trace_enabled || !eye_boundary_requested || !capturing.load() || !stereo_active.load() || view_trace_rows>=6000) return;
+    try {
+        const auto address=reinterpret_cast<std::uintptr_t>(view);
+        static UINT64 tp_frame=~0ull;static int tp_state{};
+        if(tp_frame!=frames.load()) {tp_frame=frames.load();auto reader=&read_self;const auto machine=native_takedowns.machine(reader);tp_state=0;
+            for(unsigned s:{68u,69u,70u}) if(d2vr::native_player_state(reader,image_base,machine,s,0).value_or(false)) tp_state=static_cast<int>(s);}
+        float pose[14]{},copy[12]{};std::int32_t rect[4]{};float fraction[2]{};
+        if(address) {read_self(address+0x9c,pose,8);read_self(address+0xa8,pose+2,12);read_self(address+0xcc,pose+5,36);
+            read_self(address+render_copy_offset+0xa8,copy,12);read_self(address+render_copy_offset+0xcc,copy+3,36);
+            read_self(address+0x7860,rect,16);read_self(address+0x78c0,fraction,8);}
+        std::array<std::byte,16> header{};const auto native=native_views(&header);std::uintptr_t allocation{};std::memcpy(&allocation,header.data(),8);
+        int slot=-1;float best=1e30f;
+        for(std::size_t i=0;i<native.size();++i) {float d{};for(int a=0;a<3;++a) d+=std::abs(pose[2+a]-native[i].pose->position[a]);if(d<best) {best=d;slot=static_cast<int>(i);}}
+        std::uintptr_t s0{},s1{};UINT64 f0{},f1{};
+        {std::lock_guard<std::mutex> lock(gpu_mutex);s0=eye_sources.address(0);s1=eye_sources.address(1);f0=eye_sources.frame(0);f1=eye_sources.frame(1);}
+        std::ostringstream row;row.precision(7);
+        row<<kind<<','<<frames.load()<<','<<GetCurrentThreadId()<<','<<address<<','<<index<<','<<order<<','<<std::hex<<(reinterpret_cast<std::uintptr_t>(caller)-image_base)<<std::dec
+           <<','<<head_depth.load()<<','<<tp_state;
+        for(float v:pose) row<<','<<v; // fov x,y, position, basis rows forward/left/up
+        for(float v:copy) row<<','<<v;
+        for(auto v:rect) row<<','<<v;
+        row<<','<<fraction[0]<<','<<fraction[1]<<','<<native.size()<<','<<allocation<<','<<slot<<','<<best<<','<<s0<<','<<f0<<','<<s1<<','<<f1
+           <<','<<d2vr::PostTonemapPass::eye_views[0].load()<<','<<d2vr::PostTonemapPass::eye_views[1].load()<<'\n';
+        std::lock_guard<std::mutex> lock(view_trace_mutex);
+        if(!view_trace_csv.is_open() || view_trace_rows>=6000) return;
+        ++view_trace_rows;view_trace_csv<<row.str();
+        if(view_trace_rows%200==0 || view_trace_rows==6000) view_trace_csv.flush();
+    } catch(...) {}
+}
+
+// v1246 secondary-view guard (see the globals and src/secondary_view_guard.hpp).
+static bool lens_write(std::uintptr_t at,const void* data,std::size_t size) noexcept {
+    SIZE_T written{};return WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),data,size,&written) && written==size;
+}
+static void lens_history(std::uintptr_t view,d2vr::secondary_view::Record& r,bool save,bool rows_only) noexcept {
+    std::size_t at=0;
+    for(const auto& span:d2vr::secondary_view::history_spans) {
+        const bool row=span.offset==0x7410 || span.offset==0x74d0 || span.offset==0x7590;
+        if(save) read_self(view+span.offset,r.history.data()+at,span.size);
+        else if(!rows_only || row) lens_write(view+span.offset,r.history.data()+at,span.size);
+        at+=span.size;
+    }
+}
+// After an eye's own Setup (head written, before the restore): its view, prepared entry, the window it rendered with and the engine window,
+// the history rows it left. Slot = the eye whose published view this is.
+void lens_record(void* view,int* prepared) noexcept {
+    try {
+        const auto address=reinterpret_cast<std::uintptr_t>(view);
+        const auto l=d2vr::PostTonemapPass::eye_views[0].load(),r=d2vr::PostTonemapPass::eye_views[1].load();
+        const int slot=address==l?0:(address==r && l!=r)?1:-1;
+        if(slot<0 || !prepared) return;
+        auto& record=lens_records[static_cast<std::size_t>(slot)];
+        std::array<std::byte,d2vr::secondary_view::window_size> now{};
+        if(!read_self(address+d2vr::secondary_view::window_offset,now.data(),now.size()) || now!=head_written_window) {record.valid=false;return;} // not this Setup's head write
+        record.view=address;record.prepared=reinterpret_cast<std::uintptr_t>(prepared);record.frame=frames.load();
+        read_self(image_base+d2vr::prepared_views_rva,&record.allocation,8);
+        record.written=head_written_window;std::memcpy(record.engine.data(),head_saved.data(),record.engine.size());
+        lens_history(address,record,true,false);
+        std::size_t at=0;for(const auto& span:d2vr::secondary_view::verify_spans) {read_self(address+span.offset,record.verify.data()+at,span.size);at+=span.size;}
+        record.valid=true;
+    } catch(...) {}
+}
+// The secondary pass's Setup: the eye-0 camera (its head write: pose, FOV, projection with jitter), moved by the secondary camera's
+// translation when that camera follows the player camera (the Timepiece's other timeline); an independent camera keeps its own pose and
+// the engine projection. The view's window is put back after the Setup (the replay re-creates the eye from its record anyway).
+void lens_setup(void* view,int* window_rect,int* render_rect) noexcept {
+    const auto original=original_setup.load(std::memory_order_acquire);
+    const auto address=reinterpret_cast<std::uintptr_t>(view);
+    std::array<std::byte,d2vr::secondary_view::window_size> saved{},window{};
+    bool wrote=false;
+    try {
+        ++lens_stats.setups;
+        LensCamera camera;{std::lock_guard<std::mutex> l(lens_camera_mutex);camera=lens_camera;}
+        if(camera.valid && frames.load()>camera.frame+4) camera.valid=false; // a camera from an earlier unfold
+        const auto& eye0=lens_records[0];
+        if(read_self(address+d2vr::secondary_view::window_offset,saved.data(),saved.size())) {
+            window=saved;
+            if(camera.valid && !camera.follows) {
+                std::memcpy(window.data()+(0xa8-0x9c),camera.position.data(),12);std::memcpy(window.data()+(0xcc-0x9c),camera.basis.data(),36);++lens_stats.camera_own;
+            } else if(eye0.valid) {
+                window=eye0.written;
+                if(camera.valid) {
+                    std::array<float,3> p{};std::memcpy(p.data(),window.data()+(0xa8-0x9c),12);
+                    for(int i=0;i<3;++i) p[static_cast<std::size_t>(i)]+=camera.translation[static_cast<std::size_t>(i)];
+                    std::memcpy(window.data()+(0xa8-0x9c),p.data(),12);++lens_stats.camera_follow;
+                } else ++lens_stats.camera_none;
+            } else ++lens_stats.camera_none;
+            wrote=window!=saved && lens_write(address+d2vr::secondary_view::window_offset,window.data(),window.size());
+        }
+    } catch(...) {}
+    view_trace("lens_setup_in",view,-1,wrote?1:0,nullptr);
+    original(view,window_rect,render_rect);
+    if(wrote) lens_write(address+d2vr::secondary_view::window_offset,saved.data(),saved.size());
+    view_trace("lens_setup_out",view,-1,wrote?1:0,nullptr);
+}
+// After the secondary pass: re-create the borrowed eye view exactly as its own Setup left it. The engine def copy and the engine Setup
+// (through the wrapper, as 0x35e06a calls it) rebuild the def, render copy and derived state with this eye's head write; the stamp the
+// secondary Setup left (this frame's) stops a second history roll, the recorded rows are put back around it.
+static void lens_replay(std::uintptr_t view) noexcept {
+    namespace sv=d2vr::secondary_view;
+    try {
+        int slot=-1;for(int i=0;i<2;++i) if(lens_records[static_cast<std::size_t>(i)].valid && lens_records[static_cast<std::size_t>(i)].view==view) slot=i;
+        auto& r=lens_records[static_cast<std::size_t>(slot<0?0:slot)];
+        std::uintptr_t allocation{};read_self(image_base+d2vr::prepared_views_rva,&allocation,8);
+        std::array<float,3> prepared_position{},engine_position{};
+        if(slot>=0) {read_self(r.prepared+0x30+0xa8,prepared_position.data(),12);std::memcpy(engine_position.data(),r.engine.data()+(0xa8-0x9c),12);}
+        const auto refusal=slot<0?sv::Refusal::no_record:sv::replay_refusal(r,view,frames.load(),allocation,prepared_position,engine_position);
+        if(refusal!=sv::Refusal::none) {++lens_stats.refused[static_cast<std::size_t>(refusal)];return;}
+        using DefCopy=void* (__fastcall*)(void*,const void*);using Wrapper=void (__fastcall*)(void*,void*,void*,void*);
+        reinterpret_cast<DefCopy>(image_base+sv::def_copy_rva)(reinterpret_cast<void*>(view),reinterpret_cast<const void*>(r.prepared+0x30));
+        lens_write(view+sv::window_offset,r.written.data(),r.written.size());
+        lens_history(view,r,false,true);
+        lens_replaying=true;
+        reinterpret_cast<Wrapper>(image_base+sv::setup_wrapper_rva)(reinterpret_cast<void*>(view),reinterpret_cast<void*>(r.prepared),reinterpret_cast<void*>(image_base+sv::eye_fraction_rva),nullptr);
+        lens_replaying=false;
+        lens_history(view,r,false,false);
+        lens_write(view+sv::window_offset,r.engine.data(),r.engine.size());
+        std::array<std::byte,sizeof(sv::Record::verify)> now{};std::size_t at=0;
+        for(const auto& span:sv::verify_spans) {read_self(view+span.offset,now.data()+at,span.size);at+=span.size;}
+        ++lens_stats.replays;++(now==r.verify?lens_stats.replay_exact:lens_stats.replay_differs);
+    } catch(...) {lens_replaying=false;}
+}
+void __fastcall lens_render_hook(void* renderer,void* entry) {
+    std::uintptr_t scene{},view{};
+    const auto at=reinterpret_cast<std::uintptr_t>(renderer);
+    if(!lens_guard_enabled || !capturing.load() || !stereo_active.load() || !renderer || !read_self(at+0x88,&scene,8) || !scene || !read_self(at+0x90,&view,8) || !view) {
+        original_lens_render(renderer,entry);return;
+    }
+    ++lens_stats.frames;lens_stats.last_frame=frames.load();lens_stats.eye_after=false;
+    {const auto l=d2vr::PostTonemapPass::eye_views[0].load(),r=d2vr::PostTonemapPass::eye_views[1].load();++lens_stats.borrowed[view==l?0:(view==r && l!=r)?1:2];}
+    lens_view=view;lens_active=true;
+    original_lens_render(renderer,entry);
+    lens_active=false;
+    lens_replay(view);
+}
+// The Timepiece (0x44d230, game thread): after it ran, its own camera (+0x150, the def it copies into the secondary view) is this frame's
+// other-timeline camera. Kept with its translation from the engine camera (the prepared eyes' centre) and whether it turns with it.
+std::uintptr_t __fastcall lens_owner_hook(void* owner,void* a,void* b,void* c) {
+    const auto result=original_lens_owner(owner,a,b,c);
+    if(!lens_guard_enabled || !capturing.load() || !stereo_active.load() || !owner) return result;
+    try {
+        const auto at=reinterpret_cast<std::uintptr_t>(owner);
+        std::uint8_t flags{};
+        if(!read_self(at+0xa8,&flags,1) || !(flags&4)) return result;
+        std::array<std::byte,d2vr::camera_read_size> bytes{};
+        if(!read_self(at+0x150,bytes.data(),bytes.size())) return result;
+        const auto pose=d2vr::decode_render_view(bytes);const auto native=native_views();
+        if(!pose || native.size()!=2) return result;
+        LensCamera camera;camera.valid=true;camera.frame=frames.load();camera.position=pose->position;camera.basis=pose->basis;
+        camera.follows=d2vr::secondary_view::follows(pose->basis,native[0].pose->basis);
+        camera.translation=d2vr::secondary_view::translation(pose->position,native[0].pose->position,native[1].pose->position);
+        {std::lock_guard<std::mutex> l(lens_camera_mutex);lens_camera=camera;}
+        ++lens_stats.owner_cameras;
+        auto reader=&read_self;const auto machine=native_takedowns.machine(reader);int state=0;
+        for(unsigned s:{68u,69u,70u}) if(d2vr::native_player_state(reader,image_base,machine,s,0).value_or(false)) state=static_cast<int>(s);
+        lens_stats.state=state;
+    } catch(...) {}
+    return result;
+}
+static std::string lens_status_json() {
+    LensCamera camera;{std::lock_guard<std::mutex> l(lens_camera_mutex);camera=lens_camera;}
+    std::ostringstream o;o.precision(6);
+    const auto list=[&](const auto& a) {std::string s="[";for(std::size_t i=0;i<a.size();++i) s+=(i?",":"")+std::to_string(a[i].load());return s+"]";};
+    o<<"{\"guard\":"<<(lens_guard_enabled?"true":"false")<<",\"state\":"<<lens_stats.state.load()<<",\"lens_frames\":"<<lens_stats.frames.load()
+     <<",\"begins_eye0_eye1_lens_null_other\":"<<list(lens_stats.begins)<<",\"borrowed_eye0_eye1_other\":"<<list(lens_stats.borrowed)
+     <<",\"lens_setups\":"<<lens_stats.setups.load()<<",\"camera_follow_own_none\":["<<lens_stats.camera_follow.load()<<','<<lens_stats.camera_own.load()<<','<<lens_stats.camera_none.load()<<']'
+     <<",\"owner_cameras\":"<<lens_stats.owner_cameras.load()<<",\"camera_follows\":"<<(camera.follows?"true":"false")
+     <<",\"translation\":["<<camera.translation[0]<<','<<camera.translation[1]<<','<<camera.translation[2]<<']'
+     <<",\"replays\":"<<lens_stats.replays.load()<<",\"replay_exact\":"<<lens_stats.replay_exact.load()<<",\"replay_differs\":"<<lens_stats.replay_differs.load()
+     <<",\"replay_refused_none_norecord_stale_alloc_moved\":"<<list(lens_stats.refused)
+     <<",\"post_passes_in_after\":["<<lens_stats.post_in.load()<<','<<lens_stats.post_after.load()<<"],\"taa_skips\":"<<d2vr::NativeTaaHistory::skipped_views.load()
+     <<",\"history_resets\":"<<lens_stats.resets.load()<<",\"alt_held\":"<<lens_stats.alt_held.load()
+     <<",\"native_eye_pairs\":"<<native_eye_pairs<<",\"flat_frames\":"<<unpaired_flat_frames.load()<<'}';
+    return o.str();
 }
 
 bool disable_eye_boundary_hook() noexcept {
@@ -10075,6 +10311,7 @@ void prepare_head_view(void* view) noexcept {
         head_wrote=true;SIZE_T written{};
         if(!WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(source+0x9c),bytes.data()+0x9c,head_saved.size(),&written) || written!=head_saved.size())
             throw std::runtime_error("Cannot write temporary render-only head pose");
+        std::memcpy(head_written_window.data(),bytes.data()+0x9c,head_written_window.size()); // v1246: kept with this eye's Setup record
         if(per_frame) {
             constexpr auto tracked_head=XR_VIEW_STATE_ORIENTATION_TRACKED_BIT|XR_VIEW_STATE_POSITION_TRACKED_BIT;
             // Authored scenes: the listener faces where the head-owned view faces (not the spinning native camera), at the native camera
@@ -10428,8 +10665,14 @@ void alternate_after_present(UINT64 number,bool gameplay,bool free_gameplay,bool
     // narrowed projection, which the stale-eye warp cannot carry (it takes the kept zoomed image as full-FOV and fills it from the unzoomed
     // left eye), and the mask is only drawn when the right eye is fresh. While the scope runs every frame is paired, as for an authored scene;
     // the first free frame after it is paired too (AlternateEye refresh), so no zoomed image is ever kept into alternation.
-    const bool hold=d2vr::alternate_plan_paired_hold(authored,spyglass_scope_enabled,spyglass_scope_m.load(std::memory_order_relaxed));
-    if(hold && !authored && free_gameplay) ++alt_scope_held;
+    // v1246: a secondary pass (Timepiece lens) in the last 2 frames holds paired frames too: it borrows the last view object, which in a
+    // one-view frame is the only eye, and its other-timeline image is not something the stale-eye warp can carry.
+    const UINT64 lens_frame=lens_stats.last_frame.load();
+    const bool lens_hold=lens_guard_enabled && lens_frame && number<=lens_frame+2;
+    const bool scope_hold=d2vr::alternate_plan_paired_hold(authored,spyglass_scope_enabled,spyglass_scope_m.load(std::memory_order_relaxed));
+    const bool hold=scope_hold || lens_hold;
+    if(scope_hold && !authored && free_gameplay) ++alt_scope_held;
+    if(lens_hold && !scope_hold && !authored && free_gameplay) ++lens_stats.alt_held;
     const int next=alt_plan.eye_for_frame(next_display,free_gameplay,hold,epoch_changed);
     alt_plan_stamp=(next_display<<2)|static_cast<UINT64>(next+1);
     alt_planned_single[next_display&1]=next>=0?1:0;
@@ -10880,6 +11123,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"reason\":[" << unpaired_reason[0].load() << ',' << unpaired_reason[1].load() << ',' << unpaired_reason[2].load() << ',' << unpaired_reason[3].load() << ',' << unpaired_reason[4].load()
                << "],\"pair_repeats\":" << native_eye_pair.repeats << ",\"pair_invalidations\":" << native_eye_pair.invalidations << ",\"strict_pair\":" << (native_eye_pair.tolerate_repeat?"false":"true")
                << ",\"eye_begin_calls\":" << eye_begin_calls.load() << ",\"eye_begin_matches\":" << eye_begin_matches.load() << ",\"native_eye_pairs\":" << native_eye_pairs << ",\"eye_copies\":" << native_eye_copy_count << '}'
+               << ",\"timepiece\":" << lens_status_json()
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
                << ",\"paired\":" << alt_paired.load() << ",\"scope_held\":" << alt_scope_held.load() << ",\"fallbacks\":" << alt_fallbacks.load()
                << ",\"parity_flip\":" << (d2vr::alternate_parity_flip.load()?"true":"false") << ",\"band_bursts\":" << alt_band_bursts
@@ -16204,6 +16448,22 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             if(MH_EnableHook(setup_target)!=MH_OK) throw std::runtime_error("Cannot enable native view setup observer");
             setup_enabled=true;
+            // v1246 secondary-view guard (Timepiece lens): the secondary render (0x366590) and the Timepiece camera owner (0x44d230)
+            lens_guard_enabled=head_requested && !fs::exists(root/L"build"/L"no-lens-guard");
+            if(lens_guard_enabled) {
+                namespace sv=d2vr::secondary_view;
+                static constexpr std::array<unsigned char,16> owner_prologue{0x40,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,0x24};
+                std::array<unsigned char,16> render_code{},owner_code{},copy_code{},wrapper_code{};
+                const bool code_ok=read_self(image_base+sv::render_rva,render_code.data(),16) && render_code==sv::render_prologue &&
+                    read_self(image_base+0x44d230,owner_code.data(),16) && owner_code==owner_prologue &&
+                    read_self(image_base+sv::def_copy_rva,copy_code.data(),16) && copy_code==std::array<unsigned char,16>{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x48,0x89,0x7c,0x24,0x18,0x41} &&
+                    read_self(image_base+sv::setup_wrapper_rva,wrapper_code.data(),16) && wrapper_code==std::array<unsigned char,16>{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x48,0x89,0x7c,0x24,0x18,0x55};
+                bool hooked=code_ok;
+                if(hooked && !original_lens_render && MH_CreateHook(reinterpret_cast<void*>(image_base+sv::render_rva),reinterpret_cast<void*>(&lens_render_hook),reinterpret_cast<void**>(&original_lens_render))!=MH_OK) hooked=false;
+                if(hooked && !original_lens_owner && MH_CreateHook(reinterpret_cast<void*>(image_base+0x44d230),reinterpret_cast<void*>(&lens_owner_hook),reinterpret_cast<void**>(&original_lens_owner))!=MH_OK) hooked=false;
+                if(hooked && (MH_EnableHook(reinterpret_cast<void*>(image_base+sv::render_rva))!=MH_OK || MH_EnableHook(reinterpret_cast<void*>(image_base+0x44d230))!=MH_OK)) hooked=false;
+                if(!hooked) {lens_guard_enabled=false;note_recoverable("v1246 secondary-view guard not installed (code differs or hook failed)");}
+            }
         }
         if(eye_boundary_requested || shadow_share_requested) {
             std::array<std::byte,32> bytes{};
@@ -16219,6 +16479,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                     eye_boundary_csv.open(output/L"native-eye-boundary.csv",std::ios::trunc);
                     if(d2vr::diag::on() && (!eye_boundary_csv)) throw std::runtime_error("Cannot open native eye boundary log");
                     eye_boundary_csv << "event,present,thread,view,eye,bindings,same_render_thread\n";
+                    view_trace_enabled=fs::exists(root/L"build"/L"view-trace"); // v1245 diagnostic, v1246: knob build/view-trace
+                    if(view_trace_enabled) {std::lock_guard<std::mutex> trace_lock(view_trace_mutex);view_trace_rows=0;view_trace_csv.close();
+                     view_trace_csv.open(output/L"native-view-trace.csv",std::ios::trunc);
+                     view_trace_csv<<"kind,present,thread,view,index_or_claimed,order_or_head_wrote,caller_rva,head_depth,tp_state,fov_x,fov_y,px,py,pz,"
+                        "f0,f1,f2,l0,l1,l2,u0,u1,u2,copy_px,copy_py,copy_pz,cf0,cf1,cf2,cl0,cl1,cl2,cu0,cu1,cu2,rect0,rect1,rect2,rect3,frac_x,frac_y,"
+                        "native_n,prepared_alloc,nearest_slot,slot_distance,src0_view,src0_frame,src1_view,src1_frame,eye_view0,eye_view1\n";}
                 }
                 if(!original_eye_begin && MH_CreateHook(eye_target,reinterpret_cast<void*>(&eye_begin_hook),reinterpret_cast<void**>(&original_eye_begin))!=MH_OK)
                     hook_ok=false;
@@ -16755,6 +17021,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         taa_history_installed=false;
         taa_history.alternate_runtime(alternate_native_taa_abi?&alternate_taa_runtime:nullptr);
         d2vr::PostTonemapPass::eye_resolver=+[](std::uintptr_t view,int native) {
+            if(lens_view_skipped(view)) {++(lens_active.load()?lens_stats.post_in:lens_stats.post_after);return -1;} // v1246: the secondary pass is no eye
             if(view && alternate_taa_runtime.single_view.load()==view) {
                 const auto receipt=alternate_taa_runtime.resolve(view);
                 if(receipt) alt_pose_trace_pass(3,receipt->key.eye,receipt->key.display);
@@ -16762,6 +17029,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             return native;
         };
+        d2vr::NativeTaaHistory::skip_view=lens_guard_enabled?&lens_view_skipped:nullptr;
+        lens_active=false;lens_replaying=false;lens_view=0;lens_records={};lens_eye0_seen=false;lens_stats.last_frame=0;
+        {std::lock_guard<std::mutex> l(lens_camera_mutex);lens_camera={};}
         // v613 (headset: "first minute of DLSS/FSR the right eye ghosts"): FSR/DLSS mark the right eye's pass without waiting for its native
         // history twins; build/legacy-right-eye-taa-wait restores the wait (right eye on native TAA over the shared pair until the twins exist).
         right_eye_taa_wait_legacy=fs::exists(root/L"build"/L"legacy-right-eye-taa-wait");
@@ -16914,7 +17184,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         simulated_gameplay_csv.close();
         flush_frame_timing(true);xr_timing_csv.close();present_timing_csv.close();controller_trace_csv.close();
         setup_csv.close();
-        eye_boundary_csv.close();
+        eye_boundary_csv.close();{std::lock_guard<std::mutex> trace_lock(view_trace_mutex);view_trace_csv.close();}
         if(setup_disabled) {head_anchor_csv.close();authored_camera_csv.close();}
         {std::lock_guard<std::mutex> origin_lock(arm_origin_mutex);arm_origin_csv.close();arm_model_origin_frame=0;}
         try {d2vr::frame_order::stop();} catch(...) {}
@@ -17346,7 +17616,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             simulated_gameplay_csv.close();
             flush_frame_timing(true);xr_timing_csv.close();present_timing_csv.close();controller_trace_csv.close();
             setup_csv.close();
-            eye_boundary_csv.close();
+            eye_boundary_csv.close();{std::lock_guard<std::mutex> trace_lock(view_trace_mutex);view_trace_csv.close();}
             if(setup_disabled) {head_anchor_csv.close();authored_camera_csv.close();}
             if(arm_upload_disabled || arm_restore_deferred) {std::lock_guard<std::mutex> arm_lock(arm_log_mutex);arm_csv.close();arm_palettes.close();avatar_fit_events_csv.close();}
             {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);gpu_csv.close();gpu_hand_draw_csv.close();
