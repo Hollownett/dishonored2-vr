@@ -268,7 +268,7 @@ public:
                 static constexpr const char* names[cert_consumers]{"rig_target","placement","previous_rows","held_mask"};
                 for(unsigned k=0;k<cert_consumers;++k) {o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+','+std::to_string(alt_cert_[k][2].load())+']';
                     o+=",\""+std::string(names[k])+"_fallback_why\":[";for(unsigned w=0;w<5;++w) o+=(w?",":"")+std::to_string(alt_cert_why_[k][w].load());o+=']';}
-                return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"],\"content\":"+content_json()+"}}";
+                return o;}()+",\"hypothesis_check\":["+std::to_string(alt_hyp_[0].load())+','+std::to_string(alt_hyp_[1].load())+"],\"rig_zero_why\":["+std::to_string(rig_zero_why_[0].load())+','+std::to_string(rig_zero_why_[1].load())+','+std::to_string(rig_zero_why_[2].load())+','+std::to_string(rig_zero_why_[3].load())+"],\"content\":"+content_json()+"}}";
     }
     // v950: from each eye's native TAA dispatch, its per-view globals buffer (CS b1, 800 bytes), which the eye's scene draws
     // bind at VS b1. Two per eye (a view may alternate buffers); one seen for both eyes names neither.
@@ -345,6 +345,7 @@ public:
     // v1199: certain draws whose eye's latest published Setup VP equals their own view's VP (agree) / not (the rig target's hypothesis slice
     // for that eye would have used another render's E: must stay 0)
     inline static std::array<std::atomic<std::uint64_t>,2> alt_hyp_{};
+    inline static std::array<std::atomic<std::uint64_t>,4> rig_zero_why_{}; // v1204: why a rig draw got zero motion
     inline static std::array<std::atomic<std::uint64_t>,3> alt_newest_why_{}; // v1196: no b1 bound / own view of another buffer, b1 unknown / no own view, b1 unknown
     enum ViewUse : unsigned {use_held_mask,use_rig_target,use_rig_motion,use_place,use_fix,use_camera_only,use_near,use_count};
     inline static std::array<std::array<std::atomic<std::uint64_t>,use_count>,view_sources> alt_view_use_{};
@@ -978,18 +979,25 @@ private:
             alt_rig_.fetch_add(1,std::memory_order_relaxed);
             if(mode_.load(std::memory_order_relaxed)<1 || !RigMask::motion.load(std::memory_order_relaxed)) return false; // v1171 opt-in: off = v1165 (raw rows, engine palette)
             if(!have_prev) return false; // no previous rows: not a motion-vector writer (the colour pass), nothing to pair
-            bool rows_own=false;
-            if(have_view && (affine(view.inv[0],cur) || affine(view.inv[1],cur))) {
-                const auto kind=table_.fix_any(view.eye,view.frame,cur,prev); // v1185: by content, label-tolerant
-                // v1179: only other_last (the chain through the other eye one frame back, both hops proven by content). The rig is drawn in
-                // every render, so its raw previous rows are always the other eye's: own_last on a rig draw means the draw was labelled with
-                // the wrong render (rows one engine frame old against a palette two frames old: the v1170 ~5000 px renders). Zero instead.
-                rows_own=kind==PrevMvpTable::other_last;
-            }
-            const bool own=have_view && RigMask::previous_palette(c,static_cast<int>(view.eye),view.frame,rows_own);
+            // v1204 (still-probe sims: rig own 63k/zero 98 in v1190, own 9.7k/zero 70k in v1202): the rig's own motion needs NO render label.
+            // Its rows come from the content chain (fix_any: both hops matched by exact 64-byte rows in a window of labels) and its palette
+            // from the GPU-order ring (P = two engine frames back). v1193-v1203 ran that only for draws with a (certain) view, so an
+            // uncertain rig draw was neither fixed nor INSERTED into the table, and the next render's chain through it broke as well. Now
+            // every rig draw is recorded and chained; the label is the certain view's when there is one, else the newest engine frame
+            // (fix_any searches both eyes and frames -1..+6 around it).
+            const unsigned label_eye=have_view?view.eye:latest_eye_.load(std::memory_order_relaxed)&1u;
+            const std::uint32_t label_frame=have_view?view.frame:newest_frame_.load(std::memory_order_acquire);
+            const auto kind=table_.fix_any(label_eye,label_frame,cur,prev); // v1185: by content, label-tolerant
+            // v1179: only other_last (the chain through the other eye one frame back, both hops proven by content). The rig is drawn in
+            // every render, so its raw previous rows are always the other eye's: own_last on a rig draw means the draw was labelled with
+            // the wrong render (rows one engine frame old against a palette two frames old: the v1170 ~5000 px renders). Zero instead.
+            const bool rows_own=kind==PrevMvpTable::other_last;
+            const bool own=RigMask::previous_palette(c,static_cast<int>(label_eye),label_frame,rows_own);
+            // v1204 status rig_zero_why: [first frame (cur == prev), chain miss (the previous render's draw not recorded), chain unproven
+            // (the second hop), palette (rows own but the ring has no previous palette of this eye: late / young / no slot)]
+            if(!own) rig_zero_why_[kind==PrevMvpTable::same?0:kind==PrevMvpTable::miss?1:kind==PrevMvpTable::unproven?2:3].fetch_add(1,std::memory_order_relaxed);
             if(have_view) view_use(use_rig_motion);
-            certainty(cert_previous_rows,have_view?cert_certain:tl_content_why_==3?cert_na:cert_fallback); // v1199: no certain view = zero motion (prev = cur, this render's palette)
-            if(!have_view) RigMask::previous_palette(c,-1,newest_frame_.load(std::memory_order_relaxed),false); // zero palette; its render is not valid
+            certainty(cert_previous_rows,own || have_view?cert_certain:tl_content_why_==3?cert_na:cert_fallback);
             if(own) alt_rig_own_.fetch_add(1,std::memory_order_relaxed);
             if(!own) std::memcpy(prev,cur,64);
             return bind_pool(c,s,*sh,nullptr,prev);
