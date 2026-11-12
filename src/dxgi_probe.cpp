@@ -3725,6 +3725,7 @@ static void publish_held_mask() noexcept {
         d2vr::ObjectMotion::publish_held_frames(h);
     } catch(...) {}
 }
+static bool held_rig_now(d2vr::HeldCarry& out) noexcept;   // v1262 (defined beside advance_attachment)
 static void publish_weapon_draw(std::uintptr_t view) noexcept {
     // v1140: weapons stay opt-in (v1019, build/weapon-draw-place); held props are placed by default (ObjectMotion::held_wanted).
     const bool weapons=d2vr::ObjectMotion::weapon_wanted();
@@ -3893,8 +3894,8 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 if(last_heading_t>0 && t>last_heading_t+1e-4) yaw_dps=std::remainder(cam->heading-last_heading,6.283185307179586)/(t-last_heading_t)*57.29577951308232;
                 last_heading=cam->heading;last_heading_t=t;
             }
-            const auto held_placed=[&](unsigned hand,unsigned path,const d2vr::weapon_draw::Mat* body=nullptr,const d2vr::weapon_draw::Mat* given=nullptr,const d2vr::weapon_draw::Mat* body_now=nullptr) {
-                d2vr::weapon_draw::Place::stage_motion(hand,player_speed,yaw_dps,given,body_now);   // v1258
+            const auto held_placed=[&](unsigned hand,unsigned path,const d2vr::weapon_draw::Mat* body=nullptr,const d2vr::weapon_draw::Mat* given=nullptr,const d2vr::weapon_draw::Mat* body_now=nullptr,double rig_mm=-1,double rig_deg=-1) {
+                d2vr::weapon_draw::Place::stage_motion(hand,player_speed,yaw_dps,given,body_now,rig_mm,rig_deg);   // v1258, v1262 rig check
                 d2vr::weapon_draw::RigidLocal::set_path(hand,path);
                 const auto hb=path==d2vr::weapon_draw::RigidLocal::path_physical?native_grab.held(hand):std::nullopt;
                 const bool severed=hb && hb->entity==thing[hand] && hb->limb>=0;
@@ -3959,17 +3960,32 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                             // written from (the nearest recent given * the bind's K within 1 cm / 2 deg), else the bind's K.
                             d2vr::WorldTrackedPose given[d2vr::HeldRenderSlot::ring]{};
                             const unsigned given_n=legacy_held_render_goal?0u:d2vr::held_render_pose().recent(thing[hand],given,d2vr::HeldRenderSlot::ring);
+                            // v1262 (review): K carries the model's own scales, which can be signed or non-uniform (prop-grips: signed scales). The engine's map
+                            // cannot change them, so a K measured from the given ring is taken only with the bind K's scales and handedness (each column length
+                            // within 1 %, the same determinant sign); and the drawn body pose b * inverse(K) must come out rigid (unit columns within 2 %,
+                            // orthogonal, right-handed) BEFORE it is normalised - a mirrored or scaled result is refused, never repaired into a valid-looking pose.
+                            const auto col=[](const wd::Mat& m,unsigned c) {return std::sqrt(m[c]*m[c]+m[4+c]*m[4+c]+m[8+c]*m[8+c]);};
+                            const auto det=[](const wd::Mat& g) {return g[0]*(g[5]*g[10]-g[6]*g[9])-g[1]*(g[4]*g[10]-g[6]*g[8])+g[2]*(g[4]*g[9]-g[5]*g[8]);};
+                            const auto same_scales=[&](const wd::Mat& a,const wd::Mat& r) {
+                                for(unsigned c=0;c<3;++c) {const double ra=col(r,c);if(!(ra>1e-6) || !(std::abs(col(a,c)/ra-1)<=.01)) return false;}
+                                return det(a)*det(r)>0;
+                            };
                             wd::Mat kt=ex.k;double kt_best=.01;
                             for(unsigned i=0;i<given_n;++i) {
                                 const auto gm=wd::pose_mat(given[i]);const auto gk=wd::mul(gm,ex.k);const double d=wd::distance(gk,f_read);
-                                if(d<kt_best && wd::frame_angle(gk,f_read)<.035) if(wd::Mat ig{};wd::inverse(gm,ig)) {kt_best=d;kt=wd::mul(ig,f_read);}
+                                if(d<kt_best && wd::frame_angle(gk,f_read)<.035) if(wd::Mat ig{};wd::inverse(gm,ig)) if(const auto k=wd::mul(ig,f_read);same_scales(k,ex.k)) {kt_best=d;kt=k;}
                             }
                             const wd::Mat given_frame=given_n?wd::mul(wd::pose_mat(given[0]),kt):wd::Mat{},body_now=hk?wd::mul(wd::pose_mat(hk->pose),kt):wd::Mat{};
-                            if(!legacy_held_render_goal) if(wd::Mat ikt{};wd::inverse(kt,ikt)) {
-                                const auto d=wd::mul(b,ikt);d2vr::WorldTrackedPose drawn{};drawn.position={d[3],d[7],d[11]};
-                                for(unsigned c=0;c<3;++c) {const d2vr::Vec3 axis{d[c],d[4+c],d[8+c]};const double n=d2vr::length(axis);drawn.basis[c]=n>1e-9?axis*(1/n):axis;}
+                            double rig_mm=-1,rig_deg=-1;   // v1262
+                            if(!legacy_held_render_goal) if(wd::Mat ikt{};wd::inverse(kt,ikt)) if(const auto d=wd::mul(b,ikt);
+                               std::abs(col(d,0)-1)<=.02 && std::abs(col(d,1)-1)<=.02 && std::abs(col(d,2)-1)<=.02 && det(d)>.94) {
+                                d2vr::WorldTrackedPose drawn{};drawn.position={d[3],d[7],d[11]};
+                                for(unsigned c=0;c<3;++c) drawn.basis[c]=d2vr::Vec3{d[c],d[4+c],d[8+c]}*(1/col(d,c));
                                 const auto carry=full_body.image_carry(now);   // the rig this render's image was placed with
                                 const d2vr::HeldCarry from=carry?d2vr::HeldCarry{carry->root,carry->heading}:d2vr::HeldCarry{};
+                                // v1262 live check of the one rig definition: the noted rig (read at this image's Setup) against the same reading now. Standing
+                                // still it must be 0 (a fixed offset between the two ends would show here); moving, at most the rig's motion since the Setup.
+                                if(d2vr::HeldCarry at_begin{};carry && held_rig_now(at_begin)) {rig_mm=d2vr::length(at_begin.root-from.root)*1000.;rig_deg=std::abs(std::remainder(at_begin.heading-from.heading,6.283185307179586))*57.29577951308232;}
                                 d2vr::held_render_pose().note_drawn(thing[hand],drawn,d2vr::precise_s(),carry?&from:nullptr);
                             }
                             wd::Mat body_frame{};
@@ -3978,7 +3994,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                                 body_frames[hand]=hd.frame;body_ptrs[hand]=body_frames[hand].data();
                             }
                             ++held_draw_placed[hand];++held_exact_placed[hand];held_bound_entity[hand].store(thing[hand]);held_bind.clear(hand);
-                            held_placed(hand,wd::RigidLocal::path_physical,legacy_held_render_goal?&body_frame:nullptr,given_n?&given_frame:nullptr,hk?&body_now:nullptr); // v1231/v1237, v1258 one-pose sources
+                            held_placed(hand,wd::RigidLocal::path_physical,legacy_held_render_goal?&body_frame:nullptr,given_n?&given_frame:nullptr,hk?&body_now:nullptr,rig_mm,rig_deg); // v1231/v1237, v1258 one-pose sources, v1262 rig check
                             held_engine_pose_write(model,b,hand_kind[hand]);   // v1254 (opt-in build/held-engine-pose)
                             continue;
                         }
@@ -10245,6 +10261,7 @@ void prepare_head_view(void* view) noexcept {
                     if(const auto body_model=d2vr::rig::value<std::uintptr_t>(read_self,root_binding->arms[0].player+0xf0);
                        body_model && d2vr::rig::pointer(*body_model) && read_self(*body_model+0x1860,anchor_root.data(),sizeof(anchor_root))) {t.anchor_root=anchor_root;t.anchor_root_valid=true;}
                 }
+                if(d2vr::HeldCarry rig{};held_rig_now(rig)) {t.held_rig_root=rig.root;t.held_rig_heading=rig.heading;t.held_rig_valid=true;}   // v1262: one rig definition for both ends of the held carry
                 t.camera_heading=body->heading;t.camera_heading_valid=true;   // v832: the heading this Setup's camera anchor was placed with
                 {   // v861: the tracking space's world yaw (its calibrated forward as this Setup maps it) and the anchor it turns about: a rig turn
                     const auto rig=d2vr::to_game_pose({head_origin.position,{0,0,0,1}},head_origin,anchor,1.0);

@@ -123,6 +123,55 @@ int main() {
         const auto c=s.rig_of_tick(HeldCarry{{.05,0,0},.01+.785},.064);   // a snap turn is never extrapolated into the next tick
         CHECK(std::abs(c.heading-(.01+.785))<1e-12);
     }
+    // v1262 review checks -------------------------------------------------------------------------------------------------------------------------
+    HeldRenderSlot::drawn_hold=true;
+    {   // (1) the two ends of the carry must be ONE rig definition: a fixed 2 cm / 1 deg difference between the noted rig and the rig read at the sync
+        // lands whole on the engine pose even standing still; read by the same function it is 0 (status one_pose.*.rig_mm / rig_deg measure it live).
+        const auto drawn=yawed({1.3,.2,1.1},.3);const HeldCarry noted{{1,0,0},.2};
+        HeldRenderSlot s;s.publish(1,drawn,0.);s.note_drawn(drawn,0.,&noted);
+        WorldTrackedPose same{},offset{};bool b=false;
+        const HeldCarry read_same=noted,read_offset{{1.02,0,0},.2+1./57.29577951308232};
+        CHECK(s.decide(drawn,.005,same,b,&read_same));
+        HeldRenderSlot s2;s2.publish(1,drawn,0.);s2.note_drawn(drawn,0.,&noted);CHECK(s2.decide(drawn,.005,offset,b,&read_offset));
+        const double e_same=length(same.position-drawn.position)*1000,e_off=length(offset.position-drawn.position)*1000;
+        std::printf("rig sources: one definition %.3f mm, a 2 cm / 1 deg definition offset %.1f mm on the engine pose standing still\n",e_same,e_off);
+        CHECK(e_same<1e-6 && e_off>15);   // 2 cm plus the 1 deg turn's share at 0.36 m from the root
+    }
+    {   // (3) release + re-grab of the SAME entity: nothing noted for the old hold survives (publish resets only on an entity change)
+        HeldRenderSlot s;const auto g=yawed({0,0,1},0);const HeldCarry rig{{0,0,0},0};
+        s.publish(7,g,0.);s.note_drawn(yawed({.05,0,1},.1),0.,&rig);WorldTrackedPose out{};bool b=false;CHECK(s.decide(g,.005,out,b,&rig));
+        CHECK(s.recent_n==1 && s.have_seen && s.drawn_ok && s.rel_ok && s.carry_ok);
+        s.end(.01);
+        CHECK(!s.drawn_ok && !s.rel_ok && !s.carry_ok && s.recent_n==0 && !s.have_seen && s.note_dt==0);
+        CHECK(s.decide(g,.02,out,b,&rig) && b);   // the release blend still runs from the last pose given
+        s.publish(7,g,.05);   // the same entity again, before the blend ended
+        CHECK(s.decide(g,.055,out,b,&rig) && !b && s.used==HeldRenderSlot::given_goal && length(out.position-g.position)<1e-12);   // no old note: the goal
+        std::printf("re-grab of the same entity: old note, X, given ring and rig history cleared\n");
+    }
+    {   // (2) a hitch: no note for 80 ms while the hand sweeps at 1.5 m/s through the rig. The rig-only carry keeps the last drawn hold (the hand's sweep
+        // is invisible to it); past carry_age the engine takes goal * X, which follows the hand with the motor's samples.
+        HeldRenderSlot s;const HeldCarry rig{{0,0,0},0};const auto x_off=yawed({.03,.01,0},.05);   // the motor-hand vs drawn-hand offset (X)
+        const auto drawn_at=[&](double t) {return yawed({.4+1.5*std::max(0.,t-.1),-.2,1.},0);};   // the hand starts sweeping at t = 0.1 s
+        double carry_only=0,v1262=0,steady_age_ok=1;
+        for(double t=0;t<.3;t+=1./90) {
+            const auto truth=drawn_at(t);const auto goal=grip_compose(truth,grip_inverse(x_off));   // the motor goal tracks the hand (minus X)
+            s.publish(3,goal,t);
+            const bool hitch=t>=.1 && t<.18;
+            if(!hitch) s.note_drawn(truth,t,&rig);
+            const double sync=t+.006;WorldTrackedPose out{};bool b=false;s.decide(goal,sync,out,b,&rig);
+            const double err=length(out.position-drawn_at(sync).position)*1000;   // vs the hand at the sync's time
+            if(hitch && t>.1+.035) {v1262=std::max(v1262,err);carry_only=std::max(carry_only,length(s.drawn.position-drawn_at(sync).position)*1000);}
+            if(!hitch && t>.03 && t<.1 && s.used!=HeldRenderSlot::given_carried) steady_age_ok=0;   // steady rendering: always the rig carry
+        }
+        std::printf("hitch (80 ms without notes, hand 1.5 m/s): rig-only carry of the last note lags up to %.0f mm; v1262 (goal * X past %.0f ms) %.1f mm\n",carry_only,s.carry_age()*1000,v1262);
+        CHECK(steady_age_ok==1 && carry_only>50 && v1262<15);
+    }
+    {   // (4) the drawn body pose is refused, not repaired, when K's scale/handedness disagrees (the publisher's same_scales / unit-column guard is
+        // dxgi_probe code; here the property it relies on): a mirrored basis fails grab_pose_valid, so a refused note leaves the last good one in place
+        HeldRenderSlot s;const auto g=yawed({0,0,1},0);s.publish(1,g,0.);
+        WorldTrackedPose mirrored=g;mirrored.basis[2]=mirrored.basis[2]*-1.;
+        CHECK(!s.note_drawn(mirrored,0.,nullptr) && !s.drawn_ok);
+    }
     std::printf(failures?"held_one_pose_check: %d FAILED\n":"held_one_pose_check: PASS\n",failures);
     return failures?1:0;
 }

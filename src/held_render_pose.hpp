@@ -118,13 +118,29 @@ struct HeldRenderSlot {
         if(e!=entity) *this={};
         entity=e;goal=g;at_s=now;held=true;offset_set=false;
     }
-    void end(double now) noexcept {if(held) {held=false;released_s=now;offset_set=false;drawn_ok=false;}}
+    // v1262: a release forgets everything noted for this hold (the release blend keeps `written`), so a re-grab of the SAME entity starts like a new one
+    // (publish() resets the slot only on an entity change): no old drawn hold or X, no stale given ring for the publisher's K, no old rig history.
+    void end(double now) noexcept {
+        if(!held) return;
+        held=false;released_s=now;offset_set=false;
+        drawn_ok=rel_ok=carry_ok=false;note_dt=0;recent_n=recent_next=0;have_seen=stepped=false;seen_dt=0;
+    }
+    // v1262 (review): how old a drawn note may be and still be carried by the rig alone. Notes arrive once per render (the publisher at each eye-0
+    // begin). The engine's sync runs on the game thread, which may be one frame ahead of the render thread (Setup N is drawn by Begin N+1), so a
+    // steady-state sync finds the newest note up to two render intervals old; 2.5 intervals takes the render-time jitter. Anything older means a
+    // render or its note was missed (a hitch, a render without an image): the hand's own motion since is unknown to a rig-only carry (a fast hand
+    // moves 10-20 cm in 100 ms), while the motor's goal keeps following the hand's samples, so goal * X takes over (until fresh_s), then the goal.
+    // The interval is the one measured between the last two notes (whatever the headset's rate); status held_render_pose.drawn_hold.note_age_ms.
+    static constexpr double carry_floor_s=.004,carry_cap_s=.04,carry_default_s=.03;
+    double note_dt{};
+    double carry_age() const noexcept {return note_dt>0 && note_dt<.05?std::clamp(2.5*note_dt,carry_floor_s,carry_cap_s):carry_default_s;}
     // v1258: the hold as the render drew it (a body pose: the drawn model frame * inverse of the body->model map) at `now` (s), and the rig reference
     // its image was placed with (null: none, only goal * X is possible).
     bool note_drawn(const WorldTrackedPose& pose,double now,const HeldCarry* carry=nullptr) noexcept {
         if(!held || !grab_pose_valid(pose) || !grab_pose_valid(goal)) return false;
         const auto x=grip_compose(grip_inverse(goal),pose);
         rel_ok=length(x.position)<=drawn_max_m;if(rel_ok) drawn_rel=x;   // far from the goal (a snap the goal has not caught up with, a teleport): no goal * X
+        note_dt=drawn_ok && now>drawn_s?now-drawn_s:0.;
         drawn=pose;drawn_s=now;drawn_ok=true;carry_ok=carry && finite(carry->root) && std::isfinite(carry->heading);if(carry_ok) drawn_carry=*carry;
         return true;
     }
@@ -135,9 +151,12 @@ struct HeldRenderSlot {
         if(held && !(now-at_s<=fresh_s)) end(at_s+fresh_s);   // publications stopped without an end (a stalled pass): blend out from then
         if(held) {
             out=goal;
-            if(drawn_hold && drawn_ok && now-drawn_s<=fresh_s) {
+            const bool have_rig=rig && finite(rig->root) && std::isfinite(rig->heading);
+            const HeldCarry tick_rig=have_rig?rig_of_tick(*rig,now):HeldCarry{};   // v1262: the rig history advances at every sync, carried or not
+            const double age=now-drawn_s;
+            if(drawn_hold && drawn_ok && age<=fresh_s) {
                 if(rel_ok) if(const auto d=grip_compose(goal,drawn_rel);grab_pose_valid(d)) {out=d;used=given_relative;}
-                if(carry_ok && rig && finite(rig->root) && std::isfinite(rig->heading)) if(const auto d=held_carried(drawn,drawn_carry,rig_of_tick(*rig,now));
+                if(carry_ok && have_rig && age<=carry_age()) if(const auto d=held_carried(drawn,drawn_carry,tick_rig);
                     grab_pose_valid(d) && length(d.position-drawn.position)<=carry_max_m) {out=d;used=given_carried;}   // a teleport / load is not motion
             }
             written=out;has_written=true;recent[recent_next]=out;recent_next=(recent_next+1)%ring;if(recent_n<ring) ++recent_n;return true;
@@ -216,7 +235,9 @@ public:
             ",\"frames\":"+std::to_string(ragdoll_frames_.load())+",\"bones\":"+std::to_string(ragdoll_bones_.load())+",\"unframed\":"+std::to_string(unframed_.load())+"}"+
             ",\"drawn_hold\":{\"on\":"+(HeldRenderSlot::drawn_hold?"true":"false")+",\"notes\":"+std::to_string(drawn_notes_.load())+",\"refused\":"+std::to_string(drawn_refused_.load())+
             ",\"given\":{\"goal\":"+std::to_string(given_[0].load())+",\"relative\":"+std::to_string(given_[1].load())+",\"carried\":"+std::to_string(given_[2].load())+
-            ",\"carried_rig_read\":"+std::to_string(carry_stepped_[0].load())+",\"carried_step_repeated\":"+std::to_string(carry_stepped_[1].load())+"}}}";   // v1258: what the engine was given
+            ",\"carried_rig_read\":"+std::to_string(carry_stepped_[0].load())+",\"carried_step_repeated\":"+std::to_string(carry_stepped_[1].load())+"}"+   // v1258: what the engine was given
+            ",\"note_too_old\":"+std::to_string(too_old_.load())+",\"note_age_ms\":["+[&]{std::string a;for(unsigned i=0;i<age_bins;++i) a+=(i?",":"")+std::to_string(age_n_[i].load());return a;}()+
+            "],\"note_age_edges_ms\":[5,10,15,20,25,30,40,100,\"inf\"]}}";   // v1262
     }
     static bool install(std::uintptr_t base) noexcept {
         auto& p=instance();if(!base) return false;
@@ -253,6 +274,8 @@ private:
     std::atomic<std::uint64_t> published_{},written_{},blended_{},ended_{};std::array<std::atomic<std::uint64_t>,refusals> refused_{};
     std::atomic<std::uint64_t> drawn_notes_{},drawn_refused_{};std::array<std::atomic<std::uint64_t>,3> given_{};   // v1258: [goal, goal * X, carried drawn hold]
     std::array<std::atomic<std::uint64_t>,2> carry_stepped_{};   // v1258: carried with the rig as read / with the last tick step repeated (the rig read was not yet this tick's)
+    static constexpr unsigned age_bins=9;static constexpr double age_edge_ms[age_bins]={5,10,15,20,25,30,40,100,1e9};
+    std::array<std::atomic<std::uint64_t>,age_bins> age_n_{};std::atomic<std::uint64_t> too_old_{};   // v1262: note age at the sync; carries refused as too old
     static bool same(std::uintptr_t at,const unsigned char* bytes,std::size_t n) noexcept {
         __try {return std::memcmp(reinterpret_cast<const void*>(at),bytes,n)==0;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
@@ -311,6 +334,10 @@ private:
             for(unsigned k=0;k<3;++k) {a[k*3]=float(out.basis[k].x);a[k*3+1]=float(out.basis[k].y);a[k*3+2]=float(out.basis[k].z);}
             (blending?blended_:written_).fetch_add(1,std::memory_order_relaxed);if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);
             if(s.used==HeldRenderSlot::given_carried) carry_stepped_[s.stepped?1:0].fetch_add(1,std::memory_order_relaxed);
+            if(!blending && s.drawn_ok) {   // v1262: how old the newest drawn note was at this sync, and syncs it was too old to carry
+                const double ms=(precise_s()-s.drawn_s)*1000.;unsigned bin=0;while(bin+1<age_bins && !(ms<=age_edge_ms[bin])) ++bin;age_n_[bin].fetch_add(1,std::memory_order_relaxed);
+                if(s.carry_ok && s.used!=HeldRenderSlot::given_carried && ms>s.carry_age()*1000.) too_old_.fetch_add(1,std::memory_order_relaxed);
+            }
             return true;
         }
         return false;

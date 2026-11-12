@@ -156,6 +156,7 @@ struct Tracking {
     // the same map (Driver::note_xr), so an image's arms come from the locate of its own camera.
     Xf xr_head_world{},xr_grip_world[2]{};unsigned xr_hands{};std::uint64_t xr_map{},xr_serial{};
     double camera_heading{};bool camera_heading_valid{};   // v832: the native player heading (rad) at this Setup (Driver::root_now)
+    Vec3 held_rig_root{};double held_rig_heading{};bool held_rig_valid{};   // v1262: the rig a held prop's engine pose is carried from (dxgi_probe held_rig_now, read at this Setup)
     // v861: the world yaw of the tracking space this publication was mapped with (the calibrated forward), and where it sits (the camera anchor):
     // a change between solves is a rig turn (stick, snap, fold), which turns the solver's memory with it (BodySolver::turn_rig).
     double rig_yaw{};Vec3 rig_pivot{};bool rig_valid{};
@@ -399,12 +400,13 @@ public:
         image_valid_=false;
         if(!have_track_ || !have_native_body_ || !solve_locked(0,false)) return;
         image_out_=out_;image_fit_=fit_revision_;image_frame_=frame;image_valid_=true;image_held_ok_=true;++image_begins_;
-        image_carry_ok_=false;   // v1258: the root position and heading this image was placed with (item_advance's reference), for a held prop's engine pose
-        if(track_.anchor_root_valid && track_.camera_heading_valid && std::isfinite(track_.camera_heading) && std::isfinite(track_.head_follow)) try {
-            image_carry_={frame_of(track_.anchor_root).rigid.p,track_.camera_heading-track_.head_follow};image_carry_ok_=true;
-        } catch(...) {}
+        // v1262: the rig this image's publication was made with, read by the SAME function the engine-side carry reads it with (dxgi_probe held_rig_now:
+        // body model +0x1860 root, camera heading - head_follow_total), so the two ends of the carry are one quantity at two moments.
+        image_carry_ok_=track_.held_rig_valid && std::isfinite(track_.held_rig_root.x) && std::isfinite(track_.held_rig_root.y) && std::isfinite(track_.held_rig_root.z) &&
+            std::isfinite(track_.held_rig_heading);
+        if(image_carry_ok_) image_carry_={track_.held_rig_root,track_.held_rig_heading};
     }
-    // v1258: the image of `frame`'s carry reference: the anchor root position and (camera heading - head follow) of its publication. A world pose drawn
+    // v1258: the image of `frame`'s carry reference: the rig root position and (camera heading - head follow) of its publication. A world pose drawn
     // by that image moves on with the player as item_advance moves an attached item: about the root by the heading change, with the root's translation.
     struct ImageCarry {Vec3 root{};double heading{};};
     std::optional<ImageCarry> image_carry(std::uint64_t frame) const {

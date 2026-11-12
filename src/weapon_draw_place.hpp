@@ -803,7 +803,7 @@ public:
             }
             l={true,out.have_prev,frame,out.prev_frame,model,*bound[s],out.prev,out.relative};
             published_side_[s].fetch_add(1,std::memory_order_relaxed);
-            if(staged_[s].kind>=kind_prop) {auto& c=cert_pending_[s];c.valid=true;c.f=model;c.b=*bound[s];c.bucket=staged_[s].bucket;c.kind=staged_[s].kind;c.id=ids[s];c.src=staged_[s].src;c.nsrc=staged_[s].nsrc;}   // v1258
+            if(staged_[s].kind>=kind_prop) {auto& c=cert_pending_[s];c.valid=true;c.f=model;c.b=*bound[s];c.bucket=staged_[s].bucket;c.kind=staged_[s].kind;c.id=ids[s];c.src=staged_[s].src;c.nsrc=staged_[s].nsrc;c.rig_mm=staged_[s].rig_mm;c.rig_deg=staged_[s].rig_deg;}   // v1258
         }
         staged_={};
         latest_frame_.store(frame,std::memory_order_release);
@@ -835,9 +835,10 @@ public:
     // engine was last given (held_render_pose), [1] the physics body now. Per render the rolled tally says what the thing was drawn at.
     enum Bucket:unsigned {b_still,b_walk,b_run,b_turn,buckets};   // turn: the player's heading turns >= 20 deg/s (stick or snap), whatever the speed
     static unsigned bucket_of(double player_mps,double yaw_dps) noexcept {return std::abs(yaw_dps)>=20.?b_turn:player_mps>=2.5?b_run:player_mps>=.3?b_walk:b_still;}
-    static void stage_motion(unsigned s,double player_mps,double yaw_dps,const Mat* given=nullptr,const Mat* body=nullptr) noexcept {
+    // v1262 rig_mm / rig_deg (>= 0): the rig the drawn hold was noted with (its image's publication) against the same reading at this begin.
+    static void stage_motion(unsigned s,double player_mps,double yaw_dps,const Mat* given=nullptr,const Mat* body=nullptr,double rig_mm=-1,double rig_deg=-1) noexcept {
         if(s>1) return;
-        staged_[s].bucket=bucket_of(player_mps,yaw_dps);
+        staged_[s].bucket=bucket_of(player_mps,yaw_dps);staged_[s].rig_mm=rig_mm;staged_[s].rig_deg=rig_deg;
         staged_[s].nsrc=0;
         if(given && finite(*given)) staged_[s].src[staged_[s].nsrc++]=*given;else staged_[s].src[staged_[s].nsrc++]=Mat{};
         if(body && finite(*body)) staged_[s].src[staged_[s].nsrc++]=*body;else staged_[s].src[staged_[s].nsrc++]=Mat{};
@@ -926,7 +927,7 @@ public:
                 const OneCell& c=cert_[k][bk];char b[160];
                 std::snprintf(b,sizeof b,"\"%s\":{\"renders\":%llu,\"unplaced\":%llu,\"unplaced_no_held_draw\":%llu,\"eye_split\":%llu,\"shown_deg_max\":%.2f",bn[bk],
                     static_cast<unsigned long long>(c.renders),static_cast<unsigned long long>(c.unplaced),static_cast<unsigned long long>(c.unseen),static_cast<unsigned long long>(c.eye_split),c.deg_max);
-                o+=std::string(bk?",":"")+b+",\"shown_mm\":"+c.shown.json()+",\"flip_mm\":"+c.flip.json()+",\"intra_mm\":"+c.intra.json()+",\"eye_mm\":"+c.eye.json()+",\"source_mm\":{";
+                o+=std::string(bk?",":"")+b+",\"shown_mm\":"+c.shown.json()+",\"flip_mm\":"+c.flip.json()+",\"intra_mm\":"+c.intra.json()+",\"eye_mm\":"+c.eye.json()+",\"rig_mm\":"+c.rig_mm.json()+",\"rig_deg\":"+c.rig_deg.json()+",\"source_mm\":{";
                 for(unsigned i=0;i<4;++i) o+=std::string(i?",":"")+"\""+sn[i]+"\":"+c.source[i].json();
                 o+="}}";
             }
@@ -1242,7 +1243,7 @@ private:
     struct SevDraw {std::uint64_t key{},layout{},passes{},placed{};unsigned size{};double scale_min{1e9},scale_max{},ortho_max{};std::array<double,3> l_mm{};};
     inline static std::mutex sev_mutex_;inline static std::array<SevDraw,8> sev_{};inline static unsigned sev_n_{};
     inline static std::uint32_t last_frame_l_{};inline static Mat sev_first_{};inline static std::uint64_t sev_first_key_{},sev_pairs_{},sev_apart_{};inline static double sev_spread_um_{};
-    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};};   // v1258: motion bucket, source poses
+    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};};   // v1258: motion bucket, source poses
     inline static std::array<Staged,2> staged_{};
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
     inline static std::array<std::uint32_t,2> census_frame_{};
@@ -1267,11 +1268,11 @@ public:
             char b[112];std::snprintf(b,sizeof b,"{\"n\":%llu,\"p50_le\":%g,\"p90_le\":%g,\"max\":%.3f}",static_cast<unsigned long long>(t),q(.5),q(.9),max);return b;
         }
     };
-    struct OneCell {std::uint64_t renders{},unplaced{},unseen{},eye_split{};double deg_max{};OneHist shown,flip,intra,eye;std::array<OneHist,4> source;};
+    struct OneCell {std::uint64_t renders{},unplaced{},unseen{},eye_split{};double deg_max{};OneHist shown,flip,intra,eye,rig_mm,rig_deg;std::array<OneHist,4> source;};
     static OneCell one_pose_cell(unsigned kind,unsigned bucket) {std::lock_guard<std::mutex> lock(cert_mutex_);return kind<kinds && bucket<buckets?cert_[kind][bucket]:OneCell{};}
     static void reset_one_pose() {std::lock_guard<std::mutex> lock(cert_mutex_);cert_={};cert_prev_={};cert_pending_={};for(auto& s:src_min_um_) for(auto& v:s) v.store(0);}
 private:
-    struct CertRender {bool valid{};Mat f{},b{};unsigned bucket{},kind{};std::uintptr_t id{};std::array<Mat,2> src{};unsigned nsrc{};};
+    struct CertRender {bool valid{};Mat f{},b{};unsigned bucket{},kind{};std::uintptr_t id{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};};
     inline static std::array<CertRender,2> cert_pending_{};
     inline static std::array<std::array<std::atomic<std::uint64_t>,4>,2> src_min_um_{};
     struct CertPrev {bool ok{};std::uintptr_t id{};std::array<double,3> dev{};};
@@ -1292,6 +1293,7 @@ private:
         const double dev_mm=std::hypot(dev[0],std::hypot(dev[1],dev[2]))*1000.,full_mm=distance(c.f,c.b)*1000.;
         std::lock_guard<std::mutex> lock(cert_mutex_);
         OneCell& cell=cert_[c.kind][c.bucket];++cell.renders;
+        if(c.rig_mm>=0) cell.rig_mm.add(c.rig_mm);if(c.rig_deg>=0) cell.rig_deg.add(c.rig_deg);   // v1262
         cell.shown.add(dev_mm);
         if(!placed) {++cell.unplaced;if(!(b&32u)) ++cell.unseen;const double deg=frame_angle(c.f,c.b)*57.29577951308232;if(deg>cell.deg_max) cell.deg_max=deg;
             for(unsigned i=0;i<4;++i) if(mins[i]) cell.source[i].add(static_cast<double>(mins[i]-1)/1000.);}
