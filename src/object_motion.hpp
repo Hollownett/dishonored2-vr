@@ -517,6 +517,9 @@ private:
         placed_resid_[mode][0].fetch_add(v,std::memory_order_relaxed);placed_resid_[mode][1].fetch_add(1,std::memory_order_relaxed);
         for(auto m=placed_resid_[mode][2].load(std::memory_order_relaxed);v>m && !placed_resid_[mode][2].compare_exchange_weak(m,v);) {}
     }
+    // v1223: a placed draw's identity for its rigid local transform (weapon_draw::RigidLocal): its vertex shader and cb2 size
+    // ponytail: two parts of one held thing with the same shader and size are told apart only by L (nearest within 5 cm); add the index range if that ever mixes them
+    static std::uint64_t draw_key(const ContextState& s,const Shadow& sh) noexcept {return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(s.vs))^(std::uint64_t{sh.size}<<48);}
     static std::string resid_json(unsigned mode) {
         const auto n=placed_resid_[mode][1].load();
         return "{\"draws\":"+std::to_string(n)+",\"mean_mndc\":"+std::to_string(n?placed_resid_[mode][0].load()/1000.0/static_cast<double>(n):0.)
@@ -1309,7 +1312,7 @@ private:
             if(rig_target::book().find_prev(view.vp,prev_vp)) {
                 float placed[16]{},placed_prev[16]{},still[16]{};bool own_prev=false;
                 rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
-                const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still);
+                const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh));
                 // v1218: this eye's previous render's submitted rows of the draw (receipt chain), else camera-only on the current binding
                 if(r.side>=0 && have_prev && view.receipt && placed_history.load(std::memory_order_relaxed)) {
                     float own[16];const bool predicted_own=own_prev;own_prev=false;
@@ -1349,7 +1352,7 @@ private:
                 static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
                 const auto started=timed?__rdtsc():0;
                 const auto r=weapon_draw::Place::place(frame,&weapon_views,cur,have_prev?prev:nullptr,placed,placed_prev,
-                    have_view?static_cast<int>(view.eye):-1,pass_eye,still);
+                    have_view?static_cast<int>(view.eye):-1,pass_eye,still,draw_key(s,*sh));
                 // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven), else camera-only
                 if(r.side>=0 && have_prev && placed_history.load(std::memory_order_relaxed)) {
                     float own[16];const unsigned e=static_cast<unsigned>(r.eye);
@@ -1583,6 +1586,7 @@ private:
         const bool no_draw_place_knob=std::filesystem::exists(knobs_/L"no-weapon-draw-place",error);
         weapon_mode_.store(draw_place_knob && !no_draw_place_knob?1:0,std::memory_order_relaxed);
         placed_history.store(!std::filesystem::exists(knobs_/L"no-placed-history",error),std::memory_order_relaxed); // v1218
+        weapon_draw::RigidLocal::on.store(!std::filesystem::exists(knobs_/L"no-rigid-local",error),std::memory_order_relaxed); // v1223
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)
@@ -1673,7 +1677,8 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<",\"placed\":["<<weapon_placed_side_[0].load(std::memory_order_relaxed)<<','<<weapon_placed_side_[1].load(std::memory_order_relaxed)<<']'
        <<",\"alt\":["<<weapon_alt_side_[0].load(std::memory_order_relaxed)<<','<<weapon_alt_side_[1].load(std::memory_order_relaxed)<<']'
        <<",\"prev\":["<<placed_prev_[0].load(std::memory_order_relaxed)<<','<<placed_prev_[1].load(std::memory_order_relaxed)<<']' // v1218: [submitted previous proven, camera-only]
-       <<",\"v1216_prev_error\":"<<resid_json(0)
+       <<",\"v1216_prev_error\":"<<resid_json(0)<<",\"v1216_prev_error_alt\":"<<resid_json(1)
+       <<",\"rigid_local\":"<<weapon_draw::RigidLocal::json() // v1223
        <<",\"skip\":[";
     // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when
     // a draw was actually placed, and the out-of-bounds pointer faulted every status poll after a save load. The static_asserts

@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <utility>
 
 namespace d2vr::weapon_draw {
@@ -407,7 +408,7 @@ enum Stage:unsigned {rejected,no_views,no_certificate,far_away,ambiguous,unbound
 struct Result {int side{-1},eye{-1},hint{-1};Stage stage{rejected};bool alt{};};   // alt (v1072): placed from the previous read F
 
 struct Side {
-    bool valid{},have_prev{},bound{};
+    bool valid{},have_prev{},bound{},rigid{};   // rigid (v1223): a held thing (reach > 0): its draws use RigidLocal's settled L
     double reach{};   // v1067: >0 = this side's own match radius (a held thing: 0.5 m since v1072, its parts sit at offsets from F)
     std::uint32_t prev_frame{};
     Mat model{},delta{},prev{},relative{},bound_frame{},prev_bound{};
@@ -422,6 +423,96 @@ struct Side {
     bool alt{};Mat alt_model{},alt_delta{};std::array<Mat,2> alt_prev_eye{};
 };
 struct Slot {std::atomic<std::uint32_t> ready{};std::array<Side,2> side{};};
+
+// v1223 (user: "I need loose props behave same as bodies (zero ghosting)"): a held thing's draw is placed at B * L, L = inverse(F) * M its
+// transform in the thing's frame. For a rigid part L is a constant, but measured per draw it is inverse(F_read) * F_draw * L: a carried physics
+// prop's draws are not always composed from the frame the publisher read (and the v1072 previous-read alternative is a guess between two), so
+// the measured L - and the drawn prop - wobbled against the hand by that difference, differently per render and per eye. Per held side and draw
+// (key: vertex shader + cb2 size, then the nearest L within 5 cm) the measured L of each render is a sample; L settles when 3 consecutive
+// renders agree within 0.5 mm / 0.2 deg, a single disagreeing render is an outlier (rejected, its size counted), 4 consecutive renders agreeing
+// on a new value are a genuine change (followed). Samples are folded only at the next publish, so every draw of one render - both eyes, every
+// pass - uses the same L. No settled L yet: the measured one (v1222). A new held thing (publish id) resets the side. build/no-rigid-local: off.
+class RigidLocal {
+public:
+    inline static std::atomic<bool> on{true};
+    static constexpr double agree_m=.0005,agree_rad=.0035,gate_m=.05;
+    static constexpr unsigned settle_n=3,follow_n=4,clusters=8,max_age=240;
+    static constexpr unsigned bins=11; // deviation histogram edges in mm: .05 .1 .2 .5 1 2 5 10 20 50, then above
+    // Draw time: the L to place this draw with; false = none settled (place with the measured one). Records the render's sample.
+    static bool use(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& measured,Mat& out) noexcept {
+        if(side>1 || !on.load(std::memory_order_relaxed)) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& cs=side_[side];Cluster* best=nullptr;double best_d=gate_m;Cluster* free_slot=nullptr;
+        for(auto& c:cs) {
+            if(!c.active) {if(!free_slot) free_slot=&c;continue;}
+            if(c.key!=key) continue;
+            const Mat& ref=c.settled_ok?c.settled:c.cand_n?c.cand:c.pending;
+            const double d=distance(ref,measured);
+            if(d<best_d) {best_d=d;best=&c;}
+        }
+        if(!best) {if(!free_slot) {++unsettled_;return false;} *free_slot=Cluster{};free_slot->active=true;free_slot->key=key;best=free_slot;}
+        best->age=0;
+        if(best->pending_frame!=frame+1) {best->pending=measured;best->pending_frame=frame+1;}
+        if(!best->settled_ok) {++unsettled_;return false;}
+        out=best->settled;++settled_uses_;return true;
+    }
+    // Publish time (render boundary): the last render's samples into each cluster's consensus; a changed held thing resets the side.
+    static void fold(unsigned side,std::uintptr_t id) noexcept {
+        if(side>1) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(id!=id_[side]) {if(id_[side]) ++resets_;id_[side]=id;side_[side]={};return;}
+        for(auto& c:side_[side]) {
+            if(!c.active) continue;
+            if(!c.pending_frame) {if(++c.age>max_age) c=Cluster{};continue;}
+            const Mat s=c.pending;c.pending_frame=0;++samples_;
+            if(!c.settled_ok) {
+                if(c.cand_n && agree(s,c.cand)) ++c.cand_n;else {c.cand=s;c.cand_n=1;}
+                if(c.cand_n>=settle_n) {c.settled=c.cand;c.settled_ok=true;c.cand_n=0;++settles_;}
+                continue;
+            }
+            note(dev_,dev_max_um_,dev_max_mdeg_,s,c.settled);   // how far the measured (v1222) placement was from the rigid one
+            if(agree(s,c.settled)) {c.cand_n=0;continue;}
+            ++outliers_;
+            if(c.cand_n && agree(s,c.cand)) {
+                if(++c.cand_n>=follow_n) {note(step_,step_max_um_,step_max_mdeg_,c.cand,c.settled);c.settled=c.cand;c.cand_n=0;++follows_;}
+            } else {c.cand=s;c.cand_n=1;}
+        }
+    }
+    static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};}
+    static std::string json() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string o="{\"on\":"+std::string(on.load()?"true":"false")+",\"samples\":"+std::to_string(samples_)+",\"settles\":"+std::to_string(settles_)
+            +",\"settled_draws\":"+std::to_string(settled_uses_)+",\"unsettled_draws\":"+std::to_string(unsettled_)+",\"outliers\":"+std::to_string(outliers_)
+            +",\"follows\":"+std::to_string(follows_)+",\"resets\":"+std::to_string(resets_);
+        const auto hist=[&](const char* name,const std::array<std::uint64_t,bins>& h,std::uint64_t um,std::uint64_t mdeg) {
+            std::uint64_t n=0;for(auto v:h) n+=v;
+            static constexpr double edge[bins]={.05,.1,.2,.5,1,2,5,10,20,50,1e9};
+            double p95=0;std::uint64_t run=0;for(unsigned i=0;i<bins;++i) {run+=h[i];if(n && run*100>=n*95) {p95=edge[i];break;}}
+            o+=",\""+std::string(name)+"\":{\"n\":"+std::to_string(n)+",\"p95_mm_le\":"+std::to_string(p95)+",\"max_mm\":"+std::to_string(um/1000.)
+              +",\"max_deg\":"+std::to_string(mdeg/1000.)+",\"hist_mm\":[";
+            for(unsigned i=0;i<bins;++i) o+=(i?",":"")+std::to_string(h[i]);
+            o+="]}";
+        };
+        hist("measured_vs_rigid",dev_,dev_max_um_,dev_max_mdeg_);hist("rigid_steps",step_,step_max_um_,step_max_mdeg_);
+        return o+'}';
+    }
+private:
+    struct Cluster {bool active{},settled_ok{};std::uint64_t key{};Mat settled{},cand{},pending{};unsigned cand_n{},age{};std::uint32_t pending_frame{};};
+    static bool agree(const Mat& a,const Mat& b) noexcept {return distance(a,b)<=agree_m && angle(a,b)<=agree_rad;}
+    static void note(std::array<std::uint64_t,bins>& h,std::uint64_t& max_um,std::uint64_t& max_mdeg,const Mat& a,const Mat& b) noexcept {
+        static constexpr double edge[bins]={.05,.1,.2,.5,1,2,5,10,20,50,1e9};
+        const double mm=distance(a,b)*1000.,deg=angle(a,b)*57.29577951308232;
+        unsigned i=0;while(i+1<bins && !(mm<=edge[i])) ++i;++h[i];
+        if(mm*1000.>static_cast<double>(max_um)) max_um=static_cast<std::uint64_t>(mm*1000.);
+        if(deg*1000.>static_cast<double>(max_mdeg)) max_mdeg=static_cast<std::uint64_t>(deg*1000.);
+    }
+    inline static std::mutex mutex_;
+    inline static std::array<std::array<Cluster,clusters>,2> side_{};
+    inline static std::array<std::uintptr_t,2> id_{};
+    inline static std::uint64_t samples_{},settles_{},settled_uses_{},unsettled_{},outliers_{},follows_{},resets_{};
+    inline static std::array<std::uint64_t,bins> dev_{},step_{};
+    inline static std::uint64_t dev_max_um_{},dev_max_mdeg_{},step_max_um_{},step_max_mdeg_{};
+};
 
 class Place {
 public:
@@ -441,12 +532,13 @@ public:
             Side& out=slot.side[s];out=Side{};
             Mat model{},inverse_model{};
             Read& rd=reads_[s];
+            RigidLocal::fold(s,raw[s] && side_reach[s]>0?ids[s]:0);   // v1223: the last render's L samples; a new held thing resets
             if(!raw[s]) {last_[s]={};rd={};continue;}
             model=model_of(raw[s]);
             if(!finite(model) || !inverse(model,inverse_model)) {last_[s]={};rd={};continue;}
             if(rd.cur_ok && rd.cur_frame!=frame) {rd.prior=rd.cur;rd.prior_id=rd.cur_id;rd.prior_ok=true;}   // a republish of the same render keeps its prior
             rd.cur=model;rd.cur_id=ids[s];rd.cur_frame=frame;rd.cur_ok=true;
-            out.valid=true;out.model=model;out.reach=side_reach[s];
+            out.valid=true;out.model=model;out.reach=side_reach[s];out.rigid=side_reach[s]>0;
             if(!bound[s] || !finite(*bound[s])) {last_[s]={};continue;}   // no G yet: no placement, no previous chain
             out.bound=true;out.bound_frame=*bound[s];
             out.delta=mul(*bound[s],inverse_model);
@@ -479,7 +571,7 @@ public:
         }
         publish_bound(frame,raw,bound_ptr);
     }
-    static void clear() noexcept {for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};older_={};older2_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
+    static void clear() noexcept {RigidLocal::clear();for(auto& s:ring_) s.ready.store(0,std::memory_order_release);last_={};older_={};older2_={};reads_={};latest_frame_.store(0,std::memory_order_relaxed);}
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
     static std::uint64_t published(unsigned side) noexcept {return side<2?published_side_[side].load(std::memory_order_relaxed):0;}
     static std::uint32_t latest_frame() noexcept {return latest_frame_.load(std::memory_order_acquire);}
@@ -515,7 +607,7 @@ public:
     template<class Get>
     // v1218: still_out (optional) = the camera-only previous of the current binding (this eye's previous view * delta * M; no previous view:
     // the current rows), the fallback when the submitted previous cannot be proven (ObjectMotion, PrevMvpTable::placed_previous).
-    static Result place(std::uint32_t frame,Get&& get_views,const float* cur,const float* prev,float* cur_out,float* prev_out,int tag_eye=-1,int pass_eye=-1,float* still_out=nullptr) noexcept {
+    static Result place(std::uint32_t frame,Get&& get_views,const float* cur,const float* prev,float* cur_out,float* prev_out,int tag_eye=-1,int pass_eye=-1,float* still_out=nullptr,std::uint64_t draw_key=0) noexcept {
         Result result;
         if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return result;
         const Slot* slot=slot_of(frame);
@@ -593,12 +685,13 @@ public:
         const Mat vp=views.vp[eye];
         const bool previous=w.have_prev && w.prev_eye_ok[eye] && views.prev_frame[candidate]==w.prev_frame && views.prev_ok[candidate][eye];
         const Mat& delta=use_alt?w.alt_delta:w.delta;const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:w.prev_eye[static_cast<unsigned>(eye)];
-        const Mat now=mul(mul(vp,delta),m);
-        const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],prev_eye),m):mul(mul(vp,prev_eye),m);
+        const Mat x=rigid_part(w,static_cast<unsigned>(candidate),use_alt,draw_key,frame,m);   // v1223: F_used * settled L (else M)
+        const Mat now=mul(mul(vp,delta),x);
+        const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],prev_eye),x):mul(mul(vp,prev_eye),x);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
         if(still_out) {
             const bool view_before=views.prev_frame[candidate]==w.prev_frame && w.prev_frame && views.prev_ok[candidate][eye];
-            const Mat still=view_before?mul(mul(views.prev_vp[candidate][eye],delta),m):now;
+            const Mat still=view_before?mul(mul(views.prev_vp[candidate][eye],delta),x):now;
             for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(still[i]);
         }
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
@@ -613,7 +706,7 @@ public:
     // (delta = B * inverse(F): the drawn hand's binding this render); previous = prev_vp * (B_own_prev * inverse(F)) * m with B_own_prev the
     // bound frame of the publish two engine frames back (this eye's previous render); without it, prev_vp * delta * m (the hand still,
     // the camera's motion only; Result::alt false and stage placed_tagged count that). Returns the side, else -1.
-    static Result place_one_view(const Mat& vp,const Mat& prev_vp,const float* cur,float* cur_out,float* prev_out,bool& own_prev,float* still_out=nullptr) noexcept {
+    static Result place_one_view(const Mat& vp,const Mat& prev_vp,const float* cur,float* cur_out,float* prev_out,bool& own_prev,float* still_out=nullptr,std::uint64_t draw_key=0) noexcept {
         Result result;own_prev=false;
         if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return result;
         const std::uint32_t frame=latest_frame();
@@ -634,7 +727,7 @@ public:
         }
         if(candidate<0) {result.stage=rejected;return result;}
         const Side& w=slot->side[static_cast<unsigned>(candidate)];
-        const Mat model=full(m);const Mat& delta=use_alt?w.alt_delta:w.delta;
+        const Mat model=rigid_part(w,static_cast<unsigned>(candidate),use_alt,draw_key,frame,full(m));const Mat& delta=use_alt?w.alt_delta:w.delta; // v1223
         const Mat now=mul(mul(vp,delta),model);
         Mat before=mul(mul(prev_vp,delta),model);
         if(still_out) for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(before[i]); // v1218: camera-only, the current binding
@@ -644,6 +737,14 @@ public:
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
         result.side=candidate;result.eye=-1;result.alt=use_alt;result.stage=placed_pass;return result;
+    }
+    // v1223: a held thing's part as F_used * L with L the settled rigid local transform (RigidLocal), so delta * part = B * L whatever frame
+    // the engine composed this draw from; otherwise the draw's own model rows m (v1222).
+    static Mat rigid_part(const Side& w,unsigned side,bool use_alt,std::uint64_t key,std::uint32_t frame,const Mat& m) noexcept {
+        if(!w.rigid) return m;
+        const Mat& f=use_alt?w.alt_model:w.model;Mat inv_f{},l{};
+        if(!inverse(f,inv_f) || !RigidLocal::use(side,key,frame,mul(inv_f,m),l)) return m;
+        return mul(f,l);
     }
 private:
     struct Last {bool valid{},have_prev{};std::uint32_t frame{},prev_frame{};Mat model{},placed{},prev{},relative{};};

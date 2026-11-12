@@ -245,7 +245,7 @@ print('PASS: v1190 rig target routing (knob, E at Setup, replay, per-render hand
 assert 'ModGpuScope warp_scope(context_.Get(),ModSpan::stale_warp);' in xr and 'ModSpan::rig_target' in fsr and 'ModSpan::eye_motion' in fsr
 assert 'RigMask::take_target(c,depth_resource_.p,se.rig_target.p,draws,depth_w,depth_h,static_cast<unsigned>(job.eye))' in fsr
 assert 'd2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob;' in probe  # v1198: default on in alternate mode (pin below)
-assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still)' in om
+assert 'weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh))' in om
 print('PASS: v1191 GPU spans, rig target rectangle copy, one-view weapon placement (knob alt-weapon-place)')
 
 # v1192: sim-pose-hold (simulated XR + gameplay script only): the script clock is sampled on eye-0-fresh frames, dumps only there, truth_next meta
@@ -472,3 +472,11 @@ assert 'placed_history.store(!std::filesystem::exists(knobs_/L"no-placed-history
 assert 'inline static std::atomic<bool> placed_history{true};' in om18
 assert om18.count('table_.placed_previous(placed_,') == 2
 print('PASS: v1218 placed draws keep their submitted previous rows (no-placed-history)')
+# v1223: a held thing's draws are placed at B * its settled rigid local transform (RigidLocal: settle/outlier/follow, folded per publish); build/no-rigid-local: off
+wd23 = (root / 'src' / 'weapon_draw_place.hpp').read_text(encoding='utf-8')
+om23 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
+assert 'weapon_draw::RigidLocal::on.store(!std::filesystem::exists(knobs_/L"no-rigid-local",error),std::memory_order_relaxed); // v1223' in om23
+assert 'RigidLocal::fold(s,raw[s] && side_reach[s]>0?ids[s]:0);' in wd23 and 'out.rigid=side_reach[s]>0;' in wd23
+assert wd23.count('rigid_part(w,static_cast<unsigned>(candidate),use_alt,draw_key,frame,') == 2
+assert om23.count('draw_key(s,*sh)') == 2 and '<<",\\"rigid_local\\":"<<weapon_draw::RigidLocal::json()' in om23
+print('PASS: v1223 held things placed at B * rigid L (no-rigid-local)')
