@@ -250,7 +250,7 @@ private:
         struct DrawBind {bool valid{};std::uintptr_t entity{};WorldTrackedPose body{};std::array<float,15> frame{};std::uint64_t serial{};} draw_bind{};
         bool flat{};       // the thing is wide and thin (a book, a folder): the fingers lie on its face (grip_flat_shape), not closed on the ball
         void end_hold() {
-            if(held && held->bone<0) held_render_pose().end(held->entity,precise_s());   // v1249: the engine's render frame blends back to the body
+            if(held) held_render_pose().end(held->entity,precise_s());   // v1253: ragdolls too   // v1249: the engine's render frame blends back to the body
             held.reset();sphere=0;flat=false;corpse=capped=last_capped=near_noted=mass_noted=false;mass=0;bind_pelvis_z=std::numeric_limits<double>::quiet_NaN();
             bind_motion=0;bind_owner.reset();anchor_view={};reset_tow();draw_bind={};
         }
@@ -914,7 +914,8 @@ private:
         lane.last_motor=now;lane.last_motor_s=motor_s;lane.last_capped=result->capped;
         hold_sync().motor(corpse?HoldSync::corpse:body.limb>=0?HoldSync::severed:HoldSync::prop,std::hypot(in.carrier.x,in.carrier.y),result->lag_m,result->capped);   // v1238
         // v1249: a rigid prop's render frame is drawn at this step's goal (held_render_pose.hpp); ragdolls render from their bones and are not moved
-        if(!corpse && body.limb<0) held_render_pose().publish(side,body.entity,lane.grab.last_goal(),body.pose,motor_s);else held_render_pose().refuse(HeldRenderPose::ragdoll);
+        if(!corpse && body.limb<0) held_render_pose().publish(side,body.entity,lane.grab.last_goal(),body.pose,motor_s);
+        else held_render_pose().publish(side,body.entity,lane.grab.last_goal(),body.pose,motor_s,corpse?HeldRenderPose::corpse:HeldRenderPose::severed,body.world,body.handle);   // v1253: ragdolls through their bones
         if(body.limb>=0) {   // v1088: severed-limb-hold.csv "hold" - the held part against the hand, every write; the worst error once it has come in (0.3 s)
             const auto goal=lane.grab.target();const double err=length(goal.position-body.pose.position)*1000,rot=length(grab_rotation_error(body.pose,goal))*57.29578;
             const double gap=p.palm.valid && body.hull?hull_surface_distance(body.pose,*body.hull,p.palm.palm+p.palm.direction*rig::held_palm_depth)*1000:-1;

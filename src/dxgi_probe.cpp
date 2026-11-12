@@ -16867,6 +16867,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             native_interaction_aim.clear_door_contact();
             native_grab.install(image_base,&read_self,&game_logic_mask,output/L"native-physical-grab.csv",root); // v1046: the knob folder apart from the (diagnostic, empty while off) csv; reads build/no-corpse-grab, build/no-ragdoll-posts and build/grab-tuning.cfg, logs each
             native_grab.attach_corpse_trace(&corpse_trace);
+            d2vr::HeldRenderPose::ragdolls=!fs::exists(root/L"build"/L"no-held-render-pose-severed");d2vr::HeldRenderPose::corpses=fs::exists(root/L"build"/L"held-render-pose-corpse");   // v1253
             if(!fs::exists(root/L"build"/L"no-held-render-pose")) (void)d2vr::HeldRenderPose::install(image_base);   // v1249: a held prop's engine render frame = the hold's goal
             if(controller_aim_requested)native_interaction_aim.install_door_interaction();
         }

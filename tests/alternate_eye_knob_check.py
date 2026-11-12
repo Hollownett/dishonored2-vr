@@ -658,3 +658,12 @@ assert 'if(!fs::exists(root/L"build"/L"no-held-render-pose")) (void)d2vr::HeldRe
 assert 'pose_mat(d2vr::held_render_pose().source(hb->entity).value_or(hb->pose)),ex.k)' in probe and 'd2vr::hold_sync().engine(hk->limb>=0?' in probe
 assert '<< ",\\"held_render_pose\\":" << d2vr::held_render_pose().json()' in probe
 print('PASS: v1249 held render pose')
+# v1253: severed parts (ragdoll clones) drawn at the hold goal by the engine: bone requests (0x53fbe0 from 0x76db00) and the frame (0x754ea0 from 0x76dc12)
+# moved by goal*inverse(held body), model frame rewritten; corpses translation-only opt-in; build/no-held-render-pose-severed
+hr53 = (root / 'src' / 'held_render_pose.hpp').read_text(encoding='utf-8')
+ng53 = (root / 'src' / 'native_grab.hpp').read_text(encoding='utf-8')
+assert 'inline static constexpr std::uintptr_t joint_rva=0x53fbe0,joint_site_rva=0x76db05,frame_site_rva=0x76dc17;' in hr53
+assert 'if(replaced && from==frame_site_ && write_model_frame(e,o,a))' in hr53 and 'joint_original_(anim,type,joint,mode,flag,replaced?o:pos,replaced?a:rot);' in hr53
+assert 'corpse?HeldRenderPose::corpse:HeldRenderPose::severed,body.world,body.handle);' in ng53 and 'if(held) held_render_pose().end(held->entity,precise_s());' in ng53
+assert 'd2vr::HeldRenderPose::ragdolls=!fs::exists(root/L"build"/L"no-held-render-pose-severed");d2vr::HeldRenderPose::corpses=fs::exists(root/L"build"/L"held-render-pose-corpse");' in probe
+print('PASS: v1253 held severed parts')

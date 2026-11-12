@@ -4,6 +4,10 @@
 // engine pose = the body (motor lag); (2) a body blocked by a wall leaves the render pose at the hand; (3) a release (throw / drop) hands the render
 // frame back to the body without a jump: first frame = the last pose given, last frame = the body, monotonic, frames after blend_s untouched;
 // (4) a stalled publication blends out on its own; (5) the rotation part of the blend is exact at both ends.
+// v1253 ragdolls: (6) a severed clone - the engine's contract (static RE, held_render_pose.hpp): bones are queued in WORLD space and stored as
+// palette = inverse(frame) * bone world with the frame of the same tick, drawn at model frame * palette. Moving every bone request and the frame by
+// D = goal * inverse(held body) leaves the palette unchanged (model-to-root offsets preserved) and draws every bone at D * bone, the held one at the goal;
+// moving the frame alone draws nothing elsewhere (why both are moved). (7) a corpse held by one bone: a translation, capped at 0.6 m, no turn.
 #define NOMINMAX
 #include "../src/held_render_pose.hpp"
 #include <algorithm>
@@ -97,6 +101,44 @@ int main() {
         const auto a=render_blend(body,render.position-body.position,grab_rotation_error(body,render),0),z=render_blend(body,render.position-body.position,grab_rotation_error(body,render),1);
         std::printf("blend ends: w=0 %.2e rad / %.2e m from the render pose, w=1 %.2e rad from the body\n",angle(a,render),length(a.position-render.position),angle(z,body));
         CHECK(angle(a,render)<1e-6 && length(a.position-render.position)<1e-9 && angle(z,body)<1e-9);
+    }
+    {   // (6) severed clone: three bones, the frame from bone 0, the hand holds bone 2 (a standalone/root body away from the frame body)
+        const auto inv_mul=[](const WorldTrackedPose& f,const WorldTrackedPose& b) {   // inverse(f) * b (local pose of b in f)
+            WorldTrackedPose l{};const Vec3 d=b.position-f.position;l.position={dot(f.basis[0],d),dot(f.basis[1],d),dot(f.basis[2],d)};
+            for(unsigned i=0;i<3;++i) l.basis[i]={dot(f.basis[0],b.basis[i]),dot(f.basis[1],b.basis[i]),dot(f.basis[2],b.basis[i])};return l;};
+        const auto mul=[](const WorldTrackedPose& f,const WorldTrackedPose& l) {   // f * l
+            WorldTrackedPose w{};w.position=f.position+f.basis[0]*l.position.x+f.basis[1]*l.position.y+f.basis[2]*l.position.z;
+            for(unsigned i=0;i<3;++i) w.basis[i]=f.basis[0]*l.basis[i].x+f.basis[1]*l.basis[i].y+f.basis[2]*l.basis[i].z;return w;};
+        const auto to_f=[](const WorldTrackedPose& p,float* pos,float* rot) {pos[0]=float(p.position.x);pos[1]=float(p.position.y);pos[2]=float(p.position.z);
+            for(unsigned i=0;i<3;++i) {rot[i*3]=float(p.basis[i].x);rot[i*3+1]=float(p.basis[i].y);rot[i*3+2]=float(p.basis[i].z);}};
+        const auto from_f=[](const float* pos,const float* rot) {WorldTrackedPose p{};p.position={pos[0],pos[1],pos[2]};
+            for(unsigned i=0;i<3;++i) p.basis[i]={rot[i*3],rot[i*3+1],rot[i*3+2]};return p;};
+        const WorldTrackedPose bones[3]={rotated(yawed({1,2,.3},.4),Vec3{.2,.1,.3},1.),rotated(yawed({1.2,2.1,.35},-.7),Vec3{-.4,.2,0},1.),rotated(yawed({1.1,1.8,.25},2.),Vec3{0,.5,.1},1.)};
+        const auto frame=bones[0];const auto goal=rotated(yawed({.4,1.5,1.3},.9),Vec3{.1,-.3,.2},1.);
+        const HoldDelta d{bones[2],goal};
+        WorldTrackedPose moved_frame{};{float p[3],r[9];to_f(frame,p,r);d.apply(p,r);moved_frame=from_f(p,r);}
+        double palette_err=0,draw_err=0,frame_only_err=1e9;
+        for(unsigned b=0;b<3;++b) {
+            float p[3],r[9];to_f(bones[b],p,r);d.apply(p,r);const auto moved=from_f(p,r);
+            const auto palette_old=inv_mul(frame,bones[b]),palette_new=inv_mul(moved_frame,moved);
+            palette_err=std::max(palette_err,length(palette_new.position-palette_old.position)+angle(palette_new,palette_old));
+            const auto drawn=mul(moved_frame,palette_new),want=b==2?goal:WorldTrackedPose{d.point(bones[b].position),{d.turn(bones[b].basis[0]),d.turn(bones[b].basis[1]),d.turn(bones[b].basis[2])}};
+            draw_err=std::max(draw_err,length(drawn.position-want.position)+angle(drawn,want));
+            const auto frame_only=mul(moved_frame,inv_mul(moved_frame,bones[b]));   // the frame moved, the bones not: re-derived palette, drawn where the bodies are
+            frame_only_err=std::min(frame_only_err,length(frame_only.position-bones[b].position));
+        }
+        std::printf("severed clone: palette change %.2e, drawn vs D*bone %.2e (held bone at the goal), frame-only move leaves bones %.2e m from the bodies\n",palette_err,draw_err,frame_only_err);
+        CHECK(palette_err<1e-5 && draw_err<1e-5 && frame_only_err<1e-5);
+    }
+    {   // (7) corpse held by one bone: translation by the lag, capped, no turn
+        const auto bone=yawed({0,0,.2},.3),goal=rotated(yawed({.3,.4,.2},1.),Vec3{0,0,1},.5);
+        const auto t=translated_goal(bone,goal,HeldRenderPose::corpse_cap_m);
+        CHECK(length(t.position-goal.position)<1e-12 && angle(t,bone)<1e-12);
+        const auto capped=translated_goal(bone,yawed({2,0,.2},0),HeldRenderPose::corpse_cap_m);
+        CHECK(std::abs(length(capped.position-bone.position)-.6)<1e-12 && angle(capped,bone)<1e-12);
+        const HoldDelta d{bone,t};const Vec3 foot{-.8,.3,.1};
+        CHECK(length(d.point(foot)-(foot+(t.position-bone.position)))<1e-12);
+        std::printf("corpse: translation only (%.2f m), capped at %.2f m\n",length(t.position-bone.position),HeldRenderPose::corpse_cap_m);
     }
     std::printf(failures?"held_render_pose_check: %d FAILED\n":"held_render_pose_check: PASS\n",failures);
     return failures?1:0;
