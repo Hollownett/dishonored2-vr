@@ -1929,7 +1929,7 @@ static std::ofstream eye_boundary_csv;
 // stereo: its Setup/Begin are not an eye (no eye source, pair, frame split, shadow share, per-eye TAA/FSR/DLSS pass), it is drawn from the
 // eye-0 camera moved by the secondary camera's translation (the other timeline), and the borrowed eye view is re-created from its own
 // Setup record (engine def copy + its head write + engine Setup, history rows kept) before that eye renders. build/no-lens-guard: v1245.
-static bool lens_guard_enabled=true;
+static bool lens_guard_enabled=true, lens_eye0_camera=false;   // v1256: build/lens-eye0-camera = the v1246 eye-0 lens camera (see lens_setup)
 using LensRenderFn=void (__fastcall*)(void*,void*);
 using LensOwnerFn=std::uintptr_t (__fastcall*)(void*,void*,void*,void*);
 static LensRenderFn original_lens_render{};static LensOwnerFn original_lens_owner{};
@@ -1940,7 +1940,7 @@ static std::mutex lens_camera_mutex;
 static struct LensCamera {bool valid{},follows{};std::array<float,3> position{},translation{};std::array<float,9> basis{};UINT64 frame{};} lens_camera; // game thread -> render thread
 static struct LensStats {
     std::atomic<UINT64> frames{},owner_cameras{},setups{},camera_follow{},camera_own{},camera_none{},replays{},replay_exact{},replay_differs{},post_in{},post_after{},
-        taa_skips{},resets{},alt_held{},last_frame{},no_begin{};   // v1248 no_begin: hook entries whose engine pass returned early (no lens Begin)
+        taa_skips{},resets{},alt_held{},last_frame{},no_begin{},camera_centre{},camera_pair{};   // v1248 no_begin: hook entries whose engine pass returned early (no lens Begin); v1256: the lens camera chosen
     std::array<std::atomic<UINT64>,5> begins{},refused{};std::array<std::atomic<UINT64>,3> borrowed{}; // Kind order; Refusal order; [eye0 view, eye1 view, other]
     std::atomic<bool> eye_after{false};std::atomic<int> state{0};
 } lens_stats;
@@ -6699,6 +6699,17 @@ void lens_setup(void* view,int* window_rect,int* render_rect) noexcept {
                 std::memcpy(window.data()+(0xa8-0x9c),camera.position.data(),12);std::memcpy(window.data()+(0xcc-0x9c),camera.basis.data(),36);++lens_stats.camera_own;
             } else if(eye0.valid) {
                 window=eye0.written;
+                // v1256 (user, v1255: "in the Time device display the image is rendered very poorly and the image for each eye is mixed"): the lens
+                // pass is ONE render displayed on a device screen that BOTH eyes look at, yet it was drawn from the eye-0 camera - an asymmetric
+                // stereo frustum 6.4 cm to the left. Each eye then composites a differently skewed image of the other timeline (the "mixed" image),
+                // and the off-centre frustum is what looks poor. Draw it from the head's CENTRE with eye 0's basis and window, so both eyes see the
+                // same mono image. build/lens-eye0-camera: the v1246 eye-0 camera.
+                if(!lens_eye0_camera && lens_records[1].valid) {
+                    std::array<float,3> a{},b{};
+                    std::memcpy(a.data(),window.data()+(0xa8-0x9c),12);std::memcpy(b.data(),lens_records[1].written.data()+(0xa8-0x9c),12);
+                    const auto c=d2vr::secondary_view::centre(a,b);
+                    std::memcpy(window.data()+(0xa8-0x9c),c.data(),12);++lens_stats.camera_centre;
+                } else if(!lens_eye0_camera) ++lens_stats.camera_pair;
                 if(camera.valid) {
                     std::array<float,3> p{};std::memcpy(p.data(),window.data()+(0xa8-0x9c),12);
                     for(int i=0;i<3;++i) p[static_cast<std::size_t>(i)]+=camera.translation[static_cast<std::size_t>(i)];
@@ -6787,6 +6798,7 @@ static std::string lens_status_json() {
     o<<"{\"guard\":"<<(lens_guard_enabled?"true":"false")<<",\"state\":"<<lens_stats.state.load()<<",\"lens_frames\":"<<lens_stats.frames.load()
      <<",\"begins_eye0_eye1_lens_null_other\":"<<list(lens_stats.begins)<<",\"borrowed_eye0_eye1_other\":"<<list(lens_stats.borrowed)
      <<",\"lens_setups\":"<<lens_stats.setups.load()<<",\"camera_follow_own_none\":["<<lens_stats.camera_follow.load()<<','<<lens_stats.camera_own.load()<<','<<lens_stats.camera_none.load()<<']'
+     <<",\"camera_centre_pair\":"<<"["<<lens_stats.camera_centre.load()<<','<<lens_stats.camera_pair.load()<<"]"<<",\"lens_eye0_camera\":"<<(lens_eye0_camera?"true":"false")   // v1256
      <<",\"owner_cameras\":"<<lens_stats.owner_cameras.load()<<",\"camera_follows\":"<<(camera.follows?"true":"false")
      <<",\"translation\":["<<camera.translation[0]<<','<<camera.translation[1]<<','<<camera.translation[2]<<']'
      <<",\"replays\":"<<lens_stats.replays.load()<<",\"replay_exact\":"<<lens_stats.replay_exact.load()<<",\"replay_differs\":"<<lens_stats.replay_differs.load()
@@ -9534,7 +9546,7 @@ void prepare_head_view(void* view) noexcept {
                          else if(seat) {double peak=prop_seat_gap_m.load();while(drawn.gap_m>peak && !prop_seat_gap_m.compare_exchange_weak(peak,drawn.gap_m));}
                      }
                  }}
-                // B16: held things follow the hand body (Bonelab Â§1.2, Â§2.2; src/hold_coupling.hpp). Part 1, before B15: a hold with a ready body drives
+                // B16: held things follow the hand body (Bonelab Ãƒâ€šÃ‚Â§1.2, Ãƒâ€šÃ‚Â§2.2; src/hold_coupling.hpp). Part 1, before B15: a hold with a ready body drives
                 // the body instead of yielding it; B14's snaps are suppressed while a hand holds something; the hand body's filter word drops the held
                 // body's layer while it holds (HandFilterKeeper, restored only through SafeRelease or with a new body). Part 2, after B15: held things
                 // follow the DRAWN hand (the body only as far as B15 draws it); the lag release judges the raw body gap. Knob off: nothing here runs.
@@ -12077,6 +12089,23 @@ static void capture_final_eye(unsigned eye,ID3D11Texture2D* texture) noexcept {
             std::ofstream(output_directory/(stem+L".rgba"),std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(pixels.bytes.data()),static_cast<std::streamsize>(pixels.bytes.size()));
             std::ofstream(output_directory/(stem+L".json"),std::ios::trunc) << "{\"width\":" << pixels.width << ",\"height\":" << pixels.height << ",\"magnification\":" << game_xr->spyglass_magnification << ",\"scope_mag\":" << game_xr->spyglass_scope_mag << '}';}} catch(...) {}
     }
+    // v1256 diagnostic: the Timepiece device display exactly as each eye sees it (diagnostics on), up to 6 pairs, one a second while the device is
+    // out (state 68-70) and a real lens pass ran in the last two frames. The lens is one mono render shown to BOTH eyes, so a centring error
+    // (each eye a different crop) and a projection/aspect error (skew in both eyes) are told apart from the two images alone.
+    if(eye<2 && d2vr::diag::on()) {
+        static UINT64 lens_next{};static unsigned lens_pairs{};static bool lens_pair{};
+        const auto lf=lens_stats.last_frame.load();const int st=lens_stats.state.load();
+        if(eye==0) {lens_pair=lens_pairs<6 && st>=68 && st<=70 && lf && frames.load()<=lf+2 && now>=lens_next;if(lens_pair) {lens_next=now+1000;++lens_pairs;}}
+        if(lens_pair) try {
+            const auto pixels=diag_readback_rgba(texture);
+            if(!pixels.bytes.empty()) {
+                const auto stem=L"xr-lens-"+std::to_wstring(lens_pairs)+(eye?L"-right":L"-left");
+                std::ofstream(output_directory/(stem+L".rgba"),std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(pixels.bytes.data()),static_cast<std::streamsize>(pixels.bytes.size()));
+                std::ofstream(output_directory/(stem+L".json"),std::ios::trunc) << "{\"width\":" << pixels.width << ",\"height\":" << pixels.height
+                    << ",\"state\":" << st << ",\"lens_frames\":" << lf << ",\"eye0_camera\":" << (lens_eye0_camera?1:0) << '}';
+            }
+        } catch(...) {}
+    }
     if(eye<2 && game_xr) d2vr::held_walk_burst::observe(eye,texture,player_speed,game_xr->grip_speeds,alternate_on(),d2vr::held_walk_burst::Counters{{held_exact_placed[0].load(),held_exact_placed[1].load(),held_use_exact[0].load(),held_use_exact[1].load()}},output_directory.always()); // v1249 (diagnostics on: the hook exists only then)
     capture_alt_band(eye,texture,now);
     capture_climb_pair(eye,texture,now);
@@ -14237,7 +14266,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             if(!carrying) shoulder_native_carry=false;
                                         }
                                         if(r.toss) {carry_toss_until=now_c+120;++carry_throws;} else if(r.drop) {corpse_drop_press_until=now_c+160;++carry_drops;}
-                                        // Hands only (v637): a native shoulder carry the mod did not start is put down. v1022: OFF by default â€” with
+                                        // Hands only (v637): a native shoulder carry the mod did not start is put down. v1022: OFF by default ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â with
                                         // the shoulder carry it put down the body the placement had just handed to the game (45 auto-drops in the
                                         // v1019 session); build/legacy-corpse-auto-drop restores it.
                                         {static ULONGLONG native_carry_drop_at{};
@@ -16725,6 +16754,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             setup_enabled=true;
             // v1246 secondary-view guard (Timepiece lens): the secondary render (0x366590) and the Timepiece camera owner (0x44d230)
             lens_guard_enabled=head_requested && !fs::exists(root/L"build"/L"no-lens-guard");
+            lens_eye0_camera=fs::exists(root/L"build"/L"lens-eye0-camera");   // v1256: the v1246 eye-0 lens camera (default: the head's centre)
             if(lens_guard_enabled) {
                 namespace sv=d2vr::secondary_view;
                 static constexpr std::array<unsigned char,16> owner_prologue{0x40,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,0x24};

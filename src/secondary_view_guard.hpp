@@ -34,6 +34,14 @@ inline bool follows(const std::array<float,9>& secondary,const std::array<float,
 inline std::array<float,3> translation(const std::array<float,3>& secondary,const std::array<float,3>& engine_a,const std::array<float,3>& engine_b) noexcept {
     std::array<float,3> t{};for(std::size_t i=0;i<3;++i) t[i]=secondary[i]-.5f*(engine_a[i]+engine_b[i]);return t;
 }
+// v1256 (user: "in the Time device display the image is rendered very poorly and the image for each eye is mixed"): the lens pass is ONE mono
+// image shown to both eyes. Drawn from the eye-0 pose its frustum sits half an interpupillary distance to the left, so each eye composites a
+// different crop of it - the "mixed" image. The camera is the head's centre: the midpoint of the two eyes' poses (a missing or non-finite eye
+// pose keeps the other one).
+inline std::array<float,3> centre(const std::array<float,3>& a,const std::array<float,3>& b) noexcept {
+    for(std::size_t i=0;i<3;++i) if(!std::isfinite(a[i]) || !std::isfinite(b[i])) return a;
+    std::array<float,3> c{};for(std::size_t i=0;i<3;++i) c[i]=.5f*(a[i]+b[i]);return c;
+}
 
 // Begin classification (status timepiece.begins).
 enum class Kind : unsigned {eye0,eye1,secondary,null_view,other};

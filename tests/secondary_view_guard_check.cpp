@@ -40,6 +40,13 @@ int main() {
      last=lens_pass_frame(true,110,last);CHECK(last==110 && lens_paired_hold(last,110));
      for(std::uint64_t f=111;f<140;++f) {last=lens_pass_frame(false,f,last);CHECK(lens_paired_hold(last,f)==(f<=110+hold_frames));}   // expires
      last=lens_pass_frame(true,140,last);CHECK(lens_paired_hold(last,141) && !lens_paired_hold(last,143));}
+    // v1256: the lens camera is the head's centre (the two eye poses' midpoint); a missing or non-finite eye pose keeps the other.
+    {
+        const auto c=centre({0.f,1.f,2.f},{.064f,1.4f,2.f});
+        CHECK(std::abs(c[0]-.032f)<1e-6f && std::abs(c[1]-1.2f)<1e-6f && c[2]==2.f);
+        const auto same=centre({.064f,0.f,0.f},{.064f,0.f,0.f});CHECK(same[0]==.064f);
+        const auto bad=centre({1.f,2.f,3.f},{std::nanf(""),0.f,0.f});CHECK(bad[0]==1.f && bad[1]==2.f && bad[2]==3.f);
+    }
     std::printf("PASS secondary_view_guard\n");
     return 0;
 }
