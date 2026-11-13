@@ -3622,8 +3622,8 @@ static void publish_rig_buffers() noexcept {
 }
 // Each hand's held weapon render model (inventory body+0x60, hand slots +0x68 right / +0x70 left, item+8 entity id, entity table
 // game+0x3130b0, render model entity+0xf0; its frame at model+0x1860: origin + forward/left/up rows). 0 for an empty or unreadable slot.
-static std::array<std::uintptr_t,2> weapon_models() noexcept {
-    std::array<std::uintptr_t,2> out{};
+static std::array<std::uintptr_t,2> weapon_models(std::array<std::uintptr_t,2>* entities=nullptr) noexcept {   // v1279: + the entities
+    std::array<std::uintptr_t,2> out{};if(entities) *entities={};
     try {
         const auto arms=d2vr::rig::player_arms(read_self,image_base);if(!arms) return out;
         const auto inventory=d2vr::rig::value<std::uintptr_t>(read_self,(*arms)[0].body+0x60);if(!inventory || !*inventory) return out;
@@ -3632,7 +3632,7 @@ static std::array<std::uintptr_t,2> weapon_models() noexcept {
             const auto item=d2vr::rig::value<std::uintptr_t>(read_self,*inventory+0x68+slot*8ull);if(!item || !*item) continue;
             const auto id=d2vr::rig::value<std::uint32_t>(read_self,*item+8);if(!id || (*id>>16)>=0x3fff) continue;
             const auto entity=d2vr::rig::value<std::uintptr_t>(read_self,*game+0x3130b0+(*id>>16)*8ull);if(!entity || !*entity) continue;
-            const auto model=d2vr::rig::value<std::uintptr_t>(read_self,*entity+0xf0);if(model && *model) out[slot?0u:1u]=*model;
+            const auto model=d2vr::rig::value<std::uintptr_t>(read_self,*entity+0xf0);if(model && *model) {out[slot?0u:1u]=*model;if(entities) (*entities)[slot?0u:1u]=*entity;}
         }
     } catch(...) {}
     return out;
@@ -3743,6 +3743,7 @@ static std::uint64_t weapon_copy_write(unsigned side,std::uintptr_t entity,std::
         return d2vr::weapon_draw::WriteLog::note(side,entity,-1,kind,read15,frames.load(),d2vr::weapon_draw::read_grip);
     } catch(...) {return 0;}
 }
+static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max) noexcept;
 // v1183 (knob build/stale-eye-held-mask, one-view frames): the engine frames of what the hands hold for ObjectMotion's held match (rig mask 253):
 // each hand's weapon render model, a dual-wield copy's drawn frame, a held prop (native grab, else the game's Use hold). No placement here.
 static void publish_held_mask() noexcept {
@@ -3750,8 +3751,22 @@ static void publish_held_mask() noexcept {
         d2vr::ObjectMotion::HeldFrames h{};
         const auto add=[&](const float* raw,double reach) {if(h.n<h.f.size()) {const auto m=d2vr::weapon_draw::model_of(raw);if(d2vr::weapon_draw::finite(m)) {h.f[h.n]=m;h.reach[h.n]=reach;++h.n;}}};
         std::array<float,15> raw{};
-        for(const auto model:weapon_models()) if(model && read_self(model+0x1860,raw.data(),sizeof raw)) add(raw.data(),.8);
-        for(unsigned side=0;side<2;++side) if(const auto copy=d2vr::NativeWeaponHands::copy_draw(side);copy.valid) add(copy.read.data(),.8);
+        // v1279 (user, v1278: weapons ghost in performance mode): a weapon's bolt and upgrade parts are entities bound to it with their own
+        // frames (other orientations): without them in the mask the warp took those parts for scenery. Each weapon's bound children too.
+        const auto add_kids=[&](std::uintptr_t entity,const float* raw15) {
+            std::array<d2vr::weapon_draw::Mat,8> kids{};unsigned n=0;bound_children(entity,d2vr::weapon_draw::model_of(raw15),kids.data(),n,8);
+            for(unsigned i=0;i<n && h.n<h.f.size();++i) {h.f[h.n]=kids[i];h.reach[h.n]=.3;++h.n;}
+        };
+        std::array<std::uintptr_t,2> ents{};const auto models=weapon_models(&ents);
+        for(unsigned i=0;i<2;++i) if(models[i] && read_self(models[i]+0x1860,raw.data(),sizeof raw)) {add(raw.data(),.8);add_kids(ents[i],raw.data());}
+        // v1280 (sim: the copy crossbow came out of the warp as a mosaic, the native one clean): copy.read is the frame the copy service last
+        // wrote, not the frame the engine draws the copy at (2-3 deg apart), so its draws missed the 0.004 axes test. The live model frame too.
+        for(unsigned side=0;side<2;++side) if(const auto copy=d2vr::NativeWeaponHands::copy_draw(side);copy.valid) {
+            add(copy.read.data(),.8);
+            std::uintptr_t model{};
+            if(read_self(copy.entity+0xf0,&model,sizeof model) && model && read_self(model+0x1860,raw.data(),sizeof raw)) add(raw.data(),.8);
+            add_kids(copy.entity,raw.data());
+        }
         std::array<std::uintptr_t,2> thing{};
         if(physical_grab_requested) for(unsigned hand=0;hand<2;++hand) if(native_grab.holding(hand)) if(const auto held=native_grab.held(hand);held && held->bone<0) thing[hand]=held->entity;
         {std::lock_guard<std::mutex> l(hand_state_mutex);const unsigned s=held_entity_side&1u;if(held_entity && !thing[s]) thing[s]=held_entity;}
@@ -3780,7 +3795,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
     try {
         std::uint32_t engine_frame{};
         if(!read_self(view+0x77b4,&engine_frame,4)) return;
-        const auto models=weapon_models();const auto now=frames.load();
+        std::array<std::uintptr_t,2> native_ent{};const auto models=weapon_models(&native_ent);const auto now=frames.load();
         std::array<std::array<float,15>,2> raw{};
         std::array<d2vr::weapon_draw::Mat,2> bound{};
         std::array<const float*,2> raw_ptr{};std::array<const d2vr::weapon_draw::Mat*,2> bound_ptr{};
@@ -3903,6 +3918,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             // (16 mm / 2.6 deg off, max 0.3 m) with unplaced motion. They are published as the copy's children: placed with the same delta.
             {std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
              if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()));
+             else if(engine_side>=0 && engine_side<2) bound_children(native_ent[static_cast<unsigned>(engine_side)],live,kids.data(),n,static_cast<unsigned>(kids.size()));   // v1279: the native's parts too
              d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n);}
             hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;   // v1237 census
             const auto source=d2vr::weapon_draw::Binder::state(hand).source;

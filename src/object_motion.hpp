@@ -687,7 +687,7 @@ private:
     // their parts sit at offsets with the same orientation; 0.5 m held things). Matched like the placement does: the draw's model rows
     // (inverse(VP) * rows) have the frame's orientation within Place::axes_tol and its origin within the reach.
 public:
-    struct HeldFrames {std::array<weapon_draw::Mat,6> f{};std::array<double,6> reach{};unsigned n{};};
+    struct HeldFrames {std::array<weapon_draw::Mat,24> f{};std::array<double,24> reach{};unsigned n{};};   // v1279: + the weapons' bound parts
     inline static std::atomic<bool> held_mask{false};
     static void publish_held_frames(const HeldFrames& now) noexcept {std::lock_guard<std::mutex> lock(held_mutex_);held_[1]=held_[0];held_[0]=now;}
     static std::uint64_t held_matches() noexcept {return held_matches_.load(std::memory_order_relaxed);}

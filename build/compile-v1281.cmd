@@ -1,0 +1,74 @@
+@echo off
+rem v1278 = v1277 + per-hand bolt choice (same-item wheel route keeps the native's bolt; a copy starts from its own hand's choice) + a copy weapon's bound parts (bolt, upgrades) published as children so they are placed with it
+rem v1277 = v1276 + crossbow/pistol copies start from the wheel's last bolt (native_ranged_fire last_choice_) + weapon binder remembers learned G per weapon (recall on swap/catch/cross; perf-mode glitch/ghost)
+rem v1276 = merge of v1274 (held props and limbs carried by the player's own reference frame, validated against the attach root; safety net re-arms) and v1273 (Timepiece lens: follows = same-tick test or prepared-view test).
+rem v1274 = v1272 + held carry source corrected (static RE): v1270's "character body" was the step's third argument, the GROUND body under the player
+rem  (movement component +0x2b4 from the ground cast 0x7ff540; 0xffffff unless a dynamic/keyframed body), so v1270 measured almost never. This frame's root is
+rem  now read from the player's own reference frame (rf = [[delegate+0x130]-8], origin rf+0x30, stamped rf+0x84 with the engine frame number the attach
+rem  job checks) + the model component offset +0x3b0 (or its absolute +0x3bc), cross-checked against the last attach; no learned offset, NPC steps write
+rem  their own rf; a sync before the player's step falls back (held_rig.fallback_why). The v1270 step slot in native_turning is removed. Safety net:
+rem  residual |E*K - F| (entity and model frame of one attach job; no hand motion in it), 3 renders over 0.2 m suspend, back under re-arms
+rem  (held_exact_rearmed).
+rem v1272 = merge of v1270 (held props and severed limbs carried by the measured player body, start/stop/hitch exact) and v1271 (Timepiece lens: same-tick follow test, no latch; stamp as v1257).
+rem v1270 = v1268 + the held carry MEASURED, not predicted (review of v1266: one-frame pops on every start, stop and hitch): this frame's player root =
+rem  the player's character body this frame (the Havok record the character step 0x1b4760 indexes, current at every POST_PHYSICS sync) + the model's offset
+rem  from it, learned from the game thread's own pair (the stale body-model reading with the previous frame's body; a reading already this frame's is
+rem  recognised and counted). Status held_rig (ordering per sync kind, carried vs published root by still/walk/run/turn/start3/stop3). Safety net on the
+rem  placement's own residual (>0.2 m for 3 renders ends it; jointed limbs pass); an unmatched limb is left at the engine pose (held_limb_unmatched).
+rem v1268 = merge of v1266 (held props and severed limbs carried like a held weapon while moving) and v1267 (Timepiece lens: follow latch through stale-basis frames, hidden-area stamp restored).
+rem v1266 = v1264 + held props AND severed limbs on the move (user, v1264: 'stable in the hand but when I start walking or running it gets very unstable (ghosting)'):
+rem  the engine is given the held body carried as item_advance carries a held weapon, with one fixed offset: the prop's POST_PHYSICS sync reads the body-model root
+rem  BEFORE the frame's attach job (the previous frame's root), so this frame's root = the reading + the previous frame's step, turned with this frame's heading
+rem  change; the heading is read as is. v1262's stale/current guess against the noted rig (one frame of root motion behind on turning frames and late notes:
+rem  engine_gap walk p90 <=35, run <=100) is gone. Severed limbs: held_exact no longer dropped by the rigid-frame guard (a clone is jointed), placed at
+rem  B = H_drawn * inverse(H_given) * F (props too: the engine's own K), and the ragdoll move gets the same carried drawn hold. Certificate: teleports excluded,
+rem  decode probe (other-eye / previous-render VP), source probe without its angle gate. build/legacy-held-render-goal = v1256.
+rem v1264 = merge of the Timepiece lens line (v1257 + v1259) and the held-prop line (v1258 + v1262):
+rem  v1257: Timepiece lens per eye with its own shadows (an eye-1 secondary pass inside eye 1's Begin; the shadow share treats a secondary pass as no eye).
+rem  v1259: lens passes kept out of the eyes' draw-time state (no view for their jobs, no classify, no snapshot of the borrowed view): a held prop placed in both
+rem         eyes while the device is open; per-eye census held_census.eyes / timepiece.held_eyes; build/no-lens-isolation = v1257.
+rem  v1258: the engine draws a held prop at the drawn hold (the last drawn hold carried to the tick's rig, as item_advance carries weapons), v1255's bind-time
+rem         reads removed, one-pose certificate weapon_draw.place.one_pose; build/legacy-held-render-goal = v1256.
+rem  v1262: one rig definition at both ends of the carry (held_rig_now; one_pose rig_mm/rig_deg), rig carry only for a note <= 2.5 render intervals old (else
+rem         goal*X; note_age_ms), a release forgets the hold, scale-safe K.
+rem  Merge: one set of placed-eye census bits (64 eye 0, 128 eye 1; 32 = a held draw seen), v1259's eye_slot reads them; both census rolls run.
+rem v1258 = v1256 + held props: the ENGINE pose of a held prop is the drawn hold (held_render_pose.hpp: the last drawn hold carried to the tick's rig, as item_advance carries weapons; the motor goal only as fallback), so a render whose draws are not placed no longer shows a second pose 35-100 mm off the hand; v1255's bind-time 'body' reads removed; status weapon_draw.place.one_pose (shown/flip/intra/eye mm, still/walk/run/turn) and held_render_pose.drawn_hold; build/legacy-held-render-goal = v1256.
+rem v1256 = v1255 + Timepiece device display: the lens pass is ONE mono image shown to both eyes, but it was drawn from the eye-0 camera (asymmetric
+rem stereo frustum 6.4 cm left), so each eye composited a differently skewed other-timeline image ("the image for each eye is mixed") - it is now drawn
+rem from the head centre with eye 0's basis/window; build/lens-eye0-camera restores v1246. Diagnostic: xr-lens-N-left/right.rgba captures (6 pairs,
+rem diagnostics on) of the device display as each eye sees it; status timepiece.camera_centre_pair / lens_eye0_camera.
+rem v1255 = v1254 + held things: the held body frame native_grab sampled is published as an earlier read of the thing, so a draw composed before the
+rem physics step (the engine frame still the body, not the hold goal) matches an exact historical read and is placed on the hand instead of staying at
+rem the trailing body - the two-position flip and the trail-behind while running; held_census.<kind>.draws.child and .match.exact_history show it.
+rem v1254 held-engine-pose is now opt-in (build/held-engine-pose) for experiments; the default behaviour is v1253 + the body read.
+rem v1254 = v1253 + held things: the ENGINE render frame of a held prop / severed part is written to the pose its draws are placed at, once per
+rem presented render (src/held_engine_pose.hpp; model+0x1860, the way place_weapons() writes a held weapon frame since v864). v1252 walking bursts
+rem show 5 of 16 frames carrying the same physics tick (dt 0): on those the engine frame - shadows, culling bounds, every draw the placement did not
+rem match - was a tick old, which is the 4 cm flicker in the hand. build/no-held-engine-pose: v1253 behaviour; status weapon_draw.held_engine_pose;
+rem held_census.<kind>.unplaced splits into unplaced_nodraw / unplaced_refused.
+rem
+rem + Timepiece: the slot-1 grip is a PRESS toggle (each fresh squeeze flips the device once, a held grip never repeats), and a Timepiece hand no
+rem longer has its left trigger swallowed (GripIntent pass_trigger, the fist rule, the grab guard): that trigger is the time shift. v1251 hold semantics are gone.
+rem v1253 = v1252 + held severed parts drawn at the hold goal by the engine (src/held_render_pose.hpp): the ragdoll sync 0x76d640 queues world bone requests (0x53fbe0 at 0x76db00) that the animation stores model-relative against the frame passed to 0x754ea0 at 0x76dc12; both are moved by goal*inverse(held body), the model frame rewritten after; corpses translation-only opt-in build/held-render-pose-corpse; build/no-held-render-pose-severed; status held_render_pose.ragdoll
+rem v1252 = working tree + Timepiece held on the slot-1 grip: squeeze = unfold, open = fold (native Use pulses keyed on player states 68/69/70, src/timepiece_grip.hpp; status timepiece.grip_unfold_fold_gaveup_busy)
+rem v1248 = v1247 + review fixes: held census restored as code; body kind art saved once per change off the frame and anchored on the body under the hand (cache v2); unpaired flat needs 45 gameplay frames every run (settle/authored not counted, panel kept); lens replay/hold only after a real lens Begin
+rem v1245 = v1244 + diagnostic only: native-view-trace.csv (every Setup before/after and every Begin while stereo, <= 6000 rows, with the eye-boundary knob): view pose, render copy, rect, engine caller, nearest prepared slot, eye-source state, Timepiece player state 68/69/70.
+rem v1244 = v1243 + Timepiece black screen: an unpaired gameplay run goes flat on the panel (cutscene theater path) after 45 frames (3 without a re-sendable projection) instead of black; a same-eye repeated native Begin no longer breaks the eye pair (build/strict-eye-pair = v1243 rule); status unpaired_gameplay {flat_frames,flat_runs,reason[5],pair_repeats,...}; eye-boundary rows only while stereo. Body grab: a press granted on an aged hover LOS verdict re-asks as a hover request (served across publications) and binds on its verdict (grab_los.press_rehovers / press_rehover_clear).
+rem v1243 = v1242 + hand_lock measurement (a held thing in the drawn hand's joint-59 frame per render: arm composition vs GPU-copy frame E, by player/hand speed; unplaced weapons as reference; status weapon_draw.place.hand_lock) and placed_view_frame split [same, +1, -1, other]. v1242 = v1241 + body prompt art kept per kind (Carry / with Loot) for any downed body under the hand, kind cache file, either hand focus in the body hand-on pass. v1241 = v1240 + sim fixture "grab left|right [radius] [name]" (NativeGrab::fixture_grab, simulated XR only); held parts: one canonical bitwise L per mesh across passes (RigidLocal::canonical) and one product VP*(B*L) for every pass and match kind (Place::rigid_now), status rigid_local.pass_spread_renders. v1240 = v1239 + hand body: a finite oversized speed/spin read-back retires and re-creates the body instead of latching the session (wild_motion, 8 then latch); severed_draws diagnostic in object-motion status. v1239 = v1238 + held things: a draw matches any of the last 8 distinct reads of the thing, or (settled L) is predicted from raw_draw = m * inverse(L) near the latest read (resting twins / taken clusters refused); status held_census.<kind>.match + predicted_offset. v1238 = v1237 + held-thing sync: the sticking hold feeds the goal's own velocity (build/legacy-hand-feed: the hand's); a held thing's shadow-map draws placed with it (build/no-held-shadow-place); hold_sync status (motor lag / drawn-hand gap by speed). v1237 = v1236 + held things: children of the held entity (helmet on a carried head) placed with its delta; RigidLocal recycles the stalest cluster; held census (mixed/no_mv/near_unplaced per kind and pass). v1235 = v1234 + choke grip: a held squeeze takes a later offer only for the NPC its press was on; a re-press takes back only its own running choke. v1234 = v1233 + weapon binder: a render without a composition names its holder, so a different weapon in the hand (toss, swap) drops the old G instead of being drawn at it; binding sanity per hold. v1233 = v1232 + body/hand prompt kept (takedown 1300 ms hold) while the hand's live target is still the art's object (prompt_live_holds, prompt_target_hides). v1232 = v1231 + combat choke: a held grip whose press went to a Use takes a later choke offer (OfferedChokeGrip). v1231 = v1214 + dual-wield drop fix (v1213 + arm hold only where VR arms are tracked) + AFW v2 default on in performance mode (build/no-afw2) + rig forensics only with build/rig-forensics.
+rem Sources from this worktree (src\, third_party\ headers); minhook objects copied into build\md. The prebuilt DLSS/FidelityFX import libraries
+rem are gitignored binaries that exist only in the release worktree, so L points there.
+cd /d "%~dp0.."
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul
+set D2VR_DIAGNOSTIC_OUTPUT=build\d2vr_render_probe_arm_v1281.dll
+set L=C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags\third_party
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /O2 /bigobj /Zi /Fd:build\dxgi_probe_v1281.pdb /MD /LD /I. /FI"src\dlss_eye_upscaler.hpp" /Ithird_party\minhook\include /Ithird_party\openxr\include /Ithird_party\fidelityfx src\dxgi_probe.cpp build\md\buffer.obj build\md\hook.obj build\md\trampoline.obj build\md\hde64.obj /Fo:build\dxgi_probe_v1281.obj /Fe:%D2VR_DIAGNOSTIC_OUTPUT% /link /MAP:build\d2vr_render_probe_arm_v1281.map /DEBUG /OPT:REF /OPT:ICF %L%\dlss\lib\nvsdk_ngx_d.lib advapi32.lib uuid.lib d3d11.lib dxgi.lib bcrypt.lib user32.lib d3dcompiler.lib gdi32.lib %L%\fidelityfx\libs\ffx_backend_dx11_x64.lib %L%\fidelityfx\libs\ffx_fsr3_x64.lib %L%\fidelityfx\libs\ffx_fsr3upscaler_x64.lib %L%\fidelityfx\libs\ffx_frameinterpolation_x64.lib %L%\fidelityfx\libs\ffx_opticalflow_x64.lib
+echo dll_exit=%errorlevel%
+rem
+rem + Timepiece: the slot-1 grip is a PRESS toggle (each fresh squeeze flips the device once, a held grip never repeats) and a Timepiece hand no
+rem longer has its left trigger swallowed (GripIntent pass_trigger, the fist rule, the grab guard) - the trigger is the time shift. v1251 hold semantics are gone.
+
+
+
+
+
+
