@@ -147,7 +147,8 @@ inline bool in_sphere(const Sphere& s,const Mat& vp,const float* cur) noexcept {
     for(const int i:{0,1,3}) {
         const double* row=&vp[static_cast<std::size_t>(i*4)];
         const double d=static_cast<double>(cur[i*4+3])-(row[0]*s.c[0]+row[1]*s.c[1]+row[2]*s.c[2]+row[3]);
-        if(!(d*d<=(row[0]*row[0]+row[1]*row[1]+row[2]*row[2])*s.r*s.r)) return false;
+        // v1285: + float slack: an orthographic VP's w row is (0,0,0,1), its bound is 0 and a draw's w is 1 only to rounding (shadow passes)
+        if(!(d*d<=(row[0]*row[0]+row[1]*row[1]+row[2]*row[2])*s.r*s.r+1e-6*(1.+d*d))) return false;
     }
     return true;
 }
