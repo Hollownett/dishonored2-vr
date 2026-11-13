@@ -125,6 +125,33 @@ int main() {
             }
         }
         CHECK(!follow_same_tick({std::nanf(""),0,0},yaw(0),head,yaw(0)).follows);
+        {   // v1273 decision = same-tick OR prepared. A readable but WRONG reference (another camera, fixed): same-tick never matches; the prepared test
+            // (the previous tick's player axis) carries the still ticks with its translation, turning ticks fall to own - v1264, not all-mono.
+            const std::array<float,3> wrong_p{0,0,0};const auto wrong_b=yaw(37);
+            unsigned carried_prepared=0,own=0;
+            for(int tick=1;tick<=60;++tick) {
+                const double a_now=tick<=30?0.:180.*(tick-30)/90.,a_prev=tick<=30?0.:180.*(tick-31)/90.;   // still, then turning at 180 deg/s
+                const std::array<float,3> cam{head[0],head[1],head[2]-600.f};
+                const auto same=follow_same_tick(cam,yaw(a_now),wrong_p,wrong_b);CHECK(!same.follows);
+                const auto d=decide_follow(true,same,follows(yaw(a_now),yaw(a_prev)),{0,0,-600.f});
+                if(d.follows) {CHECK(d.carried==1 && d.translation[2]==-600.f);++carried_prepared;} else ++own;
+            }
+            CHECK(carried_prepared==30 && own==30);
+            // the right reference carries every tick, turning or not, with its own translation
+            const auto s=follow_same_tick({1,2,-597},yaw(10),{1,2,3},yaw(10));
+            const auto d=decide_follow(true,s,false,{9,9,9});CHECK(d.follows && d.carried==0 && d.translation[2]==-600.f);
+            // no readable reference: the prepared test alone (v1264)
+            CHECK(decide_follow(false,Follow{},true,{0,0,-600.f}).carried==1 && !decide_follow(false,Follow{},false,{0,0,-600.f}).follows);
+            // a world-fixed camera while the player turns: neither test, except where the axes cross
+            unsigned followed=0;
+            for(int tick=0;tick<=90;++tick) {
+                const double a_now=180.*tick/90.-90.,a_prev=180.*(tick-1)/90.-90.;
+                const auto st=follow_same_tick({0,0,0},yaw(0),head,yaw(a_now));
+                const auto dd=decide_follow(true,st,follows(yaw(0),yaw(a_prev)),{0,0,0});
+                CHECK(!dd.follows || tick==45 || tick==46);followed+=dd.follows?1u:0u;
+            }
+            CHECK(followed<=2);
+        }
         CHECK(deg_bin(0.f)==0 && deg_bin(.005f)==1 && deg_bin(.05f)==2 && deg_bin(.5f)==3 && deg_bin(2.f)==4 && deg_bin(30.f)==5 && deg_bin(std::nanf(""))==5);
         // the lens stamp per pass: v1257 (borrowed view = eye 1 on both passes), each pass's own eye, none
         CHECK(lens_stamp_eye(StampMode::borrowed,1,0)==1 && lens_stamp_eye(StampMode::borrowed,1,1)==1);

@@ -101,6 +101,16 @@ inline Follow follow_same_tick(const std::array<float,3>& p,const std::array<flo
     f.follows=finite && f.angle_deg<=follow_max_deg;
     return f;
 }
+// v1273: either test matching is evidence that the Timepiece camera is the player's: the same-tick reference (exact while turning) or the v1264
+// prepared-view test (a tick stale). A misread reference (a readable but wrong camera) then degrades to v1264 instead of every frame mono; a truly
+// independent camera matches neither except on a crossing tick. The translation is this tick's offset from the test that matched (same-tick
+// first); without a match, the readable reference's. carried: 0 same-tick, 1 prepared, 2 neither.
+struct Decision {bool follows{};std::array<float,3> translation{};unsigned carried{2};};
+inline Decision decide_follow(bool reference_ok,const Follow& same,bool prepared_match,const std::array<float,3>& prepared_translation) noexcept {
+    if(reference_ok && same.follows) return {true,same.translation,0};
+    if(prepared_match) return {true,prepared_translation,1};
+    return {false,reference_ok?same.translation:prepared_translation,2};
+}
 // Status histogram of a basis difference in degrees: edges .001 .01 .1 1 5 (6 bins).
 inline unsigned deg_bin(float deg) noexcept {
     static constexpr float edge[5]={.001f,.01f,.1f,1.f,5.f};unsigned i=0;while(i<5 && !(deg<=edge[i])) ++i;return i;
