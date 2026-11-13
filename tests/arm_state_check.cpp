@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 using namespace d2vr::arm;
 
@@ -18,6 +19,130 @@ Fx idle(ArmSet& s,Clock& c,Held slot1,bool sword,std::uint64_t ms) {   // time p
 }
 unsigned lcg_state=12345;
 unsigned rnd(unsigned n) {lcg_state=lcg_state*1664525u+1013904223u;return (lcg_state>>8)%n;}
+
+// ---- v1284 (plan 2026-11-13 section 4.1): the hand rule over every reachable pair of arm contents and every event of either hand, against a model
+// of the engine's slot 1 / slot 0 (an equip lands with a new revision; fx.restore_slot1 re-equips what slot 1 held before the event, fx.unequip_slot1
+// empties it, fx.sword_left puts the sword away). Invariants after each event and 400 ms of engine reports:
+//  I1 the other hand's item is unchanged, except: the acting hand held a power and the other was empty (the power swap moves it there); the same power
+//     chosen from the acting hand's wheel moves to it (v1090); the other hand's NON-copyable native slot-1 item is put away when the acting hand's new
+//     item takes slot 1 (one slot 1: the engine cannot keep both; nothing appears, nothing moves);
+//  I2 no hand gets an item it did not choose/take, except a power by those two moves;
+//  I3 ArmSet::valid (one sword, one native slot-1 item, copies only of copyable things; one item per arm by construction);
+//  I4 no request left pending once the engine answered (a request the engine never answers expires at pend_ms = 3.5 s, see the last block).
+namespace matrix {
+struct World {ArmSet s;std::uint64_t t=1000,rev=1;Held e1{};bool sw{};Held prev1{};};
+unsigned failures=0,cases=0;
+void effects(World& w,const Fx& fx) {
+    if(fx.restore_slot1) {const int p=w.s.slot1_holder();w.e1=p>=0?w.s.a[static_cast<unsigned>(p)].what:w.prev1;++w.rev;}   // re-equip the slot-1 holder's item
+    if(fx.unequip_slot1) {w.e1=Held::none;++w.rev;}
+    if(fx.sword_left) w.sw=false;
+}
+void settle(World& w,std::uint64_t ms=400) {for(std::uint64_t e=0;e<ms;e+=20) {w.t+=20;effects(w,w.s.native_changed({w.e1,w.sw,w.rev},w.t));}}
+void equip(World& w,Held k) {w.prev1=w.e1;w.e1=k;++w.rev;}
+const char* name(Held h) {static const char* n[]={"none","pistol","crossbow","guard_sword","guard_pistol","sword","gadget","heart","power","timepiece"};return n[static_cast<unsigned>(h)];}
+bool same_arm(const Arm& a,const Arm& b) {return a.what==b.what && a.home==b.home;}
+// The events. chosen = what the acting hand asked for (none: a put-away / drop); same = the wheel chose the item slot 1 already held.
+enum Ev {wheel,put_away,pickup_native,pickup_copy,sword,hip,catch_gadget,events};
+const Held wheel_kinds[]={Held::none,Held::pistol,Held::crossbow,Held::gadget,Held::heart,Held::timepiece,Held::power};
+const Held pick_kinds[]={Held::pistol,Held::crossbow,Held::guard_sword,Held::guard_pistol};
+void act(World& w,unsigned h,Ev ev,Held k,bool& same,Held& chosen) {
+    same=false;chosen=Held::none;
+    switch(ev) {
+    case wheel: {
+        chosen=k;w.s.wheel_open(w.t);effects(w,w.s.wheel_commit(h,w.t,w.rev));
+        if(k==Held::none) {w.s.wheel_nothing(h);break;}
+        same=k==w.e1;
+        if(same) effects(w,w.s.wheel_choice(h,true,w.t));else {effects(w,w.s.wheel_choice(h,false,w.t));equip(w,k);}
+        break; }
+    case put_away: {
+        const Arm a=w.s.a[h];
+        if(a.home==Home::slot1) {w.prev1=w.e1;w.e1=Held::none;++w.rev;}   // the game unequips slot 1 (holster / drop of the native item)
+        else if(a.home==Home::copy) w.s.release(h);
+        else if(a.home==Home::slot0) {w.s.sword_away(h);w.sw=false;}
+        break; }
+    case pickup_native: case pickup_copy: {
+        chosen=k;const Fx fx=w.s.pickup(h,k,ev==pickup_native,w.t,w.rev);effects(w,fx);if(fx.native) equip(w,k);
+        break; }
+    case sword: {chosen=Held::sword;const Fx fx=w.s.sword_take(h,w.t);effects(w,fx);if(!fx.refused) w.sw=true;break;}
+    case hip: {chosen=Held::pistol;const Fx fx=w.s.hip_draw(h,w.t,w.rev);if(!fx.refused) equip(w,Held::pistol);break;}
+    case catch_gadget: {chosen=Held::gadget;const Fx fx=w.s.catch_gadget(h,w.t,w.rev);if(!fx.refused) equip(w,Held::gadget);break;}
+    default: break;
+    }
+    settle(w);
+}
+bool other_ok(const Arm& bo,const Arm& ao,const Arm& bh,const Arm& ah,bool same) {
+    return ao.what==bo.what
+        || (hops(bh.what) && bo.what==Held::none && ao.what==Held::power)                            // the power swap
+        || (same && hops(bo.what) && ao.what==Held::none && ah.what==bo.what)                        // v1090: the same power chosen here moves here
+        || (bo.home==Home::slot1 && !copyable(bo.what) && ao.what==Held::none && ah.home==Home::slot1); // slot 1 taken by this hand: put away
+}
+bool actor_ok(const Arm& bh,const Arm& ah,const Arm& bo,Held chosen,bool same) {
+    return ah.what==bh.what || ah.what==Held::none || ah.what==chosen || (same && hops(bo.what) && ah.what==bo.what);
+}
+void fail(const char* what,const World& before,const World& after,unsigned h,const char* ev,Held k) {
+    if(++failures<=12) std::printf("FAIL %s: hand %u %s %s: [%s,%s] -> [%s,%s]\n",what,h,ev,name(k),name(before.s.a[0].what),name(before.s.a[1].what),name(after.s.a[0].what),name(after.s.a[1].what));
+}
+void check(const World& before,const World& after,unsigned h,Held chosen,bool same,const char* ev,Held k) {
+    ++cases;const unsigned o=h^1u;
+    if(!after.s.valid()) fail("I3",before,after,h,ev,k);
+    if(!other_ok(before.s.a[o],after.s.a[o],before.s.a[h],after.s.a[h],same)) fail("I1",before,after,h,ev,k);
+    if(!actor_ok(before.s.a[h],after.s.a[h],before.s.a[o],chosen,same)) fail("I2",before,after,h,ev,k);
+    if(after.s.pend[0].on || after.s.pend[1].on) fail("I4",before,after,h,ev,k);
+}
+std::vector<World> states() {   // every reachable pair: at most one sword (slot 0) and one native slot-1 item; settled against the engine
+    const Arm arms[]={{Held::none,Home::none},{Held::sword,Home::slot0},{Held::pistol,Home::slot1},{Held::crossbow,Home::slot1},{Held::gadget,Home::slot1},
+        {Held::heart,Home::slot1},{Held::timepiece,Home::slot1},{Held::power,Home::slot1},{Held::pistol,Home::copy},{Held::crossbow,Home::copy},
+        {Held::guard_sword,Home::copy},{Held::guard_pistol,Home::copy}};
+    std::vector<World> out;
+    for(const Arm& a0:arms) for(const Arm& a1:arms) {
+        if((a0.home==Home::slot0 && a1.home==Home::slot0) || (a0.home==Home::slot1 && a1.home==Home::slot1)) continue;
+        World w;w.s.a={a0,a1};
+        const int p=w.s.slot1_holder(),s=w.s.sword_holder();
+        w.s.rest_slot1=p>=0?static_cast<unsigned>(p):s>=0?static_cast<unsigned>(s)^1u:0u;
+        w.e1=p>=0?w.s.a[static_cast<unsigned>(p)].what:Held::none;w.sw=s>=0;w.prev1=w.e1;
+        settle(w);
+        if(!same_arm(w.s.a[0],a0) || !same_arm(w.s.a[1],a1) || !w.s.valid()) {std::printf("FAIL matrix state [%s,%s] did not settle\n",name(a0.what),name(a1.what));++failures;continue;}
+        out.push_back(w);
+    }
+    return out;
+}
+void run() {
+    const auto all=states();
+    static const char* ev_names[events]={"wheel","put_away","pickup_native","pickup_copy","sword_take","hip_draw","catch_gadget"};
+    for(const World& start:all) for(unsigned h=0;h<2;++h) for(unsigned ev=0;ev<events;++ev) {
+        const Held* ks=ev==wheel?wheel_kinds:ev==pickup_native || ev==pickup_copy?pick_kinds:nullptr;
+        const unsigned nk=ev==wheel?7u:ev==pickup_native || ev==pickup_copy?4u:1u;
+        for(unsigned i=0;i<nk;++i) {
+            const Held k=ks?ks[i]:Held::none;World w=start;bool same=false;Held chosen{};
+            act(w,h,static_cast<Ev>(ev),k,same,chosen);check(start,w,h,chosen,same,ev_names[ev],k);
+        }
+    }
+    const unsigned single=cases;
+    // two wheel choices of one hand 50 ms apart (the first still settling), and both hands choosing 20 ms apart: the newest request owns the arrival
+    for(const World& start:all) for(unsigned h=0;h<2;++h) for(const Held k1:wheel_kinds) for(const Held k2:wheel_kinds) {
+        for(unsigned other=0;other<2;++other) {
+            World w=start;const unsigned h2=other?h^1u:h;
+            w.s.wheel_open(w.t);effects(w,w.s.wheel_commit(h,w.t,w.rev));
+            bool same1=false;if(k1==Held::none) w.s.wheel_nothing(h);else {same1=k1==w.e1;effects(w,w.s.wheel_choice(h,same1,w.t));if(!same1) equip(w,k1);}
+            w.t+=other?20:50;effects(w,w.s.native_changed({w.e1,w.sw,w.rev},w.t));
+            w.s.wheel_open(w.t);effects(w,w.s.wheel_commit(h2,w.t,w.rev));
+            bool same2=false;if(k2==Held::none) w.s.wheel_nothing(h2);else {same2=k2==w.e1;effects(w,w.s.wheel_choice(h2,same2,w.t));if(!same2) equip(w,k2);}
+            settle(w);++cases;
+            if(!w.s.valid()) fail("I3 double",start,w,h,"double",k2);
+            if(w.s.pend[0].on || w.s.pend[1].on) fail("I4 double",start,w,h,"double",k2);
+            for(unsigned x=0;x<2;++x) {   // each hand holds what it held, nothing, what it chose, or a power by the two moves
+                const Arm b=start.s.a[x],a=w.s.a[x];
+                const bool chose=(x==h && a.what==k1) || (x==h2 && a.what==k2);
+                if(!(a.what==b.what || a.what==Held::none || chose || a.what==Held::power)) fail("I2 double",start,w,x,other?"both_hands":"twice",k2);
+                if(a.what==Held::power && b.what!=Held::power && !chose && start.s.a[x^1u].what!=Held::power && start.s.a[x^1u].what!=Held::none) fail("I2 double power",start,w,x,"double",k2);
+            }
+        }
+    }
+    std::printf("v1284 hand-rule matrix: %u reachable pairs, %u single events, %u double/both-hand choices, failures=%u\n",
+        static_cast<unsigned>(all.size()),single,cases-single,failures);
+    std::fflush(stdout);
+}
+} // namespace matrix
 }
 
 int main() {
@@ -139,12 +264,16 @@ int main() {
         ArmSet t;Clock d;t.hip_draw(1,d.t,d.rev);engine(t,d,Held::pistol,false);t.wheel_commit(1,d.t,d.rev);assert(!t.wheel_choice(1,true,d.t).same_copy && t.copy_at(1)==Held::none);
         ArmSet u;Clock e;engine(u,e,Held::power,false);u.wheel_commit(1,e.t,e.rev);
         {const Fx m=u.wheel_choice(1,true,e.t);assert(!m.same_copy && u.copy_at(1)==Held::none);
-         // v1090: the same power (Heart, gadget) chosen from the other arm's wheel MOVES there; the engine keeps it equipped
+         // v1090: the same power chosen from the other arm's wheel MOVES there; the engine keeps it equipped (v1284: a power only)
          assert((m.power_moved&2u) && u.a[1].what==Held::power && u.a[1].home==Home::slot1 && u.a[0].what==Held::none && u.derive().slot1_arm==1 && u.valid());}
         engine(u,e,Held::power,false,false);assert(u.a[1].what==Held::power && u.a[0].what==Held::none);
-        // the Heart held in the left, the right arm (holding a gun copy) chooses it: the copy falls, the Heart moves right
-        ArmSet v;Clock f;engine(v,f,Held::heart,false);v.set_copy(1,Held::pistol,f.t);v.wheel_commit(1,f.t,f.rev);
-        {const Fx m=v.wheel_choice(1,true,f.t);assert((m.copy_displaced&2u) && v.a[1].what==Held::heart && v.a[0].what==Held::none && v.valid());}
+        // v1284 (was v1090: the Heart moved right and the right's copy fell): the Heart (Timepiece, gadget) held in the left, the right arm (holding a
+        // gun copy) chooses it: nothing moves - the left keeps it, the right keeps its copy, no request is left
+        for(const Held k:{Held::heart,Held::timepiece,Held::gadget}) {
+            ArmSet v;Clock f;engine(v,f,k,false);v.set_copy(1,Held::pistol,f.t);v.wheel_commit(1,f.t,f.rev);
+            const Fx m=v.wheel_choice(1,true,f.t);
+            assert(!m.copy_displaced && !m.power_moved && v.a[0].what==k && v.a[0].home==Home::slot1 && v.copy_at(1)==Held::pistol && !v.pend[1].on && v.valid());
+        }
     }
     {   // a stale request for the other arm does not steal the arrival; a wheel closed on nothing lets the holder go at once
         ArmSet s;Clock c;s.hip_draw(0,c.t,c.rev);s.wheel_commit(1,c.t,c.rev);s.wheel_choice(1,false,c.t);
@@ -255,7 +384,7 @@ int main() {
                     const bool moved_in=(fx.power_moved>>o)&1u;
                     // wheel_choice(same) copies a gun into arm h only; nothing here may touch arm o's item except a power moving in
                     // v1090: or a power the other arm held moving to arm h (the same power chosen from h's wheel)
-                    const bool moved_out=which==9 && ((fx.power_moved>>h)&1u) && slot1_only(before.what) && s.a[o].what==Held::none;
+                    const bool moved_out=which==9 && ((fx.power_moved>>h)&1u) && hops(before.what) && s.a[o].what==Held::none;   // v1284: a power only
                     assert(s.a[o].what==before.what || (moved_in && before.what==Held::none) || moved_out);
                     // the other arm's copy never changes through a local event
                     if(before.home==Home::copy) assert(s.a[o].home==Home::copy && s.a[o].what==before.what);
@@ -263,6 +392,37 @@ int main() {
                 c.t+=rnd(40);
             }
         }
+    }
+    {   // v1284 I5 (user, v1282 headset): the Timepiece in one hand, the crossbow chosen with the SAME hand: that hand gets the crossbow, the Timepiece is
+        // put away, the other hand is unchanged (whatever it holds); mirrored. Before v1284 the Timepiece (a "power") went to the other hand (copy_restore,
+        // slot1_restore, slot1_handover in the v1282 log).
+        const Arm others[]={{Held::none,Home::none},{Held::sword,Home::slot0},{Held::pistol,Home::copy},{Held::crossbow,Home::copy},{Held::guard_sword,Home::copy}};
+        for(unsigned h=0;h<2;++h) for(const Arm& other:others) {
+            matrix::World w;w.s.a[h]={Held::timepiece,Home::slot1};w.s.a[h^1u]=other;w.s.rest_slot1=h;w.e1=Held::timepiece;w.prev1=w.e1;w.sw=other.what==Held::sword;matrix::settle(w);
+            bool same=false;Held chosen{};matrix::act(w,h,matrix::wheel,Held::crossbow,same,chosen);
+            assert(w.s.a[h].what==Held::crossbow && w.s.a[h].home==Home::slot1 && w.e1==Held::crossbow);
+            assert(w.s.a[h^1u].what==other.what && w.s.a[h^1u].home==other.home && w.s.valid() && !w.s.pend[0].on && !w.s.pend[1].on);
+            // and putting it away again: the other hand still unchanged, the Timepiece does not come back anywhere
+            matrix::act(w,h,matrix::put_away,Held::none,same,chosen);
+            assert(w.s.a[h].what==Held::none && w.s.a[h^1u].what==other.what && w.s.a[h^1u].home==other.home);
+        }
+        // a crossbow copy in one hand put away while the Timepiece is in the other: the Timepiece's hand is unchanged
+        for(unsigned h=0;h<2;++h) {
+            matrix::World w;w.s.a[h^1u]={Held::timepiece,Home::slot1};w.s.a[h]={Held::crossbow,Home::copy};w.s.rest_slot1=h^1u;w.e1=Held::timepiece;w.prev1=w.e1;matrix::settle(w);
+            bool same=false;Held chosen{};matrix::act(w,h,matrix::put_away,Held::none,same,chosen);
+            assert(w.s.a[h].what==Held::none && w.s.a[h^1u].what==Held::timepiece && w.s.a[h^1u].home==Home::slot1 && w.e1==Held::timepiece);
+        }
+        // a power still swaps (the one exception): Blink in the left, a gun chosen with the left, the right empty -> Blink moves right
+        {matrix::World w;w.s.a[0]={Held::power,Home::slot1};w.e1=Held::power;w.prev1=w.e1;matrix::settle(w);
+         bool same=false;Held chosen{};matrix::act(w,0,matrix::wheel,Held::crossbow,same,chosen);
+         assert(w.s.copy_at(0)==Held::crossbow && w.s.a[1].what==Held::power && w.e1==Held::power);}
+        std::puts("v1284 I5: Timepiece hand chooses a crossbow -> crossbow there, Timepiece put away, other hand unchanged (both hands, 5 other contents)");
+    }
+    matrix::run();
+    assert(matrix::failures==0);
+    {   // I4 note: a ticketed request the engine never answers expires after pend_ms (3.5 s: late wheel landings up to 3 s are real), not 2 s
+        ArmSet s;Clock c;s.hip_draw(1,c.t,c.rev);idle(s,c,Held::none,false,2000);assert(s.pend[1].on);
+        const Fx fx=idle(s,c,Held::none,false,ArmSet::pend_ms-2000+100);assert((fx.expired&2u) && !s.pend[1].on);
     }
     std::puts("arm_state_check: ok");
     return 0;

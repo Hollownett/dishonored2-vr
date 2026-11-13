@@ -127,6 +127,72 @@ inline bool valid_grip(const Mat& g) noexcept {
     return det>.98;
 }
 
+// v1284 (plan 2026-11-13 phase B; user, v1282 headset: the frame time doubles whenever a weapon is published). Every near draw (clip w < 3 m: the
+// arms, the body, scenery along a wall, thousands on a street) inverted its view-projection, took mutexes and tested every published frame before
+// it was known to be anywhere near a held thing.
+// B1: one cheap test first. A draw's model origin is column 3 of its MVP rows (clip = VP * origin), so for a published frame at world point c with
+// match radius r, |row_i . (m - c)| <= |row_i| * r for the clip rows x, y, w (i = 0, 1, 3) is NECESSARY for |m - c| <= r: a draw that fails it for
+// every sphere cannot be matched by any frame, and is rejected with no inverse, no lock. A sphere per published frame (merged when within 2 cm), the
+// radius = the side's match reach (x2 for a held thing's predicted match: raw within reach of F, the part within reach of raw) + 5 cm.
+struct Sphere {double c[3]{};double r{};};
+template<std::size_t N> inline void add_sphere(std::array<Sphere,N>& out,unsigned& n,const Mat& f,double r) noexcept {
+    const double c[3]={f[3],f[7],f[11]};
+    if(!std::isfinite(c[0]+c[1]+c[2]+r)) return;
+    Sphere* near_s=nullptr;double best=1e30;
+    for(unsigned i=0;i<n;++i) {const double d=std::hypot(out[i].c[0]-c[0],std::hypot(out[i].c[1]-c[1],out[i].c[2]-c[2]));if(d<best) {best=d;near_s=&out[i];}}
+    if(near_s && (best<=.02 || n>=N)) {near_s->r=std::max(near_s->r,best+r);return;}   // the same spot, or no room: the nearest grows to cover it
+    out[n++]=Sphere{{c[0],c[1],c[2]},r};
+}
+inline bool in_sphere(const Sphere& s,const Mat& vp,const float* cur) noexcept {
+    for(const int i:{0,1,3}) {
+        const double* row=&vp[static_cast<std::size_t>(i*4)];
+        const double d=static_cast<double>(cur[i*4+3])-(row[0]*s.c[0]+row[1]*s.c[1]+row[2]*s.c[2]+row[3]);
+        if(!(d*d<=(row[0]*row[0]+row[1]*row[1]+row[2]*row[2])*s.r*s.r)) return false;
+    }
+    return true;
+}
+template<std::size_t N> inline bool in_any(const std::array<Sphere,N>& s,unsigned n,const Mat& vp,const float* cur) noexcept {
+    for(unsigned i=0;i<n && i<N;++i) if(in_sphere(s[i],vp,cur)) return true;
+    return false;
+}
+// B2: inverse(vp) once per thread and view-projection (the draws of one pass share it): the last two a thread inverted, keyed by their bytes.
+inline bool inverse_cached(const Mat& vp,Mat& out) noexcept {
+    struct E {Mat key{},inv{};bool ok{},set{};};
+    thread_local std::array<E,2> cache{};thread_local unsigned next{};
+    for(const auto& e:cache) if(e.set && !std::memcmp(e.key.data(),vp.data(),sizeof vp)) {if(e.ok) out=e.inv;return e.ok;}
+    E& e=cache[next++&1u];e.key=vp;e.ok=inverse(vp,e.inv);e.set=true;
+    if(e.ok) out=e.inv;
+    return e.ok;
+}
+// B3: a value one publisher writes and the draw threads read without a lock. Three buffers, each with a sequence number (odd while written): the
+// publisher fills the one after the current and makes it current; a reader whose buffer's sequence moved while it read (it was preempted across two
+// publishes) tries again, up to 4 times, then answers false.
+template<class T> class Snap {
+public:
+    // make(previous current value, the buffer to fill)
+    template<class Make> void update(Make&& make) noexcept {
+        std::lock_guard<std::mutex> lock(write_);   // the publishers only
+        const unsigned c=cur_.load(std::memory_order_relaxed),i=(c+1u)%3u;Buf& b=buf_[i];
+        b.seq.fetch_add(1,std::memory_order_relaxed);std::atomic_thread_fence(std::memory_order_release);
+        make(static_cast<const T&>(buf_[c].v),b.v);
+        b.seq.fetch_add(1,std::memory_order_release);cur_.store(i,std::memory_order_release);
+    }
+    template<class Read> bool read(Read&& r) const noexcept {   // r(const T&) -> bool, pure reads
+        for(int tries=0;tries<4;++tries) {
+            const Buf& b=buf_[cur_.load(std::memory_order_acquire)];
+            const unsigned s=b.seq.load(std::memory_order_acquire);if(s&1u) continue;
+            const bool answer=r(static_cast<const T&>(b.v));
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if(b.seq.load(std::memory_order_relaxed)==s) return answer;
+        }
+        return false;
+    }
+    void clear() noexcept {update([](const T&,T& out) {out=T{};});update([](const T&,T& out) {out=T{};});update([](const T&,T& out) {out=T{};});}
+private:
+    struct Buf {std::atomic<unsigned> seq{};T v{};};
+    std::array<Buf,3> buf_{};std::atomic<unsigned> cur_{};std::mutex write_;
+};
+
 // v1067 (user: "a head, a leg or any object in my hand jitters ... use the same synchronization as the weapons"): a held thing (a grabbed
 // prop, a part held with the game's Use) is placed at its draws like a weapon, B = H * G. Its game pose comes from a tick (one interval old
 // against the drawn hand), and no writer note pairs it, so G = inverse(H) * F is AVERAGED, and only while the hand is still (the lag is then ~0).
@@ -451,6 +517,9 @@ public:
     // locomotion apart (4 m/s * 11 ms = 4.4 cm) no note passes in the world while the player moves (v1282 headset: hand 1 unbound for 2509 renders).
     // carry (v1284): a note is also taken when its read carried by ITS OWN arm model's motion since the note (arms: the arm models' frames of this
     // render's Setup) is the drawn hand: the player's motion leaves the comparison, the hand's own motion between note and render still counts.
+    // A carried note must have been written before F was read (serial <= carry_serial_max, the log's latest serial read just before F): the world
+    // comparison also refused, while the player moves, a note the next tick's attach pass wrote between the F read and the note read (newer than F:
+    // inverse(read) * F would be one tick of motion off); the carry alone would not.
     // Diagnostics: the newest candidate's residual in the world, carried by its arm model, and carried by the player's rig (-1: not known).
     struct ArmNow {std::uintptr_t model{};Mat frame{};bool ok{};};
     struct Pick {int index{-1};unsigned how{};double raw_mm{-1},raw_deg{-1},arm_mm{-1},arm_deg{-1},rig_mm{-1},rig_deg{-1};};   // how: 0 none, 1 world, 2 carried by its arm
@@ -464,7 +533,8 @@ public:
         for(unsigned i=0;i<n_arms;++i) if(arms[i].ok && arms[i].model==w.arm) {Mat inv{};if(!inverse(w.arm_frame,inv)) return false;out=mul(mul(arms[i].frame,inv),w.read);return finite(out);}
         return false;
     }
-    static Pick pick(const Write* c,unsigned n,const Mat& drawn,const ArmNow* arms=nullptr,unsigned n_arms=0,const std::array<double,4>* rig_now=nullptr,bool carry=false) noexcept {
+    static Pick pick(const Write* c,unsigned n,const Mat& drawn,const ArmNow* arms=nullptr,unsigned n_arms=0,const std::array<double,4>* rig_now=nullptr,bool carry=false,
+            std::uint64_t carry_serial_max=~0ull) noexcept {
         Pick p;
         if(!c || !n || !finite(drawn)) return p;
         {   const Write& w=c[n-1];   // the newest candidate's residuals
@@ -474,7 +544,10 @@ public:
             if(rig_now && w.rig_ok && inverse(rig_frame(w.rig),inv_rig)) {const Mat r=mul(mul(rig_frame(*rig_now),inv_rig),w.read);p.rig_mm=distance(r,drawn)*1000.;p.rig_deg=angle(r,drawn)*57.29577951308232;}
         }
         for(int i=static_cast<int>(n)-1;i>=0;--i) if(drawn_like(c[static_cast<unsigned>(i)].read,drawn)) {p.index=i;p.how=1;return p;}
-        if(carry) for(int i=static_cast<int>(n)-1;i>=0;--i) {Mat a{};if(arm_carried(c[static_cast<unsigned>(i)],arms,n_arms,a) && drawn_like(a,drawn)) {p.index=i;p.how=2;return p;}}
+        if(carry) for(int i=static_cast<int>(n)-1;i>=0;--i) {
+            const Write& w=c[static_cast<unsigned>(i)];Mat a{};
+            if(w.serial<=carry_serial_max && arm_carried(w,arms,n_arms,a) && drawn_like(a,drawn)) {p.index=i;p.how=2;return p;}
+        }
         return p;
     }
 private:
@@ -535,6 +608,7 @@ struct Result {int side{-1},eye{-1},hint{-1};Stage stage{rejected};bool alt{},ex
 
 struct Side {
     bool valid{},have_prev{},bound{},rigid{};   // rigid (v1223): a held thing (reach > 0): its draws use RigidLocal's settled L
+    bool provisional{};   // v1284 (plan C2): a weapon published at its engine frame (B = F) while its G is not known yet
     double reach{};   // v1067: >0 = this side's own match radius (a held thing: 0.5 m since v1072, its parts sit at offsets from F)
     std::uint32_t prev_frame{};
     Mat model{},delta{},prev{},relative{},bound_frame{},prev_bound{};
@@ -559,7 +633,7 @@ struct Side {
     double gate_m{},gate_rad{};
     std::array<Mat,2> src{};unsigned nsrc{};   // v1258 one-pose source probe: the pose the engine was last given, the physics body (model frames)
 };
-struct Slot {std::atomic<std::uint32_t> ready{};std::array<Side,2> side{};};
+struct Slot {std::atomic<std::uint32_t> ready{};std::array<Side,2> side{};std::array<Sphere,12> sph{};unsigned nsph{};};   // v1284 (B1): the sides' match spheres
 
 // v1223 (user: "I need loose props behave same as bodies (zero ghosting)"): a held thing's draw is placed at B * L, L = inverse(F) * M its
 // transform in the thing's frame. For a rigid part L is a constant, but measured per draw it is inverse(F_read) * F_draw * L: a carried physics
@@ -827,9 +901,11 @@ private:
 
 class Place {
 public:
-    static constexpr unsigned ring=4;
+    static constexpr unsigned ring=4;    // the previous-render chain: a publish at most 3 frames back is the previous drawn hand
+    static constexpr unsigned slots=8;   // v1284 (C5): publishes kept by frame (an eye's previous render can be 2-4 frames back in one-view mode)
     inline static std::atomic<double> axes_tol{0.004},reach{0.8},identity_tol{0.0015},origin_tie{0.01};
     inline static std::atomic<float> near_w{3.f};
+    inline static std::atomic<bool> cull{true};   // v1284 (B1): the sphere test before any matrix work; build/no-weapon-near-cull = v1283's path
 
     // Render thread, at the eye-0 begin of the render that draws `frame`. raw[s] = the engine's F (15 floats); bound[s] = B = H_image*G
     // or null while no valid G exists (the engine's rows stay). The old publish(frame,raw,delta) form is kept for the labs and treats
@@ -838,7 +914,7 @@ public:
     static void publish_bound(std::uint32_t frame,const std::array<const float*,2>& raw,const std::array<const Mat*,2>& bound,const std::array<double,2>& side_reach={0.,0.},
             const std::array<std::uintptr_t,2>& ids={0,0},double now_s=-1,const std::array<const float*,2>& body_read={nullptr,nullptr}) noexcept {
         if(now_s<0) now_s=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        Slot& slot=ring_[frame%ring];
+        Slot& slot=ring_[frame%slots];
         slot.ready.store(0,std::memory_order_release);
         for(unsigned s=0;s<2;++s) {
             roll_census(s,frame);kind_[s].store(0,std::memory_order_relaxed);cert_pending_[s].valid=false;
@@ -873,7 +949,8 @@ public:
             }
             out.valid=true;out.model=model;out.reach=side_reach[s];out.rigid=side_reach[s]>0;out.src=staged_[s].src;out.nsrc=staged_[s].nsrc;
             if(!bound[s] || !finite(*bound[s])) {last_[s]={};continue;}   // no G yet: no placement, no previous chain
-            out.bound=true;out.bound_frame=*bound[s];
+            out.bound=true;out.bound_frame=*bound[s];out.provisional=staged_[s].provisional;
+            if(out.provisional) provisional_renders_.fetch_add(1,std::memory_order_relaxed);
             out.delta=mul(*bound[s],inverse_model);
             for(unsigned k=0;k<staged_[s].extras && out.extras<Side::max_extra;++k) if(finite(staged_[s].extra[k]) && distance(staged_[s].extra[k],model)<=alt_max_m) out.extra[out.extras++]=staged_[s].extra[k];
             if(out.extras) children_.fetch_add(out.extras,std::memory_order_relaxed);
@@ -906,6 +983,12 @@ public:
             published_side_[s].fetch_add(1,std::memory_order_relaxed);
             if(staged_[s].kind>=kind_prop) {auto& c=cert_pending_[s];c.valid=true;c.f=model;c.b=*bound[s];c.bucket=staged_[s].bucket;c.kind=staged_[s].kind;c.id=ids[s];c.src=staged_[s].src;c.nsrc=staged_[s].nsrc;c.rig_mm=staged_[s].rig_mm;c.rig_deg=staged_[s].rig_deg;}   // v1258
         }
+        slot.nsph=0;   // v1284 (B1): a sphere per published frame (F, previous read, children, earlier reads), merged when within 2 cm
+        for(unsigned s=0;s<2;++s) {
+            const Side& w=slot.side[s];if(!w.valid) continue;
+            const double r=reach_of(w)*(w.rigid?2.:1.)+.05;   // a held thing's predicted match: the part within reach of a raw pose within reach of F
+            for(int h=0;h<frames_end(w);++h) if(has_frame(w,h)) add_sphere(slot.sph,slot.nsph,frame_of(w,h),r);
+        }
         staged_={};
         latest_frame_.store(frame,std::memory_order_release);
         slot.ready.store(frame+1,std::memory_order_release);
@@ -926,9 +1009,9 @@ public:
     // placed at all; and per draw placed / with previous rows / child-matched / unplaced near-like / unplaced near-other.
     enum Kind:unsigned {kind_none,kind_weapon,kind_prop,kind_use,kind_bind,kind_severed,kinds};
     // Publisher, before publish_bound: what this side holds and the frames of the entities bound to it (children, max Side::max_extra).
-    static void stage(unsigned s,unsigned kind,const Mat* extra=nullptr,unsigned n=0) noexcept {
+    static void stage(unsigned s,unsigned kind,const Mat* extra=nullptr,unsigned n=0,bool provisional=false) noexcept {
         if(s>1) return;
-        staged_[s].kind=kind<kinds?kind:0u;
+        staged_[s].kind=kind<kinds?kind:0u;staged_[s].provisional=provisional;   // v1284 (C2)
         for(unsigned k=0;extra && k<n && staged_[s].extras<Side::max_extra;++k) staged_[s].extra[staged_[s].extras++]=extra[k];
     }
     // v1258 one-pose certificate (status weapon_draw.place.one_pose). Publisher, before publish_bound: the player's motion this render (bucket
@@ -1015,7 +1098,7 @@ public:
               +",\"unplaced_nodraw\":"+std::to_string(renders_[k][4].load())+",\"unplaced_refused\":"+std::to_string(renders_[k][3].load()-renders_[k][4].load())
               +",\"draws\":{\"placed\":"+std::to_string(draws_[k][0].load())+",\"with_prev\":"+std::to_string(draws_[k][1].load())+",\"child\":"+std::to_string(draws_[k][2].load())
               +",\"near_like\":"+std::to_string(draws_[k][3].load())+",\"near_other\":"+std::to_string(draws_[k][4].load())+"},\"match\":"+match_json(k)
-              +(k==kind_weapon?",\"refused\":"+refused_json():std::string())+"}";   // v1283 (A4)
+              +(k==kind_weapon?",\"refused\":"+refused_json()+",\"provisional_renders\":"+std::to_string(provisional_renders_.load()):std::string())+"}";   // v1283 (A4), v1284 (C2)
         }
         // v1239: predicted matches, how far the draw's implied pose was from the latest read (mm edges 1 2 5 10 20 50 100 200; deg .25 .5 1 2 5 10 20 45)
         o+=",\"predicted_offset\":{\"mm\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::to_string(pred_mm_[i].load());
@@ -1058,9 +1141,21 @@ public:
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
     static std::uint64_t published(unsigned side) noexcept {return side<2?published_side_[side].load(std::memory_order_relaxed):0;}
     static unsigned kind(unsigned side) noexcept {return side<2?kind_[side].load(std::memory_order_relaxed):0u;}   // v1283: what the last publish placed (0 none)
+    // v1284 (B1): may this draw (MVP rows `cur` under `vp`) belong to anything the latest render published? false = no matrix work, no lock.
+    // With the cull off (build/no-weapon-near-cull) always true: the callers take v1283's path.
+    static bool near_any(const Mat& vp,const float* cur) noexcept {
+        if(!cull.load(std::memory_order_relaxed)) return true;
+        if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return false;
+        const Slot* slot=slot_of(latest_frame());
+        return slot && in_any(slot->sph,slot->nsph,vp,cur);
+    }
+    static std::string own_prev_json() {   // v1284 (C5) status: one-view placed draws' own previous [by eye gap 1, 2, 3, 4+, v1191 rule, none]
+        std::string o="[";for(unsigned i=0;i<own_prev_gap_.size();++i) o+=(i?",":"")+std::to_string(own_prev_gap_[i].load());return o+"]";
+    }
+    static std::uint64_t provisional_renders() noexcept {return provisional_renders_.load(std::memory_order_relaxed);}
     static std::uint32_t latest_frame() noexcept {return latest_frame_.load(std::memory_order_acquire);}
     static const Slot* slot_of(std::uint32_t frame) noexcept {
-        const Slot& s=ring_[frame%ring];
+        const Slot& s=ring_[frame%slots];
         return s.ready.load(std::memory_order_acquire)==frame+1?&s:nullptr;
     }
     static bool still(const Slot& s,std::uint32_t frame) noexcept {return s.ready.load(std::memory_order_acquire)==frame+1;}
@@ -1102,6 +1197,11 @@ public:
         if(!views.ok[0] || !views.ok[1]) {result.stage=no_views;return result;}
         const double tol=axes_tol.load(std::memory_order_relaxed);
         const bool pass_eye_ok=pass_eye==0 || pass_eye==1;
+        if(cull.load(std::memory_order_relaxed)) {   // v1284 (B1): near no published frame in any eye it may belong to: no product, no match
+            bool any=false;
+            for(unsigned e=0;e<2 && !any;++e) if(!pass_eye_ok || static_cast<int>(e)==pass_eye) any=in_any(slot->sph,slot->nsph,views.vp[e],cur);
+            if(!any) return result;
+        }
         Rows cur_model[2]{};
         for(unsigned e=0;e<2;++e) if(views.ok[e] && (!pass_eye_ok || static_cast<int>(e)==pass_eye)) cur_model[e]=model_rows(views.inv[e].data(),cur);
         double side_distance[2]={-1,-1};bool side_oriented=false;int hit[2]={0,0};   // hit: frame_of index (0 F, 1 previous read, 2+k child k)
@@ -1182,7 +1282,7 @@ public:
         const Mat now=rigid?rigid_now(w,vp,lref,l):mul(mul(vp,delta),x);   // v1241: a held part: one product for every pass and match kind
         const Mat before=previous?mul(mul(views.prev_vp[candidate][eye],prev_eye),x):mul(mul(vp,prev_eye),x);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
-        if(rigid) RigidLocal::note_placed(static_cast<unsigned>(candidate),lref,frame,l,vp,cur_out);   // v1241 pass_spread_renders
+        if(rigid && weapon_perf::enabled()) RigidLocal::note_placed(static_cast<unsigned>(candidate),lref,frame,l,vp,cur_out);   // v1241 pass_spread_renders (v1284 B6: diagnostics)
         if(still_out) {
             const bool view_before=views.prev_frame[candidate]==w.prev_frame && w.prev_frame && views.prev_ok[candidate][eye];
             const Mat still=view_before?mul(mul(views.prev_vp[candidate][eye],delta),x):now;
@@ -1191,7 +1291,7 @@ public:
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
         result.side=candidate;result.eye=eye;result.alt=use_alt;result.extra=h>1 && h<hist0;result.predicted=predicted;result.age=age_of(w,h);
         result.stage=pass_eye_ok?placed_pass:tagged?placed_tagged:last_frame?placed_last_frame:placed_same_frame;
-        note_match(static_cast<unsigned>(candidate),result);
+        if(weapon_perf::enabled()) note_match(static_cast<unsigned>(candidate),result);   // v1284 (B6)
         return result;
     }
     // v1237 census: Place::place, plus for a draw it did not place whether that draw sits within a published side's reach (Result::near_side).
@@ -1342,12 +1442,16 @@ public:
     // (delta = B * inverse(F): the drawn hand's binding this render); previous = prev_vp * (B_own_prev * inverse(F)) * m with B_own_prev the
     // bound frame of the publish two engine frames back (this eye's previous render); without it, prev_vp * delta * m (the hand still,
     // the camera's motion only; Result::alt false and stage placed_tagged count that). Returns the side, else -1.
-    static Result place_one_view(const Mat& vp,const Mat& prev_vp,const float* cur,float* cur_out,float* prev_out,bool& own_prev,float* still_out=nullptr,std::uint64_t draw_key=0) noexcept {
+    // v1284 (C5): prev_frame = the engine frame of THIS eye's previous render (the draw's receipt; 0 unknown): its publish's drawn binding is the
+    // previous hand pose, whatever the gap (a paired frame, a skipped render, a frame-time drop); v1191's "two frames back" stays for an unknown one.
+    static Result place_one_view(const Mat& vp,const Mat& prev_vp,const float* cur,float* cur_out,float* prev_out,bool& own_prev,float* still_out=nullptr,std::uint64_t draw_key=0,
+            std::uint32_t prev_frame=0) noexcept {
         Result result;own_prev=false;
         if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return result;
         const std::uint32_t frame=latest_frame();
         const Slot* slot=slot_of(frame);if(!slot) return result;
-        Mat inv{};if(!inverse(vp,inv)) {result.stage=no_views;return result;}
+        if(cull.load(std::memory_order_relaxed) && !in_any(slot->sph,slot->nsph,vp,cur)) return result;   // v1284 (B1): before any inverse
+        Mat inv{};if(!inverse_cached(vp,inv)) {result.stage=no_views;return result;}   // v1284 (B2)
         const Rows m=model_rows(inv.data(),cur);
         const double tol=axes_tol.load(std::memory_order_relaxed);
         int candidate=-1,hit=0;double best=-1;
@@ -1377,13 +1481,23 @@ public:
         Mat before=mul(mul(prev_vp,delta),model);
         if(still_out) for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(before[i]); // v1218: camera-only, the current binding
         const Last& o=older2_[static_cast<unsigned>(candidate)];
-        Mat inverse_f{};
-        if(o.valid && frame-o.frame==2 && inverse(use_alt || use_hist?matched:w.model,inverse_f)) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;}
+        Mat inverse_f{};const Mat& f_used=use_alt || use_hist?matched:w.model;
+        unsigned gap_slot=5;
+        if(prev_frame && prev_frame!=frame && inverse(f_used,inverse_f)) if(const Slot* ps=slot_of(prev_frame)) {   // v1284 (C5): this eye's previous render
+            const Side& pw=ps->side[static_cast<unsigned>(candidate)];
+            if(pw.valid && pw.bound && distance(pw.model,w.model)<=alt_max_m) {
+                const Mat b_prev=pw.bound_frame;
+                if(still(*ps,prev_frame)) {before=mul(mul(prev_vp,mul(b_prev,inverse_f)),model);own_prev=true;gap_slot=std::min(frame-prev_frame,4u)-1u;}
+            }
+        }
+        if(!own_prev && o.valid && frame-o.frame==2 && inverse(f_used,inverse_f)) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;gap_slot=4;}
+        if(weapon_perf::enabled()) own_prev_gap_[gap_slot].fetch_add(1,std::memory_order_relaxed);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
-        if(rigid) RigidLocal::note_placed(static_cast<unsigned>(candidate),lref,frame,l,vp,cur_out);   // v1241 pass_spread_renders
+        if(rigid && weapon_perf::enabled()) RigidLocal::note_placed(static_cast<unsigned>(candidate),lref,frame,l,vp,cur_out);   // v1241 pass_spread_renders (v1284 B6: diagnostics)
         if(!still(*slot,frame)) {result.stage=rejected;return result;}
         result.side=candidate;result.eye=-1;result.alt=use_alt;result.extra=hit>1 && hit<hist0;result.predicted=predicted;result.age=age_of(w,hit);result.stage=placed_pass;
-        note_match(static_cast<unsigned>(candidate),result);return result;
+        if(weapon_perf::enabled()) note_match(static_cast<unsigned>(candidate),result);   // v1284 (B6)
+        return result;
     }
     // v1223: a held thing's part as F_used * L with L the settled rigid local transform (RigidLocal), so delta * part = B * L whatever frame
     // the engine composed this draw from; otherwise the draw's own model rows m (v1222). f = the frame the draw matched (F, previous read, child).
@@ -1410,7 +1524,7 @@ private:
     struct SevDraw {std::uint64_t key{},layout{},passes{},placed{};unsigned size{};double scale_min{1e9},scale_max{},ortho_max{};std::array<double,3> l_mm{};};
     inline static std::mutex sev_mutex_;inline static std::array<SevDraw,8> sev_{};inline static unsigned sev_n_{};
     inline static std::uint32_t last_frame_l_{};inline static Mat sev_first_{};inline static std::uint64_t sev_first_key_{},sev_pairs_{},sev_apart_{};inline static double sev_spread_um_{};
-    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};};   // v1258: motion bucket, source poses
+    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};bool provisional{};};   // v1258: motion bucket, source poses
     inline static std::array<Staged,2> staged_{};
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
     inline static std::array<std::uint32_t,2> census_frame_{};
@@ -1525,7 +1639,9 @@ private:
     struct Read {bool cur_ok{},prior_ok{};std::uint32_t cur_frame{};std::uintptr_t cur_id{},prior_id{};Mat cur{},prior{};
         std::uintptr_t ring_id{};unsigned ring_n{};std::array<Mat,Side::max_hist+1> ring{};std::array<double,Side::max_hist+1> ring_t{};}; // v1239: distinct reads, newest first
     inline static std::array<Read,2> reads_{};
-    inline static std::array<Slot,ring> ring_{};
+    inline static std::array<Slot,slots> ring_{};
+    inline static std::atomic<std::uint64_t> provisional_renders_{};   // v1284 (C2)
+    inline static std::array<std::atomic<std::uint64_t>,6> own_prev_gap_{};   // v1284 (C5): one-view own previous [by eye: gap 1, 2, 3, 4+; the v1191 rule; none]
     inline static std::array<Last,2> last_{};
     inline static std::atomic<std::uint64_t> published_{};
     inline static std::array<std::atomic<std::uint64_t>,2> published_side_{};

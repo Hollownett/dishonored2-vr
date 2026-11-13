@@ -6,15 +6,22 @@ namespace d2vr::arm {
 // Independent per-arm weapon state for dual wield (design: docs/superpowers/specs/2026-11-06-independent-arm-state-design.md).
 // Each physical arm (0 left, 1 right) says what it holds and how. The engine has two slots (slot 0 the sword, slot 1 the gun, crossbow,
 // gadget, Heart or power); which arm drives a slot is DERIVED from what the arms hold (derive()). An event touches only its own arm;
-// the one cross-arm rule is the POWER SWAP in place(): a weapon placed in the arm that holds a slot-1-only item (power, Heart, gadget)
-// moves that item to the other arm when it is empty, else puts it away. Engine truth enters only through native_changed(); a mod
+// the one cross-arm rule is the POWER SWAP in place(): a weapon placed in the arm that holds a power moves the power to the other arm when it is
+// empty, else puts it away. v1284: only a power (hops()); the Timepiece, the Heart and a gadget are put away, never moved. Engine truth enters only through native_changed(); a mod
 // request that makes the engine equip something (wheel commit, hip draw, native pickup, gadget catch) leaves a ticket naming its arm.
 // The first five values are the old HandLoadout::Extra numbers (the status JSON keeps its "extra" field readable).
-enum class Held : std::uint8_t {none,pistol,crossbow,guard_sword,guard_pistol,sword,gadget,heart,power};
+enum class Held : std::uint8_t {none,pistol,crossbow,guard_sword,guard_pistol,sword,gadget,heart,power,timepiece};
 enum class Home : std::uint8_t {none,slot0,slot1,copy};   // slot0/slot1: the engine's own item; copy: a mod-owned model in the hand
 constexpr bool native_gun(Held h) noexcept {return h==Held::pistol || h==Held::crossbow;}
 constexpr bool is_gun(Held h) noexcept {return native_gun(h) || h==Held::guard_pistol;}
-constexpr bool slot1_only(Held h) noexcept {return h==Held::gadget || h==Held::heart || h==Held::power;}
+constexpr bool slot1_only(Held h) noexcept {return h==Held::gadget || h==Held::heart || h==Held::power || h==Held::timepiece;}
+// v1284 (user, v1282 headset: "the Timepiece jumps to the other hand when I choose or put away a crossbow in the same hand; only a power may"):
+// the Timepiece (equip name "Timeshift") was classified a power (is_power_equip_name: any non-gun/gadget/Heart equip) and moved with every
+// power swap; the Heart and gadgets moved in the wheel's swap and its same-item route (v1090) too. hops(): the one kind that may move to the other
+// arm. gives_way(): a slot-1-only item that does not block a weapon taken into its arm - the power moves (hops), the Timepiece is put away; the
+// Heart and gadgets still refuse a sword or a pickup into their arm (unchanged).
+constexpr bool hops(Held h) noexcept {return h==Held::power;}
+constexpr bool gives_way(Held h) noexcept {return h==Held::power || h==Held::timepiece;}
 constexpr bool slot1_item(Held h) noexcept {return native_gun(h) || slot1_only(h);}
 constexpr bool copyable(Held h) noexcept {return native_gun(h) || h==Held::guard_sword || h==Held::guard_pistol;}
 constexpr bool is_weapon(Held h) noexcept {return h==Held::sword || native_gun(h) || h==Held::guard_sword || h==Held::guard_pistol;}
@@ -68,16 +75,21 @@ struct ArmSet {
     bool sword_leaving{};std::uint64_t sword_leave_until{};          // the model took the sword from its arm; the engine still has it drawn
     Held leave_kind{};std::uint64_t leave_until{};                   // the model put a slot-1 item away; the engine still reports it
     bool seen_valid{},applied_valid{};Held seen_kind{},applied_kind{};std::uint64_t seen_rev{},applied_rev{},seen_tick{};
+    // v1284 (plan 2026-11-13 4.1 matrix): a wheel choice whose equip is on its way (chosen 2) that a newer request superseded - a second wheel of the
+    // same arm or the other arm's, within the 60 ms settle. When that newer request ends with no arrival of its own (nothing chosen, or the item slot 1
+    // now holds), the older choice gets its ticket back: before, its equip landed with no ticket and went to the resting slot-1 arm (rest_slot1),
+    // which can be the hand that did not choose it.
+    std::array<Pend,2> held_over{};
 
     // --- queries -------------------------------------------------------------------------------------------------------------------
     int sword_holder() const noexcept {for(unsigned h=0;h<2;++h) if(a[h].home==Home::slot0) return static_cast<int>(h);return -1;}
     int slot1_holder() const noexcept {for(unsigned h=0;h<2;++h) if(a[h].home==Home::slot1) return static_cast<int>(h);return -1;}
     Held copy_at(unsigned h) const noexcept {return a[h&1u].home==Home::copy?a[h&1u].what:Held::none;}
     bool empty(unsigned h) const noexcept {h&=1u;return a[h].what==Held::none && !pend[h].on;}
-    // A hand may take a weapon (the sword, a gun) when it holds nothing or only a power (the power swap moves it).
-    bool free_for_weapon(unsigned h) const noexcept {h&=1u;return !pend[h].on && (a[h].what==Held::none || a[h].what==Held::power);}
+    // A hand may take a weapon (the sword, a gun) when it holds nothing, a power (the power swap moves it) or the Timepiece (put away, v1284).
+    bool free_for_weapon(unsigned h) const noexcept {h&=1u;return !pend[h].on && (a[h].what==Held::none || gives_way(a[h].what));}
     // A pickup may also replace a sword that is drawn in the arm but not gripped (the sword then leaves that arm only).
-    bool free_for_pickup(unsigned h) const noexcept {h&=1u;return !pend[h].on && (a[h].what==Held::none || a[h].what==Held::power || a[h].home==Home::slot0);}
+    bool free_for_pickup(unsigned h) const noexcept {h&=1u;return !pend[h].on && (a[h].what==Held::none || gives_way(a[h].what) || a[h].home==Home::slot0);}
     bool any_pending() const noexcept {return pend[0].on || pend[1].on;}
     Plan derive() const noexcept {
         const int s=sword_holder(),p=slot1_holder();Plan pl;
@@ -114,10 +126,12 @@ struct ArmSet {
         if(cur.home==Home::slot0 && home!=Home::slot0) {fx.sword_left|=1u<<h;sword_leaving=true;sword_leave_until=now+leave_ms;}
         else if(cur.home==Home::copy) fx.copy_displaced|=1u<<h;
         else if(cur.home==Home::slot1 && cur.what!=Held::none && is_weapon(what)) {
-            if(slot1_only(cur.what)) {   // POWER SWAP: the power goes to the other arm when that one is empty, else it is put away
+            if(hops(cur.what)) {   // POWER SWAP: the power goes to the other arm when that one is empty, else it is put away
                 a[h]={};
                 if(empty(o)) {a[o]={cur.what,Home::slot1};rest_slot1=o;fx.power_moved|=1u<<o;if(!engine_holds_cur) fx.restore_slot1=true;}
                 else if(engine_holds_cur) {fx.unequip_slot1=true;leave_kind=cur.what;leave_until=now+leave_ms;}
+            } else if(slot1_only(cur.what)) {   // v1284: the Timepiece (Heart, gadget) never changes arms: it is put away (the engine already did when !engine_holds_cur)
+                if(engine_holds_cur) {fx.unequip_slot1=true;leave_kind=cur.what;leave_until=now+leave_ms;}
             } else if(home!=Home::slot1 && engine_holds_cur) {fx.unequip_slot1=true;leave_kind=cur.what;leave_until=now+leave_ms;}   // a gun the arm held, replaced by a weapon of the mod's
         }
         a[h]={what,home};
@@ -132,9 +146,9 @@ struct ArmSet {
         Fx fx;h&=1u;
         if(!free_for_weapon(h) || sword_holder()>=0) {fx.refused=true;return fx;}
         const unsigned o=h^1u;sword_leaving=false;
-        if(a[h].what==Held::power) {
+        if(gives_way(a[h].what)) {   // a power moves to the empty other arm; the Timepiece (v1284), or a power with the other arm busy, is put away
             const Held p=a[h].what;a[h]={};
-            if(empty(o)) {a[o]={p,Home::slot1};fx.power_moved|=1u<<o;} else {fx.unequip_slot1=true;leave_kind=p;leave_until=now+leave_ms;}
+            if(hops(p) && empty(o)) {a[o]={p,Home::slot1};fx.power_moved|=1u<<o;} else {fx.unequip_slot1=true;leave_kind=p;leave_until=now+leave_ms;}
         }
         rest_slot1=o;return fx;
     }
@@ -198,22 +212,26 @@ struct ArmSet {
     Fx wheel_commit(unsigned h,std::uint64_t now,std::uint64_t rev) noexcept {
         Fx fx;h&=1u;wheel_ctx=true;wheel_ctx_until=now+wheel_ctx_ms;request(h,true,Held::none,now,rev);return fx;
     }
-    // The wheel closed on no item: nothing will arrive.
-    void wheel_nothing(unsigned h) noexcept {pend[h&1u]={};if(!pend[0].on && !pend[1].on) wheel_ctx=false;}
+    // The wheel closed on no item: nothing will arrive (v1284: an earlier choice's equip still on its way keeps its arm).
+    void wheel_nothing(unsigned h) noexcept {pend[h&1u]={};restore_held_over();if(!pend[0].on && !pend[1].on) wheel_ctx=false;}
     // Exact: the hooked equip named the chosen item and the caller compared it with the item slot 1 held at the commit.
     Fx wheel_choice(unsigned h,bool same,std::uint64_t now) noexcept {
         Fx fx;h&=1u;Pend& p=pend[h];
         if(!p.on || !p.wheel) {fx.refused=true;return fx;}
-        if(!same) {p.chosen=2;return fx;}
+        if(!same) {p.chosen=2;held_over={};return fx;}   // the newest different choice owns the next arrival
         p.on=false;p.chosen=1;
         const int s=slot1_holder();
-        if(s>=0 && static_cast<unsigned>(s)!=h && copyable(a[s].what) && !(a[h].home==Home::copy && a[h].what==a[s].what)) {
+        // v1284: while another choice's equip is landing (held over), slot 1 already holds THAT item, not a[s]: no copy or move of the old one
+        const bool in_flight=held_over[0].on || held_over[1].on;
+        if(!in_flight && s>=0 && static_cast<unsigned>(s)!=h && copyable(a[s].what) && !(a[h].home==Home::copy && a[h].what==a[s].what)) {
             fx.merge(place(h,a[s].what,Home::copy,now));fx.same_copy=true;
-        } else if(s>=0 && static_cast<unsigned>(s)!=h && slot1_only(a[s].what)) {
-            // v1090 (user, headset v1089: "a power active in the other hand should be placed into the new hand"): a power, gadget or Heart cannot be
-            // copied, so it MOVES to the opening arm; the engine keeps it equipped, only the arm that draws slot 1 changes (as the power swap).
+        } else if(!in_flight && s>=0 && static_cast<unsigned>(s)!=h && hops(a[s].what)) {
+            // v1090 (user, headset v1089: "a power active in the other hand should be placed into the new hand"): a power cannot be copied, so it
+            // MOVES to the opening arm; the engine keeps it equipped, only the arm that draws slot 1 changes (as the power swap).
+            // v1284: a power only - the Timepiece, the Heart or a gadget chosen from the other arm's wheel stays where it is (the game skips the equip).
             fx.merge(place(h,a[s].what,Home::slot1,now,false));fx.power_moved|=1u<<h;
         }
+        restore_held_over();   // v1284
         if(!pend[0].wheel && !pend[1].wheel && !pend[0].on && !pend[1].on) wheel_ctx=false;
         return fx;
     }
@@ -235,8 +253,13 @@ struct ArmSet {
 
 private:
     void request(unsigned h,bool wheel,Held want,std::uint64_t now,std::uint64_t rev) noexcept {
+        for(const unsigned i:{h&1u,(h&1u)^1u}) if(pend[i].on && pend[i].wheel && pend[i].chosen==2) held_over[i]=pend[i];   // v1284
         pend[(h&1u)^1u]={};   // the newest request owns the next arrival: an older one for the other arm is abandoned
         Pend& p=pend[h&1u];p={};p.on=true;p.wheel=wheel;p.want=want;p.ticket=++ticket_seq;p.deadline=now+pend_ms;p.revision=rev;p.since=now;
+    }
+    void restore_held_over() noexcept {   // v1284: the newest request ended with no arrival: a superseded choice whose equip is coming gets its ticket back
+        for(unsigned i=0;i<2;++i) if(held_over[i].on && !pend[i].on) {pend[i]=held_over[i];wheel_ctx=true;}
+        held_over={};
     }
     static bool compatible(Held want,Held got) noexcept {return want==Held::none || want==got || (slot1_only(want) && slot1_only(got));}
     Fx step(const Native& n,std::uint64_t now) noexcept {
@@ -247,6 +270,7 @@ private:
             // Fallback only: the hook gave no chosen item and the engine changed nothing: the same item, as the old 160 ms guess but later
             if(p.wheel && p.chosen==0 && now>=p.since+same_fallback_ms && n.revision==p.revision) fx.merge(wheel_choice(h,true,now));
         }
+        for(auto& x:held_over) if(x.on && now>x.deadline) x={};   // v1284
         if(wheel_ctx && now>wheel_ctx_until && !pend[0].on && !pend[1].on) wheel_ctx=false;
         if(sword_leaving && now>=sword_leave_until) sword_leaving=false;
         return fx;
@@ -269,7 +293,7 @@ private:
         int h=-1;std::uint64_t best=~0ull;
         for(unsigned i=0;i<2;++i) if(pend[i].on && !(pend[i].wheel && pend[i].chosen==1) && rev!=pend[i].revision && compatible(pend[i].want,k) && pend[i].ticket<best) {best=pend[i].ticket;h=static_cast<int>(i);}
         if(h>=0) {
-            const unsigned u=static_cast<unsigned>(h);pend[u].on=false;fx.arrived|=1u<<u;fx.merge(arrive(u,k,now));
+            const unsigned u=static_cast<unsigned>(h);pend[u].on=false;held_over={};fx.arrived|=1u<<u;fx.merge(arrive(u,k,now));
             if(!pend[0].on && !pend[1].on) wheel_ctx=false;
             return fx;
         }
@@ -286,11 +310,11 @@ private:
     Fx arrive(unsigned h,Held k,std::uint64_t now) noexcept {
         const int p=slot1_holder();
         if(native_gun(k) && p>=0 && slot1_only(a[static_cast<unsigned>(p)].what)) {
-            if(static_cast<unsigned>(p)!=h) {   // a gun chosen for this arm while the other holds a power/gadget/Heart: the gun is a copy, the item is equipped again
+            if(static_cast<unsigned>(p)!=h) {   // a gun chosen for this arm while the other holds a power/gadget/Heart/Timepiece: the gun is a copy, the item is equipped again
                 Fx fx=place(h,k,Home::copy,now,false);fx.restore_slot1=true;return fx;
             }
-            if(empty(h^1u)) return place(h,k,Home::copy,now,false);   // the power swap: the gun is this arm's copy, the power goes to the other arm and is equipped again
-            a[h]={};   // the other arm is occupied: the power is put away (the engine already replaced it)
+            if(hops(a[h].what) && empty(h^1u)) return place(h,k,Home::copy,now,false);   // the power swap: the gun is this arm's copy, the power goes to the other arm and is equipped again
+            a[h]={};   // the other arm is occupied, or not a power (v1284: the Timepiece, Heart, gadget): put away (the engine already replaced it)
         }
         return place(h,k,Home::slot1,now,false);
     }

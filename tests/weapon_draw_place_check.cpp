@@ -236,6 +236,135 @@ static void v1239_lab(const Mat& part) {
     std::printf("v1239 status: %s\n",Place::census_json().c_str());
 }
 
+// ---- v1284 (plan C1, section 4.2): G learned while the player MOVES. A writer note is composed on the game tick: read = the arm model's frame of
+// that tick * the hand joint; the drawn hand is this render's, one tick of locomotion later (the rig moved, the hand did not move in it). Before
+// (world comparison, 3 cm / 0.14 rad): at speed * tick > 3 cm no note ever passes and G is never learned. After (WriteLog::pick carry): the read
+// carried by its own arm model's motion to this render's Setup frame is the drawn hand: two agreeing notes, bound at the second render.
+static Mat arm_at(double t,double v,double yaw_dps) {   // the arm model frame while walking along (0.8,0.6) at v m/s and turning at yaw_dps
+    Mat a=mul(rot(0,0,1,yaw_dps/57.29577951308232*t),rigid(rot(0,0,1,.4),0,0,0));
+    a[3]=-91.8+.8*v*t;a[7]=-92.5+.6*v*t;a[11]=4.9;return a;
+}
+static int learn_renders(double v,double yaw_dps,double tick,bool carry,double hand_step_m,int& picked_carried) {
+    Binder::clear();
+    const Mat j=rigid(rot(.2,.1,1,.6),.35,-.18,-.42),ge=rigid(rot(.3,.5,.2,.7),.04,-.02,.06);   // the hand joint in the arm frame; the engine's item offset
+    const std::uintptr_t arm_model=0xa4a0,weapon=0x5150;picked_carried=0;
+    for(int n=0;n<10;++n) {
+        const double t_note=n*tick,t_draw=(n+1)*tick;
+        Mat jn=j;jn[3]+=hand_step_m*n;Mat jd=j;jd[3]+=hand_step_m*(n+1);   // hand_step_m: the hand moves in the rig between the note and the render
+        Write w{};w.serial=static_cast<std::uint64_t>(n+1);w.engine_side=0;w.kind=write_engine;w.frame=static_cast<std::uint64_t>(n);
+        w.read=mul(arm_at(t_note,v,yaw_dps),jn);w.arm=arm_model;w.arm_frame=arm_at(t_note,v,yaw_dps);w.arm_ok=true;
+        const Mat drawn=mul(arm_at(t_draw,v,yaw_dps),jd),f=mul(w.read,ge);   // F: the composition of that note
+        const WriteLog::ArmNow arms[2]={{arm_model,arm_at(t_draw,v,yaw_dps),true},{0xb5b0,arm_at(t_draw,v,yaw_dps),true}};
+        const auto p=WriteLog::pick(&w,1,drawn,arms,2,nullptr,carry);
+        GripCandidate c{};if(p.index>=0) candidate_from_read(w.read,f,c,weapon,write_engine,space_joint59,w.serial,w.frame);
+        if(p.how==2) ++picked_carried;
+        if(Binder::observe(0,c,weapon,write_engine,space_joint59)) {
+            Mat b{};CHECK(Binder::frame(0,drawn,b) && dist(b,mul(drawn,ge))<1e-9 && angle(b,mul(drawn,ge))<1e-9);   // the true G: the weapon in the drawn hand
+            return n+1;
+        }
+    }
+    return -1;
+}
+static void v1284_note_carry_lab() {
+    std::printf("v1284 C1 note carry (renders to bind G; -1 = never in 10; note one tick older than the drawn hand):\n");
+    for(const double tick:{1/90.,1/45.}) for(const double v:{1.5,4.,7.}) for(const double yaw:{0.,120.}) {
+        int carried=0;
+        const int before=learn_renders(v,yaw,tick,false,0,carried),after=learn_renders(v,yaw,tick,true,0,carried);
+        const double step_mm=v*tick*1000.;
+        std::printf("  tick %.1f ms  %.1f m/s  turn %3.0f deg/s  (%.1f mm/tick): before %2d  after %2d (carried notes %d)\n",tick*1000.,v,yaw,step_mm,before,after,carried);
+        CHECK(after>=1 && after<=2);
+        if(step_mm>30.) CHECK(before<0);   // the world comparison never passes once a tick of locomotion exceeds 3 cm
+    }
+    {   // the hand itself moves 5 cm between the note and the render: refused with the carry too (standing and walking)
+        int carried=0;
+        CHECK(learn_renders(0,0,1/90.,true,.05,carried)<0 && learn_renders(4,0,1/90.,true,.05,carried)<0);
+        // a note whose arm model is not one of this render's arms is never carried
+        Binder::clear();
+        Write w{};w.read=mul(arm_at(0,4,0),rigid(identity(),.3,0,0));w.arm=0xdead;w.arm_frame=arm_at(0,4,0);w.arm_ok=true;
+        const WriteLog::ArmNow arms[1]={{0xa4a0,arm_at(1/90.,4,0),true}};
+        CHECK(WriteLog::pick(&w,1,mul(arm_at(1/90.,4,0),rigid(identity(),.3,0,0)),arms,1,nullptr,true).index<0);
+        // a note written after F was read (serial above the bound) is never carried, though it would match
+        Write wn{};wn.serial=50;wn.read=mul(arm_at(0,4,0),rigid(identity(),.3,0,0));wn.arm=0xa4a0;wn.arm_frame=arm_at(0,4,0);wn.arm_ok=true;
+        const Mat drawn_n=mul(arm_at(1/90.,4,0),rigid(identity(),.3,0,0));
+        CHECK(WriteLog::pick(&wn,1,drawn_n,arms,1,nullptr,true,50).index==0 && WriteLog::pick(&wn,1,drawn_n,arms,1,nullptr,true,49).index<0);
+        std::printf("  5 cm hand motion between note and render: refused (standing and walking); unknown arm model: no carry\n");
+    }
+}
+// ---- v1284 (plan C3): a native weapon alternating between its own arm (engine) and the other hand (crossed) 50 times: after the first learn of
+// each, no render without G - also with no writer note at all on the way back (the binder keeps or recalls G per physical hand).
+static void v1284_cross_recall_lab() {
+    Binder::clear();
+    const std::uintptr_t x=0x7a00,y=0x7b00;
+    const Mat read0=hand_at(10,0),read1=hand_at(10,1),g0=rigid(rot(.2,.6,.3,.4),.04,-.02,.03),g1=mul(y180(),g0);
+    int skips_after_first=0,first_skips=0;
+    for(int round=0;round<50;++round) {
+        for(unsigned hand=0;hand<2;++hand) for(int r=0;r<2;++r) {
+            GripCandidate c{};
+            if(round==0) candidate_from_read(hand?read1:read0,mul(hand?read1:read0,hand?g1:g0),c,x,hand?write_cross:write_engine,space_joint59,static_cast<std::uint64_t>(round*4+r+1),0);
+            const bool b=Binder::observe(hand,c,x,hand?write_cross:write_engine,space_joint59);Binder::idle(hand^1u);
+            if(!b) {if(round) ++skips_after_first;else ++first_skips;}
+        }
+        if(round==25) {   // hand 0 holds another weapon for a while (its G replaced), then X comes back with no note: recalled
+            GripCandidate c{};candidate_from_read(read0,mul(read0,g1),c,y,write_engine,space_joint59,900,0);
+            Binder::observe(0,c,y,write_engine,space_joint59);Binder::observe(0,c,y,write_engine,space_joint59);
+        }
+    }
+    std::printf("v1284 C3 engine<->cross x50: unbound renders while learning %d, after %d (recalls %llu/%llu)\n",first_skips,skips_after_first,
+        static_cast<unsigned long long>(Binder::recalls(0)),static_cast<unsigned long long>(Binder::recalls(1)));
+    CHECK(first_skips==2 && skips_after_first==0 && Binder::recalls(0)>=1);
+}
+// ---- v1284 (plan B1): the sphere cull. Every placement in this lab already runs with Place::cull on (default); here: a draw 1 m from a weapon's F
+// (reach 0.8, no children) is culled before any inverse, one at 0.75 m is not; the cull off answers as before.
+static void v1284_cull_lab(const Mat& part) {
+    Binder::clear();Place::clear();
+    const Mat f=rigid(rot(0,0,1,.5),-91.7,-92.4,4.9),b=mul(f,rigid(identity(),.01,0,0));
+    publish_frame(1500,f,true,b,Mat{},false,Mat{},40);
+    // a real projection (the lab's other cases use an affine one): reverse-Z infinite, z row (0,0,0,near), w = depth; the camera 0.5 m behind F
+    Mat eye=identity();   // columns: right (-y), up (+z), forward (+x), position
+    eye[0]=0;eye[4]=-1;eye[8]=0;eye[1]=0;eye[5]=0;eye[9]=1;eye[2]=1;eye[6]=0;eye[10]=0;eye[3]=f[3]-.5;eye[7]=f[7];eye[11]=f[11]+.1;
+    Mat proj{};proj[0]=1.2;proj[5]=1.6;proj[11]=.05;proj[14]=1;
+    const Mat vp=mul(proj,inv(eye));
+    const auto at=[&](double dx,double dy,double dz) {Mat m=mul(f,part);m[3]=f[3]+dx;m[7]=f[7]+dy;m[11]=f[11]+dz;return floats(mul(vp,m));};
+    const auto on=floats(mul(vp,mul(f,part)));
+    bool culled=true,kept=true;
+    for(const auto& d:{std::array<double,3>{1,0,0},{0,1,0},{0,0,1},{0,0,-1},{0,-1,0}}) culled=culled && !Place::near_any(vp,at(d[0],d[1],d[2]).data());
+    for(const auto& d:{std::array<double,3>{.75,0,0},{0,.75,0},{0,0,.75},{.4,-.4,.4},{0,-.75,0}}) kept=kept && Place::near_any(vp,at(d[0],d[1],d[2]).data());
+    CHECK(culled && kept && Place::near_any(vp,on.data()));
+    const auto far1=at(0,1,0);
+    std::array<float,16> o{},q{};bool own=false;
+    CHECK(Place::place_one_view(vp,vp,on.data(),o.data(),q.data(),own,nullptr,0).side==0);
+    CHECK(Place::place_one_view(vp,vp,far1.data(),o.data(),q.data(),own,nullptr,0).side<0);
+    Place::cull.store(false);CHECK(Place::near_any(vp,far1.data()));Place::cull.store(true);
+    // the cost of a near draw 1 m from the weapon: culled vs v1283's path (one thread, warm caches; the inverse is not cached in v1283)
+    const auto t0=std::chrono::steady_clock::now();int n=0;
+    for(int i=0;i<50000;++i) n+=Place::place_one_view(vp,vp,far1.data(),o.data(),q.data(),own,nullptr,0).side<0;
+    const double culled_ns=std::chrono::duration<double,std::nano>(std::chrono::steady_clock::now()-t0).count()/50000.;
+    Place::cull.store(false);
+    const auto t1=std::chrono::steady_clock::now();
+    for(int i=0;i<50000;++i) n+=Place::place_one_view(vp,vp,far1.data(),o.data(),q.data(),own,nullptr,0).side<0;
+    const double uncull_ns=std::chrono::duration<double,std::nano>(std::chrono::steady_clock::now()-t1).count()/50000.;
+    Place::cull.store(true);
+    std::printf("v1284 B1 cull: 1 m (5 directions) culled, 0.75 m kept; a near draw 1 m away costs %.1f ns culled vs %.1f ns uncull (%d)\n",culled_ns,uncull_ns,n);
+    CHECK(culled_ns<uncull_ns);
+}
+// ---- v1284 (plan C5): one-view previous rows from THIS eye's previous render at any gap (it was only "exactly two frames back")
+static void v1284_own_prev_lab(const Mat& part) {
+    Binder::clear();Place::clear();
+    const auto f_at=[](int n) {return rigid(rot(0,0,1,.5+.02*n),-91.7+.01*n,-92.4,4.9);};
+    const auto b_at=[&](int n) {return mul(f_at(n),rigid(identity(),.02,0,0));};
+    for(int n=0;n<5;++n) publish_frame(1600u+static_cast<std::uint32_t>(n),f_at(n),true,b_at(n),Mat{},false,Mat{},50+n);
+    const std::uint32_t frame=1604;const Wp& w=frames_seen.at(frame);const Mat prev_vp=frames_seen.at(1601).vp[1];
+    const auto cur=floats(mul(w.vp[1],mul(f_at(4),part)));
+    std::array<float,16> o{},q{};bool own=false;
+    const Result r=Place::place_one_view(w.vp[1],prev_vp,cur.data(),o.data(),q.data(),own,nullptr,0,1601);   // the eye's previous render 3 frames back
+    const double err=worst_rows(q.data(),floats(mul(mul(prev_vp,b_at(1)),part)).data());
+    bool own_old=false;std::array<float,16> o2{},q2{};
+    Place::place_one_view(w.vp[1],prev_vp,cur.data(),o2.data(),q2.data(),own_old,nullptr,0);   // unknown: the v1191 rule (two back = 1602)
+    const double err_old=worst_rows(q2.data(),floats(mul(mul(prev_vp,b_at(2)),part)).data());
+    std::printf("v1284 C5 own previous by eye: gap 3 placed=%d own=%d err %.2e; unknown eye -> v1191 rule own=%d err %.2e\n",r.side,int(own),err,int(own_old),err_old);
+    CHECK(r.side==0 && own && err<2e-4 && own_old && err_old<2e-4);
+}
+
 int main() {
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
     const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
@@ -585,6 +714,10 @@ int main() {
     }
 
     v1239_lab(part);
+    v1284_note_carry_lab();
+    v1284_cross_recall_lab();
+    v1284_cull_lab(part);
+    v1284_own_prev_lab(part);
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

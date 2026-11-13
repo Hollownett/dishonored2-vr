@@ -1666,7 +1666,12 @@ static void arm_snap_latch(std::uint64_t frame) noexcept {std::lock_guard<std::m
 static std::atomic<std::uint64_t> image_skin_writes[3]{},image_skin_misses[3]{},image_skin_busy{},image_skin_kinds[3][4]{},image_skin_gaps[3]{},image_skin_fallback_causes[3]{};   // kinds: per slot, uploads of each kind (v1213: 3 = VR arms held over a tick fallback); gaps: held, intended, unheld
 static bool weapon_place_enabled{};   // v864: build/weapon-image-place: held weapons moved to the image's hand at the render's begin (opt-in until a sim shows the render reads it)
 static std::atomic<std::uint64_t> weapon_place_writes{},weapon_place_skips{};
-static bool weapon_note_carry=false;   // v1283 (plan A3): measured only (WriteLog::pick's carried residuals); v1284 (C1) takes carried notes
+// v1284 (plan C1): a writer note may also teach G when its read, carried by its own arm model's motion to this render's Setup frame, is the drawn hand
+// (WriteLog::pick); v1283 measured it only. build/no-weapon-note-carry: the world comparison alone (v1283).
+static bool weapon_note_carry=true;
+// v1284 (plan C2): an unbound weapon is published at its engine frame (B = F) for placement; build/no-weapon-provisional: v1283 (engine rows stay).
+static bool weapon_provisional=true;
+static std::array<std::atomic<std::uint64_t>,2> weapon_draw_provisional{};static std::array<std::atomic<bool>,2> weapon_draw_provisional_now{};
 // v930 (weapon_draw_place.hpp; default on, opt-out build/no-weapon-draw-place): a held weapon is placed in the hand each render draws, at its draw.
 // Per hand: renders published / skipped, and the scatter (RMS about the mean, metres) of the weapon origin in the drawn hand's frame as the
 // engine's tick frame has it ([0]) and as it is placed ([1]).
@@ -1730,7 +1735,8 @@ static std::string weapon_draw_json() {
     text+=",\"write_dropped\":"+std::to_string(d2vr::weapon_draw::WriteLog::dropped());
     text+=",\"binding\":"+binding_json();
     text+=",\"binder_why\":"+d2vr::weapon_draw::BindWhy::json();   // v1283 (plan A3)
-    text+=",\"near_cost\":"+d2vr::weapon_perf::json(d2vr::weapon_draw::Place::published());   // v1283 (plan A1)    text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
+    text+=",\"near_cost\":"+d2vr::weapon_perf::json(d2vr::weapon_draw::Place::published());   // v1283 (plan A1)
+    text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)    text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
     text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
@@ -1798,7 +1804,7 @@ static void weapon_perf_frame(std::uint64_t pace_ns,std::uint64_t cpu_ns) {
     std::array<d2vr::weapon_perf::HandRow,2> hands{};
     for(unsigned h=0;h<2;++h) {
         const auto b=d2vr::weapon_draw::Binder::summary(h);const unsigned k=d2vr::weapon_draw::Place::kind(h);
-        hands[h]={k?static_cast<int>(k):-1,b.bound?static_cast<int>(b.source):-1,b.bound?1:0,weapon_draw_last_skip[h].load(std::memory_order_relaxed)};
+        hands[h]={k?static_cast<int>(k):-1,b.bound?static_cast<int>(b.source):weapon_draw_provisional_now[h].load(std::memory_order_relaxed)?4:-1,b.bound?1:0,weapon_draw_last_skip[h].load(std::memory_order_relaxed)};   // source 4: provisional (v1284)
     }
     series.roll(now_s,frames.load(),d2vr::weapon_draw::Place::published(),hands,player_speed);
     series.write(output_directory/L"weapon-perf.csv");
@@ -1829,6 +1835,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     full_body.legacy_root_carry(legacy_carry);player_velocity={};player_speed=0;
     full_body.legacy_root_yaw(fs::exists(root/L"build"/L"legacy-root-yaw-carry"));
     arm_slip_fix=!fs::exists(root/L"build"/L"no-arm-slip-fix");   // v1247: the image palette in the Setup's rig frame (off = v1246)
+    weapon_note_carry=!fs::exists(root/L"build"/L"no-weapon-note-carry");weapon_provisional=!fs::exists(root/L"build"/L"no-weapon-provisional");   // v1284 (C1, C2)
     image_skin_enabled=!fs::exists(root/L"build"/L"legacy-tick-skin");   // v861: build/legacy-tick-skin keeps each tick's arm and body upload as drawn
     // v862: with the image skin the drawn arms are the image's own sample; the v830 newer-sample refresh would move a solve an upload made before
     // the render began onto the next locate, so it is off then (it only served the tick's drawn upload).
@@ -3853,6 +3860,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
         // publishes no bound frame (the engine's rows stay) and is counted, never mixed with a placed pass of the same frame.
         for(unsigned hand=0;weapons && hand<2;++hand) {
             const auto skip=[&](unsigned why) {++weapon_draw_skipped[hand];++weapon_draw_skip_reason[hand][why];weapon_draw_last_skip[hand].store(static_cast<int>(why),std::memory_order_relaxed);};
+            weapon_draw_provisional_now[hand].store(false,std::memory_order_relaxed);
             if(suppress[hand]) {skip(5);continue;}
             const auto copy=d2vr::NativeWeaponHands::copy_draw(hand);
             const bool live_models[2]={models[0]!=0,models[1]!=0};
@@ -3873,6 +3881,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 if(!read_self(copy.entity+0xa8,&id,4) || id!=copy.id || !read_self(copy.entity+0xf0,&model,sizeof model) || !model) {skip(5);continue;}
                 identity=copy.entity;
             } else {model=native_model;identity=native_model;}
+            const std::uint64_t serial_at_f=d2vr::weapon_draw::WriteLog::latest();   // v1284 (C1): notes after this may be newer than the F read next
             if(!read_self(model+0x1860,raw[hand].data(),sizeof raw[hand])) {skip(2);continue;}
             const auto live=d2vr::weapon_draw::model_of(raw[hand].data());
             if(!d2vr::weapon_draw::finite(live)) {skip(2);continue;}
@@ -3918,7 +3927,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 const auto is_drawn_hand=[&](const d2vr::weapon_draw::Mat& read) {return d2vr::weapon_draw::WriteLog::drawn_like(read,hand_frame);};
                 int chosen=-1;
                 if(image) {   // v1283 (plan A3): the same choice (the newest drawn-like note), now with why none was taken
-                    const auto pick=d2vr::weapon_draw::WriteLog::pick(candidates,candidate_count,hand_frame,arms_now.data(),2,rig_now?&*rig_now:nullptr,weapon_note_carry);
+                    const auto pick=d2vr::weapon_draw::WriteLog::pick(candidates,candidate_count,hand_frame,arms_now.data(),2,rig_now?&*rig_now:nullptr,weapon_note_carry,serial_at_f);
                     chosen=pick.index;
                     if(!candidate_count) d2vr::weapon_draw::BindWhy::no_note(hand,player_speed);
                     else if(chosen<0) d2vr::weapon_draw::BindWhy::far_note(hand,pick,player_speed);
@@ -3941,7 +3950,26 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             }
             if(note_missing && !d2vr::weapon_draw::Binder::bound(hand)) ++weapon_draw_no_writer[hand];
             const bool is_bound=d2vr::weapon_draw::Binder::observe(hand,candidate,identity,held_source,held_space);
-            if(!is_bound) {skip(candidate.attempted&&!candidate.valid?4u:3u);continue;}   // no valid G yet: the engine's rows stay (counted)
+            // v1278/v1279: the weapon's bound parts (bolt, upgrades: entities bound to it with their own frames) are published as its children
+            const auto stage_weapon=[&](bool provisional) {
+                std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
+                if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()));
+                else if(engine_side>=0 && engine_side<2) bound_children(native_ent[static_cast<unsigned>(engine_side)],live,kids.data(),n,static_cast<unsigned>(kids.size()));
+                d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n,provisional);hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;
+            };
+            if(!is_bound) {   // no valid G yet (counted)
+                skip(candidate.attempted&&!candidate.valid?4u:3u);
+                // v1284 (plan C2; v1282 headset: hand 1 unbound for 2509 renders, drawn at the engine pose with no previous rows of its own in performance
+                // mode - "in different places, ghosting"): until G is learned or recalled the weapon is published at its OWN engine frame (B = F, delta
+                // identity). It stays where the engine draws it, but every draw of it (and of its parts) is placed: its own previous rows from the previous
+                // publish, the held mask and rig target as a bound weapon's. Never learned from, never in the binder's cache (the binder is not called with
+                // it); counted apart: weapon_draw.provisional, held_census.weapon.provisional_renders, weapon-perf.csv source 4.
+                if(weapon_provisional) {
+                    bound[hand]=live;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];place_ids[hand]=identity;stage_weapon(true);
+                    ++weapon_draw_provisional[hand];weapon_draw_provisional_now[hand].store(true,std::memory_order_relaxed);
+                }
+                continue;
+            }
             if(!image) {skip(1);continue;}
             const auto hand_mat=weapon_mat(*image);
             d2vr::weapon_draw::Mat bound_frame{};
@@ -3951,11 +3979,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             // v1278 (user, v1277: the second crossbow - a real copy weapon - "renders with a lot of artifacts" in performance mode): its bolt and
             // upgrade parts are separate entities bound to it; only the weapon body was placed, the parts stayed at the copy's engine pose
             // (16 mm / 2.6 deg off, max 0.3 m) with unplaced motion. They are published as the copy's children: placed with the same delta.
-            {std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
-             if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()));
-             else if(engine_side>=0 && engine_side<2) bound_children(native_ent[static_cast<unsigned>(engine_side)],live,kids.data(),n,static_cast<unsigned>(kids.size()));   // v1279: the native's parts too
-             d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n);}
-            hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;   // v1237 census
+            stage_weapon(false);   // v1237 census kind; v1279: the native's parts too
             const auto source=d2vr::weapon_draw::Binder::state(hand).source;
             if(source<4) ++weapon_draw_source[hand][source];
             weapon_wobble[hand][0].add(in_frame(*image,{raw[hand][0],raw[hand][1],raw[hand][2]}));
@@ -5219,9 +5243,12 @@ static d2vr::arm::Native arms_native_now() noexcept {
     using H=d2vr::arm::Held;d2vr::arm::Native n{};
     if(left_gun_model.load(std::memory_order_relaxed)) n.slot1=hip_kind.load(std::memory_order_relaxed)==1?H::crossbow:H::pistol;
     else if(left_gadget.load(std::memory_order_relaxed)) n.slot1=H::gadget;
+    bool timepiece=false;
     {std::lock_guard<std::mutex> l(hand_state_mutex);n.sword=(hand_weapon_bits&2u)!=0;
-     if(n.slot1==H::none && std::string_view(left_equip_name).find("eart")!=std::string_view::npos) n.slot1=H::heart;}
-    if(n.slot1==H::none && left_power_item.load(std::memory_order_relaxed)) n.slot1=H::power;
+     if(n.slot1==H::none && std::string_view(left_equip_name).find("eart")!=std::string_view::npos) n.slot1=H::heart;
+     timepiece=d2vr::is_timepiece_equip_name(std::string_view(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name))));}
+    // v1284: the Timepiece ("Timeshift") is its own kind, not a power: only a power moves to the other arm (arm_state.hpp hops)
+    if(n.slot1==H::none && left_power_item.load(std::memory_order_relaxed)) n.slot1=timepiece?H::timepiece:H::power;
     n.revision=left_aim_equip_revision.load(std::memory_order_acquire);return n;
 }
 static d2vr::arm::Plan arms_plan_published{};   // control thread: the plan the grip machines are bound to
@@ -8586,7 +8613,7 @@ void prepare_head_view(void* view) noexcept {
         }
         // G2: an open exact-32 cutscene renders its view here too (render only: every side effect below stays on raw logic 2 / render_world_scene())
         if(!render_scene_frame()) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();cutscene_hands_live=false;
-            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();} // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
+            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();d2vr::NativeRangedFire::forget_owners();}   // v1284 (4.4): no instance's bolt across a load // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
             return;}
         // Ruling 15: the cutscene state is read ONCE per displayed frame (the mask can flip between reads); every decision below uses it
         static UINT64 cutscene_frame_of=~0ull;static bool cutscene_frame_latched{};

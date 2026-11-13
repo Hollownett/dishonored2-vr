@@ -689,22 +689,48 @@ private:
 public:
     struct HeldFrames {std::array<weapon_draw::Mat,24> f{};std::array<double,24> reach{};unsigned n{};};   // v1279: + the weapons' bound parts
     inline static std::atomic<bool> held_mask{false};
-    static void publish_held_frames(const HeldFrames& now) noexcept {std::lock_guard<std::mutex> lock(held_mutex_);held_[1]=held_[0];held_[0]=now;}
+    // v1284 (plan B1/B3): the newest and the previous publish in one lock-free snapshot, with match spheres over both (a draw outside every sphere
+    // is not held: no inverse, no lock). The publisher builds the next snapshot from the current one.
+    static void publish_held_frames(const HeldFrames& now) noexcept {
+        held_.update([&](const HeldSnap& old,HeldSnap& next) {
+            next.g[1]=old.g[0];next.g[0]=now;next.nsph=0;
+            for(const auto& g:next.g) for(unsigned i=0;i<g.n;++i) weapon_draw::add_sphere(next.sph,next.nsph,g.f[i],g.reach[i]+.05);
+        });
+    }
     static std::uint64_t held_matches() noexcept {return held_matches_.load(std::memory_order_relaxed);}
 private:
-    inline static std::mutex held_mutex_;inline static std::array<HeldFrames,2> held_{};inline static std::atomic<std::uint64_t> held_matches_{};
+    struct HeldSnap {std::array<HeldFrames,2> g{};std::array<weapon_draw::Sphere,12> sph{};unsigned nsph{};};
+    inline static weapon_draw::Snap<HeldSnap> held_{};inline static std::atomic<std::uint64_t> held_matches_{};
     static bool held_match(const View& view,const float* cur) noexcept {return held_match(view.vp,cur);}
     static bool held_match(const float* view_vp,const float* cur) noexcept {
-        weapon_draw::Mat vp{},inv{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view_vp[i];
-        if(!weapon_draw::inverse(vp,inv)) return false;
-        const auto rows=weapon_draw::Place::model_rows(inv.data(),cur);
+        weapon_draw::Mat vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view_vp[i];
         const double tol=weapon_draw::Place::axes_tol.load(std::memory_order_relaxed);
-        weapon_perf::Counted<std::mutex> lock(held_mutex_,weapon_perf::l_held);   // v1283 (A1)
-        for(const auto& g:held_) for(unsigned i=0;i<g.n;++i)
-            if(weapon_draw::Place::same_orientation(rows,g.f[i],tol) && weapon_draw::Place::origin_distance(rows,g.f[i])<=g.reach[i]) {
-                held_matches_.fetch_add(1,std::memory_order_relaxed);return true;
-            }
-        return false;
+        const bool cull=weapon_draw::Place::cull.load(std::memory_order_relaxed);
+        const bool held=held_.read([&](const HeldSnap& h) {
+            if(!h.g[0].n && !h.g[1].n) return false;   // nothing held: v1283 inverted the VP and found nothing
+            if(cull && !weapon_draw::in_any(h.sph,h.nsph,vp,cur)) return false;   // v1284 (B1)
+            weapon_draw::Mat inv{};if(!weapon_draw::inverse_cached(vp,inv)) return false;   // v1284 (B2)
+            const auto rows=weapon_draw::Place::model_rows(inv.data(),cur);
+            for(const auto& g:h.g) for(unsigned i=0;i<g.n;++i)
+                if(weapon_draw::Place::same_orientation(rows,g.f[i],tol) && weapon_draw::Place::origin_distance(rows,g.f[i])<=g.reach[i]) return true;
+            return false;
+        });
+        if(held) held_matches_.fetch_add(1,std::memory_order_relaxed);
+        return held;
+    }
+    // v1284 (plan B3): the rig target book's answers per draw thread, refreshed only when the book changed (a Setup), not under its lock per draw
+    struct LatestOf {unsigned gen{};bool ok[2]{};rig_target::M4 e[2]{};float vp[2][16]{};};
+    static const LatestOf& latest_of_cached() noexcept {
+        thread_local LatestOf c{};const unsigned g=rig_target::book().generation();
+        if(c.gen!=g) {for(unsigned h=0;h<2;++h) c.ok[h]=rig_target::book().latest_of(h,c.e[h],c.vp[h]);c.gen=g;}
+        return c;
+    }
+    static bool find_prev_cached(const float* vp,rig_target::M4& prev) noexcept {
+        struct P {unsigned gen{};float vp[16]{};bool ok{};rig_target::M4 prev{};};
+        thread_local P c{};const unsigned g=rig_target::book().generation();
+        if(c.gen!=g || std::memcmp(c.vp,vp,64)) {c.ok=rig_target::book().find_prev(vp,c.prev);std::memcpy(c.vp,vp,64);c.gen=g;}
+        if(c.ok) prev=c.prev;
+        return c.ok;
     }
     // v1190: the draw's retargeted rows (prepare) and their binding for RigMask's target replay (same thread, right after the engine's draw)
     // v1199: per hypothesis slice h (rig_mask.hpp): the drawn rows retargeted with E of eye h's latest Setup
@@ -713,11 +739,11 @@ private:
     // only to check the hypothesis of its eye against it (status hypothesis_check). Both slices retargeted: certain for the target.
     static void target_dual(ContextState& s,const Shadow* sh,const float* rows,const View* view,bool counted=true) noexcept {
         bool ok[2]{};
+        const LatestOf& latest=latest_of_cached();   // v1284 (B3)
         for(unsigned h=0;h<2;++h) {
-            rig_target::M4 e{};float vp[16]{};
-            ok[h]=rig_target::book().latest_of(h,e,vp);
-            if(ok[h]) rig_target::apply(e,rows,tl_target_rows_[h]);
-            if(counted && ok[h] && view && view->eye==h) alt_hyp_[std::memcmp(vp,view->vp,64)?1:0].fetch_add(1,std::memory_order_relaxed);
+            ok[h]=latest.ok[h];
+            if(ok[h]) rig_target::apply(latest.e[h],rows,tl_target_rows_[h]);
+            if(counted && ok[h] && view && view->eye==h) alt_hyp_[std::memcmp(latest.vp[h],view->vp,64)?1:0].fetch_add(1,std::memory_order_relaxed);
         }
         tl_target_s_=&s;tl_target_sh_=sh;RigMask::mark_target(ok[0],ok[1]);if(counted) certainty(cert_rig_target,ok[0] && ok[1]);
     }
@@ -1288,7 +1314,8 @@ private:
             if(have_content) held=held_match(view,cur);
             else {
                 bool m[2]{},any[2]{};
-                for(unsigned h=0;h<2;++h) {rig_target::M4 e{};float vp[16]{};any[h]=rig_target::book().latest_of(h,e,vp);m[h]=any[h] && held_match(vp,cur);}
+                const LatestOf& latest=latest_of_cached();   // v1284 (B3)
+                for(unsigned h=0;h<2;++h) {any[h]=latest.ok[h];m[h]=any[h] && held_match(latest.vp[h],cur);}
                 decided=any[0] && any[1] && m[0]==m[1];held=decided && m[0];
             }
             if(held) {RigMask::mark_held();view_use(use_held_mask);}
@@ -1376,16 +1403,17 @@ private:
         // v1191: one-view frames: the held weapon/prop placed in this render's drawn hand, previous rows from this eye's previous render
         // v1201: a placement candidate = a near draw matching a held thing's frame under either eye's latest view (weapons, copies, props);
         // other near draws (the body, scenery) are not applicable
-        const auto held_any=[&] {const weapon_perf::Timer perf_timer(weapon_perf::b_held_mask);for(unsigned h=0;h<2;++h) {rig_target::M4 e{};float vp[16]{};if(rig_target::book().latest_of(h,e,vp) && held_match(vp,cur)) return true;}return false;};
+        const auto held_any=[&] {const weapon_perf::Timer perf_timer(weapon_perf::b_held_mask);const LatestOf& latest=latest_of_cached();   // v1284 (B3)
+            for(unsigned h=0;h<2;++h) if(latest.ok[h] && held_match(latest.vp[h],cur)) return true;return false;};
         if(near_draw && one_view_place && !have_content && alt) certainty(cert_placement,held_any()?cert_fallback:cert_na); // v1199: uncertain: the engine's pose
         if(near_draw && one_view_place && have_content) {
             const weapon_perf::Timer perf_timer(weapon_perf::b_one_view);   // v1283 (A1): includes placed_previous, census and RigidLocal (also timed alone)
-            rig_target::M4 prev_vp{};
-            if(rig_target::book().find_prev(view.vp,prev_vp)) {
+            rig_target::M4 prev_vp{},vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
+            if(!weapon_draw::Place::near_any(vp,cur)) certainty(cert_placement,cert_na);   // v1284 (B1): near nothing published (v1283: the same outcome after the lookup and the inverse)
+            else if(find_prev_cached(view.vp,prev_vp)) {   // v1284 (B3)
                 float placed[16]{},placed_prev[16]{},still[16]{};bool own_prev=false;
-                rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
-                const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh));
-                {const weapon_perf::Timer census_timer(weapon_perf::b_census);
+                const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh),view.receipt && view.has_prev?view.prev_frame:0u);   // v1284 (C5)
+                if(weapon_perf::enabled()) {const weapon_perf::Timer census_timer(weapon_perf::b_census);   // v1284 (B6): diagnostics only
                  if(!RigMask::draw_is_rig()) weapon_draw::Place::census(r,r.side>=0 && have_prev); // v1237
                  weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,63);} // v1240: one-view draws counted under pass bit 63
                 // v1218: this eye's previous render's submitted rows of the draw (receipt chain). v1226: else the predicted previous (this eye's
@@ -1412,7 +1440,7 @@ private:
             } else {alt_place_no_view_.fetch_add(1,std::memory_order_relaxed);certainty(cert_placement,held_any()?cert_fallback:cert_na);}
         }
         // v1243 hand_lock (weapon_draw_place.hpp HandLock): every near eye-pass draw of the render the publisher noted, placed or not (the arm draws)
-        if(near_draw && !alt && pass_eye>=0) if(const std::uint32_t lf=weapon_draw::Place::latest_frame();weapon_draw::HandLock::wants(lf)) {
+        if(near_draw && !alt && pass_eye>=0 && weapon_perf::enabled()) if(const std::uint32_t lf=weapon_draw::Place::latest_frame();weapon_draw::HandLock::wants(lf)) {   // v1284 (B6): diagnostics
             const weapon_perf::Timer perf_timer(weapon_perf::b_hand_lock);   // v1283 (A1)
             const auto* hv=any_cached_views(lf);if(!hv) hv=weapon_views(lf,0,0);
             if(hv && hv->ok[pass_eye]) weapon_draw::HandLock::on_draw(lf,weapon_draw::mul(hv->inv[pass_eye],weapon_draw::widen(cur)));
@@ -1440,12 +1468,12 @@ private:
                 const auto started=timed?__rdtsc():0;
                 const bool rig=RigMask::draw_is_rig();
                 const auto r=weapon_draw::Place::place(frame,&weapon_views,cur,have_prev?prev:nullptr,placed,placed_prev,
-                    have_view?static_cast<int>(view.eye):-1,pass_eye,still,draw_key(s,*sh),!rig);
+                    have_view?static_cast<int>(view.eye):-1,pass_eye,still,draw_key(s,*sh),!rig && weapon_perf::enabled());   // v1284 (B6): the near census probes, diagnostics only
                 // v1237 census: per pass, unplaced draws within a held thing's reach [same axes, other]; placed draws whose classified view is
                 // another engine frame than the publish they were placed from (the two eyes of one render on different hand poses)
                 if(r.side<0 && r.near_side>=0) weapon_pass_near_unplaced_[pass_index][r.near_like?0:1].fetch_add(1,std::memory_order_relaxed);
-                if(r.side>=0 && have_view) placed_view_frame_[view.frame==frame?0:view.frame==frame+1?1:view.frame+1==frame?2:3].fetch_add(1,std::memory_order_relaxed); // v1243: [same, label +1, label -1, other]
-                {const weapon_perf::Timer census_timer(weapon_perf::b_census);
+                if(r.side>=0 && have_view && weapon_perf::enabled()) placed_view_frame_[view.frame==frame?0:view.frame==frame+1?1:view.frame+1==frame?2:3].fetch_add(1,std::memory_order_relaxed); // v1243: [same, label +1, label -1, other] (v1284 B6)
+                if(weapon_perf::enabled()) {const weapon_perf::Timer census_timer(weapon_perf::b_census);   // v1284 (B6)
                  if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev,frame); // v1248: restored as code (v1243 left it inside the comment); v1259: + the publish (per-eye census)
                  weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,pass_index);}   // v1240: a held severed part's placed draws
                 // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven). v1226: else the predicted previous
@@ -1692,6 +1720,7 @@ private:
         placed_history.store(!std::filesystem::exists(knobs_/L"no-placed-history",error),std::memory_order_relaxed); // v1218
         weapon_draw::RigidLocal::on.store(!std::filesystem::exists(knobs_/L"no-rigid-local",error),std::memory_order_relaxed); // v1223
         held_shadow_place.store(!std::filesystem::exists(knobs_/L"no-held-shadow-place",error),std::memory_order_relaxed); // v1238
+        weapon_draw::Place::cull.store(!std::filesystem::exists(knobs_/L"no-weapon-near-cull",error),std::memory_order_relaxed); // v1284 (B1)
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)
@@ -1803,6 +1832,7 @@ inline std::string ObjectMotion::weapon_status_json() {
        <<",\"hand_lock\":"<<weapon_draw::HandLock::json() // v1243
        <<",\"arm_slip\":"<<weapon_draw::HandLock::slip_json() // v1247
        <<",\"shadow_place\":["<<shadow_place_[0].load()<<','<<shadow_place_[1].load()<<','<<shadow_place_[2].load()<<','<<shadow_place_[3].load()<<']' // v1238
+       <<",\"own_prev_by_gap\":"<<weapon_draw::Place::own_prev_json()<<",\"near_cull\":"<<(weapon_draw::Place::cull.load()?"true":"false") // v1284 (C5, B1)
        <<",\"skip\":[";
     // One name per weapon_draw::Stage, in enum order. v1016 read past this list (`unbound` was added to the enum but not here) when
     // a draw was actually placed, and the out-of-bounds pointer faulted every status poll after a save load. The static_asserts
