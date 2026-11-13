@@ -49,6 +49,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include "weapon_perf.hpp"
 
 namespace d2vr::weapon_draw {
 using Mat=std::array<double,16>;
@@ -254,7 +255,7 @@ public:
     // One observation per render. A candidate is nil for a frame with no writer note/offset; a bound G is then simply kept.
     static bool observe(unsigned hand,const GripCandidate& candidate) {
         if(hand>1) return false;
-        std::lock_guard<std::mutex> lock(mutex_);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_binder);
         State& s=states_[hand];
         if(!candidate.identity) {if(candidate.attempted) ++s.rejects;if(!s.bound) ++s.fallbacks;return s.bound;}
         if(s.bound && (s.identity!=candidate.identity || s.source!=candidate.source || s.space!=candidate.space)) {
@@ -273,7 +274,8 @@ public:
             }
             if(!candidate.valid) {if(candidate.attempted) ++s.rejects;++s.fallbacks;return false;}
             if(s.pending_n && same_grip(candidate.g,s.pending)) ++s.pending_n;
-            else {s.pending=candidate.g;s.pending_n=1;s.pending_identity=candidate.identity;s.pending_source=candidate.source;s.pending_space=candidate.space;}
+            else {if(s.pending_n) ++mismatches_[hand];   // v1283 (A3): two notes in a row that disagree (the two-agreeing-notes rule restarts)
+                  s.pending=candidate.g;s.pending_n=1;s.pending_identity=candidate.identity;s.pending_source=candidate.source;s.pending_space=candidate.space;}
             const bool exact=candidate.source==write_held || candidate.source==write_mirror;
             const unsigned needed=exact?1u:2u;   // a copy service's offset is exact; a writer note can be newer than F
             if(s.pending_n>=needed) {
@@ -308,12 +310,12 @@ public:
     // B = H * G for this render's drawn hand H (joint 59 or grip, matching the G's space).
     static bool frame(unsigned hand,const Mat& hand_frame,Mat& out) {
         if(hand>1) return false;
-        std::lock_guard<std::mutex> lock(mutex_);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_binder);
         if(!states_[hand].bound || !finite(hand_frame)) return false;
         out=mul(hand_frame,states_[hand].g);return finite(out);
     }
-    static bool bound(unsigned hand) {if(hand>1) return false;std::lock_guard<std::mutex> lock(mutex_);return states_[hand].bound;}
-    static State state(unsigned hand) {if(hand>1) return State{};std::lock_guard<std::mutex> lock(mutex_);return states_[hand];}
+    static bool bound(unsigned hand) {if(hand>1) return false;weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_binder);return states_[hand].bound;}
+    static State state(unsigned hand) {if(hand>1) return State{};weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_binder);return states_[hand];}
     // Diagnostics only: engine frame vs bound frame. Never gates, never changes G.
     static void note_sanity(unsigned hand,const Mat& engine,const Mat& bound_frame) {
         if(hand>1) return;
@@ -327,6 +329,7 @@ public:
     static void clear() {std::lock_guard<std::mutex> lock(mutex_);states_={};known_={};}
     static void forget() {std::lock_guard<std::mutex> lock(mutex_);known_={};}
     static std::uint64_t recalls(unsigned hand) {return hand<2?recalls_[hand].load(std::memory_order_relaxed):0;}
+    static std::uint64_t mismatches(unsigned hand) {return hand<2?mismatches_[hand].load(std::memory_order_relaxed):0;}   // v1283
     struct Summary {bool bound{};unsigned source{},space{},age{},pending{};double g_m{};unsigned long long learns{},refreshes{},rejects{},fallbacks{},sanity_n{};double sanity_mm{},sanity_deg{},sanity_max_mm{};};
     static Summary summary(unsigned hand) {
         Summary out;
@@ -360,7 +363,7 @@ private:
     }
     inline static std::array<State,2> states_{};
     inline static std::array<std::array<Known,8>,2> known_{};inline static std::uint64_t tick_{};
-    inline static std::array<std::atomic<std::uint64_t>,2> recalls_{};
+    inline static std::array<std::atomic<std::uint64_t>,2> recalls_{},mismatches_{};
     inline static std::mutex mutex_;
 };
 
@@ -374,22 +377,30 @@ struct Write {
     unsigned read_frame{read_attachment};
     std::uint64_t frame{};
     Mat read{};
+    // v1283 (plan A3/C1): the frame the read was composed in - the arm model (its address and model+0x1860 at the note, the post-physics attach
+    // pass that wrote it just before) - and the player's rig then (held_rig_now: body root, camera heading - head follow; diagnostics only), so
+    // the read can be carried to another moment's frame of the same arm / rig.
+    std::uintptr_t arm{};Mat arm_frame{};bool arm_ok{};
+    std::array<double,4> rig{};bool rig_ok{};
 };
 class WriteLog {
 public:
     static constexpr unsigned ring=16;
     static std::uint64_t note(unsigned physical,std::uintptr_t source,int engine_side,unsigned kind,const float* read,
-            std::uint64_t frame=0,unsigned read_frame=read_attachment) noexcept {
+            std::uint64_t frame=0,unsigned read_frame=read_attachment,std::uintptr_t arm=0,const float* arm_raw=nullptr,const double* rig=nullptr) noexcept {
         if(physical>1 || !read) return 0;
         const Mat pose=model_of(read);
         if(!finite(pose)) return 0;
+        Mat arm_frame{};const bool arm_ok=arm && arm_raw && (arm_frame=model_of(arm_raw),finite(arm_frame));
         std::unique_lock<std::mutex> lock(mutex_,std::try_to_lock);
+        if(!lock.owns_lock() && weapon_perf::enabled()) weapon_perf::detail::misses[weapon_perf::l_writelog].fetch_add(1,std::memory_order_relaxed);   // v1283
         for(unsigned i=0;i<8 && !lock.owns_lock();++i) if(lock.try_lock()) break;
         if(!lock.owns_lock()) {dropped_.fetch_add(1,std::memory_order_relaxed);return 0;}
         Slot& s=slots_[physical];
         Write& w=s.ring[s.next];
         w.serial=reserve();
         w.source=source;w.engine_side=engine_side;w.kind=kind;w.read_frame=read_frame;w.frame=frame;w.read=pose;
+        w.arm=arm_ok?arm:0;w.arm_frame=arm_frame;w.arm_ok=arm_ok;w.rig_ok=rig && std::isfinite(rig[0]+rig[1]+rig[2]+rig[3]);if(w.rig_ok) for(unsigned i=0;i<4;++i) w.rig[i]=rig[i];
         s.next=(s.next+1)%ring;++s.total;
         return w.serial;
     }
@@ -398,7 +409,7 @@ public:
     static std::uint64_t reserve() noexcept {return serial_.fetch_add(1,std::memory_order_relaxed)+1;}
     static unsigned writes(unsigned physical,Write* out) noexcept {
         if(physical>1 || !out) return 0;
-        std::lock_guard<std::mutex> lock(mutex_);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_writelog);
         const Slot& s=slots_[physical];
         const unsigned n=s.total<ring?s.total:ring,start=(s.next+ring-n)%ring;
         for(unsigned i=0;i<n;++i) out[i]=s.ring[(start+i)%ring];
@@ -434,6 +445,38 @@ public:
         }
         return count;
     }
+    // v1283 (plan A3) / v1284 (C1): the writer note that may teach G this render: the newest candidate whose read is the hand this render draws
+    // (3 cm / 0.14 rad, the v1018 rule; the two-agreeing-notes rule of Binder::observe stays behind it). A note is composed on the game tick
+    // (world read = that tick's arm model frame * the hand joint); the drawn hand belongs to this render's Setup. If those frames are a tick of
+    // locomotion apart (4 m/s * 11 ms = 4.4 cm) no note passes in the world while the player moves (v1282 headset: hand 1 unbound for 2509 renders).
+    // carry (v1284): a note is also taken when its read carried by ITS OWN arm model's motion since the note (arms: the arm models' frames of this
+    // render's Setup) is the drawn hand: the player's motion leaves the comparison, the hand's own motion between note and render still counts.
+    // Diagnostics: the newest candidate's residual in the world, carried by its arm model, and carried by the player's rig (-1: not known).
+    struct ArmNow {std::uintptr_t model{};Mat frame{};bool ok{};};
+    struct Pick {int index{-1};unsigned how{};double raw_mm{-1},raw_deg{-1},arm_mm{-1},arm_deg{-1},rig_mm{-1},rig_deg{-1};};   // how: 0 none, 1 world, 2 carried by its arm
+    static constexpr double drawn_m=.03,drawn_rad=.14;
+    static bool drawn_like(const Mat& read,const Mat& drawn) noexcept {return read[15]!=0 && distance(read,drawn)<=drawn_m && angle(read,drawn)<=drawn_rad;}
+    static Mat rig_frame(const std::array<double,4>& r) noexcept {   // root (x,y,z) and heading about world z
+        Mat m=identity();const double c=std::cos(r[3]),s=std::sin(r[3]);m[0]=c;m[1]=-s;m[4]=s;m[5]=c;m[3]=r[0];m[7]=r[1];m[11]=r[2];return m;
+    }
+    static bool arm_carried(const Write& w,const ArmNow* arms,unsigned n_arms,Mat& out) noexcept {
+        if(!w.arm_ok || !arms) return false;
+        for(unsigned i=0;i<n_arms;++i) if(arms[i].ok && arms[i].model==w.arm) {Mat inv{};if(!inverse(w.arm_frame,inv)) return false;out=mul(mul(arms[i].frame,inv),w.read);return finite(out);}
+        return false;
+    }
+    static Pick pick(const Write* c,unsigned n,const Mat& drawn,const ArmNow* arms=nullptr,unsigned n_arms=0,const std::array<double,4>* rig_now=nullptr,bool carry=false) noexcept {
+        Pick p;
+        if(!c || !n || !finite(drawn)) return p;
+        {   const Write& w=c[n-1];   // the newest candidate's residuals
+            p.raw_mm=distance(w.read,drawn)*1000.;p.raw_deg=angle(w.read,drawn)*57.29577951308232;
+            Mat a{};if(arm_carried(w,arms,n_arms,a)) {p.arm_mm=distance(a,drawn)*1000.;p.arm_deg=angle(a,drawn)*57.29577951308232;}
+            Mat inv_rig{};
+            if(rig_now && w.rig_ok && inverse(rig_frame(w.rig),inv_rig)) {const Mat r=mul(mul(rig_frame(*rig_now),inv_rig),w.read);p.rig_mm=distance(r,drawn)*1000.;p.rig_deg=angle(r,drawn)*57.29577951308232;}
+        }
+        for(int i=static_cast<int>(n)-1;i>=0;--i) if(drawn_like(c[static_cast<unsigned>(i)].read,drawn)) {p.index=i;p.how=1;return p;}
+        if(carry) for(int i=static_cast<int>(n)-1;i>=0;--i) {Mat a{};if(arm_carried(c[static_cast<unsigned>(i)],arms,n_arms,a) && drawn_like(a,drawn)) {p.index=i;p.how=2;return p;}}
+        return p;
+    }
 private:
     struct Slot {unsigned total{},next{};std::array<Write,ring> ring{};};
     inline static std::mutex mutex_{};
@@ -441,6 +484,38 @@ private:
     inline static std::atomic<std::uint64_t> serial_{};
     inline static std::atomic<std::uint64_t> dropped_{};
     inline static std::atomic<std::uint64_t> generation_{1};
+};
+// v1283 (plan A3): why a hand's G is or is not learned, per physical hand: renders with no candidate note at all (note_none), with candidates but
+// none drawn-like (note_far: the newest note's world residual, and the same carried by its arm model / by the player's rig, mm and deg), notes
+// taken only after the arm carry (carried, v1284), two disagreeing notes in a row, recalled and learned G (Binder); none/far split by the player's
+// speed at that render (still < 0.3 m/s, walk < 2.5 m/s, run).
+class BindWhy {
+public:
+    static constexpr unsigned bins=10;
+    static constexpr double mm_edge[bins]={5,10,20,30,40,60,100,200,500,1e9},deg_edge[bins]={1,2,5,8,12,20,45,90,135,1e9};
+    static unsigned speed(double mps) noexcept {return !(mps>=.3)?0u:mps<2.5?1u:2u;}
+    static void no_note(unsigned hand,double mps) noexcept {if(hand<2) h_[hand].none_[speed(mps)].fetch_add(1,std::memory_order_relaxed);}
+    static void carried(unsigned hand) noexcept {if(hand<2) h_[hand].carried.fetch_add(1,std::memory_order_relaxed);}
+    static void far_note(unsigned hand,const WriteLog::Pick& p,double mps) noexcept {
+        if(hand>1) return;Hand& h=h_[hand];h.far_[speed(mps)].fetch_add(1,std::memory_order_relaxed);
+        add(h.raw_mm,p.raw_mm,mm_edge);add(h.raw_deg,p.raw_deg,deg_edge);add(h.arm_mm,p.arm_mm,mm_edge);add(h.arm_deg,p.arm_deg,deg_edge);add(h.rig_mm,p.rig_mm,mm_edge);
+    }
+    static std::string json() {
+        std::string o="{\"mm_edges\":[5,10,20,30,40,60,100,200,500,\"inf\"],\"deg_edges\":[1,2,5,8,12,20,45,90,135,\"inf\"],\"hands\":[";
+        const auto arr=[](const auto& a) {std::string s="[";for(std::size_t i=0;i<a.size();++i) s+=(i?",":"")+std::to_string(a[i].load(std::memory_order_relaxed));return s+"]";};
+        for(unsigned i=0;i<2;++i) {
+            const Hand& h=h_[i];const auto b=Binder::summary(i);
+            o+=std::string(i?",":"")+"{\"note_none\":"+arr(h.none_)+",\"note_far\":"+arr(h.far_)+",\"carried\":"+std::to_string(h.carried.load())
+              +",\"pending_mismatch\":"+std::to_string(Binder::mismatches(i))+",\"recalled\":"+std::to_string(Binder::recalls(i))+",\"learned\":"+std::to_string(b.learns)
+              +",\"far_mm\":"+arr(h.raw_mm)+",\"far_deg\":"+arr(h.raw_deg)+",\"arm_carried_mm\":"+arr(h.arm_mm)+",\"arm_carried_deg\":"+arr(h.arm_deg)+",\"rig_carried_mm\":"+arr(h.rig_mm)+"}";
+        }
+        return o+"]}";
+    }
+private:
+    using Hist=std::array<std::atomic<std::uint64_t>,bins>;
+    struct Hand {std::array<std::atomic<std::uint64_t>,3> none_{},far_{};std::atomic<std::uint64_t> carried{};Hist raw_mm{},raw_deg{},arm_mm{},arm_deg{},rig_mm{};};
+    static void add(Hist& h,double v,const double* edge) noexcept {if(!(v>=0) || !std::isfinite(v)) return;unsigned i=0;while(i+1<bins && !(v<=edge[i])) ++i;h[i].fetch_add(1,std::memory_order_relaxed);}
+    inline static std::array<Hand,2> h_{};
 };
 
 // The two views' view-projections (index = the mod's eye 0/1) of the render, and per side the views of that side's previous published
@@ -510,7 +585,8 @@ public:
     // for this render (a predicted draw of another object is then refused).
     static bool use(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& measured,Mat& out,unsigned ref=0,const Mat* draw_m=nullptr) noexcept {
         if(side>1 || !on.load(std::memory_order_relaxed)) return false;
-        std::lock_guard<std::mutex> lock(mutex_);
+        const weapon_perf::Timer timer(weapon_perf::b_rigid_local);   // v1283
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
         auto& cs=side_[side];Cluster* best=nullptr;double best_d=gate_m;Cluster* free_slot=nullptr;
         for(auto& c:cs) {
             if(!c.active) {if(!free_slot) free_slot=&c;continue;}
@@ -550,7 +626,7 @@ public:
     // with the same VP and agreeing L (the passes of one mesh) must have written bit-identical rows; pass_spread_renders counts renders where not.
     static void note_placed(unsigned side,unsigned ref,std::uint32_t frame,const Mat& l,const Mat& vp,const float* out) noexcept {
         if(side>1) return;
-        std::lock_guard<std::mutex> lock(mutex_);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
         if(placed_frame_!=frame+1) {placed_frame_=frame+1;placed_n_=0;placed_spread_=false;}
         for(unsigned i=0;i<placed_n_;++i) {
             const auto& p=placed_[i];
@@ -572,7 +648,8 @@ public:
     static Prediction predict(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m,double gate,double gate_rad,RefOf&& ref_of) noexcept {
         Prediction p;
         if(side>1 || !on.load(std::memory_order_relaxed)) return p;
-        std::lock_guard<std::mutex> lock(mutex_);
+        const weapon_perf::Timer timer(weapon_perf::b_rigid_local);   // v1283
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
         Cluster* best=nullptr;Mat best_ref{};double best_d=0,best_a=0;
         for(auto& c:side_[side]) {
             if(!c.active || !c.settled_ok || c.key!=key) continue;
@@ -598,12 +675,12 @@ public:
     // v1239: an unplaced draw near a held thing (another object, or the thing itself at a pose no read or prediction accepted).
     static void other(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m) noexcept {
         if(side>1) return;
-        std::lock_guard<std::mutex> lock(mutex_);remember(side,key,frame,m);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);remember(side,key,frame,m);
     }
     // Publish time (render boundary): the last render's samples into each cluster's consensus; a changed held thing resets the side.
     static void fold(unsigned side,std::uintptr_t id) noexcept {
         if(side>1) return;
-        std::lock_guard<std::mutex> lock(mutex_);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
         if(id!=id_[side]) {if(id_[side]) ++resets_;id_[side]=id;side_[side]={};others_[side]={};render_l_[side]={};return;}
         const unsigned path=path_[side].load(std::memory_order_relaxed);
         for(auto& c:side_[side]) {
@@ -636,13 +713,13 @@ public:
     // v1258 one-pose census: a draw with the vertex shader + cb2 size of a part this hold has placed (any pose, any render)
     static bool has_key(unsigned side,std::uint64_t key) noexcept {
         if(side>1) return false;
-        std::lock_guard<std::mutex> lock(mutex_);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
         for(const auto& c:side_[side]) if(c.active && c.key==key) return true;
         return false;
     }
     static bool settled_l(unsigned side,std::uint64_t key,Mat& out) noexcept {   // v1258 source probe: the first settled L of this key relative to the thing
         if(side>1) return false;
-        std::lock_guard<std::mutex> lock(mutex_);
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
         for(const auto& c:side_[side]) if(c.active && c.settled_ok && c.key==key && c.ref==0) {out=c.settled;return true;}
         return false;
     }
@@ -894,7 +971,7 @@ public:
     static void severed_draw(const Result& r,std::uint64_t key,std::uint64_t layout,unsigned size,unsigned pass) noexcept {
         if(r.side<0 || r.side>1 || kind_[static_cast<unsigned>(r.side)].load(std::memory_order_relaxed)!=kind_severed) return;
         const Mat l=last_l_;
-        std::lock_guard<std::mutex> lock(sev_mutex_);
+        weapon_perf::Counted<std::mutex> lock(sev_mutex_,weapon_perf::l_severed);
         SevDraw* d=nullptr;
         for(unsigned i=0;i<sev_n_;++i) if(sev_[i].key==key) d=&sev_[i];
         if(!d && sev_n_<sev_.size()) {d=&sev_[sev_n_++];d->key=key;d->layout=layout;d->size=size;}
@@ -937,7 +1014,8 @@ public:
               +",\"no_mv\":"+std::to_string(renders_[k][2].load())+",\"unplaced\":"+std::to_string(renders_[k][3].load())
               +",\"unplaced_nodraw\":"+std::to_string(renders_[k][4].load())+",\"unplaced_refused\":"+std::to_string(renders_[k][3].load()-renders_[k][4].load())
               +",\"draws\":{\"placed\":"+std::to_string(draws_[k][0].load())+",\"with_prev\":"+std::to_string(draws_[k][1].load())+",\"child\":"+std::to_string(draws_[k][2].load())
-              +",\"near_like\":"+std::to_string(draws_[k][3].load())+",\"near_other\":"+std::to_string(draws_[k][4].load())+"},\"match\":"+match_json(k)+"}";
+              +",\"near_like\":"+std::to_string(draws_[k][3].load())+",\"near_other\":"+std::to_string(draws_[k][4].load())+"},\"match\":"+match_json(k)
+              +(k==kind_weapon?",\"refused\":"+refused_json():std::string())+"}";   // v1283 (A4)
         }
         // v1239: predicted matches, how far the draw's implied pose was from the latest read (mm edges 1 2 5 10 20 50 100 200; deg .25 .5 1 2 5 10 20 45)
         o+=",\"predicted_offset\":{\"mm\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::to_string(pred_mm_[i].load());
@@ -979,6 +1057,7 @@ public:
         cert_pending_={};cert_prev_={};}   // v1258
     static std::uint64_t published() noexcept {return published_.load(std::memory_order_relaxed);}
     static std::uint64_t published(unsigned side) noexcept {return side<2?published_side_[side].load(std::memory_order_relaxed):0;}
+    static unsigned kind(unsigned side) noexcept {return side<2?kind_[side].load(std::memory_order_relaxed):0u;}   // v1283: what the last publish placed (0 none)
     static std::uint32_t latest_frame() noexcept {return latest_frame_.load(std::memory_order_acquire);}
     static const Slot* slot_of(std::uint32_t frame) noexcept {
         const Slot& s=ring_[frame%ring];
@@ -1123,9 +1202,37 @@ public:
         const Slot* slot=slot_of(frame);if(!slot) return r;
         const Views* v=get_views(frame,slot->side[0].valid?slot->side[0].prev_frame:0,slot->side[1].valid?slot->side[1].prev_frame:0);
         const unsigned e=pass_eye==0 || pass_eye==1?static_cast<unsigned>(pass_eye):tag_eye==1?1u:0u;
-        if(v && v->ok[e]) {const Rows m=model_rows(v->inv[e].data(),cur);near_of(*slot,m,r);source_probe(*slot,full(m),draw_key);decode_probe(*slot,*v,cur,e);}
+        if(v && v->ok[e]) {const Rows m=model_rows(v->inv[e].data(),cur);near_of(*slot,m,r);refusal_probe(*slot,m);source_probe(*slot,full(m),draw_key);decode_probe(*slot,*v,cur,e);}
         return r;
     }
+    // v1283 (plan A4): a draw within a published WEAPON side's reach that no frame placed: its nearest frame by axes (F, the previous read, a child,
+    // an earlier read). Per render and side the smallest angle is kept; a render that ends unplaced with draws refused (census bit 8 without bit 1)
+    // adds it to held_census.weapon.refused and, the first 64, to artifacts/weapon-refused.jsonl. Diagnostics only (weapon_perf::enabled).
+    static void refusal_probe(const Slot& slot,const Rows& m) noexcept {
+        if(!weapon_perf::enabled()) return;
+        const Mat mm=full(m);
+        for(unsigned s=0;s<2;++s) {
+            const Side& w=slot.side[s];
+            if(!w.valid || !w.bound || kind_[s].load(std::memory_order_relaxed)!=kind_weapon) continue;
+            for(int h=0;h<frames_end(w);++h) {
+                if(!has_frame(w,h)) continue;
+                const Mat& f=frame_of(w,h);const double d=origin_distance(m,f);if(!(d<=reach_of(w))) continue;
+                const double deg=frame_angle(mm,f)*57.29577951308232;const unsigned cls=h==0?0u:h==1?1u:h<hist0?2u:3u;
+                const std::uint64_t key=(static_cast<std::uint64_t>(std::min(deg*1000.,4e9))<<24)|(static_cast<std::uint64_t>(std::min(d*1000.,65535.))<<8)|cls;
+                auto& b=refuse_best_[s];for(auto old=b.load(std::memory_order_relaxed);key<old && !b.compare_exchange_weak(old,key,std::memory_order_relaxed);) {}
+            }
+        }
+    }
+    // The refused samples from index `from` on as JSON lines (ObjectMotion's poll appends them to weapon-refused.jsonl); returns the new count.
+    static unsigned refused_lines(unsigned from,std::string& out) {
+        std::lock_guard<std::mutex> lock(refused_mutex_);
+        char b[160];
+        for(unsigned i=from;i<refused_n_;++i) {const auto& r=refused_[i];
+            std::snprintf(b,sizeof b,"{\"frame\":%u,\"side\":%u,\"deg\":%.3f,\"mm\":%.1f,\"frame_kind\":\"%s\",\"player_mps\":%.2f}\n",r.frame,r.side,r.deg,r.mm,
+                r.cls==0?"F":r.cls==1?"previous":r.cls==2?"child":"history",r.mps);out+=b;}
+        return refused_n_;
+    }
+    static void refusal_speed(double mps) noexcept {refuse_mps_.store(mps,std::memory_order_relaxed);}   // the publisher: the player's speed this render
     // v1258 one-pose source probe: an unplaced draw with the shader + cb2 size of a part this hold placed, through that part's settled L, is the thing
     // at raw = m * inverse(L). Per render and side: the nearest such draw (within 2 deg) to each pose it could have been composed from -
     // [F read at the begin, B placed, the pose the engine was last given, the physics body]. A peak near 0 mm names the source; none = no such draw.
@@ -1256,7 +1363,7 @@ public:
         }
         bool predicted=false;Mat predicted_x{},predicted_l{};
         if(candidate<0 && predict_place(*slot,full(m),draw_key,frame,candidate,hit,predicted_x,predicted_l)) predicted=true;   // v1239
-        if(candidate<0) {result.stage=rejected;near_of(*slot,m,result);return result;}
+        if(candidate<0) {result.stage=rejected;near_of(*slot,m,result);refusal_probe(*slot,m);return result;}
         const Side& w=slot->side[static_cast<unsigned>(candidate)];
         const bool use_alt=hit==1,use_hist=hit>=hist0;const Mat& matched=frame_of(w,hit);
         Mat hist_delta{},hist_prev{};
@@ -1373,8 +1480,10 @@ private:
     // The render published last for this side ends here: its tallies into its kind (a republish of the same render adds nothing).
     static void roll_census(unsigned s,std::uint32_t frame) noexcept {
         if(census_frame_[s]==frame+1) return;
+        const std::uint32_t rolled=census_frame_[s];   // v1283: the rolled render + 1 (0: none)
         census_frame_[s]=frame+1;
         const unsigned k=kind_[s].load(std::memory_order_relaxed),b=bits_[s].exchange(0,std::memory_order_relaxed);
+        if(const std::uint64_t best=refuse_best_[s].exchange(~0ull,std::memory_order_relaxed);k==kind_weapon && (b&8u) && !(b&1u) && best!=~0ull) note_refused(s,rolled?rolled-1:0,best);   // v1283 (A4)
         roll_cert(s,b);   // v1258
         const bool lens=census_secondary_[s];census_secondary_[s]=secondary_next_.load(std::memory_order_relaxed);   // v1259: the rolled render's flag; the new one's
         const std::uint32_t f0=eye_frame_[s][0].exchange(0,std::memory_order_relaxed),f1=eye_frame_[s][1].exchange(0,std::memory_order_relaxed);
@@ -1385,6 +1494,31 @@ private:
         if((b&1u) && (b&4u)) r[1].fetch_add(1,std::memory_order_relaxed);
         if((b&1u) && !(b&2u)) r[2].fetch_add(1,std::memory_order_relaxed);
         if(!(b&1u)) {r[3].fetch_add(1,std::memory_order_relaxed);if(!(b&8u)) r[4].fetch_add(1,std::memory_order_relaxed);}   // v1254: [unplaced, of which no draw was drawn at all]
+    }
+    // v1283 (A4) refused weapon renders: per side this render's best candidate (key: millidegrees << 24 | mm << 8 | frame kind; ~0 none),
+    // histograms by angle (deg .05 .1 .23 .5 1 2 5 10 45, above) and origin distance (mm 1 5 10 20 50 100 200 400 800, above), frame kinds, samples
+    inline static std::array<std::atomic<std::uint64_t>,2> refuse_best_{{~0ull,~0ull}};
+    inline static std::atomic<double> refuse_mps_{};
+    inline static std::array<std::atomic<std::uint64_t>,10> refuse_deg_{},refuse_mm_{};inline static std::array<std::atomic<std::uint64_t>,4> refuse_cls_{};
+    inline static std::atomic<std::uint64_t> refuse_renders_{};
+    struct Refused {std::uint32_t frame{};unsigned side{},cls{};double deg{},mm{},mps{};};
+    inline static std::mutex refused_mutex_;inline static std::array<Refused,64> refused_{};inline static unsigned refused_n_{};
+    static void note_refused(unsigned s,std::uint32_t frame,std::uint64_t key) noexcept {
+        static constexpr double deg_edge[10]={.05,.1,.23,.5,1,2,5,10,45,1e9},mm_edge[10]={1,5,10,20,50,100,200,400,800,1e9};
+        const double deg=static_cast<double>(key>>24)/1000.,mm=static_cast<double>((key>>8)&0xffffu);const unsigned cls=static_cast<unsigned>(key&3u);
+        unsigned i=0;while(i<9 && !(deg<=deg_edge[i])) ++i;refuse_deg_[i].fetch_add(1,std::memory_order_relaxed);
+        i=0;while(i<9 && !(mm<=mm_edge[i])) ++i;refuse_mm_[i].fetch_add(1,std::memory_order_relaxed);
+        refuse_cls_[cls].fetch_add(1,std::memory_order_relaxed);refuse_renders_.fetch_add(1,std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(refused_mutex_);
+        if(refused_n_<refused_.size()) refused_[refused_n_++]=Refused{frame,s,cls,deg,mm,refuse_mps_.load(std::memory_order_relaxed)};
+    }
+    static std::string refused_json() {
+        std::string o="{\"renders\":"+std::to_string(refuse_renders_.load())+",\"deg_edges\":[0.05,0.1,0.23,0.5,1,2,5,10,45,\"inf\"],\"deg\":[";
+        for(unsigned i=0;i<10;++i) o+=(i?",":"")+std::to_string(refuse_deg_[i].load());
+        o+="],\"mm_edges\":[1,5,10,20,50,100,200,400,800,\"inf\"],\"mm\":[";for(unsigned i=0;i<10;++i) o+=(i?",":"")+std::to_string(refuse_mm_[i].load());
+        o+="],\"frame_kind\":{\"F\":"+std::to_string(refuse_cls_[0].load())+",\"previous\":"+std::to_string(refuse_cls_[1].load())+",\"child\":"+std::to_string(refuse_cls_[2].load())
+          +",\"history\":"+std::to_string(refuse_cls_[3].load())+"}}";
+        return o;
     }
     struct Last {bool valid{},have_prev{};std::uint32_t frame{},prev_frame{};Mat model{},placed{},prev{},relative{};};
     inline static std::array<Last,2> older_{},older2_{};

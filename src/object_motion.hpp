@@ -699,7 +699,7 @@ private:
         if(!weapon_draw::inverse(vp,inv)) return false;
         const auto rows=weapon_draw::Place::model_rows(inv.data(),cur);
         const double tol=weapon_draw::Place::axes_tol.load(std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lock(held_mutex_);
+        weapon_perf::Counted<std::mutex> lock(held_mutex_,weapon_perf::l_held);   // v1283 (A1)
         for(const auto& g:held_) for(unsigned i=0;i<g.n;++i)
             if(weapon_draw::Place::same_orientation(rows,g.f[i],tol) && weapon_draw::Place::origin_distance(rows,g.f[i])<=g.reach[i]) {
                 held_matches_.fetch_add(1,std::memory_order_relaxed);return true;
@@ -1283,6 +1283,7 @@ private:
         // v1199: an uncertain draw is held when both eyes' latest views agree it is (the match tolerance is far wider than the eye separation;
         // they disagree only at the edge of the reach: then not held, counted as a fallback)
         if(alternate() && held_mask.load(std::memory_order_relaxed) && cur[15]>0.01f && cur[15]<weapon_draw::Place::near_w.load(std::memory_order_relaxed)) {
+            const weapon_perf::Timer perf_timer(weapon_perf::b_held_mask);   // v1283 (A1)
             bool held=false,decided=true;
             if(have_content) held=held_match(view,cur);
             else {
@@ -1297,11 +1298,12 @@ private:
         // v1190 (rig_target.hpp, knob stale-eye-rig-target): a depth-writing rig/held draw of the one-view gets its rows for the stale eye's target
         // camera, E * rows, E found by this draw's view-projection (the per-view write it was classified by); the mask replay draws it with them
         // v1199: both hypotheses (rig_mask.hpp); the view is not needed
-        if(alternate() && RigMask::target_wanted()) {target_dual(s,sh,cur,have_content?&view:nullptr);view_use(use_rig_target);}
+        if(alternate() && RigMask::target_wanted()) {const weapon_perf::Timer perf_timer(weapon_perf::b_target_dual);target_dual(s,sh,cur,have_content?&view:nullptr);view_use(use_rig_target);}
         bool have_prev=gather_previous(s.layout,sh->data,sh->size,z,prev);
         count(motion);if(have_prev) std::memcpy(engine,prev,64);
         const float near_w=weapon_draw::Place::near_w.load(std::memory_order_relaxed);
         const bool near_draw=cur[15]>0.01f && cur[15]<near_w;
+        if(near_draw) weapon_perf::near_draw();   // v1283 (A1): near draws per render
         const bool alt=alternate(); // v1151: the held-weapon placement is a paired-mode binder; alternate draws take the general path
         // v1238 (user v1235: carried props unstable while moving; status SHADOWS_DYNAMIC near 870k, matched 0): a held thing's shadow-map draws were
         // left at the engine's physics pose, so its shadow (on the hand, the body, the thing itself) moved against the placed thing with every
@@ -1310,12 +1312,13 @@ private:
         // nothing and changes nothing. Current rows only (a shadow pass writes no motion). build/no-held-shadow-place: off.
         if(near_draw && pass>=0 && pass_eye<0 && pass_view && read_ && held_shadow_place.load(std::memory_order_relaxed) && mode_.load(std::memory_order_relaxed)>=1 &&
            placing_mode()==1 && !RigMask::draw_is_rig()) {
+            const weapon_perf::Timer perf_timer(weapon_perf::b_held_shadow);   // v1283 (A1)
             float lvp[16];
             if(read_(pass_view+0x7510,lvp,64)) {
                 const weapon_draw::Mat vp=weapon_draw::widen(lvp);float placed[16],unused[16];bool own=false;
                 const auto r=weapon_draw::Place::place_one_view(vp,vp,cur,placed,unused,own,nullptr,draw_key(s,*sh));
                 shadow_place_[r.side>=0?1:r.near_side>=0?2:0].fetch_add(1,std::memory_order_relaxed);
-                if(r.side>=0) return bind_pool(c,s,*sh,placed,nullptr);
+                if(r.side>=0) {weapon_perf::placed_draw();return bind_pool(c,s,*sh,placed,nullptr);}
             } else shadow_place_[3].fetch_add(1,std::memory_order_relaxed);
         }
         // v1162: a rig draw (rig_mask.hpp: binds an arm/body skin buffer) keeps the engine's own rows in alternate mode: the mod re-poses
@@ -1373,21 +1376,24 @@ private:
         // v1191: one-view frames: the held weapon/prop placed in this render's drawn hand, previous rows from this eye's previous render
         // v1201: a placement candidate = a near draw matching a held thing's frame under either eye's latest view (weapons, copies, props);
         // other near draws (the body, scenery) are not applicable
-        const auto held_any=[&] {for(unsigned h=0;h<2;++h) {rig_target::M4 e{};float vp[16]{};if(rig_target::book().latest_of(h,e,vp) && held_match(vp,cur)) return true;}return false;};
+        const auto held_any=[&] {const weapon_perf::Timer perf_timer(weapon_perf::b_held_mask);for(unsigned h=0;h<2;++h) {rig_target::M4 e{};float vp[16]{};if(rig_target::book().latest_of(h,e,vp) && held_match(vp,cur)) return true;}return false;};
         if(near_draw && one_view_place && !have_content && alt) certainty(cert_placement,held_any()?cert_fallback:cert_na); // v1199: uncertain: the engine's pose
         if(near_draw && one_view_place && have_content) {
+            const weapon_perf::Timer perf_timer(weapon_perf::b_one_view);   // v1283 (A1): includes placed_previous, census and RigidLocal (also timed alone)
             rig_target::M4 prev_vp{};
             if(rig_target::book().find_prev(view.vp,prev_vp)) {
                 float placed[16]{},placed_prev[16]{},still[16]{};bool own_prev=false;
                 rig_target::M4 vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view.vp[i];
                 const auto r=weapon_draw::Place::place_one_view(vp,prev_vp,cur,placed,placed_prev,own_prev,still,draw_key(s,*sh));
-                if(!RigMask::draw_is_rig()) weapon_draw::Place::census(r,r.side>=0 && have_prev); // v1237
-                weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,63); // v1240: one-view draws counted under pass bit 63
+                {const weapon_perf::Timer census_timer(weapon_perf::b_census);
+                 if(!RigMask::draw_is_rig()) weapon_draw::Place::census(r,r.side>=0 && have_prev); // v1237
+                 weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,63);} // v1240: one-view draws counted under pass bit 63
                 // v1218: this eye's previous render's submitted rows of the draw (receipt chain). v1226: else the predicted previous (this eye's
                 // previous binding * L: moved rigidly with the hand) when that render's binding exists, camera-only on the current binding only without it
                 if(r.side>=0 && have_prev && view.receipt && placed_history.load(std::memory_order_relaxed)) {
                     float own[16];const bool predicted_own=own_prev;own_prev=false;unsigned why=0;
                     if(view.has_prev) {
+                        const weapon_perf::Timer previous_timer(weapon_perf::b_placed_previous);
                         own_prev=table_.placed_previous(placed_,view.eye,view.frame,view.prev_frame,true,cur,engine,placed,own,&why);
                         if(!own_prev) placed_fail_[why<7?why:6].fetch_add(1,std::memory_order_relaxed);
                     } else {table_.insert(view.eye,view.frame,cur,engine);placed_.insert(view.eye,view.frame,cur,placed);} // a history reset: recorded
@@ -1395,6 +1401,7 @@ private:
                     if(own_prev) std::memcpy(placed_prev,own,64);else if(!predicted_own) std::memcpy(placed_prev,still,64);
                 }
                 if(r.side>=0) {
+                    weapon_perf::placed_draw();
                     alt_place_placed_.fetch_add(1,std::memory_order_relaxed);view_use(use_place);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
                     certainty(cert_placement,true);
                     if(RigMask::target_wanted()) target_dual(s,sh,placed,&view,false); // v1199: the placed rows, both hypotheses (counted above)
@@ -1406,10 +1413,12 @@ private:
         }
         // v1243 hand_lock (weapon_draw_place.hpp HandLock): every near eye-pass draw of the render the publisher noted, placed or not (the arm draws)
         if(near_draw && !alt && pass_eye>=0) if(const std::uint32_t lf=weapon_draw::Place::latest_frame();weapon_draw::HandLock::wants(lf)) {
+            const weapon_perf::Timer perf_timer(weapon_perf::b_hand_lock);   // v1283 (A1)
             const auto* hv=any_cached_views(lf);if(!hv) hv=weapon_views(lf,0,0);
             if(hv && hv->ok[pass_eye]) weapon_draw::HandLock::on_draw(lf,weapon_draw::mul(hv->inv[pass_eye],weapon_draw::widen(cur)));
         }
         if(near_draw && !alt && weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed))) {
+            const weapon_perf::Timer perf_timer(weapon_perf::b_paired);   // v1283 (A1): includes placed_previous, census and RigidLocal (also timed alone)
             count(weapon_near);
             const unsigned pass_index=pass>=0 && static_cast<unsigned>(pass)<pass_slots-1?static_cast<unsigned>(pass):pass_slots-1;
             weapon_pass_near_[pass_index].fetch_add(1,std::memory_order_relaxed);
@@ -1436,8 +1445,9 @@ private:
                 // another engine frame than the publish they were placed from (the two eyes of one render on different hand poses)
                 if(r.side<0 && r.near_side>=0) weapon_pass_near_unplaced_[pass_index][r.near_like?0:1].fetch_add(1,std::memory_order_relaxed);
                 if(r.side>=0 && have_view) placed_view_frame_[view.frame==frame?0:view.frame==frame+1?1:view.frame+1==frame?2:3].fetch_add(1,std::memory_order_relaxed); // v1243: [same, label +1, label -1, other]
-                if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev,frame); // v1248: restored as code (v1243 left it inside the comment); v1259: + the publish (per-eye census)
-                weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,pass_index);   // v1240: a held severed part's placed draws
+                {const weapon_perf::Timer census_timer(weapon_perf::b_census);
+                 if(!rig) weapon_draw::Place::census(r,r.side>=0 && have_prev,frame); // v1248: restored as code (v1243 left it inside the comment); v1259: + the publish (per-eye census)
+                 weapon_draw::Place::severed_draw(r,draw_key(s,*sh),s.layout,sh->size,pass_index);}   // v1240: a held severed part's placed draws
                 // v1218: the previous rows are the rows this eye's previous frame submitted for the draw (proven). v1226: else the predicted previous
                 // (prevVP(eye) * B_prev * L: the thing moved rigidly with the hand, exact with v1223's rigid L), never camera-only (a held thing is not
                 // world-fixed). Counted per pass and eye.
@@ -1446,6 +1456,7 @@ private:
                     if(!have_prev) weapon_pass_prev_[pass_index][e][0].fetch_add(1,std::memory_order_relaxed);
                     else if(placed_history.load(std::memory_order_relaxed)) {
                         float own[16];unsigned why=0;
+                        const weapon_perf::Timer previous_timer(weapon_perf::b_placed_previous);
                         const bool proven=table_.placed_previous(placed_,e,frame,frame-1,false,cur,engine,placed,own,&why);
                         if(proven) {note_resid(0,own,placed_prev);std::memcpy(placed_prev,own,64);}
                         else placed_fail_[why<7?why:6].fetch_add(1,std::memory_order_relaxed);
@@ -1457,6 +1468,7 @@ private:
                 if(r.stage) {count(static_cast<Counter>(weapon_stage+r.stage));if(r.hint>=0) weapon_skip_side_[static_cast<unsigned>(r.hint)][r.stage].fetch_add(1,std::memory_order_relaxed);}
                 if(weapon_probe_on_.load(std::memory_order_relaxed) && have_view && (r.stage || cur[15]<1.5f)) probe_draw(view,cur,*sh,s,r);
                 if(r.side>=0) {
+                    weapon_perf::placed_draw();
                     count(r.eye?weapon_eye1:weapon_eye0);
                     if(!have_prev) count(weapon_placed_current_only);   // v1103: a colour/forward draw (no previous rows to rewrite)
                     if(have_view && static_cast<unsigned>(r.eye)!=view.eye) count(weapon_label_wrong);
@@ -1717,6 +1729,11 @@ private:
         std::uint64_t proxy[5]{};
         if(proxy_stats_) proxy_stats_(proxy);
         if(output_.empty()) return;   // v1046: diagnostics off = no folder (output_/name would be relative); the throttle state above is already updated
+        {   // v1283 (plan A4): the refused weapon renders' samples (first 64 of the session)
+            static unsigned refused_written{};std::string lines;const unsigned n=weapon_draw::Place::refused_lines(refused_written,lines);
+            if(!lines.empty()) {std::ofstream refused(output_/L"weapon-refused.jsonl",std::ios::app|std::ios::binary);refused<<lines;}
+            refused_written=n;
+        }
         std::ofstream json(output_/L"object-motion.json",std::ios::trunc);
         json<<"{\"mode\":"<<mode<<",\"installed\":"<<(installed_?"true":"false")<<",\"proxy_layouts\":"<<(layout_?"true":"false")
             <<",\"proxy_shaders\":["<<proxy[0]<<','<<proxy[1]<<','<<proxy[2]<<','<<proxy[3]<<','<<proxy[4]
