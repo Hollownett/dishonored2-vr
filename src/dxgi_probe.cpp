@@ -3760,6 +3760,19 @@ static void publish_held_mask() noexcept {
     } catch(...) {}
 }
 static bool held_rig_now(d2vr::HeldCarry& out,bool sync=false) noexcept;   // v1262 (defined beside advance_attachment); v1274 sync: the engine's sync
+// v1237/v1278: the model frames of the entities the engine binds to `entity` (its +0xb0 children, count +0xb8: the bind/Hide/Show list,
+// d2vr-upgrade-attach-abi: a weapon's bolt and upgrade parts, a carried head's helmet), finite and within 0.6 m of F, appended to kids.
+static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max) noexcept {
+    std::uintptr_t list{};std::uint32_t count{};
+    if(!entity || !read_self(entity+0xb0,&list,sizeof list) || !list || !read_self(entity+0xb8,&count,sizeof count) || count>64) return;
+    for(std::uint32_t i=0;i<count && i<16 && n<max;++i) {
+        std::uintptr_t child{},model{};std::array<float,15> frame{};
+        if(!read_self(list+i*8,&child,sizeof child) || !child || child==entity || !read_self(child+0xf0,&model,sizeof model) || !model ||
+           !read_self(model+0x1860,frame.data(),sizeof frame)) continue;
+        const auto c=d2vr::weapon_draw::model_of(frame.data());
+        if(d2vr::weapon_draw::finite(c) && d2vr::weapon_draw::distance(c,f)<=.6) kids[n++]=c;
+    }
+}
 static void publish_weapon_draw(std::uintptr_t view) noexcept {
     // v1140: weapons stay opt-in (v1019, build/weapon-draw-place); held props are placed by default (ObjectMotion::held_wanted).
     const bool weapons=d2vr::ObjectMotion::weapon_wanted();
@@ -3885,7 +3898,13 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             if(!d2vr::weapon_draw::Binder::frame(hand,hand_mat,bound_frame)) {skip(3);continue;}
             d2vr::weapon_draw::Binder::note_sanity(hand,live,bound_frame);   // report-only: engine F vs the bound frame
             raw_ptr[hand]=raw[hand].data();bound[hand]=bound_frame;bound_ptr[hand]=&bound[hand];place_ids[hand]=identity;
-            d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon);hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;   // v1237 census
+            // v1278 (user, v1277: the second crossbow - a real copy weapon - "renders with a lot of artifacts" in performance mode): its bolt and
+            // upgrade parts are separate entities bound to it; only the weapon body was placed, the parts stayed at the copy's engine pose
+            // (16 mm / 2.6 deg off, max 0.3 m) with unplaced motion. They are published as the copy's children: placed with the same delta.
+            {std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
+             if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()));
+             d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n);}
+            hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;   // v1237 census
             const auto source=d2vr::weapon_draw::Binder::state(hand).source;
             if(source<4) ++weapon_draw_source[hand][source];
             weapon_wobble[hand][0].add(in_frame(*image,{raw[hand][0],raw[hand][1],raw[hand][2]}));
@@ -3939,16 +3958,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
                 const auto f=d2vr::weapon_draw::model_of(raw[hand].data());
                 if(body && d2vr::weapon_draw::finite(*body) && d2vr::weapon_draw::distance(*body,f)<=.6) kids[n++]=*body;   // v1255: the body's own frame
-                std::uintptr_t list{};std::uint32_t count{};
-                if(read_self(thing[hand]+0xb0,&list,sizeof list) && list && read_self(thing[hand]+0xb8,&count,sizeof count) && count<=64) {
-                    for(std::uint32_t i=0;i<count && i<16 && n<kids.size();++i) {
-                        std::uintptr_t child{},model{};std::array<float,15> frame{};
-                        if(!read_self(list+i*8,&child,sizeof child) || !child || child==thing[hand] || !read_self(child+0xf0,&model,sizeof model) || !model ||
-                           !read_self(model+0x1860,frame.data(),sizeof frame)) continue;
-                        const auto c=d2vr::weapon_draw::model_of(frame.data());
-                        if(d2vr::weapon_draw::finite(c) && d2vr::weapon_draw::distance(c,f)<=.6) kids[n++]=c;
-                    }
-                }
+                bound_children(thing[hand],f,kids.data(),n,static_cast<unsigned>(kids.size()));
                 d2vr::weapon_draw::Place::stage(hand,kind,kids.data(),n);hand_kind[hand]=kind;
             };
             for(unsigned hand=0;hand<2;++hand) {
@@ -15319,7 +15329,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(dual_wield_enabled) { // two active hands: a hand's mod-owned gun fires a real shot from its barrel on its own trigger (NativeRangedFire)
                                     using E=d2vr::arm::Held;static std::array<bool,2> shot_down{};
                                     {const auto kind=[&](unsigned h){const auto ex=arm_set.copy_at(h);return !d2vr::arm::is_gun(ex)?-1:ex==E::crossbow?1:0;}; // v1094: the copies' own ammo (NativeRangedFire::track_ammo)
-                                     d2vr::NativeRangedFire::note_copies(kind(0),kind(1));}
+                                     d2vr::NativeRangedFire::note_copies(kind(0),kind(1),arm_set.slot1_holder());}
                                     {static bool pick_installed=false;if(!pick_installed) {pick_installed=true; // v1101: a copy hand's wheel ammo choice stays on its copy (NativeRangedFire::wheel_pick)
                                         d2vr::NativeManualEquipRuntime::wheel_pick.store(+[](std::uintptr_t item,std::uintptr_t ammo)->std::uintptr_t {auto rd=&read_self;return d2vr::NativeRangedFire::wheel_pick(image_base,rd,item,ammo);},std::memory_order_release);}}
                                     for(unsigned h=0;h<2;++h) {
