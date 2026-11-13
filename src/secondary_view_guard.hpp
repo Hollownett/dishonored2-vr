@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -75,22 +76,39 @@ inline bool camera_matches(const std::array<float,3>& written_p,const std::array
     return true;
 }
 
-// v1265 (user, v1264 headset: "timepiece display render got broken ... regressed to a previous state before fix"; status camera_follow_own_none
-// [23442,3613,2]: 23.6% of lens frames took the independent-camera path, v1257 5.6%): follows() runs on the game thread right after the
-// Timepiece's update (0x44d230) against the PREPARED views, which that tick has not rebuilt yet: while the player camera turns, the basis is one
-// tick stale and fails the 0.02 test, and the frame was drawn as an independent camera (the Timepiece's flat pose, the engine's projection, one
-// image for both eyes). A camera that followed keeps following while its translation stays the one it followed with (a stale basis, a snap
-// turn); the translation used is the one from its last exact frame. It is an independent camera only when it never matched or its translation
-// moved away (latch_m), or the latch went latch_gap frames without a camera.
-struct FollowLatch {bool valid{};std::array<float,3> t{};std::uint64_t frame{};};
-enum class CameraPath : unsigned {follow,latched,own,none};
-inline constexpr float latch_m=1.f;inline constexpr std::uint64_t latch_gap=8;
-inline CameraPath follow_path(FollowLatch& l,bool basis_follows,const std::array<float,3>& t_now,std::uint64_t frame) noexcept {
-    for(float v:t_now) if(!std::isfinite(v)) {l.valid=false;return CameraPath::own;}
-    if(basis_follows) {l={true,t_now,frame};return CameraPath::follow;}
-    float d=0;for(std::size_t i=0;i<3;++i) d+=(t_now[i]-l.t[i])*(t_now[i]-l.t[i]);
-    if(l.valid && frame>=l.frame && frame<=l.frame+latch_gap && std::sqrt(d)<=latch_m) {l.frame=frame;return CameraPath::latched;}
-    l.valid=false;return CameraPath::own;
+// v1265 -> v1269 (user, v1264 headset: "timepiece display render got broken ... regressed to a previous state before fix"; camera_follow_own_none
+// [23442,3613,2]: 23.6% of lens frames took the independent-camera path, v1257 5.6%): follows() ran on the game thread right after the Timepiece's
+// update (0x44d230) against the PREPARED views, which that tick has not rebuilt yet, so while the player camera turned the basis was one tick stale
+// and failed. v1265 latched over it (review: a time shift while turning, an independent camera latched by one match, drift kept); v1269 removes the
+// latch and tests at the source. The Timepiece reads the player camera THIS tick: 0x7e7110(game+0x1f52b8) = the last camera of that list (+0x10),
+// 0x88e140 its origin (+0xa8) and axis (+0xcc); 0x44c2d0 adds the timeline offset to the origin; with its flag +0xa8 & 0x10 set, 0x890c50 writes
+// both into its own camera (+0x150: origin +0xa8, axis +0xcc). The owner hook reads the same camera after 0x44d230 returns: the same values the
+// Timepiece copied, so its axis equals the reference exactly every tick it follows, turning or not; the translation is this tick's offset.
+// The rotation angle between two orthonormal bases from their difference (|a-b|^2 = 8 sin^2(angle/2)): exact at 0, unlike acos of the trace.
+inline float basis_angle_deg(const std::array<float,9>& a,const std::array<float,9>& b) noexcept {
+    double d2=0;for(std::size_t i=0;i<9;++i) {const double d=double(a[i])-double(b[i]);d2+=d*d;}
+    if(!std::isfinite(d2)) return 180.f;
+    return static_cast<float>(2.*std::asin(std::min(1.,std::sqrt(d2)/2.8284271247461903))*57.29577951308232);
+}
+enum class CameraPath : unsigned {follow,own,none};
+inline constexpr float follow_max_deg=.1f;
+struct Follow {bool follows{};std::array<float,3> translation{};float angle_deg{180.f};};
+inline Follow follow_same_tick(bool engine_follows,const std::array<float,3>& p,const std::array<float,9>& b,const std::array<float,3>& ref_p,const std::array<float,9>& ref_b) noexcept {
+    Follow f;f.angle_deg=basis_angle_deg(ref_b,b);
+    for(std::size_t i=0;i<3;++i) f.translation[i]=p[i]-ref_p[i];
+    bool finite=true;for(float v:f.translation) finite=finite && std::isfinite(v);
+    f.follows=engine_follows && finite && f.angle_deg<=follow_max_deg;
+    return f;
+}
+// Status histogram of a basis difference in degrees: edges .001 .01 .1 1 5 (6 bins).
+inline unsigned deg_bin(float deg) noexcept {
+    static constexpr float edge[5]={.001f,.01f,.1f,1.f,5.f};unsigned i=0;while(i<5 && !(deg<=edge[i])) ++i;return i;
+}
+// v1269 lens visibility stamp (the HMD hidden area stamped into a lens pass's FORWARD_WORLD depth). borrowed = v1257 (the borrowed view's eye,
+// eye 1's mask on both lens passes; default), pass_eye = each pass's own eye (a head-centre pass has none), off = v1264 (no stamp).
+enum class StampMode : unsigned {borrowed,pass_eye,off};
+inline int lens_stamp_eye(StampMode m,int borrowed_eye,int pass_eye) noexcept {
+    return m==StampMode::borrowed?borrowed_eye:m==StampMode::pass_eye && (pass_eye==0 || pass_eye==1)?pass_eye:-1;
 }
 // v1265 certificate: the pixel grid a lens image is rendered in against the eye that composites it (the glass samples by screen position):
 // projection (view+0x7390), render rect (+0x7860) and resolution fraction (+0x78c0), read from the eye's view before the pass and from the

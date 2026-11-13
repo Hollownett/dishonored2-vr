@@ -91,20 +91,43 @@ int main() {
      auto cb2=cb;cb2[0]+=2e-4f;CHECK(camera_matches(cp,cb,cp,cb) && camera_matches(cp,cb,cp,cb2));
      CHECK(!camera_matches(cp,cb,{39.80228f,-49.8292f,-298.3025f},cb));   // eye 1 is 6.4 cm away
      auto nan=cp;nan[1]=std::nanf("");CHECK(!camera_matches(cp,cb,nan,cb));}
-    {   // v1265 camera path: a following camera stays following through stale-basis ticks with its translation (v1264: 23.6% of lens frames fell
-        // to the independent path while turning); it is independent when it never matched, its translation moved away, or the latch aged out.
-        FollowLatch l;const std::array<float,3> t0{0,0,-600},walk{.08f,0,-600},blink{6.f,0,-600};
-        CHECK(follow_path(l,false,t0,10)==CameraPath::own);                 // never matched: an independent camera
-        CHECK(follow_path(l,true,t0,11)==CameraPath::follow && l.valid);
-        for(std::uint64_t f=12;f<40;++f) CHECK(follow_path(l,false,walk,f)==CameraPath::latched);   // a long turn while walking: every tick stale
-        CHECK(l.t[0]==0.f);                                                // the translation kept is the exact frame's
-        CHECK(follow_path(l,true,walk,40)==CameraPath::follow && l.t[0]==walk[0]);
-        CHECK(follow_path(l,false,blink,41)==CameraPath::own && !l.valid); // the translation moved 6 m: not the same camera relation
-        CHECK(follow_path(l,false,t0,42)==CameraPath::own);                 // and it stays independent until an exact match
-        CHECK(follow_path(l,true,t0,50)==CameraPath::follow);
-        CHECK(follow_path(l,false,t0,50+latch_gap+1)==CameraPath::own);     // no camera for longer than the gap (device folded)
-        CHECK(follow_path(l,true,t0,70)==CameraPath::follow && follow_path(l,false,{std::nanf(""),0,0},71)==CameraPath::own);
-        CHECK(follow_path(l,true,{0,0,600},80)==CameraPath::follow && l.t[2]==600.f);   // the time shift: a new exact relation
+    {   // v1269 same-tick follows: the Timepiece's axis is this tick's player camera axis (copied at 0x890c50 under flag 0x10), its origin the
+        // player camera's plus the timeline offset. The v1264 test compared against the previous tick's prepared views.
+        const auto yaw=[](double deg) {const float c=static_cast<float>(std::cos(deg/57.29577951308232)),s=static_cast<float>(std::sin(deg/57.29577951308232));
+            return std::array<float,9>{c,s,0.f,-s,c,0.f,0.f,0.f,1.f};};
+        CHECK(std::abs(basis_angle_deg(yaw(0),yaw(30))-30.f)<.01f && basis_angle_deg(yaw(12),yaw(12))<.01f);
+        const std::array<float,3> head{39.8f,-49.8f,301.7f};
+        for(const double rate:{90.,180.}) {   // deg/s, 90 Hz ticks, walking 1.5 m/s
+            unsigned old_fail=0;
+            for(int tick=1;tick<=90;++tick) {
+                const double a_now=rate*tick/90.,a_prev=rate*(tick-1)/90.;
+                const std::array<float,3> ref{head[0]+.0167f*static_cast<float>(tick),head[1],head[2]},cam{ref[0],ref[1],ref[2]-600.f};
+                const auto f=follow_same_tick(true,cam,yaw(a_now),ref,yaw(a_now));
+                CHECK(f.follows && f.angle_deg<=.001f && std::abs(f.translation[2]+600.f)<1e-3f && std::abs(f.translation[0])<1e-4f);
+                if(!follows(yaw(a_now),yaw(a_prev))) ++old_fail;   // the v1264 test against the previous tick
+            }
+            CHECK(rate<100. || old_fail==90);   // 2 deg per tick: the v1264 test failed every tick (the mono path)
+        }
+        {   // an independent world-fixed camera (no follow flag, its own axis) while the player turns: never follows, also when the axes cross
+            for(int tick=0;tick<=90;++tick) {
+                const auto ref=yaw(180.*tick/90.-90.);
+                CHECK(!follow_same_tick(false,{0,0,0},yaw(0),head,ref).follows);
+                CHECK(!follow_same_tick(true,{0,0,0},yaw(0),head,ref).follows || tick==45);   // a flag but a frozen axis: only where it crosses
+            }
+        }
+        {   // the time shift while turning at 180 deg/s: the offset flips sign on one tick; that tick and the next still follow (per eye)
+            for(int tick=0;tick<6;++tick) {
+                const auto b=yaw(2.*tick);const float off=tick<3?-600.f:600.f;
+                const auto f=follow_same_tick(true,{head[0],head[1],head[2]+off},b,head,b);
+                CHECK(f.follows && f.translation[2]==off);
+            }
+        }
+        CHECK(!follow_same_tick(true,{std::nanf(""),0,0},yaw(0),head,yaw(0)).follows);
+        CHECK(deg_bin(0.f)==0 && deg_bin(.005f)==1 && deg_bin(.05f)==2 && deg_bin(.5f)==3 && deg_bin(2.f)==4 && deg_bin(30.f)==5 && deg_bin(std::nanf(""))==5);
+        // the lens stamp per pass: v1257 (borrowed view = eye 1 on both passes), each pass's own eye, none
+        CHECK(lens_stamp_eye(StampMode::borrowed,1,0)==1 && lens_stamp_eye(StampMode::borrowed,1,1)==1);
+        CHECK(lens_stamp_eye(StampMode::pass_eye,1,0)==0 && lens_stamp_eye(StampMode::pass_eye,1,1)==1 && lens_stamp_eye(StampMode::pass_eye,1,2)==-1);
+        CHECK(lens_stamp_eye(StampMode::off,1,0)==-1 && lens_stamp_eye(StampMode::off,1,1)==-1);
     }
     {   // v1265 grid certificate
         Grid a{};for(std::size_t i=0;i<16;++i) a.projection[i]=static_cast<float>(i)*.25f;a.rect={0,0,2495,2687};a.fraction={1.f,1.f};
