@@ -2016,7 +2016,7 @@ static struct LensStats {
     std::array<std::atomic<UINT64>,3> camera_path{};std::array<std::atomic<UINT64>,3> grid_match{},grid_mismatch{};   // v1269 path: [follow, own, none]
     // v1269 (game thread, per owner tick with the engine's follow flag 0x10): the Timepiece axis against the same-tick player camera and against the
     // prepared views (the v1264 reference), deg bins <=.001 .01 .1 1 5 >5; ticks with the flag set / clear; ticks without a readable reference
-    std::array<std::atomic<UINT64>,6> same_tick_deg{},prepared_deg{};std::array<std::atomic<UINT64>,2> engine_follow_flag{};std::atomic<UINT64> reference_misses{};
+    std::array<std::atomic<UINT64>,6> same_tick_deg{},prepared_deg{};std::array<std::atomic<UINT64>,2> engine_follow_flag{};std::atomic<UINT64> reference_misses{},follow_latched{};
     std::array<std::atomic<UINT64>,4> flag_vs_match{};   // v1271 (ticks with a reference): [flag set & match, set & mismatch, clear & match, clear & mismatch]
     std::array<std::atomic<UINT64>,4> same_vs_prepared{};   // v1273 (ticks with a reference): [same & prepared, same only, prepared only, neither]
     std::array<std::atomic<UINT64>,3> records_kept{},records_changed{};   // v1265: per pass, the borrowed eye's object-motion view records unchanged / changed across it
@@ -7033,6 +7033,7 @@ void lens_note_pass_begin(std::uintptr_t view) noexcept {
 }
 // One secondary render (0x366590) drawn for pass_eye (0/1; 2 = head centre), then the borrowed eye view re-created. True when it began.
 static bool lens_isolated=true;   // v1259: build/no-lens-isolation = v1257 (the lens pass's jobs and its borrowed view seen as the eye's)
+static bool lens_no_follow_latch=false;   // v1291: build/no-lens-follow-latch
 static bool lens_follow_prepared=false;   // v1269: build/lens-follow-prepared = the v1264 follows test (prepared views, one tick stale while turning)
 // v1269: the player camera the Timepiece reads this tick (0x7e7110(game+0x1f52b8): the list's last camera +0x10; 0x88e140: origin +0xa8, axis +0xcc)
 static bool lens_reference_camera(std::array<float,3>& p,std::array<float,9>& b) noexcept {
@@ -7152,7 +7153,15 @@ std::uintptr_t __fastcall lens_owner_hook(void* owner,void* a,void* b,void* c) {
         } else if(!lens_follow_prepared) ++lens_stats.reference_misses;
         ++lens_stats.prepared_deg[sv::deg_bin(sv::basis_angle_deg(native[0].pose->basis,pose->basis))];   // what the v1264 test saw
         ++lens_stats.engine_follow_flag[engine_follows?0:1];
-        const auto d=sv::decide_follow(reference_ok,same,prepared_match,prepared_t);
+        auto d=sv::decide_follow(reference_ok,same,prepared_match,prepared_t);
+        // v1291 (user, v1290: "Timepiece looks great in performance mode, but in normal stereo it often falls back to mono"): a frame whose test
+        // fails right after frames that followed (the references are a tick apart while the head or a snap turn moves: 8 % of lens frames in
+        // the v1282 session, more in stereo) keeps following for up to 0.5 s with the LAST proven translation (the Timepiece's offset is fixed
+        // while it is out), instead of dropping eye 1 to eye 0's lens image. A camera that really is its own stays unfollowed after 0.5 s.
+        // build/no-lens-follow-latch: v1290.
+        {static std::uint64_t followed_at{};static std::array<float,3> followed_t{};const auto tick=GetTickCount64();
+         if(d.follows) {followed_at=tick;followed_t=d.translation;}
+         else if(!lens_no_follow_latch && followed_at && tick-followed_at<=500) {d.follows=true;d.translation=followed_t;++lens_stats.follow_latched;}}
         camera.follows=d.follows;camera.translation=d.translation;camera.path=static_cast<unsigned>(d.follows?sv::CameraPath::follow:sv::CameraPath::own);
         {std::lock_guard<std::mutex> l(lens_camera_mutex);lens_camera=camera;}
         ++lens_stats.owner_cameras;
@@ -7181,7 +7190,7 @@ static std::string lens_status_json() {
      // v1269: lens frames by camera path [follow, own, none]; per pass the lens grid (projection, rect, fraction) equal / not to the compositing eye's
      <<",\"follow_test\":\""<<(lens_follow_prepared?"prepared":"same_tick")<<"\",\"camera_path_follow_own_none\":"<<list(lens_stats.camera_path)
      <<",\"same_tick_deg\":"<<list(lens_stats.same_tick_deg)<<",\"prepared_deg\":"<<list(lens_stats.prepared_deg)
-     <<",\"engine_follow_flag_set_clear\":"<<list(lens_stats.engine_follow_flag)<<",\"reference_misses\":"<<lens_stats.reference_misses.load()
+     <<",\"engine_follow_flag_set_clear\":"<<list(lens_stats.engine_follow_flag)<<",\"reference_misses\":"<<lens_stats.reference_misses.load()<<",\"follow_latched\":"<<lens_stats.follow_latched.load()
      <<",\"flag_set_match_set_mismatch_clear_match_clear_mismatch\":"<<list(lens_stats.flag_vs_match)
      <<",\"same_and_prepared_same_only_prepared_only_neither\":"<<list(lens_stats.same_vs_prepared)
      <<",\"stamp\":\""<<(lens_stamp_mode==d2vr::secondary_view::StampMode::borrowed?"borrowed":lens_stamp_mode==d2vr::secondary_view::StampMode::pass_eye?"pass_eye":"off")<<'"'
@@ -17217,6 +17226,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             lens_eye0_camera=fs::exists(root/L"build"/L"lens-eye0-camera");   // v1256: the v1246 eye-0 lens camera (default: the head's centre)
             lens_mono=fs::exists(root/L"build"/L"lens-mono");lens_shared_shadows=fs::exists(root/L"build"/L"lens-shared-shadows");   // v1257: v1256 camera / v1256 shadows
             lens_isolated=!fs::exists(root/L"build"/L"no-lens-isolation");   // v1259: build/no-lens-isolation = v1257
+            lens_no_follow_latch=fs::exists(root/L"build"/L"no-lens-follow-latch");   // v1291
             lens_follow_prepared=fs::exists(root/L"build"/L"lens-follow-prepared");   // v1269: the v1264 follows test
             lens_stamp_mode=fs::exists(root/L"build"/L"no-lens-stamp")?d2vr::secondary_view::StampMode::off:   // v1269: v1264 (no stamp on a lens pass)
                 fs::exists(root/L"build"/L"lens-stamp-pass-eye")?d2vr::secondary_view::StampMode::pass_eye:d2vr::secondary_view::StampMode::borrowed;   // default v1257
