@@ -201,7 +201,7 @@ assert 'const std::uintptr_t rig_view=alternate_on() && mono && stale_eye_rig_kn
 assert 'stale_eye_rig_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-rig-motion");' in probe
 assert 'const bool rig_on=alternate_on() && stale_eye_rig_knob;' in probe and 'd2vr::RigMask::enabled=rig_on;if(game_xr) {game_xr->stale_rig_masks=rig_on;game_xr->stale_rig_motion_rules=stale_eye_rig_motion_knob;}' in probe
 assert probe.count('d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass());') == 4
-assert probe.count('rig_mask.after({') == 4 and probe.count('&rig_mask_draw<Binding>,&rig_mask_targets<Binding>);') == 4
+assert probe.count('rig_mask.after({') == 4 and probe.count('&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>);') == 4  # v1286: + the UAV form
 assert 'game_xr->stale_eye_rig(motion_eye,rig.Get(),rig_w,rig_h,number,rig_live && stale_eye_rig_knob,fsr_taa.eye_rig_motion(static_cast<int>(motion_eye)));' in probe
 assert '\\"rig_mask\\":' in probe and '\\"rig_mask_pixels\\":' in probe
 assert 'if(!stale_rig_masks || eye>1 || !stale_rig_live_[eye] || stale_rig_frame_[eye]!=alternate_frame || !stale_rig_[eye]) return {};' in xr
@@ -412,7 +412,7 @@ print('PASS: v1209 rig guard, forensics, draw views')
 # v1210: nested draw hooks are one draw (inner RigMask/ObjectMotion scopes inert), draw-time probe of rig slots and rows, other-view MV writers n/a
 rm6 = (root / 'src' / 'rig_mask.hpp').read_text(encoding='utf-8')
 om6 = (root / 'src' / 'object_motion.hpp').read_text(encoding='utf-8')
-assert 'nested_=tl_scope_depth_++>0;' in rm6 and '~Scope() {--tl_scope_depth_;if(nested_) return;' in rm6 and 'void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {\n            if(nested_) return;' in rm6
+assert 'nested_=tl_scope_depth_++>0;' in rm6 and '~Scope() {--tl_scope_depth_;if(nested_) return;' in rm6 and 'void after(const DrawArgs& args,DrawFn draw,TargetsFn targets,TargetsUavFn targets_uav=nullptr) noexcept { // v1286: + the UAV form\n            if(nested_) return;' in rm6
 assert 'nested_(RigMask::nested_draw()),s_(installed_ && !nested_?before(c):nullptr)' in om6 and 'if(nested_) return;\n            SkinMotion::restore(c_);' in om6
 assert 'probe_on=rig_on && d2vr::RigMask::motion.load() && rig_forensics_knob;' in probe and 'RigMask::probe_arm(view.display,want,sh->size,' in om6  # v1216: was diag::on()
 assert 'v && v!=alt_view_.load(std::memory_order_relaxed)) {' in om6

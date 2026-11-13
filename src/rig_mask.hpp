@@ -14,6 +14,22 @@
 // The rig target is cleared after each copy. The PS reads only SV_Position: system-value position links with any vertex shader that writes
 // it, whatever its other outputs (checked on WARP with SV_Position not the first output, tests/rig_mask_check.cpp).
 // Knob build/no-stale-eye-rig (dxgi_probe): inert (no detection, no replay, no mask).
+//
+// v1286 replay without render-target switches (sim v1285: 13 placed weapon draws a render cost 17.6 vs 8.6 ms frames, the mod's CPU ~1 ms:
+// the four OM target switches of every replayed draw, not its three extra draws). The engine's RTVs and DSV stay bound; ONE
+// OMSetRenderTargetsAndUnorderedAccessViews (KEEP targets, past the hooks) adds two pixel-shader UAVs at u6/u7 and one removes them again:
+//  - mask (u7): the rig mask texture itself (R32G32_FLOAT, now also a UAV), written by an [earlydepthstencil] PS with the same value the
+//    v1285 PS wrote (float2(z, 0 / 1 own / 2 held)), depth EQUAL against the engine's DSV as before, colour writes off (write mask 0 on all
+//    targets, so the engine's RTVs get nothing);
+//  - slices (u6): one R32_UINT texture array (2 slices, the hypothesis eye h), InterlockedMax of key = asuint(z) << 1 | (rig 1, held 0),
+//    depth test and write off. Reverse-Z positive float bits are monotonic as uint and their sign bit is free, so the shift keeps the depth
+//    exact and the max is "nearest wins" in any draw order (replaces the slices' own D32 GREATER; an exact depth tie now prefers rig).
+//  take_target converts slice `slice` into the caller's R32G32_FLOAT (x depth, y 255 / 253, 0 0 none: what the consumers read, unchanged)
+//  in one compute pass over the render rectangle that also zeroes both slices (where the v1285 copy and clears were); the mask is still
+//  cleared by FsrTaa's ClearRenderTargetView after its copy. A draw whose engine set leaves no room (> 6 RTVs) or that has engine PS UAVs
+//  bound gets the same three draws with the engine's RTVs unbound (2 OM switches, counted per reason) and its exact set (UAVs too) restored.
+//  A device without FL 11.0 typed UAVs / R32_UINT atomics, or whose UAV shaders cannot be made, replays the v1285 way (counted per draw).
+//  Knob build/legacy-rig-replay: the v1285 path everywhere (replay_legacy, the RTV/D32 slices and the copy), for A/B.
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
@@ -23,6 +39,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -102,6 +119,9 @@ public:
     struct DrawArgs {unsigned kind{};UINT count{},instances{1},start{};INT base{};UINT first{};}; // 0 DrawIndexed 1 ..Instanced 2 Draw 3 DrawInstanced
     using DrawFn=void(*)(ID3D11DeviceContext*,const DrawArgs&) noexcept;               // the engine's draw, past every hook
     using TargetsFn=void(*)(ID3D11DeviceContext*,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*) noexcept; // OMSetRenderTargets, past the hooks
+    // v1286: OMSetRenderTargetsAndUnorderedAccessViews, past the hooks (null: the context's own method, for the WARP checks)
+    using TargetsUavFn=void(*)(ID3D11DeviceContext*,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*) noexcept;
+    inline static std::atomic<bool> legacy_replay{false}; // v1286: dxgi_probe at start-up, build/legacy-rig-replay (the v1285 RTV replay)
     static void publish(const std::array<std::uintptr_t,buffer_slots>& buffers) noexcept {
         unsigned n=0;
         for(unsigned i=0;i<buffer_slots;++i) {buffers_[i].store(buffers[i],std::memory_order_relaxed);n+=buffers[i]!=0;}
@@ -135,6 +155,8 @@ public:
     // created by the caller from target_desc) and cleared; true when this render replayed rig draws and none missed its retarget.
     static bool target_desc(ID3D11Resource* depth,D3D11_TEXTURE2D_DESC& d) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if(target_.depth==depth && target_.keys) { // v1286: the v1285 shape (R32G32_FLOAT, 2 slices); the UAV flag asks for a UAV-capable copy
+            target_.keys->GetDesc(&d);d.Format=DXGI_FORMAT_R32G32_FLOAT;d.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;return depth!=nullptr;}
         if(!depth || target_.depth!=depth || !target_.trg) return false;
         target_.trg->GetDesc(&d);return true;
     }
@@ -145,13 +167,23 @@ public:
     // 0 draws while their neighbours counted ~2 renders' worth; the GPU target itself was complete), so one render of slack is allowed.
     static bool take_target(ID3D11DeviceContext* c,ID3D11Resource* depth,ID3D11Texture2D* out,std::uint64_t& draws,UINT w=0,UINT h=0,unsigned slice=0) {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2> rtv;std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>,2> dsv;
-        {std::lock_guard<std::mutex> lock(mutex_);if(!depth || target_.depth!=depth || !target_.trg) return false;trg=target_.trg;rtv=target_.trg_rtv;dsv=target_.trg_dsv;}
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> keys,out_uav;Microsoft::WRL::ComPtr<ID3D11ComputeShader> convert;Microsoft::WRL::ComPtr<ID3D11Buffer> cb; // v1286
+        {std::lock_guard<std::mutex> lock(mutex_);
+         if(depth && target_.depth==depth && target_.keys) {trg=target_.keys;keys=target_.key_uav;convert=uav_.convert;cb=uav_.cb;if(out) out_uav=out_view(out);} // v1286
+         else {if(!depth || target_.depth!=depth || !target_.trg) return false;trg=target_.trg;rtv=target_.trg_rtv;dsv=target_.trg_dsv;}}
         slice&=1u;
         draws=target_draws_frame_.exchange(0,std::memory_order_relaxed);const auto before=target_draws_last_.exchange(draws,std::memory_order_relaxed);
         const auto misses=target_misses_frame_[slice].exchange(0,std::memory_order_relaxed);target_misses_frame_[slice^1u].store(0,std::memory_order_relaxed);
         D3D11_TEXTURE2D_DESC d{};trg->GetDesc(&d);
         const bool part=w && h && w<=d.Width && h<=d.Height && (w<d.Width || h<d.Height);
         const D3D11_BOX box{0,0,0,part?w:d.Width,part?h:d.Height,1};const D3D11_RECT rect{0,0,static_cast<LONG>(box.right),static_cast<LONG>(box.bottom)};
+        if(keys) { // v1286: slice `slice` converted into `out` (the box only) and both slices zeroed, one compute pass
+            const bool converted=convert_keys(c,keys.Get(),out_uav.Get(),convert.Get(),cb.Get(),box.right,box.bottom,slice) && (!out || out_uav);
+            if(!converted) convert_failures_.fetch_add(1,std::memory_order_relaxed);
+            const bool valid=converted && (draws>0 || before>0) && misses==0;(valid?target_valid_:target_invalid_).fetch_add(1,std::memory_order_relaxed);
+            if(!draws) (before?target_lent_:target_empty_).fetch_add(1,std::memory_order_relaxed);
+            return valid;
+        }
         if(out) c->CopySubresourceRegion(out,0,0,0,0,trg.Get(),slice,&box); // subresource `slice` = array slice `slice` (one mip)
         const float zero[4]{};
         Microsoft::WRL::ComPtr<ID3D11DeviceContext1> c1;const bool view_clear=part && SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c1)));
@@ -355,7 +387,7 @@ public:
     }
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);
         for(auto& r:ring_) {r.ready.store(false);r.clear();r.device=nullptr;r.bytes=0;}
-        target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;}
+        target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;uav_={};uav_state_=0;}
     static std::string json() {
         std::ostringstream o;
         // v1168: t0..t3 per digit: 0 none, 1 this model's wrapper 0, 2 its wrapper 1, 3 another rig model's, 4 a non-rig resource
@@ -377,6 +409,10 @@ public:
          <<",\"held_draws\":"<<held_draws_.load()<<",\"target\":{\"on\":"<<(target_on.load()?"true":"false")<<",\"draws\":"<<target_draws_.load()
          <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load();
+        // v1286: the replay path (uav: engine targets kept, UAV writes; legacy: the v1285 target switches, knob or device), the draws each way
+        // took, the per-draw fallbacks by reason, and the per-render slice conversions (one per take; failures = out had no UAV / no shader)
+        o<<",\"replay_path\":\""<<(legacy_replay.load() || (uav_state_.load()>1)?"legacy":"uav")<<"\",\"uav_replays\":"<<uav_replays_.load()<<",\"replay_fallbacks\":{\"no_slot\":"<<fallbacks_[0].load()
+         <<",\"engine_uavs\":"<<fallbacks_[1].load()<<",\"feature_level\":"<<fallbacks_[2].load()<<",\"create_failed\":"<<fallbacks_[3].load()<<"},\"conversions\":"<<conversions_.load()<<",\"convert_failures\":"<<convert_failures_.load();
         // v1210: nested draw hooks (inert inner scopes), slot metadata counts, the draw-time probe: tally [wild][pal_eq][cb_eq] and notes
         // v1211: slot_captures = slots written at the draw (capture_drawn), capture_refused = size/device mismatch; pal = slot == the t1 the eye's
         // previous render drew (prev_unknown: that render had no probe, counted as pal!)
@@ -412,12 +448,12 @@ public:
             tl_rig_=is_rig(c);tl_depth_=true;c_=c; // v1183: every depth-writing one-view draw may be replayed (rig, or held when ObjectMotion marks it)
             if(tl_rig_) {rig_draws_.fetch_add(1,std::memory_order_relaxed);rig_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
         }
-        void after(const DrawArgs& args,DrawFn draw,TargetsFn targets) noexcept {
+        void after(const DrawArgs& args,DrawFn draw,TargetsFn targets,TargetsUavFn targets_uav=nullptr) noexcept { // v1286: + the UAV form
             if(nested_) return;
             if(tl_probe_display_!=~0ull && c_) {probe_capture(c_);tl_probe_display_=~0ull;} // v1210: what this draw read, in GPU order
             if(tl_foreign_t0_) foreign_count_.store(args.count,std::memory_order_relaxed); // v1169 diagnostic: the draw's index/vertex count
             restore_t0(); // v1166: the engine's previous palette again before the replay (it sees the engine's bindings)
-            if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets);
+            if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets,targets_uav);
             c_=nullptr;
         }
         ~Scope() {--tl_scope_depth_;if(nested_) return;restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
@@ -433,7 +469,17 @@ public:
     static bool nested_draw() noexcept {return tl_scope_depth_>1;} // inside a draw hook entered from another draw hook (v1210)
 private:
     struct Target {ID3D11Resource* depth{};Microsoft::WRL::ComPtr<ID3D11Resource> hold;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;UINT w{},h{};
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2> trg_rtv;std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>,2> trg_dsv;}; // v1190; v1199 two slices
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> trg;std::array<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>,2> trg_rtv;std::array<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>,2> trg_dsv; // v1190; v1199 two slices
+        // v1286 UAV replay (instead of trg/trg_rtv/trg_dsv): the mask's UAV, the slices' keys (R32_UINT, 2 slices) and their UAV, and the UAVs
+        // made on take_target's outputs (one per eye; a cached view holds its texture, so the address key cannot be reused meanwhile)
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> mask_uav,key_uav;Microsoft::WRL::ComPtr<ID3D11Texture2D> keys;
+        std::array<std::pair<ID3D11Resource*,Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>>,2> outs{};unsigned next_out{};};
+    // v1286: per device, the UAV replay's shaders and states: mask PS by class (0 rig, 1 own, 2 held), slice PS [held][slice], the conversion
+    struct UavKit {std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,3> mask;std::array<std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,2>,2> slice;
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> convert;Microsoft::WRL::ComPtr<ID3D11Buffer> cb;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> off;Microsoft::WRL::ComPtr<ID3D11BlendState> none;};
+    inline static UavKit uav_{};inline static std::atomic<int> uav_state_{}; // 0 not tried for this device, 1 ready, 2 feature level/formats, 3 create failed
+    static constexpr UINT uav_slot=6; // u6 keys, u7 mask: room for up to 6 engine RTVs
+    inline static std::atomic<std::uint64_t> uav_replays_{},conversions_{},convert_failures_{};inline static std::array<std::atomic<std::uint64_t>,4> fallbacks_{}; // no slot, engine UAVs, feature level, create failed
     inline static thread_local bool tl_target_[2]{};
     inline static std::atomic<std::uint64_t> target_draws_{},target_draws_frame_{},target_draws_last_{},target_misses_{},target_valid_{},target_invalid_{},target_lent_{},target_empty_{};
     inline static std::array<std::atomic<std::uint64_t>,2> target_misses_frame_{},target_slice_misses_{};
@@ -726,9 +772,46 @@ private:
         return hit;
     }
     // Under mutex_: the shader and states (once), and the rig target for this depth resource (recreated on a new depth/size).
+    static void new_device(ID3D11Device* device) { // under mutex_
+        target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();ps_target_rig_.Reset();ps_target_held_.Reset();nearest_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;
+        uav_={};uav_state_=0; // v1286
+    }
+    // v1286, under mutex_ for the current device: the UAV replay's shaders and states, made once; false (the v1285 replay for this device) below
+    // FL 11.0, without typed UAVs of R32G32_FLOAT / R32_UINT or R32_UINT atomic max, or when a shader or state cannot be made
+    static bool uav_ready(ID3D11Device* device) {
+        if(const int s=uav_state_.load(std::memory_order_relaxed)) return s==1;
+        UINT f2=0,f1=0;D3D11_FEATURE_DATA_FORMAT_SUPPORT2 a{DXGI_FORMAT_R32_UINT,0};
+        const bool fl=device->GetFeatureLevel()>=D3D_FEATURE_LEVEL_11_0 && SUCCEEDED(device->CheckFormatSupport(DXGI_FORMAT_R32G32_FLOAT,&f2)) && SUCCEEDED(device->CheckFormatSupport(DXGI_FORMAT_R32_UINT,&f1)) &&
+            (f2&D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) && (f1&D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) &&
+            SUCCEEDED(device->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2,&a,sizeof a)) && (a.OutFormatSupport2&D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_UNSIGNED_MIN_OR_MAX);
+        if(!fl) {uav_state_=2;return false;}
+        UavKit k{};char src[320];bool ok=true;
+        const auto ps=[&](Microsoft::WRL::ComPtr<ID3D11PixelShader>& out) {Microsoft::WRL::ComPtr<ID3DBlob> code;
+            ok=ok && SUCCEEDED(D3DCompile(src,std::strlen(src),nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr)) &&
+               SUCCEEDED(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&out));};
+        for(unsigned y=0;y<3;++y) { // the v1285 mask value (z, class) where the draw passes depth EQUAL; early depth: no write where it fails
+            std::snprintf(src,sizeof src,"RWTexture2D<float2> m:register(u%u);[earlydepthstencil] void main(float4 p:SV_Position){m[uint2(p.xy)]=float2(p.z,%u);}",uav_slot+1,y);ps(k.mask[y]);}
+        for(unsigned held=0;held<2;++held) for(unsigned s=0;s<2;++s) { // nearest wins: max of (depth bits << 1 | rig); z <= 0 never won the v1285 GREATER over its clear
+            std::snprintf(src,sizeof src,"RWTexture2DArray<uint> s:register(u%u);void main(float4 p:SV_Position){if(p.z>0) InterlockedMax(s[uint3(uint2(p.xy),%u)],(asuint(p.z)<<1)|%uu);}",uav_slot,s,held?0u:1u);
+            ps(k.slice[held][s]);}
+        // the conversion (take_target): slice k.z of the render rectangle k.xy -> x depth, y 255 rig / 253 held (0 0 none) when k.w, both slices zeroed
+        static const char cs[]="RWTexture2DArray<uint> s:register(u0);RWTexture2DArray<float2> o:register(u1);cbuffer C:register(b0){uint4 k;};"
+            "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID){if(any(i.xy>=k.xy)) return;"
+            "if(k.w) {const uint v=s[uint3(i.xy,k.z)];o[uint3(i.xy,0)]=v?float2(asfloat(v>>1),(v&1)?255.0:253.0):float2(0,0);}"
+            "s[uint3(i.xy,0)]=0;s[uint3(i.xy,1)]=0;}";
+        Microsoft::WRL::ComPtr<ID3DBlob> code;
+        ok=ok && SUCCEEDED(D3DCompile(cs,sizeof cs-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr)) &&
+           SUCCEEDED(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&k.convert));
+        D3D11_BUFFER_DESC b{};b.ByteWidth=16;b.Usage=D3D11_USAGE_DEFAULT;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_DEPTH_STENCIL_DESC od{};od.DepthEnable=FALSE;od.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;od.DepthFunc=D3D11_COMPARISON_ALWAYS;od.StencilEnable=FALSE;
+        D3D11_BLEND_DESC nb{};nb.RenderTarget[0].RenderTargetWriteMask=0; // no colour to any engine target (IndependentBlendEnable off: all eight)
+        ok=ok && SUCCEEDED(device->CreateBuffer(&b,nullptr,&k.cb)) && SUCCEEDED(device->CreateDepthStencilState(&od,&k.off)) && SUCCEEDED(device->CreateBlendState(&nb,&k.none));
+        if(!ok) {uav_state_=3;return false;}
+        uav_=k;uav_state_=1;return true;
+    }
     static bool prepare(ID3D11Device* device,ID3D11Resource* depth,const D3D11_TEXTURE2D_DESC& dd,bool& created) {
         created=false;
-        if(device_!=device) {target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();ps_target_rig_.Reset();ps_target_held_.Reset();nearest_.Reset();equal_.Reset();blend_.Reset();made_=make_failed_=false;device_=device;} // a new device
+        if(device_!=device) new_device(device); // a new device
         if(!made_ && !make_failed_) {
             // v1179: y = 1 when the draw had this eye's own previous palette and rows (its MV pixels are own motion), else 0
             static const char src[]="float2 main(float4 p:SV_Position):SV_Target{return float2(p.z,0);}";
@@ -757,14 +840,21 @@ private:
             made_=!make_failed_;
         }
         if(!made_) return false;
-        if(target_.depth==depth && target_.w==dd.Width && target_.h==dd.Height && target_.rtv) return true;
+        const bool want_uav=!legacy_replay.load(std::memory_order_relaxed) && uav_state_.load(std::memory_order_relaxed)==1; // v1286
+        if(target_.depth==depth && target_.w==dd.Width && target_.h==dd.Height && target_.rtv && static_cast<bool>(target_.keys)==want_uav) return true;
         target_={};
         D3D11_TEXTURE2D_DESC t{};t.Width=dd.Width;t.Height=dd.Height;t.MipLevels=t.ArraySize=1;t.Format=DXGI_FORMAT_R32G32_FLOAT;t.SampleDesc.Count=1;
         t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+        if(want_uav) t.BindFlags|=D3D11_BIND_UNORDERED_ACCESS; // v1286: the mask is written through a UAV (FsrTaa still clears it as a target)
         Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;Target n{};
         if(FAILED(device->CreateTexture2D(&t,nullptr,&tex)) || FAILED(device->CreateRenderTargetView(tex.Get(),nullptr,&n.rtv)) ||
            FAILED(device->CreateShaderResourceView(tex.Get(),nullptr,&n.srv))) return false;
-        { // v1190: the rig target and its own depth (same size)
+        if(want_uav) { // v1286: the mask's UAV and the slices' keys (no slice targets, no slice depth)
+            D3D11_TEXTURE2D_DESC a=t;a.ArraySize=2;a.Format=DXGI_FORMAT_R32_UINT;a.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC kv{};kv.Format=a.Format;kv.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2DARRAY;kv.Texture2DArray.ArraySize=2;
+            if(FAILED(device->CreateUnorderedAccessView(tex.Get(),nullptr,&n.mask_uav)) || FAILED(device->CreateTexture2D(&a,nullptr,&n.keys)) ||
+               FAILED(device->CreateUnorderedAccessView(n.keys.Get(),&kv,&n.key_uav))) return false;
+        } else { // v1190: the rig target and its own depth (same size)
             D3D11_TEXTURE2D_DESC a=t;a.ArraySize=2; // v1199: slice h = the hypothesis "the draw is a render of eye h"
             if(FAILED(device->CreateTexture2D(&a,nullptr,&n.trg))) return false;
             D3D11_TEXTURE2D_DESC z=a;z.Format=DXGI_FORMAT_D32_FLOAT;z.BindFlags=D3D11_BIND_DEPTH_STENCIL;Microsoft::WRL::ComPtr<ID3D11Texture2D> zt;
@@ -778,7 +868,111 @@ private:
         n.depth=depth;n.hold=depth;n.w=dd.Width;n.h=dd.Height;target_=n;created=true;
         return true;
     }
-    static void replay(ID3D11DeviceContext* c,const DrawArgs& a,DrawFn draw,TargetsFn targets) noexcept {
+    // v1286: the UAV replay unless the knob asks for v1285 or this device cannot do it (counted per draw by reason)
+    static void replay(ID3D11DeviceContext* c,const DrawArgs& a,DrawFn draw,TargetsFn targets,TargetsUavFn targets_uav) noexcept {
+        if(!legacy_replay.load(std::memory_order_relaxed) && replay_uav(c,a,draw,targets,targets_uav)) return;
+        replay_legacy(c,a,draw,targets);
+    }
+    // v1286, under mutex_: a UAV on `out` (array slice 0, R32G32_FLOAT), cached per output texture (FsrTaa's two eyes); null without the UAV flag
+    static Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> out_view(ID3D11Texture2D* out) {
+        for(const auto& o:target_.outs) if(o.first==out && o.second) return o.second;
+        D3D11_TEXTURE2D_DESC d{};out->GetDesc(&d);
+        if(!(d.BindFlags&D3D11_BIND_UNORDERED_ACCESS) || d.Format!=DXGI_FORMAT_R32G32_FLOAT || d.SampleDesc.Count!=1) return {};
+        Microsoft::WRL::ComPtr<ID3D11Device> device;out->GetDevice(&device);
+        D3D11_UNORDERED_ACCESS_VIEW_DESC v{};v.Format=d.Format;v.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2DARRAY;v.Texture2DArray.ArraySize=1;
+        auto& slot=target_.outs[target_.next_out++%target_.outs.size()];slot={};
+        if(!device || FAILED(device->CreateUnorderedAccessView(out,&v,&slot.second))) {slot={};return {};}
+        slot.first=out;return slot.second;
+    }
+    // v1286: the slices' keys -> `out` (slice `slice`, the w x h rectangle; none when null) and both slices zeroed, one dispatch. The CS
+    // shader, b0 and u0/u1 of `c` are restored.
+    static bool convert_keys(ID3D11DeviceContext* c,ID3D11UnorderedAccessView* keys,ID3D11UnorderedAccessView* out,ID3D11ComputeShader* cs,ID3D11Buffer* cb,UINT w,UINT h,unsigned slice) noexcept {
+        if(!c || !keys || !cs || !cb || !w || !h) return false;
+        const UINT k[4]{w,h,slice,out?1u:0u};c->UpdateSubresource(cb,0,nullptr,k,0,0);
+        ID3D11ComputeShader* old_cs{};c->CSGetShader(&old_cs,nullptr,nullptr);ID3D11Buffer* old_cb{};c->CSGetConstantBuffers(0,1,&old_cb);ID3D11UnorderedAccessView* old_uav[2]{};c->CSGetUnorderedAccessViews(0,2,old_uav);
+        ID3D11UnorderedAccessView* uav[2]{keys,out};c->CSSetShader(cs,nullptr,0);c->CSSetConstantBuffers(0,1,&cb);c->CSSetUnorderedAccessViews(0,2,uav,nullptr);
+        c->Dispatch((w+7)/8,(h+7)/8,1);
+        const UINT keep[2]{~0u,~0u};c->CSSetUnorderedAccessViews(0,2,old_uav,keep);c->CSSetConstantBuffers(0,1,&old_cb);c->CSSetShader(old_cs,nullptr,0);
+        for(auto* u:old_uav) if(u) u->Release();
+        if(old_cb) old_cb->Release();
+        if(old_cs) old_cs->Release();
+        conversions_.fetch_add(1,std::memory_order_relaxed);return true;
+    }
+    // v1286: false = this device has no UAV replay (the context untouched): the caller replays the v1285 way. Otherwise the same three draws
+    // as v1285 (mask, slice 0, slice 1) with the engine's targets kept, or, when its set leaves no room or has PS UAVs, with its RTVs unbound.
+    static bool replay_uav(ID3D11DeviceContext* c,const DrawArgs& a,DrawFn draw,TargetsFn targets,TargetsUavFn targets_uav) noexcept {
+        std::array<ID3D11RenderTargetView*,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs{};ID3D11DepthStencilView* dsv{};std::array<ID3D11UnorderedAccessView*,D3D11_PS_CS_UAV_REGISTER_COUNT> uavs{};
+        c->OMGetRenderTargetsAndUnorderedAccessViews(static_cast<UINT>(rtvs.size()),rtvs.data(),&dsv,0,static_cast<UINT>(uavs.size()),uavs.data());
+        const auto release_targets=[&] {for(auto* r:rtvs) if(r) r->Release();if(dsv) dsv->Release();for(auto* u:uavs) if(u) u->Release();};
+        if(!dsv) {no_dsv_.fetch_add(1,std::memory_order_relaxed);release_targets();return true;}
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> mask_rtv;Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> mask_uav,key_uav; // held: a reset cannot free them mid-replay
+        Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,2> slice_ps;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal,off;Microsoft::WRL::ComPtr<ID3D11BlendState> none;
+        bool ready=true;
+        {
+            ID3D11Resource* depth{};dsv->GetResource(&depth);
+            D3D11_TEXTURE2D_DESC dd{};ID3D11Texture2D* dt{};
+            if(depth && SUCCEEDED(depth->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&dt))) && dt) {dt->GetDesc(&dd);dt->Release();}
+            ID3D11Device* device{};c->GetDevice(&device);bool created=false;
+            try {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if(device && device_!=device) new_device(device);
+                ready=device && uav_ready(device);
+                if(ready && dd.SampleDesc.Count==1 && dd.Width && prepare(device,depth,dd,created) && target_.keys) {
+                    mask_rtv=target_.rtv;mask_uav=target_.mask_uav;key_uav=target_.key_uav;ps=uav_.mask[tl_held_?2:tl_own_?1:0];slice_ps=uav_.slice[tl_held_?1:0];
+                    equal=equal_;off=uav_.off;none=uav_.none;
+                }
+            } catch(...) {}
+            if(device) device->Release();
+            if(depth) depth->Release();
+            if(ready && dd.SampleDesc.Count!=1) msaa_.fetch_add(1,std::memory_order_relaxed);
+            else if(ready && !mask_uav) failures_.fetch_add(1,std::memory_order_relaxed);
+            else if(ready && created) {const float zero[4]{};const UINT zero_u[4]{};c->ClearRenderTargetView(mask_rtv.Get(),zero);c->ClearUnorderedAccessViewUint(key_uav.Get(),zero_u);}
+        }
+        if(!ready) {fallbacks_[uav_state_.load(std::memory_order_relaxed)==2?2:3].fetch_add(1,std::memory_order_relaxed);release_targets();return false;}
+        if(!mask_uav) {release_targets();return true;}
+        UINT rtv_count=0;for(UINT i=0;i<rtvs.size();++i) if(rtvs[i]) rtv_count=i+1;
+        UINT uav_first=static_cast<UINT>(uavs.size()),uav_end=0;for(UINT i=0;i<uavs.size();++i) if(uavs[i]) {uav_first=std::min(uav_first,i);uav_end=i+1;}
+        const bool engine_uavs=uav_end>0,keep=!engine_uavs && rtv_count<=uav_slot; // keep: the engine's targets stay bound (the fast path)
+        if(!keep) fallbacks_[engine_uavs?1:0].fetch_add(1,std::memory_order_relaxed);
+        const auto om=[&](UINT n,ID3D11RenderTargetView* const* r,ID3D11DepthStencilView* d,UINT first,UINT count,ID3D11UnorderedAccessView* const* u,const UINT* k) {
+            if(targets_uav) targets_uav(c,n,r,d,first,count,u,k);else c->OMSetRenderTargetsAndUnorderedAccessViews(n,r,d,first,count,u,k);};
+        ID3D11PixelShader* engine_ps{};std::array<ID3D11ClassInstance*,256> classes{};UINT class_count=256;c->PSGetShader(&engine_ps,classes.data(),&class_count);
+        ID3D11DepthStencilState* dss{};UINT ref{};c->OMGetDepthStencilState(&dss,&ref);
+        ID3D11BlendState* blend{};float factor[4]{};UINT mask{};c->OMGetBlendState(&blend,factor,&mask);
+        ID3D11UnorderedAccessView* ours[2]{key_uav.Get(),mask_uav.Get()};
+        if(keep) om(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,nullptr,nullptr,uav_slot,2,ours,nullptr); // the only OM change of the fast path
+        else om(0,nullptr,dsv,uav_slot,2,ours,nullptr); // fallback: no engine RTV (no room, or its UAVs would be replaced), its DSV for the test
+        c->PSSetShader(ps.Get(),nullptr,0);c->OMSetDepthStencilState(equal.Get(),0);c->OMSetBlendState(none.Get(),nullptr,0xffffffff);
+        draw(c,a);
+        // the slices: the same draw per hypothesis eye with its retargeted rows (v1199), depth off: InterlockedMax is the nearest-wins
+        if(tl_target_[0] || tl_target_[1]) {
+            const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);
+            bool drew=false;
+            for(unsigned k=0;k<2;++k) {
+                if(tl_target_[k] && bind && restore && bind(c,k)) {
+                    if(!drew) c->OMSetDepthStencilState(off.Get(),0);
+                    c->PSSetShader(slice_ps[k].Get(),nullptr,0);draw(c,a);drew=true;
+                } else {target_slice_misses_[k].fetch_add(1,std::memory_order_relaxed);target_misses_frame_[k].fetch_add(1,std::memory_order_relaxed);}
+            }
+            if(drew && restore) restore(c);
+            if(drew) {target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
+            else target_misses_.fetch_add(1,std::memory_order_relaxed);
+        } else if(target_on.load(std::memory_order_relaxed)) for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed); // a rig/held draw without its retarget
+        if(keep) {ID3D11UnorderedAccessView* no[2]{};om(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,nullptr,nullptr,uav_slot,2,no,nullptr);}
+        else if(engine_uavs) { // its exact set, UAVs with their hidden counters kept (-1)
+            std::array<UINT,D3D11_PS_CS_UAV_REGISTER_COUNT> counts;counts.fill(~0u);om(rtv_count,rtvs.data(),dsv,uav_first,uav_end-uav_first,uavs.data()+uav_first,counts.data());
+        } else if(rtv_count<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) om(rtv_count,rtvs.data(),dsv,rtv_count,0,nullptr,nullptr); // its RTVs and DSV, no UAV
+        else {om(0,nullptr,nullptr,0,0,nullptr,nullptr);targets(c,rtv_count,rtvs.data(),dsv);} // eight RTVs: no UAV start slot left
+        c->PSSetShader(engine_ps,class_count?classes.data():nullptr,class_count);c->OMSetDepthStencilState(dss,ref);c->OMSetBlendState(blend,factor,mask);
+        if(engine_ps) engine_ps->Release();
+        for(UINT i=0;i<class_count && i<classes.size();++i) if(classes[i]) classes[i]->Release();
+        if(dss) dss->Release();
+        if(blend) blend->Release();
+        release_targets();
+        replays_.fetch_add(1,std::memory_order_relaxed);replays_frame_.fetch_add(1,std::memory_order_relaxed);uav_replays_.fetch_add(1,std::memory_order_relaxed);
+        return true;
+    }
+    static void replay_legacy(ID3D11DeviceContext* c,const DrawArgs& a,DrawFn draw,TargetsFn targets) noexcept { // the v1285 replay (v1286 name)
         std::array<ID3D11RenderTargetView*,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs{};ID3D11DepthStencilView* dsv{};
         c->OMGetRenderTargets(static_cast<UINT>(rtvs.size()),rtvs.data(),&dsv);
         const auto release_targets=[&] {for(auto* r:rtvs) if(r) r->Release();if(dsv) dsv->Release();};

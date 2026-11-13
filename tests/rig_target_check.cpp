@@ -42,6 +42,8 @@ int main() {
     const M4 got=d2vr::rig_target::mul(e,vpa);double worst=0;
     for(int i=0;i<16;++i) worst=std::max(worst,std::abs(got[i]-vpb[i]));
     std::printf("math: max |E*VP_f - VP_t| %.3g\n",worst);CHECK(worst<1e-9);
+    for(const bool legacy:{false,true}) { // v1286: the UAV replay (default) and the v1285 replay (build/legacy-rig-replay)
+    d2vr::RigMask::legacy_replay=legacy;std::printf("replay path: %s\n",legacy?"legacy":"uav");
     // WARP
     ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> c;
     if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,nullptr,&c))) {std::printf("FAIL WARP\n");return 1;}
@@ -89,10 +91,13 @@ int main() {
     c->ClearDepthStencilView(dsv_b.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_b.Get());
     const auto rows_b=rows_of(vpb);c->UpdateSubresource(cb.Get(),0,nullptr,rows_b.data(),0,0);c->Draw(36,0);c->OMSetRenderTargets(0,nullptr,nullptr);
     D3D11_TEXTURE2D_DESC td{};CHECK(d2vr::RigMask::target_desc(depth_a.Get(),td));
-    td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> out;dev->CreateTexture2D(&td,nullptr,&out);
+    // v1286: made like FsrTaa makes it (the UAV replay converts into it), read back through a staging copy
+    D3D11_TEXTURE2D_DESC od=td;od.BindFlags=D3D11_BIND_SHADER_RESOURCE|(td.BindFlags&D3D11_BIND_UNORDERED_ACCESS);ComPtr<ID3D11Texture2D> out;dev->CreateTexture2D(&od,nullptr,&out);
+    td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> out_read;dev->CreateTexture2D(&td,nullptr,&out_read);
+    const auto staged=[&] {c->CopyResource(out_read.Get(),out.Get());return out_read.Get();};
     std::uint64_t draws{};const bool valid=d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws);CHECK(valid && draws==1);
     D3D11_TEXTURE2D_DESC sd=t;sd.BindFlags=0;sd.Usage=D3D11_USAGE_STAGING;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> truth;dev->CreateTexture2D(&sd,nullptr,&truth);c->CopyResource(truth.Get(),depth_b.Get());
-    D3D11_MAPPED_SUBRESOURCE mo{},mt{};CHECK(SUCCEEDED(c->Map(out.Get(),0,D3D11_MAP_READ,0,&mo)));CHECK(SUCCEEDED(c->Map(truth.Get(),0,D3D11_MAP_READ,0,&mt)));
+    D3D11_MAPPED_SUBRESOURCE mo{},mt{};CHECK(SUCCEEDED(c->Map(staged(),0,D3D11_MAP_READ,0,&mo)));CHECK(SUCCEEDED(c->Map(truth.Get(),0,D3D11_MAP_READ,0,&mt)));
     unsigned covered=0,xor_px=0;double worst_mm=0;
     const auto metres=[](float z) {return p11/(z+p10);}; // reverse-Z: distance ahead
     for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) {
@@ -100,7 +105,7 @@ int main() {
         const bool in_g=g[1]>0,in_b=b>0;covered+=in_b;if(in_g!=in_b) ++xor_px;
         if(in_g && in_b) {worst_mm=std::max(worst_mm,std::abs(metres(g[0])-metres(b))*1000);CHECK(g[1]==255.f);}
     }
-    c->Unmap(out.Get(),0);c->Unmap(truth.Get(),0);
+    c->Unmap(out_read.Get(),0);c->Unmap(truth.Get(),0);
     std::printf("retarget: covered %u px, coverage XOR %u (%.3f%%), worst depth %.4f mm\n",covered,xor_px,covered?100.0*xor_px/covered:0.,worst_mm);
     CHECK(covered>200 && xor_px*1000<=covered && worst_mm<1.0);
     // 2c. a held item (no rig palette; ObjectMotion marks it held after its placement): class 253
@@ -111,9 +116,9 @@ int main() {
     c->OMSetRenderTargets(0,nullptr,nullptr);
     // v1191: copied and cleared over the render rectangle only (here all but the last row and column)
     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,N-1,N-1) && draws==1);
-    CHECK(SUCCEEDED(c->Map(out.Get(),0,D3D11_MAP_READ,0,&mo)));unsigned held=0;
+    CHECK(SUCCEEDED(c->Map(staged(),0,D3D11_MAP_READ,0,&mo)));unsigned held=0;
     for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) held+=static_cast<const float*>(mo.pData)[y*(mo.RowPitch/4)+x*2+1]==253.f;
-    c->Unmap(out.Get(),0);std::printf("held: %u px of class 253\n",held);CHECK(held*1000>=covered*999 && held<=covered+covered/1000+1);
+    c->Unmap(out_read.Get(),0);std::printf("held: %u px of class 253\n",held);CHECK(held*1000>=covered*999 && held<=covered+covered/1000+1);
     // 2d. a rig draw without its retarget makes the render invalid
     c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());
     {ID3D11ShaderResourceView* s=rig_view.Get();c->VSSetShaderResources(0,1,&s);
@@ -139,12 +144,12 @@ int main() {
          for(UINT y=0;y<N;++y) for(UINT k=0;k<N;++k) x+=(static_cast<const float*>(a.pData)[y*(a.RowPitch/4)+k*2+1]>0)!=(static_cast<const float*>(b.pData)[y*(b.RowPitch/4)+k]>0);
          c->Unmap(o,0);c->Unmap(truth.Get(),0);return x;};
      // the same replays twice (one per take: a take clears both slices)
-     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,0) && draws==1);const unsigned x0=xor_vs_truth(out.Get());
+     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,0) && draws==1);const unsigned x0=xor_vs_truth(staged());
      c->ClearDepthStencilView(dsv_a.Get(),D3D11_CLEAR_DEPTH,0.f,0);c->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv_a.Get());c->UpdateSubresource(cb.Get(),0,nullptr,drawn_rows.data(),0,0);
      {ID3D11ShaderResourceView* s=rig_view.Get();c->VSSetShaderResources(0,1,&s);
       d2vr::RigMask::Scope scope(c.Get(),1);d2vr::RigMask::mark_target(true,true);c->Draw(36,0);scope.after({2,36,1,0,0,0},draw,targets);}
      c->OMSetRenderTargets(0,nullptr,nullptr);
-     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,1));const unsigned x1=xor_vs_truth(out.Get());
+     CHECK(d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,1));const unsigned x1=xor_vs_truth(staged());
      std::printf("dual: slice of the fresh eye XOR %u px (%.3f%%), the other slice XOR %u px\n",x0,covered?100.0*x0/covered:0.,x1);
      CHECK(x0*1000<=covered && x1*4>covered);dual=false;
      // 2f. a render whose draws were counted into the previous take (CPU record overlap) is still valid; two in a row are not
@@ -162,6 +167,8 @@ int main() {
      c->OMSetRenderTargets(0,nullptr,nullptr);
      CHECK(!d2vr::RigMask::take_target(c.Get(),depth_a.Get(),out.Get(),draws,0,0,1));}
     d2vr::RigMask::reset();
+    }
+    d2vr::RigMask::legacy_replay=false;
     if(failures) {std::printf("rig_target_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: rig_target_check (E math, retargeted replay = the other eye's render within 1 mm, held class, missing retarget invalid)\n");
     return 0;

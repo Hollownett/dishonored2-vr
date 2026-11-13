@@ -3079,6 +3079,12 @@ template<unsigned Binding> void rig_mask_targets(ID3D11DeviceContext* c,UINT n,I
     reinterpret_cast<TargetsFn>(gpu_bindings.original(1,Binding))(c,n,t,d);
     if(census_on.load(std::memory_order_relaxed)) {ps_state.barrier(c);wide_state.barrier(c);}
 }
+// v1286: the UAV replay's OMSetRenderTargetsAndUnorderedAccessViews (add/remove its two PS UAVs with the engine's targets kept), past
+// every hook like rig_mask_targets: the hooked form would see D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL as a target count
+template<unsigned Binding> void rig_mask_targets_uav(ID3D11DeviceContext* c,UINT n,ID3D11RenderTargetView* const* t,ID3D11DepthStencilView* d,UINT first,UINT count,ID3D11UnorderedAccessView* const* u,const UINT* initial) noexcept {
+    reinterpret_cast<TargetsUavFn>(gpu_bindings.original(2,Binding))(c,n,t,d,first,count,u,initial);
+    if(census_on.load(std::memory_order_relaxed)) {ps_state.barrier(c);wide_state.barrier(c);}
+}
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);d2vr::spyglass_art_probe().observe(context,count,true);
     if(skip_letterbox_draw(context,count)) return;
@@ -3087,7 +3093,7 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     NativeNoteDraw note(context,count,1,start,base);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
-    rig_mask.after({0,count,1,start,base,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163: with every binding of the draw still in place
+    rig_mask.after({0,count,1,start,base,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163: with every binding of the draw still in place
     cross_eye.after();
     note.submitted();
 }
@@ -3098,7 +3104,7 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
-    rig_mask.after({1,count,instances,start,base,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163
+    rig_mask.after({1,count,instances,start,base,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
     note.submitted();
 }
@@ -3108,7 +3114,7 @@ template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UI
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawFn>(gpu_bindings.original(5,Binding))(context,count,start);
-    rig_mask.after({2,count,1,start,0,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163
+    rig_mask.after({2,count,1,start,0,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
 }
 template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,UINT first) {
@@ -3117,7 +3123,7 @@ template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11Device
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
-    rig_mask.after({3,count,instances,start,0,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>); // v1163
+    rig_mask.after({3,count,instances,start,0,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
 }
 
@@ -17651,6 +17657,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         rig_forensics_knob=fs::exists(root/L"build"/L"rig-forensics"); // v1216: GPU copies/read-backs every render, so never on with diagnostics alone
         rig_target_knob=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob; // v1190
         d2vr::RigMask::target_bind=&d2vr::ObjectMotion::target_bind; /* v1199: per slice */d2vr::RigMask::target_restore=&d2vr::ObjectMotion::target_restore;
+        d2vr::RigMask::legacy_replay=fs::exists(root/L"build"/L"legacy-rig-replay"); // v1286: the v1285 render-target-switching rig/held replay (A/B)
         alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191
         if(!rig_target_knob && !alt_weapon_place_knob) d2vr::rig_target::book().clear();
         d2vr::ObjectMotion::held_mask=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames

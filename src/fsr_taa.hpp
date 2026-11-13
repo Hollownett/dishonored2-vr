@@ -1167,8 +1167,8 @@ private:
                     auto& se=(*eyes_)[static_cast<std::size_t>(job.eye^1)];D3D11_TEXTURE2D_DESC td{};
                     if(RigMask::target_desc(depth_resource_.p,td)) {
                         D3D11_TEXTURE2D_DESC have{};if(se.rig_target.p) se.rig_target.p->GetDesc(&have);
-                        if(!se.rig_target.p || have.Width!=td.Width || have.Height!=td.Height || have.Format!=td.Format) {
-                            td.BindFlags=D3D11_BIND_SHADER_RESOURCE;ID3D11Device* dev{};c->GetDevice(&dev);ID3D11Texture2D* t{};
+                        if(!se.rig_target.p || have.Width!=td.Width || have.Height!=td.Height || have.Format!=td.Format || ((have.BindFlags^td.BindFlags)&D3D11_BIND_UNORDERED_ACCESS)) {
+                            td.BindFlags=D3D11_BIND_SHADER_RESOURCE|(td.BindFlags&D3D11_BIND_UNORDERED_ACCESS);ID3D11Device* dev{};c->GetDevice(&dev);ID3D11Texture2D* t{}; // v1286: the UAV replay converts into it
                             se.rig_target.reset();if(dev && SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&t))) se.rig_target.adopt(t);
                             if(dev) dev->Release();
                         }
