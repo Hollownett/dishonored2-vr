@@ -102,27 +102,29 @@ int main() {
             for(int tick=1;tick<=90;++tick) {
                 const double a_now=rate*tick/90.,a_prev=rate*(tick-1)/90.;
                 const std::array<float,3> ref{head[0]+.0167f*static_cast<float>(tick),head[1],head[2]},cam{ref[0],ref[1],ref[2]-600.f};
-                const auto f=follow_same_tick(true,cam,yaw(a_now),ref,yaw(a_now));
+                const auto f=follow_same_tick(cam,yaw(a_now),ref,yaw(a_now));
                 CHECK(f.follows && f.angle_deg<=.001f && std::abs(f.translation[2]+600.f)<1e-3f && std::abs(f.translation[0])<1e-4f);
                 if(!follows(yaw(a_now),yaw(a_prev))) ++old_fail;   // the v1264 test against the previous tick
             }
             CHECK(rate<100. || old_fail==90);   // 2 deg per tick: the v1264 test failed every tick (the mono path)
         }
-        {   // an independent world-fixed camera (no follow flag, its own axis) while the player turns: never follows, also when the axes cross
+        {   // an independent world-fixed camera (its own axis; the engine flag is not an input) while the player turns: follows only on the tick the
+            // axes cross (a single-tick event)
+            unsigned crossed=0;
             for(int tick=0;tick<=90;++tick) {
-                const auto ref=yaw(180.*tick/90.-90.);
-                CHECK(!follow_same_tick(false,{0,0,0},yaw(0),head,ref).follows);
-                CHECK(!follow_same_tick(true,{0,0,0},yaw(0),head,ref).follows || tick==45);   // a flag but a frozen axis: only where it crosses
+                const bool f=follow_same_tick({0,0,0},yaw(0),head,yaw(180.*tick/90.-90.)).follows;
+                CHECK(!f || tick==45);crossed+=f?1u:0u;
             }
+            CHECK(crossed==1);
         }
         {   // the time shift while turning at 180 deg/s: the offset flips sign on one tick; that tick and the next still follow (per eye)
             for(int tick=0;tick<6;++tick) {
                 const auto b=yaw(2.*tick);const float off=tick<3?-600.f:600.f;
-                const auto f=follow_same_tick(true,{head[0],head[1],head[2]+off},b,head,b);
+                const auto f=follow_same_tick({head[0],head[1],head[2]+off},b,head,b);
                 CHECK(f.follows && f.translation[2]==off);
             }
         }
-        CHECK(!follow_same_tick(true,{std::nanf(""),0,0},yaw(0),head,yaw(0)).follows);
+        CHECK(!follow_same_tick({std::nanf(""),0,0},yaw(0),head,yaw(0)).follows);
         CHECK(deg_bin(0.f)==0 && deg_bin(.005f)==1 && deg_bin(.05f)==2 && deg_bin(.5f)==3 && deg_bin(2.f)==4 && deg_bin(30.f)==5 && deg_bin(std::nanf(""))==5);
         // the lens stamp per pass: v1257 (borrowed view = eye 1 on both passes), each pass's own eye, none
         CHECK(lens_stamp_eye(StampMode::borrowed,1,0)==1 && lens_stamp_eye(StampMode::borrowed,1,1)==1);

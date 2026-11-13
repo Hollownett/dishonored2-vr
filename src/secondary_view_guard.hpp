@@ -84,6 +84,7 @@ inline bool camera_matches(const std::array<float,3>& written_p,const std::array
 // 0x88e140 its origin (+0xa8) and axis (+0xcc); 0x44c2d0 adds the timeline offset to the origin; with its flag +0xa8 & 0x10 set, 0x890c50 writes
 // both into its own camera (+0x150: origin +0xa8, axis +0xcc). The owner hook reads the same camera after 0x44d230 returns: the same values the
 // Timepiece copied, so its axis equals the reference exactly every tick it follows, turning or not; the translation is this tick's offset.
+// v1271: the decision is the orientation test alone; the flag is a diagnostic only (one misread bit must not turn every frame mono).
 // The rotation angle between two orthonormal bases from their difference (|a-b|^2 = 8 sin^2(angle/2)): exact at 0, unlike acos of the trace.
 inline float basis_angle_deg(const std::array<float,9>& a,const std::array<float,9>& b) noexcept {
     double d2=0;for(std::size_t i=0;i<9;++i) {const double d=double(a[i])-double(b[i]);d2+=d*d;}
@@ -93,11 +94,11 @@ inline float basis_angle_deg(const std::array<float,9>& a,const std::array<float
 enum class CameraPath : unsigned {follow,own,none};
 inline constexpr float follow_max_deg=.1f;
 struct Follow {bool follows{};std::array<float,3> translation{};float angle_deg{180.f};};
-inline Follow follow_same_tick(bool engine_follows,const std::array<float,3>& p,const std::array<float,9>& b,const std::array<float,3>& ref_p,const std::array<float,9>& ref_b) noexcept {
+inline Follow follow_same_tick(const std::array<float,3>& p,const std::array<float,9>& b,const std::array<float,3>& ref_p,const std::array<float,9>& ref_b) noexcept {
     Follow f;f.angle_deg=basis_angle_deg(ref_b,b);
     for(std::size_t i=0;i<3;++i) f.translation[i]=p[i]-ref_p[i];
     bool finite=true;for(float v:f.translation) finite=finite && std::isfinite(v);
-    f.follows=engine_follows && finite && f.angle_deg<=follow_max_deg;
+    f.follows=finite && f.angle_deg<=follow_max_deg;
     return f;
 }
 // Status histogram of a basis difference in degrees: edges .001 .01 .1 1 5 (6 bins).

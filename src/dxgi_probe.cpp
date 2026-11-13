@@ -1966,6 +1966,7 @@ static struct LensStats {
     // v1269 (game thread, per owner tick with the engine's follow flag 0x10): the Timepiece axis against the same-tick player camera and against the
     // prepared views (the v1264 reference), deg bins <=.001 .01 .1 1 5 >5; ticks with the flag set / clear; ticks without a readable reference
     std::array<std::atomic<UINT64>,6> same_tick_deg{},prepared_deg{};std::array<std::atomic<UINT64>,2> engine_follow_flag{};std::atomic<UINT64> reference_misses{};
+    std::array<std::atomic<UINT64>,4> flag_vs_match{};   // v1271 (ticks with a reference): [flag set & match, set & mismatch, clear & match, clear & mismatch]
     std::array<std::atomic<UINT64>,3> records_kept{},records_changed{};   // v1265: per pass, the borrowed eye's object-motion view records unchanged / changed across it
 } lens_stats;
 void lens_note_pass_begin(std::uintptr_t view) noexcept;
@@ -6966,21 +6967,21 @@ std::uintptr_t __fastcall lens_owner_hook(void* owner,void* a,void* b,void* c) {
         const auto pose=d2vr::decode_render_view(bytes);const auto native=native_views();
         if(!pose || native.size()!=2) return result;
         LensCamera camera;camera.valid=true;camera.frame=frames.load();camera.position=pose->position;camera.basis=pose->basis;
-        // v1269: follows = the Timepiece took this tick's player camera (flag 0x10: 0x890c50 ran) and its axis equals that camera's, read now - the
-        // same values it copied (secondary_view::follow_same_tick); the translation is this tick's offset. build/lens-follow-prepared: the v1264 test
-        // against the prepared views (the previous tick's while the camera turns).
+        // v1269/v1271: follows = the Timepiece's axis equals this tick's player camera axis, read now - the same values it copied
+        // (secondary_view::follow_same_tick); the translation is this tick's offset. Flag 0x10 (0x890c50 ran) is recorded only. build/lens-follow-prepared:
+        // the v1264 test against the prepared views (the previous tick's while the camera turns).
         namespace sv=d2vr::secondary_view;
         const bool engine_follows=(flags&0x10)!=0;
         std::array<float,3> ref_p{};std::array<float,9> ref_b{};
         sv::Follow f{};
         if(!lens_follow_prepared && lens_reference_camera(ref_p,ref_b)) {
-            f=sv::follow_same_tick(engine_follows,pose->position,pose->basis,ref_p,ref_b);
-            if(engine_follows) ++lens_stats.same_tick_deg[sv::deg_bin(f.angle_deg)];
+            f=sv::follow_same_tick(pose->position,pose->basis,ref_p,ref_b);
+            ++lens_stats.same_tick_deg[sv::deg_bin(f.angle_deg)];++lens_stats.flag_vs_match[(engine_follows?0u:2u)+(f.follows?0u:1u)];
         } else {
             if(!lens_follow_prepared) ++lens_stats.reference_misses;
             f.follows=sv::follows(pose->basis,native[0].pose->basis);f.translation=sv::translation(pose->position,native[0].pose->position,native[1].pose->position);
         }
-        if(engine_follows) ++lens_stats.prepared_deg[sv::deg_bin(sv::basis_angle_deg(native[0].pose->basis,pose->basis))];   // what the v1264 test saw
+        ++lens_stats.prepared_deg[sv::deg_bin(sv::basis_angle_deg(native[0].pose->basis,pose->basis))];   // what the v1264 test saw
         ++lens_stats.engine_follow_flag[engine_follows?0:1];
         camera.follows=f.follows;camera.translation=f.translation;camera.path=static_cast<unsigned>(f.follows?sv::CameraPath::follow:sv::CameraPath::own);
         {std::lock_guard<std::mutex> l(lens_camera_mutex);lens_camera=camera;}
@@ -7011,6 +7012,7 @@ static std::string lens_status_json() {
      <<",\"follow_test\":\""<<(lens_follow_prepared?"prepared":"same_tick")<<"\",\"camera_path_follow_own_none\":"<<list(lens_stats.camera_path)
      <<",\"same_tick_deg\":"<<list(lens_stats.same_tick_deg)<<",\"prepared_deg\":"<<list(lens_stats.prepared_deg)
      <<",\"engine_follow_flag_set_clear\":"<<list(lens_stats.engine_follow_flag)<<",\"reference_misses\":"<<lens_stats.reference_misses.load()
+     <<",\"flag_set_match_set_mismatch_clear_match_clear_mismatch\":"<<list(lens_stats.flag_vs_match)
      <<",\"stamp\":\""<<(lens_stamp_mode==d2vr::secondary_view::StampMode::borrowed?"borrowed":lens_stamp_mode==d2vr::secondary_view::StampMode::pass_eye?"pass_eye":"off")<<'"'
      <<",\"grid_match\":"<<list(lens_stats.grid_match)<<",\"grid_mismatch\":"<<list(lens_stats.grid_mismatch)
      <<",\"eye_records_kept\":"<<list(lens_stats.records_kept)<<",\"eye_records_changed\":"<<list(lens_stats.records_changed)<<'}'
