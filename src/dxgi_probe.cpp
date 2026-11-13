@@ -324,6 +324,7 @@ static std::atomic<bool> callback_failed{false};
 static std::string callback_error;
 static std::mutex callback_error_mutex;
 void record_callback_error(const char* message) noexcept {
+    if(!message || !*message) message="callback failed with an empty message"; // v1287: the failure always names itself
     try {
         std::lock_guard<std::mutex> lock(callback_error_mutex);
         if(callback_error.empty()) callback_error=message;
@@ -2247,7 +2248,7 @@ void __fastcall setup_hook(void* view,int* window_rect,int* render_rect) {
             for(float value:pose.basis) setup_csv << ',' << value;
             setup_csv << ',' << (matched?1:0) << '\n';
         }
-    } catch(...) {callback_failed=true;}
+    } catch(...) {record_callback_error("View setup observer threw (non-std exception)");}
 }
 
 bool disable_setup_hook() {
@@ -2779,7 +2780,7 @@ template<unsigned Binding> void WINAPI viewports_hook(ID3D11DeviceContext* conte
         std::lock_guard<std::mutex> lock(gpu_mutex);
         auto phase=gpu_phase.load();
         if(!phase) return;
-        if(count>D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) {callback_failed=true;return;}
+        if(count>D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) {char why[96];std::snprintf(why,sizeof why,"GPU trace: RSSetViewports count %u > 16",count);record_callback_error(why);return;}
         for(UINT i=0;i<count;++i) {
             if(gpu_events>=32000) {++gpu_dropped;continue;}
             ++gpu_events;
@@ -2788,7 +2789,7 @@ template<unsigned Binding> void WINAPI viewports_hook(ID3D11DeviceContext* conte
                     << ',' << i << ',' << v.TopLeftX << ',' << v.TopLeftY << ',' << v.Width << ',' << v.Height
                     << ',' << v.MinDepth << ',' << v.MaxDepth << ",0,0,0,0," << context->GetType() << ",0,0,0\n";
         }
-    } catch(...) {callback_failed=true;gpu_phase=0;}
+    } catch(...) {record_callback_error("GPU trace: viewport trace threw");gpu_phase=0;}
 }
 
 void trace_targets(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth,
@@ -2798,7 +2799,7 @@ void trace_targets(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetVie
         std::lock_guard<std::mutex> lock(gpu_mutex);
         auto phase=gpu_phase.load();
         if(!phase || (expected_phase && phase!=expected_phase)) return;
-        if(count>D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) {callback_failed=true;return;}
+        if(count>D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) {char why[96];std::snprintf(why,sizeof why,"GPU trace: render-target bind count %#x > 8 (event %s)",count,event);record_callback_error(why);return;}
         for(UINT i=0;i<count;++i) {
             if(viewport && (!targets || !targets[i])) continue;
             if(gpu_events>=32000) {++gpu_dropped;continue;}
@@ -2823,7 +2824,7 @@ void trace_targets(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetVie
                     << ",0," << v.TopLeftX << ',' << v.TopLeftY << ',' << v.Width << ',' << v.Height << ',' << v.MinDepth << ',' << v.MaxDepth << ',' << reinterpret_cast<std::uintptr_t>(resource.Get())
                     << ',' << desc.Width << ',' << desc.Height << ',' << desc.Format << ',' << context->GetType() << ',' << elements << ',' << instances << ',' << draw << '\n';
         }
-    } catch(...) {callback_failed=true;gpu_phase=0;}
+    } catch(...) {record_callback_error("GPU trace: render-target trace threw");gpu_phase=0;}
 }
 
 // v991 (measurement): how often a render-target bind repeats the exact set the same context already had. Paired rendering binds the
@@ -2847,7 +2848,7 @@ static void note_rt_bind(ID3D11DeviceContext* context,UINT count,ID3D11RenderTar
 }
 template<unsigned Binding> void WINAPI targets_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth) {
     GpuCallbackDepth depth_guard;
-    try {observe_paired_target_change(context,count,targets);} catch(...) {callback_failed=true;}
+    try {observe_paired_target_change(context,count,targets);} catch(...) {record_callback_error("OMSetRenderTargets hook: paired target observer threw");}
     try {note_rt_bind(context,count,targets,depth);} catch(...) {}
     auto replacement=native_hud_art_capture.replacement(context,count,targets);
     if(!replacement) replacement=redirect_world_ui(context,count,targets,depth);
@@ -2858,7 +2859,17 @@ template<unsigned Binding> void WINAPI targets_hook(ID3D11DeviceContext* context
 
 template<unsigned Binding> void WINAPI targets_uav_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth,UINT start,UINT uav_count,ID3D11UnorderedAccessView* const* uavs,const UINT* initial) {
     GpuCallbackDepth depth_guard;
-    try {observe_paired_target_change(context,count,targets);} catch(...) {callback_failed=true;}
+    // v1287: D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL binds pixel-shader UAVs only; the RTVs and DSV stay, so no target observer has a
+    // change to see (it is no target count: trace_targets took 0xffffffff for one and failed the session, silently, in the settled GPU
+    // trace frame). The v1286 rig replay's own KEEP binds arrive here although they call the trampoline: d3d11's immediate-context table
+    // after SetMultithreadProtected(FALSE) (the game's first table, binding 0) and its multithread-protected table forward slot 34 to the
+    // plain table's entry, which this registry hooks too once the game switches to it (tests/d3d11_table_forward_check.cpp).
+    if(count==D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
+        if(census_on.load(std::memory_order_relaxed)) {ps_state.barrier(context);wide_state.barrier(context);}
+        reinterpret_cast<TargetsUavFn>(gpu_bindings.original(2,Binding))(context,count,targets,depth,start,uav_count,uavs,initial);
+        return;
+    }
+    try {observe_paired_target_change(context,count,targets);} catch(...) {record_callback_error("OMSetRenderTargetsAndUnorderedAccessViews hook: paired target observer threw");}
     if(!uav_count) try {note_rt_bind(context,count,targets,depth);} catch(...) {}
     else if(census_on.load(std::memory_order_relaxed)) {ps_state.barrier(context);wide_state.barrier(context);} // the UAV form replaces the render targets too
     auto replacement=uav_count==0?native_hud_art_capture.replacement(context,count,targets):ComPtr<ID3D11RenderTargetView>{};
@@ -2920,7 +2931,7 @@ void trace_draw(ID3D11DeviceContext* context,const char* event,UINT elements,UIN
                 gpu_hand_draw_csv<<phase<<','<<draw<<','<<used<<",count_candidate_only,"<<event<<','<<GetCurrentThreadId()<<','<<key[0]<<','<<context->GetType()<<','<<elements<<','<<instances<<','<<start<<','<<base<<','<<first<<','<<topology<<','<<key[10]<<','<<key[11]<<','<<key[6]<<','<<idx_format<<','<<index_offset<<','<<index_desc.ByteWidth<<','<<i<<','<<key[12+i*3]<<','<<strides[i]<<','<<offsets[i]<<','<<vertex_desc.ByteWidth<<'\n';
             }
         }
-    } catch(...) {callback_failed=true;gpu_phase=0;}
+    } catch(...) {record_callback_error("GPU trace: draw trace threw");gpu_phase=0;}
 }
 // Track T C3: the two letterbox bars of an immersive 3D cutscene are not drawn (letterbox_gate.hpp). Immersive scene frames only; cheap reject first (39 indices).
 static bool skip_letterbox_draw(ID3D11DeviceContext* context,UINT count) noexcept {
@@ -4786,7 +4797,7 @@ void observe_arm_upload(void* model,const void* source,UINT count,std::uintptr_t
         if(d2vr::diag::on() && (!arm_palettes || !arm_csv)) throw std::runtime_error("Cannot save native arm upload sample");
         ++arm_upload_samples[side];
     } catch(const std::exception& error) {record_callback_error(error.what());}
-    catch(...) {callback_failed=true;}
+    catch(...) {record_callback_error("Native arm upload sample threw (non-std exception)");}
 }
 
 bool body_material_restore_pending() noexcept {
@@ -6699,7 +6710,7 @@ void observe_eye_setup(void* view) noexcept {
             eye_boundary_csv << "setup," << frames.load() << ',' << GetCurrentThreadId() << ',' << address
                              << ',' << eye << ",0,0\n";
         }
-    } catch(...) {callback_failed=true;}
+    } catch(...) {record_callback_error("View setup (eye view) observer threw");}
 }
 
 // Completion is published after original Setup and the supported forced-jitter
@@ -6811,7 +6822,7 @@ void observe_eye_begin(void* view) noexcept {
             eye_boundary_csv << "begin," << frames.load() << ',' << GetCurrentThreadId() << ',' << address
                              << ',' << eye << ',' << bindings << ',' << (same_context?1:0) << '\n';
         }
-    } catch(...) {callback_failed=true;}
+    } catch(...) {record_callback_error("Eye begin observer threw");}
 }
 
 // v1245 view trace (Timepiece, diagnostic; with the eye-boundary knob): every Setup (before and after the original) and every Begin while
@@ -11085,7 +11096,7 @@ void restore_head_view() noexcept {
     SIZE_T written{};
     if(WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(head_source_address+0x9c),head_saved.data(),head_saved.size(),&written) && written==head_saved.size()) {
         if(cinematic_probe_wrote) ++cinematic_probe_restores;else ++head_restores;} // the G2 spike's test write is not a gameplay head write
-    else {callback_failed=true;capturing=false;}
+    else {record_callback_error("Head view restore: WriteProcessMemory failed");capturing=false;}
     head_wrote=false;cinematic_probe_wrote=false;
 }
 
