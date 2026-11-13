@@ -1140,8 +1140,8 @@ private:
             // v1179: rig motion validity is per pixel (mask 255 = a draw with the eye's own previous palette and rows); with the feature on,
             // rig_motion says only that 255 pixels carry own motion (no per-render tally any more)
             const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed) && job.receipt && !job.receipt->reset;
-            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rig_depth;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rig_target;
-            if(view_render && rig_copy_.p && rig_cb_.p && e.rig_uav.p && e.rig_count_uav.p && e.rig_count_staging[0].p && RigMask::target(depth_resource_.p,rig_depth,rig_target)) {
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rig_depth;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rig_target;Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> rig_keys; // v1288: the UAV replay's mask keys (u2)
+            if(view_render && rig_copy_.p && rig_cb_.p && e.rig_uav.p && e.rig_count_uav.p && e.rig_count_staging[0].p && RigMask::target(depth_resource_.p,rig_depth,rig_target,&rig_keys)) {
                 float k[4]{0,0,static_cast<float>(depth_w),static_cast<float>(depth_h)};rig_mask_eps(depth_srv_format_,k[0],k[1]);
                 c->UpdateSubresource(rig_cb_.p,0,nullptr,k,0,0);
                 const UINT zero[4]{};c->ClearUnorderedAccessViewUint(e.rig_count_uav.p,zero);
@@ -1150,14 +1150,14 @@ private:
                     if(dev && SUCCEEDED(dev->CreateShaderResourceView(job.motion.p,nullptr,&v))) {e.mv_srv.adopt(v);e.mv_key=job.motion.p;}
                     if(dev) dev->Release();
                 }
-                ID3D11ShaderResourceView* in[3]{depth_view_.p,rig_depth.Get(),e.mv_key==job.motion.p?e.mv_srv.p:nullptr};ID3D11UnorderedAccessView* outs2[2]{e.rig_uav.p,e.rig_count_uav.p};
-                c->CSSetShader(rig_copy_.p,nullptr,0);c->CSSetShaderResources(0,3,in);c->CSSetUnorderedAccessViews(0,2,outs2,nullptr);c->CSSetConstantBuffers(0,1,&rig_cb_.p);
+                ID3D11ShaderResourceView* in[3]{depth_view_.p,rig_depth.Get(),e.mv_key==job.motion.p?e.mv_srv.p:nullptr};ID3D11UnorderedAccessView* outs2[3]{e.rig_uav.p,e.rig_count_uav.p,rig_keys.Get()};
+                c->CSSetShader(rig_copy_.p,nullptr,0);c->CSSetShaderResources(0,3,in);c->CSSetUnorderedAccessViews(0,3,outs2,nullptr);c->CSSetConstantBuffers(0,1,&rig_cb_.p);
                 c->Dispatch((depth_w+7)/8,(depth_h+7)/8,1);
-                ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no_uav[2]{};ID3D11Buffer* no_cb{};
-                c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,2,no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
+                ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no_uav[3]{};ID3D11Buffer* no_cb{};
+                c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,3,no_uav,nullptr);c->CSSetConstantBuffers(0,1,&no_cb);
                 // v1209: rig pixels marked wild (252) get zero motion in the TAA's motion input, before the motion pass and the upscaler
                 if(e.mv_key==job.motion.p) RigMask::guard(c,job.motion.p,e.rig_srv.p,depth_w,depth_h);
-                const float far_value[4]{};c->ClearRenderTargetView(rig_target.Get(),far_value); // the next render's rig depth starts empty
+                const float far_value[4]{};if(rig_target) c->ClearRenderTargetView(rig_target.Get(),far_value); // the next render's rig depth starts empty (v1288 keys: zeroed by the copy)
                 e.rig_count_display[e.rig_count_serial%e.rig_count_staging.size()]=job.receipt?job.receipt->key.display:0;
                 c->CopyResource(e.rig_count_staging[e.rig_count_serial%e.rig_count_staging.size()].p,e.rig_count.p);++e.rig_count_serial;++rig_live_renders;
                 e.rig_valid=true;e.rig_live=true;++rig_copies;

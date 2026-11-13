@@ -5,7 +5,8 @@
 //   1  seven RTVs (no UAV slot left: fallback with the engine RTVs unbound)
 //   2  two RTVs + an engine PS UAV at u3 (fallback; the engine UAV restored)
 //   3  eight RTVs (fallback; the eight-RTV restore)
-// and D32 / D24 scene depth. Checks: the mask texture is bit-identical, both converted slices (take_target of slice 0 and 1) are
+// and D32 / D24 scene depth; v1288: plus edges inside 2x2 quads (variant 1) and thin held parts replayed before the farther held body under
+// them (variant 2, the frayed Heart of the v1287 sim). Checks: the mask texture is bit-identical, both converted slices (take_target of slice 0 and 1) are
 // bit-identical (depth and class of the nearest), the engine's colour targets are bit-identical (the UAV path writes none), the engine's
 // RTVs/DSV/UAVs/PS/depth state/blend are restored exactly, spot pixels hold the nearest draw's class (held over rig; the farther draw
 // replayed last loses), the status counts the path and the fallbacks, and (when the SDK layers are installed) no D3D11 debug-layer error.
@@ -45,7 +46,7 @@ static std::vector<std::uint8_t> read_back(ID3D11Device* d,ID3D11DeviceContext* 
 }
 static unsigned legacy_uav_lost=0; // the v1285 replay restores targets with OMSetRenderTargets, which drops an engine PS UAV (kept as it was)
 static std::uint64_t num(const std::string& j,const char* key) {const auto p=j.find(key);return p==std::string::npos?~0ull:std::strtoull(j.c_str()+p+std::strlen(key),nullptr,10);}
-static Result run(bool legacy,int cfg,bool d24,bool want_debug,bool aligned=true) {
+static Result run(bool legacy,int cfg,bool d24,bool want_debug,int variant=0) {
     Result res;
     ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> c;
     if(want_debug && SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,nullptr,&c))) res.debug=true;
@@ -92,13 +93,23 @@ static Result run(bool legacy,int cfg,bool d24,bool want_debug,bool aligned=true
     const auto targets=[](ID3D11DeviceContext* x,UINT n,ID3D11RenderTargetView* const* r,ID3D11DepthStencilView* d) noexcept {x->OMSetRenderTargets(n,r,d);};
     // kind 0 world, 1 rig, 2 held. Reverse-Z: larger z is nearer.
     struct D {float r[4];float z[3];int kind;};
-    const D scene[]{
+    // variant 0: A's bottom edge on a 2x2 quad boundary; 1: inside a quad row (C passes below it); 2 (v1288): thin held parts ("straps", 2-3 px,
+    // their edges inside quads) replayed BEFORE the farther held body under them, as a skinned held item's sub-meshes can come
+    std::vector<D> scene{
         {{-1,-1,1,1},{.1f,0,0},0},            // world far
-        {{-.8f,aligned?-.625f:-.6f,.3f,.5f},{.4f,.05f,.02f},1}, // rig A, sloped (aligned: its bottom edge, where C passes below, on a 2x2 quad boundary)
+        {{-.8f,variant==1?-.6f:-.625f,.3f,.5f},{.4f,.05f,.02f},1}, // rig A, sloped
         {{-.2f,-.3f,.7f,.7f},{.6f,0,0},2},    // held B, nearer, over A (two classes)
         {{-.5f,-.8f,.5f,.2f},{.3f,0,0},1},    // rig C, farther than A/B, replayed after them
         {{.2f,-.9f,.9f,-.1f},{.25f,0,0},2},   // held D, farther than C, replayed after it
         {{.5f,.5f,1,1},{.9f,0,0},0}};         // world near
+    if(variant==2) scene={
+        {{-1,-1,1,1},{.1f,0,0},0},                          // world far
+        {{-.03125f,-.8f,.03125f,.8f},{.6f,0,0},2},          // strap, columns 31-32: both its 2x2 quads straddle its edges
+        {{-.8f,-.03125f,.8f,.03125f},{.62f,0,0},2},         // strap across it, rows 31-32
+        {{.2f,-.7f,.29f,.7f},{.58f,-.01f,0},2},             // strap, about 3 px, sloped
+        {{-.7f,-.7f,.7f,.7f},{.45f,.02f,.01f},2},           // the held body under them, replayed after them
+        {{-.9f,-.9f,-.3f,-.2f},{.5f,0,0},1}};               // a rig hand over part of the body
+    const std::uint64_t replayed=static_cast<std::uint64_t>(std::count_if(scene.begin(),scene.end(),[](const D& d) {return d.kind!=0;}));
     for(UINT take=0;take<2;++take) { // the scene twice: a take converts one slice and clears both
         for(const D& d:scene) {
             cur={};std::memcpy(cur.r,d.r,16);std::memcpy(cur.z,d.z,12);c->UpdateSubresource(cb.Get(),0,nullptr,&cur,0,0);
@@ -119,16 +130,21 @@ static Result run(bool legacy,int cfg,bool d24,bool want_debug,bool aligned=true
             ID3D11DepthStencilState* st{};UINT ref{};c->OMGetDepthStencilState(&st,&ref);CHECK(st==prepass.Get() && ref==3);if(st) st->Release();
             ID3D11BlendState* b{};float f[4]{};UINT m{};c->OMGetBlendState(&b,f,&m);CHECK(b==blend.Get() && f[2]==.75f && m==0xfff);if(b) b->Release();
         }
-        ComPtr<ID3D11ShaderResourceView> mask_srv;ComPtr<ID3D11RenderTargetView> mask_rtv;
-        if(!d2vr::RigMask::target(depth.Get(),mask_srv,mask_rtv)) {std::printf("FAIL no rig target\n");++failures;return res;}
-        ComPtr<ID3D11Resource> mask_res;mask_srv->GetResource(&mask_res);
-        if(!take) {res.mask=read_back(dev.Get(),c.Get(),mask_res.Get(),8);res.colour=read_back(dev.Get(),c.Get(),colour[0].Get(),4);}
-        c->ClearRenderTargetView(mask_rtv.Get(),clear); // FsrTaa clears the mask after its copy
+        ComPtr<ID3D11ShaderResourceView> mask_srv;ComPtr<ID3D11RenderTargetView> mask_rtv;ComPtr<ID3D11UnorderedAccessView> mask_keys;
+        if(!d2vr::RigMask::target(depth.Get(),mask_srv,mask_rtv,&mask_keys)) {std::printf("FAIL no rig target\n");++failures;return res;}
+        CHECK(!mask_keys==legacy && !mask_srv==!legacy);
+        if(!take) {res.colour=read_back(dev.Get(),c.Get(),colour[0].Get(),4);
+            ComPtr<ID3D11Resource> mask_res;if(mask_keys) mask_keys->GetResource(&mask_res);else mask_srv->GetResource(&mask_res);
+            if(!mask_keys) res.mask=read_back(dev.Get(),c.Get(),mask_res.Get(),8);
+            else {const auto k=read_back(dev.Get(),c.Get(),mask_res.Get(),4);res.mask.resize(N*N*8); // v1288: key -> the v1285 (depth, class)
+                for(UINT i=0;i<N*N;++i) {std::uint32_t key;std::memcpy(&key,&k[i*4],4);const std::uint32_t bits=key>>2;float v[2];std::memcpy(&v[0],&bits,4);v[1]=float(key&3u);std::memcpy(&res.mask[i*8],v,8);}}}
+        if(mask_keys) {const UINT zero[4]{};c->ClearUnorderedAccessViewUint(mask_keys.Get(),zero);} // the copy zeroes the keys
+        else c->ClearRenderTargetView(mask_rtv.Get(),clear); // FsrTaa clears the mask after its copy
         D3D11_TEXTURE2D_DESC td{};CHECK(d2vr::RigMask::target_desc(depth.Get(),td));
         CHECK(td.Format==DXGI_FORMAT_R32G32_FLOAT && td.ArraySize==2 && td.Width==N && ((td.BindFlags&D3D11_BIND_UNORDERED_ACCESS)!=0)==!legacy);
         td.BindFlags=D3D11_BIND_SHADER_RESOURCE|(td.BindFlags&D3D11_BIND_UNORDERED_ACCESS); // as FsrTaa makes it
         ComPtr<ID3D11Texture2D> out;CHECK(SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&out)));
-        std::uint64_t draws{};CHECK(d2vr::RigMask::take_target(c.Get(),depth.Get(),out.Get(),draws,0,0,take) && draws==4);
+        std::uint64_t draws{};CHECK(d2vr::RigMask::take_target(c.Get(),depth.Get(),out.Get(),draws,0,0,take) && draws==replayed);
         res.slice[take]=read_back(dev.Get(),c.Get(),out.Get(),8);
     }
     if(info) {const UINT64 n=info->GetNumStoredMessages();
@@ -172,16 +188,20 @@ int main() {
         // the mask (engine depth EQUAL at each replay): B's held class over A, C's rig class over the later D
         CHECK(f_at(u.mask,px(0),py(.2f),1)==2.f && f_at(u.mask,px(.35f),py(-.5f),1)==0.f && f_at(u.mask,px(.35f),py(-.5f),0)>.29f);
     }
-    { // WARP and early depth: in a 2x2 quad where some pixels pass the replay's depth EQUAL and others fail it, WARP keeps the failing pixels'
-      // UAV writes (they run as helpers; the D3D spec forbids external effects of an invocation that fails an early depth test, and real
-      // GPUs mask helper lanes). With A's bottom edge inside a quad row, the later, farther rig C overwrites A's mask on that one pixel row
-      // (the v1285 replay does not). Measured here, not required equal: every difference must be such a quad-mate write.
-        const Result u=run(false,0,false,debug,false),l=run(true,0,false,debug,false);unsigned diff=0,leak=0;
-        for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) if(std::memcmp(&u.mask[(y*N+x)*8],&l.mask[(y*N+x)*8],8)) {++diff;bool mate=false;
-            for(UINT qy=y&~1u;qy<(y&~1u)+2;++qy) for(UINT qx=x&~1u;qx<(x&~1u)+2;++qx) mate|=(qx!=x || qy!=y) && !std::memcmp(&l.mask[(qy*N+qx)*8],&u.mask[(y*N+x)*8],8);
-            leak+=mate;}
-        std::printf("mid-quad occlusion edge (WARP): mask differs at %u px, %u of them a quad-mate's write; slices %s\n",diff,leak,u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1]?"identical":"DIFFERENT");
-        CHECK(diff==leak && diff<=N && u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1]);
+    // v1288: edges inside 2x2 quads, a farther part replayed after a nearer one. WARP runs the depth-failed pixels of a quad as helpers and
+    // keeps their UAV stores (the D3D spec forbids external effects of an invocation that fails an early depth test); v1286/v1287 lost the
+    // nearer part's mask on those pixels (variant 1: 25 px of A's bottom row; variant 2: the 2-3 px straps). Required identical now
+    // (v1288 mask key: the max, in any store order). Measured with v1287's plain stores: variant 1 25 px, variant 2 211 px (38 of 204 strap
+    // pixels kept); an SV_Coverage guard on the store changes nothing on WARP (its depth-failed quad pixels carry coverage).
+    for(int variant=1;variant<3;++variant) for(const bool d24:{false,true}) {
+        const Result u=run(false,0,d24,debug,variant),l=run(true,0,d24,debug,variant);unsigned diff=0,held=0,strap=0;
+        for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) {
+            diff+=std::memcmp(&u.mask[(y*N+x)*8],&l.mask[(y*N+x)*8],8)!=0;held+=f_at(l.mask,x,y,1)==2.f;
+            strap+=variant==2 && (x==31 || x==32 || y==31 || y==32) && f_at(u.mask,x,y,1)==2.f && f_at(u.mask,x,y,0)>.55f;}
+        std::printf("variant %d %s: mask differs at %u px of %u held; slices %s; strap pixels in the mask %u\n",variant,d24?"D24":"D32",diff,held,
+            u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1]?"identical":"DIFFERENT",strap);
+        CHECK(diff==0 && u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1] && u.colour==l.colour);
+        if(variant==2) CHECK(strap>=180); // two crossing 2-px straps over 1.6 NDC (about 51 px each way): ~200 strap pixels
     }
     std::printf("v1285 replay with an engine PS UAV bound: the UAV was lost %u times (state checks), the UAV replay restored it every time\n",legacy_uav_lost);
     if(failures) {std::printf("rig_replay_uav_check: %d failure(s)\n",failures);return 1;}

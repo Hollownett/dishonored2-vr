@@ -164,9 +164,9 @@ static void run(bool d24,int mode) {
     }
     engine_draw(vw.Get(),other_view.Get(),near_world);
     // the copy/compare
-    ComPtr<ID3D11ShaderResourceView> rig_srv;ComPtr<ID3D11RenderTargetView> rig_rtv;
+    ComPtr<ID3D11ShaderResourceView> rig_srv;ComPtr<ID3D11RenderTargetView> rig_rtv;ComPtr<ID3D11UnorderedAccessView> rig_keys; // v1288: the UAV replay's mask keys (u2)
     CHECK(d2vr::RigMask::take_view_draws()==3);
-    if(!d2vr::RigMask::target(depth.Get(),rig_srv,rig_rtv)) {std::printf("FAIL no rig target\n");++failures;return;}
+    if(!d2vr::RigMask::target(depth.Get(),rig_srv,rig_rtv,&rig_keys)) {std::printf("FAIL no rig target\n");++failures;return;}
     D3D11_TEXTURE2D_DESC mt=t;mt.Format=DXGI_FORMAT_R8_TYPELESS;mt.BindFlags=D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D> mask;dev->CreateTexture2D(&mt,nullptr,&mask);
     D3D11_UNORDERED_ACCESS_VIEW_DESC mu{};mu.Format=DXGI_FORMAT_R8_UINT;mu.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2D;ComPtr<ID3D11UnorderedAccessView> mask_uav;dev->CreateUnorderedAccessView(mask.Get(),&mu,&mask_uav);
     D3D11_BUFFER_DESC nb{};nb.ByteWidth=16;nb.BindFlags=D3D11_BIND_UNORDERED_ACCESS;nb.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;ComPtr<ID3D11Buffer> counts;dev->CreateBuffer(&nb,nullptr,&counts);
@@ -182,17 +182,19 @@ static void run(bool d24,int mode) {
     std::vector<float> mvi(N*N*2);for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) mvi[(y*N+x)*2]=x<N/4?20.f:x<N/2?.6f:.001f; // v1213: 0.6 widths = a fast swing, true motion (not wild)
     D3D11_TEXTURE2D_DESC mvd=t;mvd.Format=DXGI_FORMAT_R32G32_FLOAT;mvd.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;D3D11_SUBRESOURCE_DATA mvs{mvi.data(),N*8,0};
     ComPtr<ID3D11Texture2D> mvt;dev->CreateTexture2D(&mvd,&mvs,&mvt);ComPtr<ID3D11ShaderResourceView> mv_srv;dev->CreateShaderResourceView(mvt.Get(),nullptr,&mv_srv);
-    ID3D11ShaderResourceView* in[3]{depth_srv.Get(),rig_srv.Get(),mv_srv.Get()};ID3D11UnorderedAccessView* outs[2]{mask_uav.Get(),counts_uav.Get()};
-    c->CSSetShader(cs.Get(),nullptr,0);c->CSSetShaderResources(0,3,in);c->CSSetUnorderedAccessViews(0,2,outs,nullptr);c->CSSetConstantBuffers(0,1,kbuf.GetAddressOf());
+    ID3D11ShaderResourceView* in[3]{depth_srv.Get(),rig_srv.Get(),mv_srv.Get()};ID3D11UnorderedAccessView* outs[3]{mask_uav.Get(),counts_uav.Get(),rig_keys.Get()};
+    std::vector<std::uint8_t> rb; // the rig depth as (float depth, float class) per pixel, read before the copy zeroes the keys
+    if(rig_keys) {ComPtr<ID3D11Resource> kr;rig_keys->GetResource(&kr);ComPtr<ID3D11Texture2D> kt;kr.As(&kt);const auto kb=read_back(dev.Get(),c.Get(),kt.Get(),4);rb.resize(N*N*8);
+        for(UINT p=0;p<N*N;++p) {std::uint32_t key;std::memcpy(&key,&kb[p*4],4);const std::uint32_t bits=key>>2;float v[2];std::memcpy(&v[0],&bits,4);v[1]=float(key&3u);std::memcpy(&rb[p*8],v,8);}}
+    c->CSSetShader(cs.Get(),nullptr,0);c->CSSetShaderResources(0,3,in);c->CSSetUnorderedAccessViews(0,3,outs,nullptr);c->CSSetConstantBuffers(0,1,kbuf.GetAddressOf());
     c->Dispatch(N/8,N/8,1);
-    ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no[2]{};c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,2,no,nullptr);
+    ID3D11ShaderResourceView* none[3]{};ID3D11UnorderedAccessView* no[3]{};c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,3,no,nullptr);
     D3D11_SHADER_RESOURCE_VIEW_DESC msd{};msd.Format=DXGI_FORMAT_R8_UINT;msd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;msd.Texture2D.MipLevels=1;
     ComPtr<ID3D11ShaderResourceView> mask_srv;dev->CreateShaderResourceView(mask.Get(),&msd,&mask_srv);
     const bool guarded=d2vr::RigMask::guard(c.Get(),mvt.Get(),mask_srv.Get(),N,N);CHECK(guarded);
     const auto mvo=read_back(dev.Get(),c.Get(),mvt.Get(),8);
     const auto m=read_back(dev.Get(),c.Get(),mask.Get(),1),zb=read_back(dev.Get(),c.Get(),depth.Get(),4),c1=read_back(dev.Get(),c.Get(),colour[1].Get(),4);
-    ComPtr<ID3D11Resource> rig_res;rig_srv->GetResource(&rig_res);ComPtr<ID3D11Texture2D> rig_tex;rig_res.As(&rig_tex);
-    const auto rb=read_back(dev.Get(),c.Get(),rig_tex.Get(),8);
+    if(!rig_keys) {ComPtr<ID3D11Resource> rig_res;rig_srv->GetResource(&rig_res);ComPtr<ID3D11Texture2D> rig_tex;rig_res.As(&rig_tex);rb=read_back(dev.Get(),c.Get(),rig_tex.Get(),8);}
     // expected rig pixels: centres inside the rig rect (pixel x from -0.8..0.4 NDC, y -0.6..0.6) and x < 0 NDC (not under the near surface)
     unsigned wrong=0,rig_px=0,mv_bad=0;double worst=0,worst_steps=0;
     for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) {
@@ -215,7 +217,9 @@ static void run(bool d24,int mode) {
     std::printf("%s: rig pixels %u, max |rig - scene| %.3g (%.2f %s)\n",d24?"D24":"D32",rig_px,worst,worst_steps,d24?"D24 steps":"ulp");
 }
 int main() {
-    for(int mode=0;mode<4;++mode) {run(true,mode);run(false,mode);}
+    for(const bool legacy:{false,true}) { // v1288: the UAV replay (mask keys, u2 of the copy) and the v1285 replay
+        d2vr::RigMask::legacy_replay=legacy;for(int mode=0;mode<4;++mode) {run(true,mode);run(false,mode);}}
+    d2vr::RigMask::legacy_replay=false;
     if(failures) {std::printf("rig_mask_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: rig_mask_check (replay through RigMask::Scope, SV_Position-only PS on a VS with SV_Position second, engine state restored, copy/compare)\n");
     return 0;

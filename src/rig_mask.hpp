@@ -30,6 +30,8 @@
 //  bound gets the same three draws with the engine's RTVs unbound (2 OM switches, counted per reason) and its exact set (UAVs too) restored.
 //  A device without FL 11.0 typed UAVs / R32_UINT atomics, or whose UAV shaders cannot be made, replays the v1285 way (counted per draw).
 //  Knob build/legacy-rig-replay: the v1285 path everywhere (replay_legacy, the RTV/D32 slices and the copy), for A/B.
+// v1288: the mask is an R32_UINT key texture as well (InterlockedMax(asuint(z) << 2 | 0 rig / 1 own / 2 held), no float2 store: the
+//  stores of two replayed draws are not ordered), decoded and zeroed by the copy shader (u2). See uav_ready.
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
@@ -60,12 +62,15 @@ namespace d2vr {
 // v1213: the bound is the render width (v1212 swing 5331/5332: an exact pair, the right arm moved 0.15-0.23 m and up to 50 deg in two engine
 // frames, 124k rig pixels past a quarter width were TRUE motion the guard zeroed). Past a whole render width a vector leaves the view: TAA
 // cannot use it, and the start-up/vanish garbage (40,000 px) stays caught.
+// v1288: u2 = the UAV replay's mask keys (R32_UINT: asuint(rig depth) << 2 | 0 rig / 1 own / 2 held, InterlockedMax), read in place of t1
+// and zeroed here for the next render (the v1285 replay leaves u2 unbound: reads 0, t1 as before).
 inline constexpr char rig_mask_copy_source[]=
     "Texture2D<float> z:register(t0);Texture2D<float2> r:register(t1);Texture2D<float2> mv:register(t2);RWTexture2D<uint> o:register(u0);RWByteAddressBuffer n:register(u1);"
-    "cbuffer C:register(b0){float4 k;};groupshared uint g[4];"
+    "RWTexture2D<uint> rk:register(u2);cbuffer C:register(b0){float4 k;};groupshared uint g[4];"
     "[numthreads(8,8,1)] void main(uint3 i:SV_DispatchThreadID,uint t:SV_GroupIndex){"
     "if(t<4) g[t]=0;GroupMemoryBarrierWithGroupSync();"
-    "const bool inside=all(float2(i.xy)<k.zw);const float d=z.Load(int3(i.xy,0));const float2 rq=r.Load(int3(i.xy,0));const float q=rq.x;"
+    "const bool inside=all(float2(i.xy)<k.zw);const float d=z.Load(int3(i.xy,0));const uint kq=rk[i.xy];rk[i.xy]=0;"
+    "const float2 rq=kq?float2(asfloat(kq>>2),float(kq&3u)):r.Load(int3(i.xy,0));const float q=rq.x;"
     "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e,held=rig && rq.y>1.5,own=rig && !held && rq.y>0.5;"
     "o[i.xy]=held?253:own?255:rig?254:0;"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
@@ -380,10 +385,12 @@ public:
     // FsrTaa's copy: draws of the alternate view seen since the last call (0: no one-view render, the mask is not live), and the rig target
     // of this scene depth (empty: none yet / another depth).
     static std::uint64_t take_view_draws() noexcept {return view_draws_.exchange(0,std::memory_order_relaxed);}
-    static bool target(ID3D11Resource* depth,Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srv,Microsoft::WRL::ComPtr<ID3D11RenderTargetView>& rtv) {
+    // v1288: `keys` = the UAV replay's mask keys (the copy shader's u2; its srv/rtv are then null: nothing to bind at t1, nothing to clear)
+    static bool target(ID3D11Resource* depth,Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srv,Microsoft::WRL::ComPtr<ID3D11RenderTargetView>& rtv,
+                       Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>* keys=nullptr) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(!depth || target_.depth!=depth || !target_.srv) return false;
-        srv=target_.srv;rtv=target_.rtv;return true;
+        if(!depth || target_.depth!=depth || !(target_.srv || (target_.mask_uav && keys))) return false;
+        srv=target_.srv;rtv=target_.rtv;if(keys) *keys=target_.mask_uav;return true;
     }
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);
         for(auto& r:ring_) {r.ready.store(false);r.clear();r.device=nullptr;r.bytes=0;}
@@ -789,8 +796,14 @@ private:
         const auto ps=[&](Microsoft::WRL::ComPtr<ID3D11PixelShader>& out) {Microsoft::WRL::ComPtr<ID3DBlob> code;
             ok=ok && SUCCEEDED(D3DCompile(src,std::strlen(src),nullptr,nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr)) &&
                SUCCEEDED(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&out));};
+        // v1288 (sim v1287: the Heart frayed in the rebuilt eye): the mask is a key too, InterlockedMax(asuint(z) << 2 | class), decoded by
+        // the copy (u2). Plain stores made "the last replay that passed EQUAL wins" depend on the order the stores land: the output merger
+        // orders colour writes, nothing orders the UAV stores of two replayed draws, and a depth-failed pixel of a 2x2 quad may store
+        // (WARP does: tests/rig_replay_uav_check.cpp variant 2 lost 166 of 204 strap pixels to the body replayed after them). Under the
+        // engine's reverse-Z GREATER/GREATER_EQUAL depth the draws passing EQUAL at a pixel come with growing z, so the max IS the last
+        // writer in any order, and a later farther part's stray store loses. z in [0,1] leaves the top two bits free.
         for(unsigned y=0;y<3;++y) { // the v1285 mask value (z, class) where the draw passes depth EQUAL; early depth: no write where it fails
-            std::snprintf(src,sizeof src,"RWTexture2D<float2> m:register(u%u);[earlydepthstencil] void main(float4 p:SV_Position){m[uint2(p.xy)]=float2(p.z,%u);}",uav_slot+1,y);ps(k.mask[y]);}
+            std::snprintf(src,sizeof src,"RWTexture2D<uint> m:register(u%u);[earlydepthstencil] void main(float4 p:SV_Position){InterlockedMax(m[uint2(p.xy)],(asuint(p.z)<<2)|%uu);}",uav_slot+1,y);ps(k.mask[y]);}
         for(unsigned held=0;held<2;++held) for(unsigned s=0;s<2;++s) { // nearest wins: max of (depth bits << 1 | rig); z <= 0 never won the v1285 GREATER over its clear
             std::snprintf(src,sizeof src,"RWTexture2DArray<uint> s:register(u%u);void main(float4 p:SV_Position){if(p.z>0) InterlockedMax(s[uint3(uint2(p.xy),%u)],(asuint(p.z)<<1)|%uu);}",uav_slot,s,held?0u:1u);
             ps(k.slice[held][s]);}
@@ -841,20 +854,19 @@ private:
         }
         if(!made_) return false;
         const bool want_uav=!legacy_replay.load(std::memory_order_relaxed) && uav_state_.load(std::memory_order_relaxed)==1; // v1286
-        if(target_.depth==depth && target_.w==dd.Width && target_.h==dd.Height && target_.rtv && static_cast<bool>(target_.keys)==want_uav) return true;
+        if(target_.depth==depth && target_.w==dd.Width && target_.h==dd.Height && (target_.rtv || target_.mask_uav) && static_cast<bool>(target_.keys)==want_uav) return true;
         target_={};
         D3D11_TEXTURE2D_DESC t{};t.Width=dd.Width;t.Height=dd.Height;t.MipLevels=t.ArraySize=1;t.Format=DXGI_FORMAT_R32G32_FLOAT;t.SampleDesc.Count=1;
         t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
-        if(want_uav) t.BindFlags|=D3D11_BIND_UNORDERED_ACCESS; // v1286: the mask is written through a UAV (FsrTaa still clears it as a target)
         Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;Target n{};
-        if(FAILED(device->CreateTexture2D(&t,nullptr,&tex)) || FAILED(device->CreateRenderTargetView(tex.Get(),nullptr,&n.rtv)) ||
-           FAILED(device->CreateShaderResourceView(tex.Get(),nullptr,&n.srv))) return false;
-        if(want_uav) { // v1286: the mask's UAV and the slices' keys (no slice targets, no slice depth)
-            D3D11_TEXTURE2D_DESC a=t;a.ArraySize=2;a.Format=DXGI_FORMAT_R32_UINT;a.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+        if(want_uav) { // v1286: the slices' keys (no slice targets, no slice depth); v1288: the mask is keys too (R32_UINT, no RTV/SRV)
+            D3D11_TEXTURE2D_DESC m=t;m.Format=DXGI_FORMAT_R32_UINT;m.BindFlags=D3D11_BIND_UNORDERED_ACCESS;D3D11_TEXTURE2D_DESC a=m;a.ArraySize=2;
             D3D11_UNORDERED_ACCESS_VIEW_DESC kv{};kv.Format=a.Format;kv.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2DARRAY;kv.Texture2DArray.ArraySize=2;
-            if(FAILED(device->CreateUnorderedAccessView(tex.Get(),nullptr,&n.mask_uav)) || FAILED(device->CreateTexture2D(&a,nullptr,&n.keys)) ||
-               FAILED(device->CreateUnorderedAccessView(n.keys.Get(),&kv,&n.key_uav))) return false;
-        } else { // v1190: the rig target and its own depth (same size)
+            if(FAILED(device->CreateTexture2D(&m,nullptr,&tex)) || FAILED(device->CreateUnorderedAccessView(tex.Get(),nullptr,&n.mask_uav)) ||
+               FAILED(device->CreateTexture2D(&a,nullptr,&n.keys)) || FAILED(device->CreateUnorderedAccessView(n.keys.Get(),&kv,&n.key_uav))) return false;
+        } else if(FAILED(device->CreateTexture2D(&t,nullptr,&tex)) || FAILED(device->CreateRenderTargetView(tex.Get(),nullptr,&n.rtv)) ||
+           FAILED(device->CreateShaderResourceView(tex.Get(),nullptr,&n.srv))) return false;
+        else { // v1190: the rig target and its own depth (same size)
             D3D11_TEXTURE2D_DESC a=t;a.ArraySize=2; // v1199: slice h = the hypothesis "the draw is a render of eye h"
             if(FAILED(device->CreateTexture2D(&a,nullptr,&n.trg))) return false;
             D3D11_TEXTURE2D_DESC z=a;z.Format=DXGI_FORMAT_D32_FLOAT;z.BindFlags=D3D11_BIND_DEPTH_STENCIL;Microsoft::WRL::ComPtr<ID3D11Texture2D> zt;
@@ -905,7 +917,7 @@ private:
         c->OMGetRenderTargetsAndUnorderedAccessViews(static_cast<UINT>(rtvs.size()),rtvs.data(),&dsv,0,static_cast<UINT>(uavs.size()),uavs.data());
         const auto release_targets=[&] {for(auto* r:rtvs) if(r) r->Release();if(dsv) dsv->Release();for(auto* u:uavs) if(u) u->Release();};
         if(!dsv) {no_dsv_.fetch_add(1,std::memory_order_relaxed);release_targets();return true;}
-        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> mask_rtv;Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> mask_uav,key_uav; // held: a reset cannot free them mid-replay
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> mask_uav,key_uav; // held: a reset cannot free them mid-replay
         Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,2> slice_ps;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal,off;Microsoft::WRL::ComPtr<ID3D11BlendState> none;
         bool ready=true;
         {
@@ -918,7 +930,7 @@ private:
                 if(device && device_!=device) new_device(device);
                 ready=device && uav_ready(device);
                 if(ready && dd.SampleDesc.Count==1 && dd.Width && prepare(device,depth,dd,created) && target_.keys) {
-                    mask_rtv=target_.rtv;mask_uav=target_.mask_uav;key_uav=target_.key_uav;ps=uav_.mask[tl_held_?2:tl_own_?1:0];slice_ps=uav_.slice[tl_held_?1:0];
+                    mask_uav=target_.mask_uav;key_uav=target_.key_uav;ps=uav_.mask[tl_held_?2:tl_own_?1:0];slice_ps=uav_.slice[tl_held_?1:0];
                     equal=equal_;off=uav_.off;none=uav_.none;
                 }
             } catch(...) {}
@@ -926,7 +938,7 @@ private:
             if(depth) depth->Release();
             if(ready && dd.SampleDesc.Count!=1) msaa_.fetch_add(1,std::memory_order_relaxed);
             else if(ready && !mask_uav) failures_.fetch_add(1,std::memory_order_relaxed);
-            else if(ready && created) {const float zero[4]{};const UINT zero_u[4]{};c->ClearRenderTargetView(mask_rtv.Get(),zero);c->ClearUnorderedAccessViewUint(key_uav.Get(),zero_u);}
+            else if(ready && created) {const UINT zero_u[4]{};c->ClearUnorderedAccessViewUint(mask_uav.Get(),zero_u);c->ClearUnorderedAccessViewUint(key_uav.Get(),zero_u);}
         }
         if(!ready) {fallbacks_[uav_state_.load(std::memory_order_relaxed)==2?2:3].fetch_add(1,std::memory_order_relaxed);release_targets();return false;}
         if(!mask_uav) {release_targets();return true;}
