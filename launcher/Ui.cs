@@ -607,7 +607,10 @@ sealed class OptionList : ArtControl
             if (sel) Ui.Brush(g, hl, Focused ? 1f : .85f);
             else if (i == hover) Ui.Brush(g, hl, .12f);
             var fg = sel ? Ui.OnBrush : on ? Ui.Text : Ui.Faint;
-            TextRenderer.DrawText(g, o.Name, label, new Rectangle(S(28), r.Y, LabelW - S(36), r.Height), fg, vc);
+            var lr = new Rectangle(S(28), r.Y, LabelW - S(36), r.Height);
+            // a name wider than its column is drawn a size smaller instead of being cut with an ellipsis
+            var lf = TextRenderer.MeasureText(g, o.Name, label, lr.Size, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width > lr.Width ? Ui.Font(this, 11f) : label;
+            TextRenderer.DrawText(g, o.Name, lf, lr, fg, vc);
             var v = ValueRect(r);
             if (o.IsSlider)
             {
@@ -624,6 +627,10 @@ sealed class OptionList : ArtControl
         }
         if (MaxScroll > 0)  // a thin scroll thumb on the right edge, as on the Features list
         {
+            // rows cut by the edge fade out, which also says there is more in that direction
+            int sc = Math.Clamp(scroll, 0, MaxScroll), fh = S(26);
+            if (sc < MaxScroll) { var fr = new Rectangle(0, Height - fh, Width - S(6), fh); using var fb = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(fr.X, fr.Y - 1, fr.Width, fr.Height + 2), Color.FromArgb(0, Ui.Ink), Color.FromArgb(245, Ui.Ink), 90f); g.FillRectangle(fb, fr); }
+            if (sc > 0) { var fr = new Rectangle(0, 0, Width - S(6), fh); using var fb = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(fr.X, fr.Y - 1, fr.Width, fr.Height + 2), Color.FromArgb(245, Ui.Ink), Color.FromArgb(0, Ui.Ink), 90f); g.FillRectangle(fb, fr); }
             int th = Math.Max(S(24), Height * Height / Total), ty = (Height - th) * Math.Clamp(scroll, 0, MaxScroll) / MaxScroll;
             using var b = new SolidBrush(Color.FromArgb(110, Ui.Soft));
             g.FillRectangle(b, Width - S(4), ty, S(3), th);
