@@ -625,7 +625,7 @@ struct Side {
     // v1237 (user v1233: "the helmet was completely out of place" on a carried severed head): entities the engine binds to the held thing
     // (its +0xb0 children: a helmet, a hat) follow F rigidly but have their own model frame, so a draw of one never matched F's axes and stayed
     // at the engine's lagging pose beside the placed thing. Their frames are matched too; delta is the held thing's (B * inverse(F)).
-    static constexpr unsigned max_extra=4;
+    static constexpr unsigned max_extra=8;   // v1290: a crossbow's bolt + its upgrades' parts (was 4)
     unsigned extras{};std::array<Mat,max_extra> extra{};
     // v1239 (held things only): the publisher's earlier distinct reads of the thing (ages 1..7, the previous read included), each an exact
     // match of the tick it was read at (frame index 2+max_extra+j), and the predicted-match gates from the thing's speed (0.05 s of motion).

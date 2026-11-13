@@ -3848,15 +3848,37 @@ static bool held_rig_now(d2vr::HeldCarry& out,bool sync=false) noexcept;   // v1
 // v1237/v1278: the model frames of the entities the engine binds to `entity` (its +0xb0 children, count +0xb8: the bind/Hide/Show list,
 // d2vr-upgrade-attach-abi: a weapon's bolt and upgrade parts, a carried head's helmet), finite and within 0.6 m of F, appended to kids.
 static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max) noexcept {
-    std::uintptr_t list{};std::uint32_t count{};
-    if(!entity || !read_self(entity+0xb0,&list,sizeof list) || !list || !read_self(entity+0xb8,&count,sizeof count) || count>64) return;
-    for(std::uint32_t i=0;i<count && i<16 && n<max;++i) {
-        std::uintptr_t child{},model{};std::array<float,15> frame{};
-        if(!read_self(list+i*8,&child,sizeof child) || !child || child==entity || !read_self(child+0xf0,&model,sizeof model) || !model ||
-           !read_self(model+0x1860,frame.data(),sizeof frame)) continue;
+    if(!entity) return;
+    const auto add=[&](std::uintptr_t child) {
+        std::uintptr_t model{};std::array<float,15> frame{};
+        if(!child || child==entity || n>=max || !read_self(child+0xf0,&model,sizeof model) || !model || !read_self(model+0x1860,frame.data(),sizeof frame)) return;
         const auto c=d2vr::weapon_draw::model_of(frame.data());
-        if(d2vr::weapon_draw::finite(c) && d2vr::weapon_draw::distance(c,f)<=.6) kids[n++]=c;
-    }
+        if(!d2vr::weapon_draw::finite(c) || d2vr::weapon_draw::distance(c,f)>.6) return;
+        for(unsigned k=0;k<n;++k) if(d2vr::weapon_draw::distance(kids[k],c)<1e-5 && d2vr::weapon_draw::angle(kids[k],c)<1e-5) return;   // the same frame twice
+        kids[n++]=c;
+    };
+    try {
+        // v1290 (user, v1289: "crossbow attachments and bolt still ghosting a lot"; status children_published 0, draws.child 0, 1352 renders with
+        // a refused draw > 45 deg / 20-80 cm off F): the parts were never found. (1) The weapon's own parts, from its equipment component as
+        // NativeWeaponHands' audit reads them: component (entity +0x268 list, crossbow vtable 0x1b9cbf8 / gun 0x1b53f58, comp+0x10 == entity),
+        // m_upgrades comp+0x50 (idList<upgrade_t>, 0x28 each: +0x10 static part, +0x18 animated part), the loaded bolt comp+0x160.
+        if(const auto comps=d2vr::rig::list(read_self,entity+0x268,4096)) for(unsigned i=0;i<comps->packed_count && i<48;++i) {
+            const auto c=d2vr::rig::value<std::uintptr_t>(read_self,comps->data+i*8ull);
+            if(!c || !*c || d2vr::rig::value<std::uintptr_t>(read_self,*c+0x10)!=entity) continue;
+            const bool crossbow=d2vr::rig::typed(read_self,image_base,*c,0x1b9cbf8);
+            if(!crossbow && !d2vr::rig::typed(read_self,image_base,*c,0x1b53f58)) continue;
+            if(crossbow) if(const auto bolt=d2vr::rig::value<std::uintptr_t>(read_self,*c+0x160);bolt && d2vr::rig::pointer(*bolt)) add(*bolt);
+            if(const auto ups=d2vr::rig::list(read_self,*c+0x50,64)) for(unsigned u=0;u<ups->packed_count && u<16;++u) for(const std::uintptr_t off:{0x10ull,0x18ull})
+                if(const auto part=d2vr::rig::value<std::uintptr_t>(read_self,ups->data+u*0x28ull+off);part && d2vr::rig::pointer(*part)) add(*part);
+            break;
+        }
+    } catch(...) {}
+    // (2) the engine's bind list (entity +0xb0, count +0xb8). v1290: the count is an idList's packed count (low 24 bits; the high byte carries flags),
+    // so v1237's `count > 64` test refused every real list.
+    std::uintptr_t list{};std::uint32_t count{};
+    if(!read_self(entity+0xb0,&list,sizeof list) || !list || !read_self(entity+0xb8,&count,sizeof count)) return;
+    count&=0xffffffu;if(count>64) return;
+    for(std::uint32_t i=0;i<count && i<16 && n<max;++i) {std::uintptr_t child{};if(read_self(list+i*8,&child,sizeof child)) add(child);}
 }
 static void publish_weapon_draw(std::uintptr_t view) noexcept {
     // v1140: weapons stay opt-in (v1019, build/weapon-draw-place); held props are placed by default (ObjectMotion::held_wanted).
