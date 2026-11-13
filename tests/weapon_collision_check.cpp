@@ -11,7 +11,9 @@ static std::optional<CollisionHit> wall(Vec3 a,Vec3 b) {
 }
 int main() {
     // Blade only (physical hands Task 5): the hand is the hand clamp's (hand_clamp.hpp); the blade sweeps from the drawn grip.
-    WeaponCollision c;const Vec3 dir{1,0,0};const double dt=1./90;
+    // v1289: the one-frame rules below are legacy_step's (build/legacy-weapon-contact, set_legacy); the default contact_step (planes, a damped
+    // follower) is checked by tests/weapon_contact_lab.cpp. The bare hand and the segment's start below run on the default path.
+    WeaponCollision c;c.set_legacy(true);const Vec3 dir{1,0,0};const double dt=1./90;
     auto r=c.update(0,dt,{.2,0,0},dir,.6,wall);
     CHECK(!r.contact&&!r.event&&!r.haptic&&length(r.shift)==0);
     // Tip pokes .2 into the wall (grip .6, tip 1.2): grip pushed back .2, tip rests on the surface.
@@ -51,11 +53,11 @@ int main() {
     while(r.contact) {r=c.update(0,dt,{.2,0,0},dir,.6,wall);CHECK(length(r.shift)<=prev+1e-12);prev=length(r.shift);CHECK(++n<400);}
     CHECK(length(r.shift)==0);
     r=c.update(0,dt,{.6,0,0},dir,.6,wall);CHECK(r.event);
-    WeaponCollision cap({.1,1.5,.12,.08,3});
+    WeaponCollision cap({.1,1.5,.12,.08,3});cap.set_legacy(true);
     r=cap.update(0,dt,{.6,0,0},dir,.6,wall);CHECK(std::abs(length(r.shift)-.1)<1e-9);
     r=c.update(0,dt,{NAN,0,0},dir,.6,wall);CHECK(!r.contact);
     { // Angled blade: the hand keeps its tracked position, the blade pivots so its tip rests on the wall.
-        WeaponCollision a;const Vec3 d45{std::sqrt(.5),std::sqrt(.5),0};
+        WeaponCollision a;a.set_legacy(true);const Vec3 d45{std::sqrt(.5),std::sqrt(.5),0};
         const auto q=a.update(0,dt,{.5,0,0},d45,.9,wall); // tip at x=1.136: .136 inside
         CHECK(q.blade_dir && length(q.shift)==0 && std::abs(length(*q.blade_dir)-1)<1e-9);
         const Vec3 tip=Vec3{.5,0,0}+*q.blade_dir*.9;CHECK(std::abs(tip.x-.99)<1e-9 && tip.y>0);
@@ -76,7 +78,7 @@ int main() {
             CHECK(!align_weapon_blade(pose,{NAN,0,0},reverse));
             CHECK(!align_weapon_blade(pose,{},reverse));
         }
-        WeaponCollision repeated;
+        WeaponCollision repeated;repeated.set_legacy(true);
         for(const bool reverse:{false,true,false,true,false}) {
             const double sign=reverse?-1.:1.;
             WorldTrackedPose pose{{.5,0,0},{{d45*sign,Vec3{-d45.y,d45.x,0}*sign,{0,0,1}}}};

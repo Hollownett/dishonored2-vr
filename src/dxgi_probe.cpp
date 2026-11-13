@@ -680,6 +680,30 @@ static d2vr::WeaponCollision weapon_collision;static bool weapon_collision_enabl
 // v1033 (render thread, per frame): each side's drawn gun frame (its authored hold from held_copy.hpp), filled by the weapon block and read by
 // the gun body's publication. A sword's side, a cutscene or an authored camera leaves it empty and the publication falls back to the hand frame.
 static std::array<std::optional<d2vr::WorldTrackedPose>,2> gun_drawn_frame;static LONGLONG weapon_collision_qpc{};static std::atomic<UINT64> weapon_contact_frames{},weapon_contact_events{};static std::array<std::atomic<UINT64>,2> weapon_events_side{},weapon_blade_casts_side{}; // v771: per hand (left sword)
+// v1289 (user 2026-11-13: a held weapon at a corner or wall thrashed side to side): WeaponCollision's per-hand contact counters, copied after every
+// update for the status writer (status weapon_collision.contact), and the hand clamp's own frame-to-frame step of an armed hand held at a surface
+// (hand_max_jump_mm: the second cause tests/weapon_contact_lab.cpp found at convex edges, in hand_clamp.hpp). build/legacy-weapon-contact restores
+// the v1288 blade response (WeaponCollision::legacy_step); the counters run in both modes.
+static bool legacy_weapon_contact{};
+struct WeaponContactStatus {std::atomic<UINT64> frames{},plane_changes{},reversals{};std::atomic<double> seconds{},damped_seconds{},max_jump_m{},max_turn_deg{},hand_max_jump_m{};};
+static std::array<WeaponContactStatus,2> weapon_contact_status;
+static std::string weapon_contact_json() {
+    const auto pair=[](auto get) {std::ostringstream v;v<<'['<<get(weapon_contact_status[0])<<','<<get(weapon_contact_status[1])<<']';return v.str();};
+    const auto rate=[](const WeaponContactStatus& w,const std::atomic<UINT64>& n) {const double t=w.seconds.load();return t>0?static_cast<double>(n.load())/t:0.;};
+    std::ostringstream o;
+    o<<"{\"legacy\":"<<(legacy_weapon_contact?"true":"false")
+     <<",\"frames\":"<<pair([](const WeaponContactStatus& w){return w.frames.load();})
+     <<",\"seconds\":"<<pair([](const WeaponContactStatus& w){return w.seconds.load();})
+     <<",\"plane_changes\":"<<pair([](const WeaponContactStatus& w){return w.plane_changes.load();})
+     <<",\"plane_changes_per_s\":"<<pair([&](const WeaponContactStatus& w){return rate(w,w.plane_changes);})
+     <<",\"reversals\":"<<pair([](const WeaponContactStatus& w){return w.reversals.load();})
+     <<",\"reversals_per_s\":"<<pair([&](const WeaponContactStatus& w){return rate(w,w.reversals);})
+     <<",\"max_jump_mm\":"<<pair([](const WeaponContactStatus& w){return w.max_jump_m.load()*1000;})
+     <<",\"max_turn_deg\":"<<pair([](const WeaponContactStatus& w){return w.max_turn_deg.load();})
+     <<",\"damped_seconds\":"<<pair([](const WeaponContactStatus& w){return w.damped_seconds.load();})
+     <<",\"hand_max_jump_mm\":"<<pair([](const WeaponContactStatus& w){return w.hand_max_jump_m.load()*1000;})<<'}';
+    return o.str();
+}
 // Physical hands phase 1 (hand_clamp.hpp, hand_clamp_feed.hpp): the drawn hand stops at world surfaces. Render thread only; the
 // status reads the HandClampStatus mirrors. clamp_state: each side's last output state (slot 0 answers the chest re-acquire while
 // released); clamp_exclude: the met prop the next update's exclusion sweep skips (meet_clamp); clamp_tip/clamp_wall_tip: the leading
@@ -9567,7 +9591,7 @@ void prepare_head_view(void* view) noexcept {
                         std::optional<d2vr::CollisionHit> blade_hit,palm_hit;unsigned slot=hand_clamp_enabled?1u:0u;
                         auto query=[&](d2vr::Vec3 a,d2vr::Vec3 b)->std::optional<d2vr::CollisionHit> {
                             const unsigned k=slot++;
-                            d2vr::NativeInteractionAim::post_weapon_segment(side,k,a,b,k?std::max(.02,blade_radius):.05);
+                            d2vr::NativeInteractionAim::post_weapon_segment(side,k,a,b,k?d2vr::WeaponCollision::cast_radius(blade_radius):.05); // v1289: the radius WeaponCollision judges its planes with
                             const auto h=d2vr::NativeInteractionAim::weapon_hit(side,k,now);if(!h) return {};
                             auto c=d2vr::to_collision_hit(*h);
                             if(k==1 && d2vr::blade_hit_is_self(c.entity,c.point,static_cast<std::uintptr_t>(body->player),render_player_root().value_or(d2vr::Vec3{1e9,1e9,1e9}))) {++blade_self_hits;return {};} // G2: the player's own body is never a surface for the blade
@@ -9694,6 +9718,15 @@ void prepare_head_view(void* view) noexcept {
                         if(reach_clamped) ++status.reach_clamped;
                         // The blade sweeps from the drawn grip and eases its own push (a blade pushed straight into a surface moves the hand back); the
                         // clamp is told its own hand, and the pushed hand stays out of the clamp's planes (compose_blade, M1).
+                        {   // v1289 (status weapon_collision.contact.hand_max_jump_mm): the hand clamp's own frame-to-frame step of an armed hand it holds at a
+                            // surface, against the controller (the lab's second cause: 39-52 mm steps at a convex edge, the same in v1288 and v1289)
+                            static std::array<std::optional<d2vr::Vec3>,2> last_hand_offset{};
+                            const bool held_at=armed && clamp_updated && clamped.valid && !clamp_yield && clamped.state==d2vr::ClampState::contact;
+                            const d2vr::Vec3 offset=g.position-palm.position;
+                            if(held_at && last_hand_offset[side] && d2vr::finite(offset)) {auto& peak=weapon_contact_status[side].hand_max_jump_m;
+                                const double step=d2vr::length(offset-*last_hand_offset[side]);if(step>peak.load()) peak.store(step);}
+                            last_hand_offset[side]=held_at && d2vr::finite(offset)?std::optional<d2vr::Vec3>{offset}:std::nullopt;
+                        }
                         const auto r=weapon_collision.update(side,dt,g.position,barrel_axis,blade,query,barrel_offset,blade_radius);
                         const auto composed=d2vr::compose_blade(hand_clamp,side,g.basis,g.position,r,met_prop);
                         g.position=composed.drawn;
@@ -9760,6 +9793,9 @@ void prepare_head_view(void* view) noexcept {
                         status.missed_notes.store(hand_clamp.missed_notes(side));status.repeated_updates.store(hand_clamp.repeated_updates(side));
                         status.reacquire_blocked.store(hand_clamp.reacquire_blocked_frames(side));
                         }
+                        {const auto& st=weapon_collision.stats(side);auto& ws=weapon_contact_status[side];   // v1289: per-hand contact counters for the status writer
+                         ws.frames.store(st.frames);ws.plane_changes.store(st.plane_changes);ws.reversals.store(st.reversals);ws.seconds.store(st.seconds);
+                         ws.damped_seconds.store(st.damped_seconds);ws.max_jump_m.store(st.max_jump_m);ws.max_turn_deg.store(st.max_turn_deg);}
                         if(sword_side && blade>0) {std::lock_guard<std::mutex> l(sword_tip_mutex);sword_tip=g.position+d2vr::sword_blade_axis(g,reverse_sword)*blade;sword_tip_tick=now;}
                         if(event) {++weapon_contact_events;++weapon_events_side[side];
                             // Blade on the world: the surface reacts like a sword hit, quieter (engine contact FX on the game thread).
@@ -11746,7 +11782,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"applied\":" << [&]{std::ostringstream o;const auto a=full_body.thumb_applied();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<static_cast<int>(a[i][0]*10)<<','<<static_cast<int>(a[i][1]*10)<<','<<static_cast<int>(a[i][2]*10)<<']';}o<<']';return o.str();}()
         << ",\"planned\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<planned_thumb[i][0].load()<<','<<planned_thumb[i][1].load()<<','<<planned_thumb[i][2].load()<<','<<planned_thumb[i][3].load()<<']';}o<<']';return o.str();}()
         << ",\"drawn\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<drawn_thumb[i][0].load()<<','<<drawn_thumb[i][1].load()<<','<<drawn_thumb[i][2].load()<<','<<drawn_thumb[i][3].load()<<']';}o<<']';return o.str();}()
-<< ",\"checks\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<thumb_checks[i][0].load()<<','<<thumb_checks[i][1].load()<<']';}return o.str();}() << "]}}" << ",\"watch\":[" << prop_watch.size() << "," << prop_watch.reads() << "," << (watch_calls.load()?static_cast<double>(watch_ns.load())/1000./static_cast<double>(watch_calls.load()):0.) << "," << watch_max_ns.load()/1000. << "," << watch_found.load() << "," << watch_missed.load() << "]" << ",\"fit\":[" << fits_done.load() << "," << fit_steps.load() << "," << (fit_steps.load()?static_cast<double>(fit_ns.load())/1000./static_cast<double>(fit_steps.load()):0.) << "," << fit_max_ns.load()/1000. << "," << fit_shift_mm.load() << "," << fit_slide_mm.load() << "]" << ",\"cast_us\":" << [&]{LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=d2vr::NativeInteractionAim::weapon_cast_count_.load();return n && f.QuadPart?static_cast<double>(d2vr::NativeInteractionAim::weapon_cast_ticks_.load())*1e6/static_cast<double>(f.QuadPart)/static_cast<double>(n):0.0;}() << "}" << ",\"weapon_collision\":{\"enabled\":" << (weapon_collision_enabled?"true":"false") << ",\"casts\":" << d2vr::NativeInteractionAim::weapon_casts_.load() << ",\"contact_frames\":" << weapon_contact_frames.load() << ",\"events\":" << weapon_contact_events.load() << ",\"events_side\":[" << weapon_events_side[0].load() << ',' << weapon_events_side[1].load() << "],\"blade_side\":[" << weapon_blade_casts_side[0].load() << ',' << weapon_blade_casts_side[1].load() << "]}" << ",\"hand_clamp\":{\"active\":" << [&]{
+<< ",\"checks\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<thumb_checks[i][0].load()<<','<<thumb_checks[i][1].load()<<']';}return o.str();}() << "]}}" << ",\"watch\":[" << prop_watch.size() << "," << prop_watch.reads() << "," << (watch_calls.load()?static_cast<double>(watch_ns.load())/1000./static_cast<double>(watch_calls.load()):0.) << "," << watch_max_ns.load()/1000. << "," << watch_found.load() << "," << watch_missed.load() << "]" << ",\"fit\":[" << fits_done.load() << "," << fit_steps.load() << "," << (fit_steps.load()?static_cast<double>(fit_ns.load())/1000./static_cast<double>(fit_steps.load()):0.) << "," << fit_max_ns.load()/1000. << "," << fit_shift_mm.load() << "," << fit_slide_mm.load() << "]" << ",\"cast_us\":" << [&]{LARGE_INTEGER f{};QueryPerformanceFrequency(&f);const auto n=d2vr::NativeInteractionAim::weapon_cast_count_.load();return n && f.QuadPart?static_cast<double>(d2vr::NativeInteractionAim::weapon_cast_ticks_.load())*1e6/static_cast<double>(f.QuadPart)/static_cast<double>(n):0.0;}() << "}" << ",\"weapon_collision\":{\"enabled\":" << (weapon_collision_enabled?"true":"false") << ",\"casts\":" << d2vr::NativeInteractionAim::weapon_casts_.load() << ",\"contact_frames\":" << weapon_contact_frames.load() << ",\"events\":" << weapon_contact_events.load() << ",\"events_side\":[" << weapon_events_side[0].load() << ',' << weapon_events_side[1].load() << "],\"blade_side\":[" << weapon_blade_casts_side[0].load() << ',' << weapon_blade_casts_side[1].load() << "],\"contact\":" << weapon_contact_json() << "}" << ",\"hand_clamp\":{\"active\":" << [&]{
             // Physical hands (C9/C14): per side [left,right]. state 0 free / 1 contact / 2 released; missed_notes and repeated_updates stay 0
             // (the note_drawn contract); unanswered: frames whose palm post the game thread had not answered (its previous answer was read);
             // cast_us: the clamp's own casts per frame (mean / max over 2 s, last scope), budget 500 (C14). exclusion: hits = another body
@@ -17737,7 +17773,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
          if(!rvas.empty()) {const auto n=d2vr::NativeCallTrace::install(image_base,rvas);
              try {std::ofstream f(output_directory/L"native-call-trace.csv");f<<"# hooks "<<n<<'/'<<rvas.size()<<'\n';} catch(...) {}}}
         gun_shape_override={};{std::ifstream knob(root/L"build"/L"gun-shape");GunShape v{};if(knob>>v[0]>>v[1]>>v[2]>>v[3] && v[2]>.05 && v[2]<.8 && v[3]>=0 && v[3]<.15) gun_shape_override=v;}
-        {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();reset_clamp_state();
+        {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;
+        legacy_weapon_contact=fs::exists(root/L"build"/L"legacy-weapon-contact");weapon_collision.set_legacy(legacy_weapon_contact);   // v1289: the v1288 blade response
+        for(auto& w:weapon_contact_status) {w.frames=0;w.plane_changes=0;w.reversals=0;w.seconds=0;w.damped_seconds=0;w.max_jump_m=0;w.max_turn_deg=0;w.hand_max_jump_m=0;}
+        hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();reset_clamp_state();
         hand_clamp_enabled=!fs::exists(root/L"build"/L"no-hand-clamp"); // headset A/B: the pre-Task-5 drawn hand
         d2vr::NativeInteractionAim::clamp_exclude_info_zero_=fs::exists(root/L"build"/L"hand-clamp-exclude-info-zero"); // diagnostic: +0x14 of the exclusion sweeps is 0, not the prop's filter word
         native_interaction_aim.slash_speed(vr_combat_enabled?slash_speed_factor:1.f);

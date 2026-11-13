@@ -140,9 +140,11 @@ void reacquire() {
 }
 // M1: a 4.5 m/s sword stab 20 cm into a wall, in the publication's order (clamp -> blade from the drawn grip -> compose_blade ->
 // note_drawn). The blade's answers are one frame late (the previous segment's hit), as weapon_hit gives them. Judged: once the
-// blade touches, the tip never recoils more than 5 mm off the surface and settles on it.
-void blade_stab() {
-    HandClamp clamp;WeaponCollision blade_policy;ClampOutput out{};double now=0;bool started=false;
+// blade touches, the tip never recoils more than 5 mm off the surface and settles on it. v1289 (contact_step, the default): the tip rests
+// blade_skin (1 cm) off the surface for a push too (legacy_step's push rested it on the surface), reaches that without overshoot and never
+// recoils past it.
+void blade_stab(bool legacy) {
+    HandClamp clamp;WeaponCollision blade_policy;blade_policy.set_legacy(legacy);ClampOutput out{};double now=0;bool started=false;
     const auto root=level_frame({0,0,0},{1,0,0});const double blade=.65;
     std::optional<CollisionHit> last_hit;   // what the previous frame's blade segment met
     double worst_recoil=0,last_tip=0;bool touched=false;
@@ -165,9 +167,10 @@ void blade_stab() {
         if(touched) worst_recoil=std::max(worst_recoil,1-last_tip);
         now+=dt;
     }
-    CHECK(touched && worst_recoil<=.005 && std::abs(last_tip-1)<1e-6);
+    const double rest=legacy?0.:CollisionConfig{}.blade_skin;
+    CHECK(touched && worst_recoil<=rest+.005 && std::abs(last_tip-(1-rest))<1e-6);
     CHECK(clamp.missed_notes(0)==0 && out.state==ClampState::free);
-    std::printf("blade_stab: worst recoil %.4f m, settled tip %.6f\n",worst_recoil,last_tip);
+    std::printf("blade_stab (%s): worst recoil %.4f m, settled tip %.6f\n",legacy?"legacy":"v1289",worst_recoil,last_tip);
 }
 
 // A blade push never moves the hand through a plane the clamp holds: the hand pressed into the wall at x=1, the reversed blade's
@@ -180,7 +183,7 @@ void blade_push_stays_out() {
         out=clamp.update(0,in);started=true;clamp.note_drawn(0,root,out.drawn.position);now+=dt;
     }
     CHECK(std::abs(out.drawn.position.x-.945)<1e-6);
-    WeaponCollision blade_policy;
+    WeaponCollision blade_policy;blade_policy.set_legacy(true);   // legacy_step pushes all 10.5 cm in one frame (v1289 glides there); compose_blade is the same
     const auto r=blade_policy.update(0,dt,out.drawn.position,{-1,0,0},.65,[](Vec3,Vec3)->std::optional<CollisionHit> {return CollisionHit{{.4,0,1},{1,0,0},.5,9};});
     CHECK(r.contact && r.shift.x>.1);                               // the blade alone would push the hand 10 cm into the wall
     const auto composed=compose_blade(clamp,0,pose_at({}).basis,out.drawn.position,r,std::nullopt);
@@ -447,7 +450,7 @@ void released_shot_actual_receipts() {
 } // namespace
 
 int main() {
-    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab();blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();shot_clipped_at_held_planes();reload_forgets();released_shot_actual_receipts();
+    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab(true);blade_stab(false);blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();shot_clipped_at_held_planes();reload_forgets();released_shot_actual_receipts();
     std::puts("PASS hand_clamp_feed_check: C9 yields, C14 cadence, answer routing, open-hand probe sets, re-acquire hold, blade stab, shot origin");
     return 0;
 }
