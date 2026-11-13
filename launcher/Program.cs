@@ -161,7 +161,7 @@ sealed class MainForm : Form
         { IsSlider = true, Min = 50, Max = 200, Step = 5, Page = 25, Format = v => (v / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "x" };
         aa = new Option("Anti-aliasing", AaHelp, AaBase);
         RefreshDlssChoices();
-        perf = new Option("Performance mode (experimental)", PerfHelp, ("Off", 0), ("On", 1));  // the alternate-eye knob file, written on Save through the Features path
+        perf = new Option("Performance mode", PerfHelp, ("Off", 0), ("On (experimental)", 1));  // the alternate-eye knob file, written on Save through the Features path
         sharp = new Option("Sharpening", "Contrast-adaptive sharpening after upscaling.", ("Off", 0.0), ("Low", .25), ("Medium", .5), ("High", .75), ("Max", 1.0));
         hud = new Option("HUD size", "How large the game HUD is drawn around the centre of your view.", ("55% (centre)", 55), ("65% (default)", 65), ("75%", 75), ("85%", 85), ("100% (game layout)", 100), ("125%", 125), ("150%", 150), ("200%", 200));
         mirror = new Option("Monitor view", "What the desktop window mirrors while you play in VR.", ("Right eye", 0), ("Left eye", 1), ("Both eyes", 2), ("Off (fastest)", 3));

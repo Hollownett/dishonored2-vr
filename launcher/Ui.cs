@@ -487,17 +487,35 @@ sealed class OptionList : ArtControl
     public int Selected = -1;
     public event Action? SelectionChanged;
     int hover = -1; bool drag;
+    int scroll;  // pixels the rows are moved up when they do not all fit (mouse wheel, or the selection moving out of view)
 
     public OptionList() { SetStyle(ControlStyles.Selectable, true); TabStop = true; AccessibleRole = AccessibleRole.List; AccessibleName = "VR settings"; }
     public Option? Current => Selected >= 0 && Selected < Rows.Count ? Rows[Selected] as Option : null;
     int Headings => Rows.Count(r => r is string);
     public int IdealHeight => Headings * S(32) + (Rows.Count - Headings) * S(34);
+    int HeadH => S(32);
+    /// <summary>Rows shrink to fit down to a readable minimum; below that the list scrolls.</summary>
+    int RowH { get { int opts = Rows.Count - Headings; return opts == 0 ? 0 : Math.Clamp((Height - Headings * HeadH) / opts, S(24), S(36)); } }
+    int Total => Headings * HeadH + (Rows.Count - Headings) * RowH;
+    int MaxScroll => Math.Max(0, Total - Height);
 
     IEnumerable<(object Row, Rectangle R, int I)> RowRects()
     {
-        int opts = Rows.Count - Headings, hh = S(32), rh = opts == 0 ? 0 : Math.Clamp((Height - Headings * hh) / opts, S(24), S(36)), y = 0;
+        int hh = HeadH, rh = RowH, y = -Math.Clamp(scroll, 0, MaxScroll);
         for (int i = 0; i < Rows.Count; i++) { int h = Rows[i] is string ? hh : rh; yield return (Rows[i], new Rectangle(0, y, Width, h), i); y += h; }
     }
+    void ScrollTo(int value) { value = Math.Clamp(value, 0, MaxScroll); if (value == scroll) return; scroll = value; hover = -1; Invalidate(); }
+    /// <summary>Brings row i into view, together with the section heading right above it.</summary>
+    void EnsureVisible(int i)
+    {
+        int first = i > 0 && Rows[i - 1] is string ? i - 1 : i, top = 0, bottom = 0, y = 0;
+        for (int k = 0; k <= i; k++) { int h = Rows[k] is string ? HeadH : RowH; if (k == first) top = y; y += h; bottom = y; }
+        if (top < scroll) ScrollTo(top); else if (bottom > scroll + Height) ScrollTo(bottom - Height);
+    }
+    /// <summary>One wheel notch scrolls three rows (the Windows default of three lines), as the Features list does.</summary>
+    protected override void OnMouseWheel(MouseEventArgs e) { ScrollTo(scroll - e.Delta * 3 * Math.Max(1, RowH) / 120); base.OnMouseWheel(e); }
+    protected override void OnMouseEnter(EventArgs e) { if (MaxScroll > 0 && !Focused && CanFocus) Focus(); base.OnMouseEnter(e); }  // the wheel goes to the focused control
+    protected override void OnResize(EventArgs e) { base.OnResize(e); scroll = Math.Clamp(scroll, 0, MaxScroll); if (Selected >= 0 && Selected < Rows.Count) EnsureVisible(Selected); }
     int LabelW => Math.Max(S(190), Width * 42 / 100);
     Rectangle ValueRect(Rectangle r) => new(LabelW, r.Y, r.Right - S(14) - LabelW, r.Height);
     Rectangle TrackRect(Rectangle r) { var v = ValueRect(r); return new Rectangle(v.X + S(6), r.Y + (r.Height - S(10)) / 2, v.Width - S(78), S(10)); }
@@ -510,7 +528,7 @@ sealed class OptionList : ArtControl
     void Select(int i)
     {
         if (i == Selected || i < 0 || i >= Rows.Count || Rows[i] is not Option) return;
-        Selected = i; Invalidate(); SelectionChanged?.Invoke();
+        Selected = i; EnsureVisible(i); Invalidate(); SelectionChanged?.Invoke();
         AccessibilityNotifyClients(AccessibleEvents.Focus, -1);
     }
     void Change(Option o, int dir, bool page = false)
@@ -603,6 +621,12 @@ sealed class OptionList : ArtControl
                 Ui.Arrow(g, ar, false, o.Index < o.Items.Count - 1 ? (on ? 1f : .5f) : .18f, tint);
                 TextRenderer.DrawText(g, ValueText(o), value, Rectangle.FromLTRB(al.Right + S(6), r.Y, ar.X - S(6), r.Bottom), fg, vc | TextFormatFlags.HorizontalCenter);
             }
+        }
+        if (MaxScroll > 0)  // a thin scroll thumb on the right edge, as on the Features list
+        {
+            int th = Math.Max(S(24), Height * Height / Total), ty = (Height - th) * Math.Clamp(scroll, 0, MaxScroll) / MaxScroll;
+            using var b = new SolidBrush(Color.FromArgb(110, Ui.Soft));
+            g.FillRectangle(b, Width - S(4), ty, S(3), th);
         }
     }
 }
