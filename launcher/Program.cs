@@ -932,7 +932,7 @@ sealed class MainForm : Form
         showFeatures = on;
         options.Visible = !on; save.Visible = !on; reload.Visible = !on; featList.Visible = on; restore.Visible = on; dlssButton.Visible = !on;
         featToggle.Text = on ? "Back to options" : "Features";
-        if (on) LoadFeatures(); else SetSettingsMsg("", Ui.Dim);
+        if (on) LoadFeatures(keepPerf: true); else SetSettingsMsg("", Ui.Dim);  // opening the list keeps an unsaved Performance mode choice
         LayoutSettings(); pages[1].Invalidate(true);
         if (on && featList.Rows.Count > 0) featList.Rows[0].Focus(); else if (!on) options.Focus();
     }
@@ -949,7 +949,7 @@ sealed class MainForm : Form
     }
 
     /// <summary>Reads the knob files into the check rows (no writes).</summary>
-    void LoadFeatures()
+    void LoadFeatures(bool keepPerf = false)
     {
         if (featuresError != null) { SetSettingsMsg(featuresError, Ui.Bad); return; }
         loadingFeatures = true;
@@ -957,7 +957,7 @@ sealed class MainForm : Form
         {
             var st = Features.State(FeatureBuild, features);
             for (int i = 0; i < shownFeatures.Count; i++) featList.Rows[i].SetSilently(st[shownFeatures[i].Id].On);
-            if (features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf) Select(perf, st[pf.Id].On ? 1 : 0, "");
+            if (!keepPerf && features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf) Select(perf, st[pf.Id].On ? 1 : 0, "");
             RefreshAaNote();
             if (showFeatures) SetSettingsMsg("Each switch is saved at once. It applies the next time VR starts.", Ui.Dim);
         }
