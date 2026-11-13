@@ -247,13 +247,21 @@ template<class Read> bool severed_limb_entity(Read& read,std::uintptr_t base,std
     if(!rva || !*rva || !read(base+*rva+16,name,sizeof(name)-1) || std::strcmp(name,".?AVarkSeveredLimb@@")!=0) return false;
     severed_limb_vtable.store(*table,std::memory_order_relaxed);return true;
 }
+template<class Read> bool hand_ragdoll(Read& read,std::uintptr_t base,std::uintptr_t entity);
+// v1292 (user, 2026-11-13: "hand drag for dogs - just attach the hand to it as to a regular prop"): a dead or unconscious NPC whose ragdoll is not the
+// 17-body human one the corpse hold knows (a hound) is held like a severed limb: its body nearest the palm sticks to the hand, the rest hangs from it.
+template<class Read> bool prop_held_npc_body(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+    if(!rig::typed(read,base,entity,0x1c5e108)) return false;
+    const auto state=rig::value<unsigned char>(read,entity+0xd1);
+    return state && (*state&0x28)!=0 && !hand_ragdoll(read,base,entity);
+}
 // index >= 0: that body (a held one, re-read every pass); index < 0: the body nearest `toward`.
 template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Read& read,std::uintptr_t base,std::uintptr_t entity,int index,Vec3 toward={}) {
     using namespace rig;
     const auto refuse=[&](unsigned why) -> std::optional<NativeRigidBody> {
         severed_limb_reads_refused.fetch_add(1,std::memory_order_relaxed);severed_limb_why[why].fetch_add(1,std::memory_order_relaxed);return {};};
     const auto game=value<std::uintptr_t>(read,base+0x39a5290);
-    if(!game || !typed(read,base,*game,0x1c940a8) || !severed_limb_entity(read,base,entity)) return {};
+    if(!game || !typed(read,base,*game,0x1c940a8) || !(severed_limb_entity(read,base,entity) || prop_held_npc_body(read,base,entity))) return {};
     const auto id=value<std::uint32_t>(read,entity+0xa8);
     if(!id || *id==0x3fff0010 || (*id>>16)>=0x3fff || value<std::uintptr_t>(read,*game+0x3130b0+(*id>>16)*8)!=entity) return refuse(0);
     const auto model=value<std::uintptr_t>(read,entity+0xf0);

@@ -14886,7 +14886,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 const bool carry_target=d2vr::grab_carryables.load(std::memory_order_relaxed) && in.native && d2vr::native_carryable(read_self,image_base,static_cast<std::uintptr_t>(in.native->id));
                                                 if(carry_target) in.native.reset(); // the grab takes it when in reach, else nothing
                                                 in.since_ms=grip_intent[h].decision_since(now_gi);in.now_ms=now_gi;
-                                                in.native_corpse=!legacy_corpse_carry && in.native && in.native->kind!=d2vr::PalmKind::loot && native_grab.is_corpse_entity(in.native->id);   // Ruling V1
+                                                in.native_corpse=!legacy_corpse_carry && in.native && in.native->kind!=d2vr::PalmKind::loot && native_grab.is_corpse_entity(in.native->id) &&
+                                                    d2vr::hand_ragdoll(read_self,image_base,static_cast<std::uintptr_t>(in.native->id));   // Ruling V1; v1292: a hound's body is no V1 corpse - out of the palm's reach its grip is the game's held Carry (v1291 stopped at ~20%: the buffer turned it into an empty grab)
                                                 if(grip_intent[h].kind()==d2vr::GripIntent::Kind::none || grip_intent[h].kind()==d2vr::GripIntent::Kind::deciding) {grip_corpse_gate[h]=in.native_corpse;grip_corpse_entity[h]=in.native_corpse?in.native->id:0;}   // fixed for the press once decided
                                                 in.choke_owns=h==choke_side && (choke_offer.has_value() || control_active_choke!=0);
                                                 in.takedown_offered=control_takedown.any();

@@ -448,6 +448,7 @@ private:
                 // A guard the game offers a choke or takedown for is no body to grab (headset 2026-11-01: a fist at his collar in
                 // combat held him physically for up to 7 s and the choke never started); the press stays the game's.
                 if(npc_reserved(*id,now)) return {};
+                if(corpse_enabled_ && prop_held_npc_body(read_,base_,*entity)) return native_severed_limb_body(read_,base_,*entity,-1,p.palm.valid?p.palm.palm:p.hand.position);   // v1292: a hound, held like a prop
                 return corpse(*entity);
             }
             if(limb) return native_severed_limb_body(read_,base_,*entity,-1,p.palm.valid?p.palm.palm:p.hand.position);
