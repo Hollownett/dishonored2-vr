@@ -389,7 +389,7 @@ public:
          <<"},\"moved_100ms\":"<<moved_.load()<<",\"stationary_100ms\":"<<stationary_.load()<<",\"ended_early\":"<<ended_early_.load()
          <<",\"alive_4s\":"<<alive_4s_.load()<<",\"entity_finds\":"<<entity_finds_.load()<<",\"unstarted_shots\":"<<unstarted_shots_.load()<<",\"ammo\":{\"pool_before\":"<<pool_before_.load()<<",\"pool_after\":"<<pool_after_.load()
          <<",\"mag_before\":"<<mag_before_.load()<<",\"mag_after\":"<<mag_after_.load()<<",\"spent\":"<<spent_.load()
-         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"v1094\":["<<ammo_swaps_.load()<<','<<ammo_splits_.load()<<','<<spreads_.load()<<','<<bursts_.load()<<','<<own_shots_.load()<<','<<copy_ammo_sets_.load()<<','<<wheel_picks_.load()<<','<<same_item_keeps_.load()<<','<<native_follows_.load()<<"],\"gate\":["<<gate_state_.load()<<','<<gated_.load()<<','<<gate_passed_.load()
+         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"v1094\":["<<ammo_swaps_.load()<<','<<ammo_splits_.load()<<','<<spreads_.load()<<','<<bursts_.load()<<','<<own_shots_.load()<<','<<copy_ammo_sets_.load()<<','<<wheel_picks_.load()<<','<<same_item_keeps_.load()<<','<<native_follows_.load()<<"],\"bolts\":["<<bolts_[0].load()<<','<<bolts_[1].load()<<','<<bolts_[2].load()<<"],\"gate\":["<<gate_state_.load()<<','<<gated_.load()<<','<<gate_passed_.load()
          <<','<<hook_status_[0]<<','<<hook_status_[1]<<','<<dry_pulls_.load()<<','<<scene_refills_.load()<<"],\"hands\":[";   // v1117: copy WEAPON_FIRE gate [state, swallowed, passed, MH gun, MH crossbow], dry pulls
         const auto now=clock();
         for(unsigned s=0;s<2;++s) {
@@ -688,9 +688,16 @@ private:
     // Which hand's choice an ammo change is. The wheel's equip sets the weapon's ammo (comp+0x98) for both hands; a choice made by a hand
     // that holds a copy of that weapon is that copy's own: kept for the copy, and the native weapon gets its ammo back through the game's
     // own switch. A change by any other hand (within 2.5 s of its wheel choice or not) is the native weapon's.
+    template<class Read> static int ammo_index(Read& read,std::uintptr_t comp,std::uintptr_t entry) {   // v1281 status: m_ammoTypes index, -1 none
+        const auto decl=comp?rig::value<std::uintptr_t>(read,comp+8):std::nullopt;const auto first=decl && *decl?rig::value<std::uintptr_t>(read,*decl+0x188):std::nullopt;
+        return first && *first && entry>=*first && (entry-*first)%0x70==0 && (entry-*first)/0x70<16?static_cast<int>((entry-*first)/0x70):-1;
+    }
     template<class Read> static void track_ammo(std::uintptr_t base,Read& read) {
         const auto now=clock();if(now-ammo_looked_<100) return;
         ammo_looked_=now;
+        {Why wb{};const auto lb=locate(base,read,Shot::crossbow,wb);   // v1281 status bolts: [native, left copy, right copy] crossbow ammo index (-1 none)
+         bolts_[0]=lb?ammo_index(read,lb->comp,lb->ammo):-1;
+         for(unsigned side=0;side<2;++side) {const auto cc=copy_kind_[side].load()==1?copy_comp_[side]:0;const auto a=cc?rig::value<std::uintptr_t>(read,cc+0x98):std::nullopt;bolts_[1+side]=a?ammo_index(read,cc,*a):-1;}}
         for(unsigned k=0;k<2;++k) {   // v1279: the native instance keeps its own ammo (wheel_pick sets it); only an empty own type lets the game switch
             Why why{};const auto l=locate(base,read,static_cast<Shot::Kind>(k),why);if(!l) continue;
             if(seen_comp_[k]!=l->comp) {
@@ -700,12 +707,13 @@ private:
             const auto cur=l->ammo,own=seen_ammo_[k];if(cur==own) continue;
             const auto own_decl=entry_valid(read,l->comp,own)?rig::value<std::uintptr_t>(read,own):std::nullopt;
             if(!own_decl || !*own_decl || pool_count(read,l->inventory,*own_decl)<=0) {seen_ammo_[k]=cur;set_own(l->comp,cur);++native_follows_;continue;}   // ran out: the game's switch stands
+            if(now-native_try_[k]<1000) continue;native_try_[k]=now;   // v1281: a refused switch is retried once a second, not every 100 ms (each try unloads and reloads)
             if(select_ammo(base,l->comp,*own_decl)) ++ammo_splits_;
         }
         for(unsigned side=0;side<2;++side) if(const int t=test_ammo_[side].exchange(-1);t>=0) { // the test command
             const int k=copy_kind_[side].load();const auto cc=copy_comp_[side];if(k<0 || k>1 || !cc) continue;
             const auto decl=rig::value<std::uintptr_t>(read,cc+8);const auto first=decl?rig::value<std::uintptr_t>(read,*decl+0x188):std::nullopt;
-            if(first && *first) {copy_ammo_[side][k]=*first+static_cast<std::uintptr_t>(t)*0x70;set_own(cc,copy_ammo_[side][k]);}
+            if(first && *first) {copy_ammo_[side][k]=*first+static_cast<std::uintptr_t>(t)*0x70;set_own(cc,copy_ammo_[side][k]);if(const auto it=rig::value<std::uintptr_t>(read,copy_ammo_[side][k]);it && *it) hand_choice_[side][k]=*it;}   // as a wheel choice of this hand
         }
         for(unsigned side=0;side<2;++side) { // v1096: a real copy selects its own ammo itself (0x63a490 on its component: the bolt and magazine follow)
             const int k=copy_kind_[side].load();const auto cc=copy_comp_[side];if(k<0 || k>1 || !cc) continue;
@@ -716,14 +724,18 @@ private:
             if(!want || !entry_valid(read,cc,want)) continue;
             set_own(cc,want);copy_ammo_[side][k]=want;
             const auto have=rig::value<std::uintptr_t>(read,cc+0x98);if(!have || *have==want) continue;
+            if(copy_try_[side].comp==cc && copy_try_[side].entry==want && now-copy_try_[side].at<1000) continue;   // v1281: once a second per refused choice
+            copy_try_[side]={cc,want,now};
             const auto item=rig::value<std::uintptr_t>(read,want);
             if(item && *item && select_ammo(base,cc,*item)) ++copy_ammo_sets_;
         }
     }
+    struct Try {std::uintptr_t comp{},entry{};std::uint64_t at{};};
+    inline static std::array<Try,2> copy_try_{};inline static std::array<std::uint64_t,2> native_try_{};
     // v1279: each weapon instance's own ammo entry, by component (game thread). ponytail: 16 instances, least recently used replaced.
     struct OwnAmmo {std::uintptr_t comp{},entry{};std::uint64_t used{};};
     inline static std::array<OwnAmmo,16> own_{};inline static std::uint64_t own_tick_{};
-    inline static std::atomic<std::uint64_t> native_follows_{};
+    inline static std::atomic<std::uint64_t> native_follows_{};inline static std::array<std::atomic<int>,3> bolts_{{-1,-1,-1}};
     static std::uintptr_t own_of(std::uintptr_t comp) noexcept {for(auto& o:own_) if(comp && o.comp==comp) {o.used=++own_tick_;return o.entry;}return 0;}
     static void set_own(std::uintptr_t comp,std::uintptr_t entry) noexcept {
         if(!comp || !entry) return;
