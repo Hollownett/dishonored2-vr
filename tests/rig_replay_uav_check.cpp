@@ -6,7 +6,8 @@
 //   2  two RTVs + an engine PS UAV at u3 (fallback; the engine UAV restored)
 //   3  eight RTVs (fallback; the eight-RTV restore)
 // and D32 / D24 scene depth; v1288: plus edges inside 2x2 quads (variant 1) and thin held parts replayed before the farther held body under
-// them (variant 2, the frayed Heart of the v1287 sim). Checks: the mask texture is bit-identical, both converted slices (take_target of slice 0 and 1) are
+// them (variant 2, the frayed Heart of the v1287 sim); v1295: thin held parts (a crossbow's bolt and mechanism) drawn in a pass the pass map does
+// not name for the one-view (variant 3: Scope pass 2, the one-view is 1), one of them into another depth target and one with depth writes off. Checks: the mask texture is bit-identical, both converted slices (take_target of slice 0 and 1) are
 // bit-identical (depth and class of the nearest), the engine's colour targets are bit-identical (the UAV path writes none), the engine's
 // RTVs/DSV/UAVs/PS/depth state/blend are restored exactly, spot pixels hold the nearest draw's class (held over rig; the farther draw
 // replayed last loses), the status counts the path and the fallbacks, and (when the SDK layers are installed) no D3D11 debug-layer error.
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <array>
 #include "../src/rig_mask.hpp"
 #pragma comment(lib,"d3d11.lib")
 #pragma comment(lib,"d3dcompiler.lib")
@@ -57,6 +59,7 @@ static Result run(bool legacy,int cfg,bool d24,bool want_debug,int variant=0) {
     t.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D> depth;dev->CreateTexture2D(&t,nullptr,&depth);
     D3D11_DEPTH_STENCIL_VIEW_DESC dv{};dv.Format=d24?DXGI_FORMAT_D24_UNORM_S8_UINT:DXGI_FORMAT_D32_FLOAT;dv.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
     ComPtr<ID3D11DepthStencilView> dsv;CHECK(SUCCEEDED(dev->CreateDepthStencilView(depth.Get(),&dv,&dsv)));
+    ComPtr<ID3D11Texture2D> other_depth;dev->CreateTexture2D(&t,nullptr,&other_depth);ComPtr<ID3D11DepthStencilView> other_dsv;CHECK(SUCCEEDED(dev->CreateDepthStencilView(other_depth.Get(),&dv,&other_dsv))); // v1295: a shadow map's
     D3D11_TEXTURE2D_DESC ct=t;ct.Format=DXGI_FORMAT_R8G8B8A8_UNORM;ct.BindFlags=D3D11_BIND_RENDER_TARGET;
     ComPtr<ID3D11Texture2D> colour[8];ComPtr<ID3D11RenderTargetView> rtv[8];
     for(int i=0;i<8;++i) {dev->CreateTexture2D(&ct,nullptr,&colour[i]);dev->CreateRenderTargetView(colour[i].Get(),nullptr,&rtv[i]);}
@@ -77,6 +80,7 @@ static Result run(bool legacy,int cfg,bool d24,bool want_debug,int variant=0) {
     ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;dev->CreateVertexShader(vsb->GetBufferPointer(),vsb->GetBufferSize(),nullptr,&vs);dev->CreatePixelShader(psb->GetBufferPointer(),psb->GetBufferSize(),nullptr,&ps);
     D3D11_BUFFER_DESC cbd{};cbd.ByteWidth=sizeof(Params);cbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ComPtr<ID3D11Buffer> cb;dev->CreateBuffer(&cbd,nullptr,&cb);params_cb=cb.Get();
     D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=TRUE;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;ds.DepthFunc=D3D11_COMPARISON_GREATER;ComPtr<ID3D11DepthStencilState> prepass;dev->CreateDepthStencilState(&ds,&prepass);
+    ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;ComPtr<ID3D11DepthStencilState> no_write;dev->CreateDepthStencilState(&ds,&no_write); // v1295
     D3D11_BLEND_DESC bl{};bl.RenderTarget[0].RenderTargetWriteMask=0xf;ComPtr<ID3D11BlendState> blend;dev->CreateBlendState(&bl,&blend);
     D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;ComPtr<ID3D11RasterizerState> rs;dev->CreateRasterizerState(&rd,&rs);
     const D3D11_VIEWPORT vp{0,0,float(N),float(N),0,1};c->RSSetViewports(1,&vp);c->RSSetState(rs.Get());c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -92,7 +96,8 @@ static Result run(bool legacy,int cfg,bool d24,bool want_debug,int variant=0) {
     const auto draw=[](ID3D11DeviceContext* x,const d2vr::RigMask::DrawArgs& a) noexcept {x->Draw(a.count,a.start);};
     const auto targets=[](ID3D11DeviceContext* x,UINT n,ID3D11RenderTargetView* const* r,ID3D11DepthStencilView* d) noexcept {x->OMSetRenderTargets(n,r,d);};
     // kind 0 world, 1 rig, 2 held. Reverse-Z: larger z is nearer.
-    struct D {float r[4];float z[3];int kind;};
+    // v1295: pass = the Scope's pass view (1 the one-view's, 2 another pass); special 1 = into another depth target, 2 = depth writes off
+    struct D {float r[4];float z[3];int kind;int pass{1};int special{};};
     // variant 0: A's bottom edge on a 2x2 quad boundary; 1: inside a quad row (C passes below it); 2 (v1288): thin held parts ("straps", 2-3 px,
     // their edges inside quads) replayed BEFORE the farther held body under them, as a skinned held item's sub-meshes can come
     std::vector<D> scene{
@@ -109,15 +114,26 @@ static Result run(bool legacy,int cfg,bool d24,bool want_debug,int variant=0) {
         {{.2f,-.7f,.29f,.7f},{.58f,-.01f,0},2},             // strap, about 3 px, sloped
         {{-.7f,-.7f,.7f,.7f},{.45f,.02f,.01f},2},           // the held body under them, replayed after them
         {{-.9f,-.9f,-.3f,-.2f},{.5f,0,0},1}};               // a rig hand over part of the body
-    const std::uint64_t replayed=static_cast<std::uint64_t>(std::count_if(scene.begin(),scene.end(),[](const D& d) {return d.kind!=0;}));
+    if(variant==3) scene={   // v1295 (sim v1291: the placed bolt and mechanism were scenery in both masks and absent from the rig target)
+        {{-1,-1,1,1},{.1f,0,0},0},                          // world far
+        {{-.7f,-.7f,.7f,.7f},{.45f,.02f,.01f},2},           // the held body, in the one-view's pass
+        {{-.03125f,-.8f,.03125f,.8f},{.6f,0,0},2,2},        // strap (the bolt), columns 31-32, drawn in another pass into the scene depth
+        {{-.8f,-.03125f,.8f,.03125f},{.62f,0,0},2,2},       // strap across it, rows 31-32, the same
+        {{.3f,.3f,.6f,.6f},{.7f,0,0},2,2,1},                // a held draw of another pass into ANOTHER depth target: never this mask's
+        {{-.6f,.3f,-.3f,.6f},{.7f,0,0},2,2,2}};             // a held draw of another pass that writes no depth: not in the scene depth
+    const std::uint64_t replayed=static_cast<std::uint64_t>(std::count_if(scene.begin(),scene.end(),[](const D& d) {return d.kind!=0 && !d.special;}));
     for(UINT take=0;take<2;++take) { // the scene twice: a take converts one slice and clears both
         for(const D& d:scene) {
             cur={};std::memcpy(cur.r,d.r,16);std::memcpy(cur.z,d.z,12);c->UpdateSubresource(cb.Get(),0,nullptr,&cur,0,0);
             ID3D11ShaderResourceView* s=d.kind==1?rig_view.Get():other_view.Get();c->VSSetShaderResources(0,1,&s);
-            d2vr::RigMask::Scope scope(c.Get(),1);
-            if(d.kind==2) d2vr::RigMask::mark_held();
-            if(d.kind) d2vr::RigMask::mark_target(true,true);
-            c->Draw(6,0);scope.after({2,6,1,0,0,0},draw,targets);
+            if(d.special==1) c->OMSetRenderTargets(nrt,engine_rtvs,other_dsv.Get());
+            if(d.special==2) c->OMSetDepthStencilState(no_write.Get(),3);
+            {d2vr::RigMask::Scope scope(c.Get(),static_cast<std::uintptr_t>(d.pass));
+             if(d.kind==2) d2vr::RigMask::mark_held();
+             if(d.kind) d2vr::RigMask::mark_target(true,true);
+             c->Draw(6,0);scope.after({2,6,1,0,0,0},draw,targets);}
+            if(d.special==1) c->OMSetRenderTargets(nrt,engine_rtvs,dsv.Get());
+            if(d.special==2) c->OMSetDepthStencilState(prepass.Get(),3);
         }
         { // the engine's state is its own again
             ID3D11RenderTargetView* r[8]{};ID3D11DepthStencilView* dd{};ID3D11UnorderedAccessView* u[8]{};c->OMGetRenderTargetsAndUnorderedAccessViews(8,r,&dd,0,8,u);
@@ -202,6 +218,30 @@ int main() {
             u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1]?"identical":"DIFFERENT",strap);
         CHECK(diff==0 && u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1] && u.colour==l.colour);
         if(variant==2) CHECK(strap>=180); // two crossing 2-px straps over 1.6 NDC (about 51 px each way): ~200 strap pixels
+    }
+    // v1295: held parts drawn outside the one-view's mapped passes are replayed when they write the scene depth (both paths, identical), never
+    // when they write another depth target (the mask is not remade for it: the body stays) or no depth; the outcome per held mark is counted
+    for(const bool d24:{false,true}) {
+        const std::string before=d2vr::RigMask::json();
+        const Result u=run(false,0,d24,debug,3),l=run(true,0,d24,debug,3);
+        const std::string after=d2vr::RigMask::json();
+        unsigned strap=0,strap_s[2]{},other=0,body=0;
+        for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) {
+            strap+=(x==31 || x==32 || y==31 || y==32) && f_at(u.mask,x,y,1)==2.f && f_at(u.mask,x,y,0)>.55f;
+            other+=f_at(u.mask,x,y,0)>.65f || f_at(u.slice[0],x,y,0)>.65f || f_at(u.slice[1],x,y,0)>.65f;
+            body+=f_at(u.mask,x,y,1)==2.f && f_at(u.mask,x,y,0)<.5f;
+        }
+        for(unsigned k=0;k<2;++k) {const float ox=offsets[k][0];   // the vertical strap in slice k (shifted by the slice's offset)
+            for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) strap_s[k]+=f_at(u.slice[k],x,y,1)==253.f && std::abs(f_at(u.slice[k],x,y,0)-.6f)<1e-6f && std::abs(int(x)-int(px(ox)))<=1;}
+        const auto marks=[](const std::string& j) {std::array<std::uint64_t,6> m{};const auto p=j.find("\"held_marks\":[");if(p==std::string::npos) return m;
+            const char* q=j.c_str()+p+14;for(auto& v:m) {char* e{};v=std::strtoull(q,&e,10);q=e;if(*q==',') ++q;}return m;};
+        const auto m0=marks(before),m1=marks(after);std::array<std::uint64_t,6> dm{};for(unsigned i=0;i<6;++i) dm[i]=m1[i]-m0[i];
+        std::printf("variant 3 %s: strap pixels in the mask %u, in slices %u/%u, other-depth/no-write pixels %u, body pixels %u; held marks [%llu %llu %llu %llu %llu %llu]; uav == legacy %s\n",
+            d24?"D24":"D32",strap,strap_s[0],strap_s[1],other,body,dm[0],dm[1],dm[2],dm[3],dm[4],dm[5],u.mask==l.mask && u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1]?"yes":"NO");
+        CHECK(strap>=180 && strap_s[0]>=80 && strap_s[1]>=80);   // v1291: 0 (the parts were never replayed: scenery in the mask, absent from the target)
+        CHECK(other==0 && body>500);
+        CHECK(u.mask==l.mask && u.slice[0]==l.slice[0] && u.slice[1]==l.slice[1] && u.colour==l.colour);
+        CHECK(dm[0]==4 && dm[1]==8 && dm[2]==4 && dm[3]==4 && dm[4]==0 && dm[5]==0);   // 2 runs x 2 takes: body / 2 straps / no write / other depth
     }
     std::printf("v1285 replay with an engine PS UAV bound: the UAV was lost %u times (state checks), the UAV replay restored it every time\n",legacy_uav_lost);
     if(failures) {std::printf("rig_replay_uav_check: %d failure(s)\n",failures);return 1;}

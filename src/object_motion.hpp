@@ -328,6 +328,10 @@ public:
             +"],\"view_use\":["+[] {std::string o;for(unsigned i=0;i<view_sources;++i) {o+=i?",[":"[";for(unsigned u=0;u<use_count;++u) o+=(u?",":"")+std::to_string(alt_view_use_[i][u].load());o+="]";}return o;}()+"]"
             +",\"weapon_place\":["+std::to_string(alt_place_placed_.load())+','+std::to_string(alt_place_own_prev_.load())+','+std::to_string(alt_place_no_prev_.load())+','+std::to_string(alt_place_no_view_.load())+"]"
             +",\"weapon_place_v1216_prev_error\":"+resid_json(1) // v1218: weapon_place[1] = submitted previous proven, [2] = camera-only
+            // v1295: placed one-view draws the held match missed (the v1291 class split) [all, of them replayed as held now], held draws' target rows
+            // [placed, engine] (replayed slices), rig draws that left before their retarget [secondary pass, no cb2 shadow, no rows, no reflected VS layout]
+            +",\"held_by_place\":["+std::to_string(alt_held_by_place_[0].load())+','+std::to_string(alt_held_by_place_[1].load())+"],\"held_target_rows\":["+std::to_string(alt_held_target_rows_[0].load())+','+std::to_string(alt_held_target_rows_[1].load())
+            +"],\"rig_no_retarget\":["+std::to_string(alt_rig_early_[0].load())+','+std::to_string(alt_rig_early_[1].load())+','+std::to_string(alt_rig_early_[2].load())+','+std::to_string(alt_rig_early_[3].load())+"]"
             +",\"view_mode\":\""+(alt_view_heuristic.load()?"heuristic":"certain")+"\",\"certainty\":{"+[] {std::string o; // v1199: per consumer [certain, fell back]
                 static constexpr const char* names[cert_consumers]{"rig_target","placement","previous_rows","held_mask"};
                 for(unsigned k=0;k<cert_consumers;++k) {o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+','+std::to_string(alt_cert_[k][2].load())+']';
@@ -401,6 +405,7 @@ public:
     inline static std::atomic<bool> alt_weapon_place{false};
     inline static std::atomic<bool> placed_history{true}; // v1218: placed draws' previous rows = their submitted previous (off: build/no-placed-history)
     inline static std::atomic<std::uint64_t> alt_place_placed_{},alt_place_own_prev_{},alt_place_no_prev_{},alt_place_no_view_{};
+    inline static std::array<std::atomic<std::uint64_t>,2> alt_held_by_place_{};inline static std::array<std::atomic<std::uint64_t>,2> alt_held_target_rows_{};inline static std::array<std::atomic<std::uint64_t>,4> alt_rig_early_{}; // v1295
     // v1194: where a one-view draw's view came from: 0 own newest write, 1 own older write of its bound b1, 2/3 another context's write of its
     // b1 (of the newest frame / older), 4 the newest view anywhere (the pre-v1193 fallback); and per source, what used it (view_use)
     inline static thread_local unsigned tl_view_src_{};
@@ -737,7 +742,9 @@ private:
     inline static thread_local float tl_target_rows_[2][16]{};inline static thread_local ContextState* tl_target_s_{};inline static thread_local const Shadow* tl_target_sh_{};
     // The rig target's two hypotheses for this draw's drawn rows (the engine's, or the placed ones). `view`: the draw's certain view, if any,
     // only to check the hypothesis of its eye against it (status hypothesis_check). Both slices retargeted: certain for the target.
-    static void target_dual(ContextState& s,const Shadow* sh,const float* rows,const View* view,bool counted=true) noexcept {
+    inline static thread_local bool tl_target_placed_{}; // v1295: tl_target_rows_ are a placement's rows (status held_target_rows)
+    static void target_dual(ContextState& s,const Shadow* sh,const float* rows,const View* view,bool counted=true,bool placed=false) noexcept {
+        tl_target_placed_=placed;
         bool ok[2]{};
         const LatestOf& latest=latest_of_cached();   // v1284 (B3)
         for(unsigned h=0;h<2;++h) {
@@ -751,6 +758,7 @@ public:
     static bool target_bind(ID3D11DeviceContext* c,unsigned slice) noexcept {
         ContextState* s=tl_target_s_;const Shadow* sh=tl_target_sh_;
         if(!s || !sh || sh->buffer!=s->cb[1] || slice>1) return false;
+        if(slice==0 && RigMask::draw_is_held()) alt_held_target_rows_[tl_target_placed_?0:1].fetch_add(1,std::memory_order_relaxed); // v1295
         return bind_pool(c,*s,*sh,tl_target_rows_[slice],nullptr); // previous rows as the engine wrote them (a depth-only replay never reads them)
     }
     static void target_restore(ID3D11DeviceContext* c) noexcept { // the engine's per-instance buffer again (DrawScope restores it too)
@@ -1263,14 +1271,17 @@ private:
     // is not an eye view (shadow maps) are left at the engine's tick frame and counted (docs/WEAPON-DRAW-PLACE-TEMPORAL.md).
     static bool prepare(ID3D11DeviceContext* c,ContextState& s) noexcept {
         count(layout_draws);
-        if(secondary_job()) {secondary_draws_.fetch_add(1,std::memory_order_relaxed);secondary_eye_draws_[borrowed_eye_.load(std::memory_order_relaxed)%3u].fetch_add(1,std::memory_order_relaxed);return false;}   // v1259: a secondary pass's draw: the engine's rows
+        // v1295 (status rig_no_retarget): a rig draw the mask replays that leaves here before its retarget (target_dual) invalidates the
+        // render's whole rig target (RigMask::take_target): [0] a secondary pass, [1] no cb2 shadow, [2] no rows ([3] no VS layout: before())
+        const auto rig_early=[](unsigned why) noexcept {if(alternate() && RigMask::draw_is_rig() && RigMask::target_wanted()) alt_rig_early_[why].fetch_add(1,std::memory_order_relaxed);};
+        if(secondary_job()) {rig_early(0);secondary_draws_.fetch_add(1,std::memory_order_relaxed);secondary_eye_draws_[borrowed_eye_.load(std::memory_order_relaxed)%3u].fetch_add(1,std::memory_order_relaxed);return false;}   // v1259: a secondary pass's draw: the engine's rows
         const Shadow* sh=s.cb[1]?&s.shadow(s.cb[1]):nullptr;
-        if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);return false;}
+        if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);rig_early(1);return false;}
         // v1040: no previous rows and no weapon placement: the draw ends in no_rows below whatever the view says. Skip the view lookup,
         // the pass callback and the row gather (the b1 agree/untagged diagnostics no longer count these draws).
         const bool one_view_place=alt_weapon_place.load(std::memory_order_relaxed) && alternate() && mode_.load(std::memory_order_relaxed)>=1; // v1191
         if(!has_previous(s.layout,sh->size) && !weapon_draw_on(placing_mode(),mode_.load(std::memory_order_relaxed)) && !one_view_place) {
-            count(motion);count(no_rows);return false;
+            count(motion);count(no_rows);rig_early(2);return false;
         }
         View view{};
         // v1200: alternate certain mode identifies the view from the rows, so they are gathered first (z row: the newest eye's; the content
@@ -1304,7 +1315,7 @@ private:
             z=z_local;
         }
         float cur[16],prev[16],engine[16];
-        if(!gather_current(s.layout,sh->data,sh->size,z,cur)) {count(no_rows);return false;}
+        if(!gather_current(s.layout,sh->data,sh->size,z,cur)) {count(no_rows);rig_early(2);return false;}
         // v1183 (knob stale-eye-held-mask): a near draw whose model frame is a held weapon's / held thing's engine frame joins the rig mask (253)
         // v1199: an uncertain draw is held when both eyes' latest views agree it is (the match tolerance is far wider than the eye separation;
         // they disagree only at the edge of the reach: then not held, counted as a fallback)
@@ -1432,7 +1443,11 @@ private:
                     weapon_perf::placed_draw();
                     alt_place_placed_.fetch_add(1,std::memory_order_relaxed);view_use(use_place);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
                     certainty(cert_placement,true);
-                    if(RigMask::target_wanted()) target_dual(s,sh,placed,&view,false); // v1199: the placed rows, both hypotheses (counted above)
+                    // v1295: what the placement moves with the hand is held, in the mask and the rig target alike: the warp's class of a draw follows
+                    // the placement, not a second match against other frames (sim v1291: placed bolt and mechanism parts were scenery in both masks
+                    // and absent from the target while the body was held - the warp tore them apart). The target gets the placed rows.
+                    if(held_mask.load(std::memory_order_relaxed) && !RigMask::draw_is_held() && !RigMask::draw_is_rig()) {alt_held_by_place_[0].fetch_add(1,std::memory_order_relaxed);RigMask::mark_held();if(RigMask::draw_is_held()) alt_held_by_place_[1].fetch_add(1,std::memory_order_relaxed);}
+                    if(RigMask::target_wanted()) target_dual(s,sh,placed,&view,false,true); // v1199: the placed rows, both hypotheses (counted above)
                     if(!bind_pool(c,s,*sh,placed,have_prev?placed_prev:nullptr)) return false;
                     count(view.eye?fixed_r:fixed_l);return true;
                 }
@@ -1638,7 +1653,7 @@ private:
     static ContextState* before(ID3D11DeviceContext* c) noexcept {
         if(!on()) return nullptr;
         ContextState* s=state(c);
-        if(!s || !s->layout) return nullptr;
+        if(!s || !s->layout) {if(s && alternate() && RigMask::draw_is_rig() && RigMask::target_wanted()) alt_rig_early_[3].fetch_add(1,std::memory_order_relaxed);return nullptr;}   // v1295: rig_no_retarget[3]
         const auto t=__rdtsc();
         const bool bound=prepare(c,*s);
         if(bound) set_cb_[s->type](c,2,1,&s->pool);
