@@ -5163,7 +5163,7 @@ static bool shoulder_dock_enabled{};   // build/shoulder-dock: a body released a
 // or other loot on a body reach the game. A body offered only its Carry still gets the v637 hand-carry guard.
 // v690: never the cured Hypatia lying on the floor: her prompt is the game's own wake-up interaction (headset 2026-10-30: the
 // grip started the scene but no prompt showed).
-static bool body_carry_action(std::uintptr_t e) noexcept {std::uint8_t f{};return physical_grab_requested && !legacy_corpse_carry && npc_entity(e) && read_self(e+0xd1,&f,1) && (f&0x28);}
+static bool body_carry_action(std::uintptr_t e) noexcept {std::uint8_t f{};return physical_grab_requested && !legacy_corpse_carry && npc_entity(e) && read_self(e+0xd1,&f,1) && (f&0x28) && d2vr::hand_ragdoll(read_self,image_base,e);}   // v1291: a hound's body keeps the game's Carry
 // v722 (user, headset v721: "no indication when the hand is on a dead NPC; it must work exactly like Talk or loot"): a body's
 // prompt is the game's own, shown on the body like every other prompt. The v637/v721 guard that hid it (1157 clears in one session)
 // is gone; body_carry_action still keeps the Use press off a body, so the hand carry is unchanged.

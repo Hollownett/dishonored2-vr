@@ -325,6 +325,20 @@ template<class Read> std::optional<NativeRigidBody> native_severed_limb_body(Rea
     severed_limb_reads_ok.fetch_add(1,std::memory_order_relaxed);
     return best;
 }
+// v1291 (user, 2026-11-13: "I cannot pick up a dog body"): the hand reads only the 17-body human ragdoll (native_ragdoll_body below). An NPC whose
+// ragdoll has another body count (a hound) offers the hand nothing, so its body must keep the game's own Carry. True when the hand can read this body.
+template<class Read> bool hand_ragdoll(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+    using namespace rig;
+    const auto entries=list(read,entity+0x268,256);
+    if(!entries) return false;
+    for(unsigned i=0;i<entries->packed_count;++i) {
+        const auto at=value<std::uintptr_t>(read,entries->data+i*8);
+        if(!at || !typed(read,base,*at,0x1c54008)) continue;
+        const auto handles=value<std::uintptr_t>(read,*at+0x100);
+        return handles && pointer(*handles) && value<std::uint32_t>(read,*handles+0x30)==17u;
+    }
+    return false;
+}
 template<class Read> std::optional<NativeRigidBody> native_ragdoll_body(Read& read,std::uintptr_t base,std::uintptr_t entity,int bone) {
     using namespace rig;
     if(bone<0 || bone>=17) return {};
