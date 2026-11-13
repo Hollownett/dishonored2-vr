@@ -1,4 +1,4 @@
-// v1266 lab: one pose per presented frame for a held loose prop AND a held severed limb, while standing, walking, running, stick turning and snap
+// v1266/v1270 lab: one pose per presented frame for a held loose prop AND a held severed limb, while standing, walking, running, stick turning and snap
 // turning - the model of the v1264 headset session (00:34-00:38) and the reason v1264 still ghosted on the move.
 // Engine order it models (the game runs ONE game frame per render: held_render_pose.published ~= renders; the bursts' 15/16/0 ms "ticks" are
 // GetTickCount64's 15.6 ms resolution, not game ticks): game frame k = physics, the held thing's POST_PHYSICS sync (the engine is given its pose
@@ -46,62 +46,71 @@ struct V1262Rig {
         seen_dt=dt;seen=read;seen_s=now;have_seen=true;return out;
     }
 };
-struct Motion {const char* name{};double speed{},yaw_rate{},snap{};};   // snap: a heading jump every 0.5 s (rad)
-struct Result {double shown_p90{},flip_p90{},flip_max{},eye_max{},gap_p90{};std::uint64_t renders{},unplaced{},stepped{},carried{};};
+// rate: frames per second; stop_at / start_at (s): the player stops / starts there; hitch_at: one frame 3x long; current_every: every n-th sync's root
+// reading is already this frame's (an attach job that ran before the sync)
+struct Motion {const char* name{};double speed{},yaw_rate{},snap{},rate{90},stop_at{},start_at{},hitch_at{};unsigned current_every{};};
+struct Result {double shown_p90{},flip_p90{},flip_max{},eye_max{},gap_p90{},gap_max{};std::uint64_t renders{},unplaced{},stepped{},carried{};};
 static double edge_p(const wd::Place::OneHist& h,double q) {
     std::uint64_t t=0;for(auto v:h.n) t+=v;std::uint64_t run=0;
     for(unsigned i=0;i<wd::Place::OneHist::bins;++i) {run+=h.n[i];if(t && double(run)>=q*double(t)) return wd::Place::OneHist::edge[i];}
     return 0;
 }
 static wd::Place::OneHist merged(const wd::Place::OneHist& a,const wd::Place::OneHist& b) {auto o=a;for(unsigned i=0;i<o.n.size();++i) o.n[i]+=b.n[i];o.max=std::max(a.max,b.max);return o;}
-enum Mode {v1264,v1266};
+// v1264: the v1262 rule; v1266: the predicted step (= PlayerRigTracker without a body reading); v1270: the measured rig (the character body)
+enum Mode {v1264,v1266,v1270};
 static double begin_before_p=.9;
 static Result run(const Motion& m,Mode mode,bool limb) {
     lcg=11;HeldRenderSlot::drawn_hold=true;wd::Place::clear();wd::Place::reset_one_pose();
-    HeldRenderSlot slot;V1262Rig old;const std::uintptr_t entity=0x1234;
+    HeldRenderSlot slot;V1262Rig old;PlayerRigTracker tracker;const std::uintptr_t entity=0x1234;
     const WorldTrackedPose rel=tilt(yawed({.10,.02,-.03},.4),{1,0,0},.3);          // the held body in the drawn grip
     const WorldTrackedPose motor_off=tilt(yawed({.035,.018,-.01},.12),{0,1,0},.06); // the motor's hand vs the drawn hand (~40 mm, ~8 deg)
+    const Vec3 body_local{.03,.01,-.9};   // the character body against the model root (turns with the heading)
     const auto track_at=[&](double t) {   // the hand in the rig (tracking): a 2 cm sway and wrist turn (~0.13 m/s, ~0.4 rad/s)
         return tilt(yawed({.35+.02*std::sin(t*6.3),-.2+.015*std::sin(t*4.1),1.1+.01*std::sin(t*7.7)},.2*std::sin(t*2.)),{1,0,0},.1*std::sin(t*3.3));};
     const auto joint_at=[&](double t) {   // limb: the clone's frame body against the held body (a 30 cm lever flopping +-17 deg)
         return limb?tilt(yawed({.3,0,-.05},.3*std::sin(t*3.)),{0,1,0},.2*std::sin(t*2.3)):yawed({0,0,0},0);};
-    // game frames, one per render (90 Hz with 0.5 ms jitter), each with its rig (root along the heading, heading turning, a snap every 0.5 s)
+    const auto speed_at=[&](double t) {return (m.stop_at>0 && t>=m.stop_at) || (m.start_at>0 && t<m.start_at)?0.:m.speed;};
+    // game frames, one per render (rate Hz, +-0.25 ms), each with its rig: the turn first (the physics step's delegate), then the root moves
     std::vector<double> T{0};std::vector<HeldCarry> rig{HeldCarry{{0,0,0},0}};
     while(T.back()<3.2) {
-        const double dt=1./90+(rnd()-.5)*.0005;HeldCarry r=rig.back();   // the runtime paces frames to +-0.25 ms
-        r.heading+=m.yaw_rate*dt;if(m.snap!=0 && std::floor((T.back()+dt)/.5)>std::floor(T.back()/.5)) r.heading+=m.snap;   // the turn first (the physics step's delegate)
-        r.root=r.root+Vec3{std::cos(r.heading),std::sin(r.heading),0}*(m.speed*dt);
+        double dt=1./m.rate+(rnd()-.5)*.0005;if(m.hitch_at>0 && T.back()<m.hitch_at && T.back()+dt>=m.hitch_at) dt*=3;
+        HeldCarry r=rig.back();
+        r.heading+=m.yaw_rate*dt;if(m.snap!=0 && std::floor((T.back()+dt)/.5)>std::floor(T.back()/.5)) r.heading+=m.snap;
+        r.root=r.root+Vec3{std::cos(r.heading),std::sin(r.heading),0}*(speed_at(T.back()+dt)*dt);
         T.push_back(T.back()+dt);rig.push_back(r);
     }
+    const auto body_of=[&](std::size_t k) {const double c=std::cos(rig[k].heading),s=std::sin(rig[k].heading);
+        return rig[k].root-Vec3{c*body_local.x-s*body_local.y,s*body_local.x+c*body_local.y,body_local.z};};
     const auto drawn_at=[&](std::size_t k) {return grip_compose(grip_compose(yawed(rig[k].root,rig[k].heading),track_at(T[k])),rel);};   // B (body) of render k
     std::vector<double> gaps;std::uint64_t stepped=0,carried=0;
     std::size_t last_note=0;bool noted=false;
     for(std::size_t k=2;k+1<T.size();++k) {
-        // Begin k-1 before or after sync k (the game thread up to one frame ahead of the render thread)
         const bool begin_before=rnd()<begin_before_p;   // v1264 note ages: 90 % of syncs found a note <= 10 ms old (Begin k-1 already done)
         const auto note=[&](std::size_t j) {slot.note_drawn(drawn_at(j),T[j]+.004,&rig[j]);last_note=j;noted=true;};
         if(begin_before) note(k-1);
         // the motor of frame k: the newest publication's hand (frame k-1) led by the player's velocity to frame k
         const auto sample=grip_compose(grip_compose(yawed(rig[k-1].root,rig[k-1].heading),track_at(T[k-1])),motor_off);
-        auto goal=grip_compose(sample,rel);goal.position=goal.position+Vec3{std::cos(rig[k].heading),std::sin(rig[k].heading),0}*(m.speed*(T[k]-T[k-1]));
+        auto goal=grip_compose(sample,rel);goal.position=goal.position+Vec3{std::cos(rig[k].heading),std::sin(rig[k].heading),0}*(speed_at(T[k])*(T[k]-T[k-1]));
         slot.publish(entity,goal,T[k]);
-        const HeldCarry read{rig[k-1].root,rig[k].heading};   // the sync reads frame k-1's root (attach pending) and frame k's heading
+        const bool current=m.current_every && k%m.current_every==0;   // the attach job ran before this sync
+        HeldCarry read{current?rig[k].root:rig[k-1].root,rig[k].heading,body_of(k),mode==v1270};
         WorldTrackedPose given{};bool blending=false;const double now=T[k]+.002;
-        if(mode==v1266) {slot.decide(goal,now,given,blending,&read);if(slot.used==HeldRenderSlot::given_carried) {++carried;if(slot.stepped) ++stepped;}}
-        else if(limb) {given=goal;}   // v1264: a severed part was given the bare motor goal (ragdolls had no drawn note)
-        else {   // v1264 prop: the v1262 rule against the noted rig
-            const auto r=old.of(read,now,noted?rig[last_note]:read);
-            given=noted?held_carried(slot.drawn,slot.drawn_carry,r):goal;++carried;if(old.stepped) ++stepped;
+        if(mode==v1264) {
+            if(limb) given=goal;   // v1264: a severed part was given the bare motor goal
+            else {const auto r=old.of(read,now,noted?rig[last_note]:read);given=noted?held_carried(slot.drawn,slot.drawn_carry,r):goal;++carried;if(old.stepped) ++stepped;}
+        } else {
+            const auto r=tracker.frame_rig(read,now);slot.decide(goal,now,given,blending,&r);
+            if(slot.used==HeldRenderSlot::given_carried) ++carried;
         }
         if(!begin_before) note(k-1);
         // render k: composed from the given pose; the model frame F = given * J (the clone's frame body; a prop: J = identity)
         const double t=T[k];const auto j=joint_at(t);const auto f=grip_compose(given,j),h=drawn_at(k);
         const auto b=grip_compose(h,j);   // B = H * inverse(G) * F = H * J
         std::array<float,15> raw{};const wd::Mat fm=wd::pose_mat(f),bm=wd::pose_mat(b);HeldEnginePose::frame_from_pose(fm.data(),raw.data());
+        if(t>=.3 && t-1./m.rate<.3) {wd::Place::reset_one_pose();gaps.clear();stepped=carried=0;}
         if(t>=.3) gaps.push_back(length(f.position-b.position)*1000);
-        if(t>=.3 && t-1./90<.3) {wd::Place::reset_one_pose();gaps.clear();stepped=carried=0;}
         const double yaw_dps=std::remainder(rig[k].heading-rig[k-1].heading,6.283185307179586)/(T[k]-T[k-1])*57.29577951308232;
-        wd::Place::stage(0,limb?wd::Place::kind_severed:wd::Place::kind_prop);wd::Place::stage_motion(0,m.speed,yaw_dps,&fm,&fm);
+        wd::Place::stage(0,limb?wd::Place::kind_severed:wd::Place::kind_prop);wd::Place::stage_motion(0,speed_at(t),yaw_dps,&fm,&fm);
         wd::Place::publish_bound(static_cast<std::uint32_t>(100+k),{raw.data(),nullptr},{&bm,nullptr},{.5,0.},{entity,0},t);
         if(rnd()>=.58) for(int eye=0;eye<2;++eye) {wd::Result r;r.side=0;r.eye=eye;r.stage=wd::placed_pass;wd::Place::census(r,true,static_cast<std::uint32_t>(100+k));wd::Place::census(r,false,static_cast<std::uint32_t>(100+k));}
     }
@@ -110,20 +119,34 @@ static Result run(const Motion& m,Mode mode,bool limb) {
     for(unsigned b=0;b<wd::Place::buckets;++b) {const auto c=wd::Place::one_pose_cell(limb?wd::Place::kind_severed:wd::Place::kind_prop,b);
         all.renders+=c.renders;all.unplaced+=c.unplaced;all.shown=merged(all.shown,c.shown);all.flip=merged(all.flip,c.flip);all.eye=merged(all.eye,c.eye);}
     std::sort(gaps.begin(),gaps.end());
-    return {edge_p(all.shown,.9),edge_p(all.flip,.9),all.flip.max,all.eye.max,gaps.empty()?0:gaps[static_cast<std::size_t>(.9*double(gaps.size()-1))],all.renders,all.unplaced,stepped,carried};
+    return {edge_p(all.shown,.9),edge_p(all.flip,.9),all.flip.max,all.eye.max,gaps.empty()?0:gaps[static_cast<std::size_t>(.9*double(gaps.size()-1))],gaps.empty()?0:gaps.back(),
+            all.renders,all.unplaced,stepped,carried};
 }
 int main() {
     const Motion motions[]={{"still",0,0,0},{"walk 1.5 m/s",1.5,0,0},{"walk 3 m/s",3,0,0},{"run 7 m/s",7,0,0},{"walk 1.5 + stick turn 90/s",1.5,1.571,0},
                             {"run 5 + stick turn 60/s",5,1.047,0},{"walk 1.5 + snap 45 deg",1.5,0,.785}};
-    for(const bool limb:{false,true}) for(const auto& m:motions) {
-        const auto before=run(m,v1264,limb),after=run(m,v1266,limb);
-        std::printf("%-5s %-27s v1264: engine gap p90 %5.1f mm, flip p90 <=%5.1f max %6.1f | v1266: gap p90 %4.1f mm, flip p90 <=%4.1f max %5.1f, eye max %.1f (%llu renders, %llu unplaced)\n",
-            limb?"limb":"prop",m.name,before.gap_p90,before.flip_p90,before.flip_max,after.gap_p90,after.flip_p90,after.flip_max,after.eye_max,
-            static_cast<unsigned long long>(after.renders),static_cast<unsigned long long>(after.unplaced));
-        CHECK(after.renders>200 && after.unplaced>after.renders/3);
-        if(m.speed>=3 || m.yaw_rate>0 || m.snap>0) CHECK(before.flip_p90>=20);   // v1264 reproduces the moving ghost
-        CHECK(after.flip_p90<=5 && after.flip_max<=10 && after.gap_p90<=5 && after.eye_max==0);   // v1266: one pose per render, moving or not
-        if(!limb && m.speed>0 && m.yaw_rate==0 && m.snap==0) CHECK(after.stepped*10>=after.carried*9);   // the root step is applied on (nearly) every moving frame
+    const Motion events[]={{"stop from 3 m/s, 90 Hz",3,0,0,90,1.},{"stop from 3 m/s, 120 Hz",3,0,0,120,1.},{"stop from 7 m/s, 90 Hz",7,0,0,90,1.},{"stop from 7 m/s, 120 Hz",7,0,0,120,1.},
+                           {"start to 3 m/s, 90 Hz",3,0,0,90,0,1.},{"start to 7 m/s, 120 Hz",7,0,0,120,0,1.},{"run 7, one 3x hitch frame",7,0,0,90,0,0,1.},
+                           {"run 7, every 5th reading current",7,0,0,90,0,0,0,5}};
+    for(const bool limb:{false,true}) {
+        for(const auto& m:motions) {
+            const auto before=run(m,v1264,limb),after=run(m,v1270,limb);
+            std::printf("%-5s %-33s v1264: gap p90 %5.1f, flip p90 <=%5.1f max %6.1f | v1270: gap p90 %4.1f, flip p90 <=%4.1f max %5.1f, eye %.1f (%llu renders, %llu unplaced)\n",
+                limb?"limb":"prop",m.name,before.gap_p90,before.flip_p90,before.flip_max,after.gap_p90,after.flip_p90,after.flip_max,after.eye_max,
+                static_cast<unsigned long long>(after.renders),static_cast<unsigned long long>(after.unplaced));
+            CHECK(after.renders>200 && after.unplaced>after.renders/3);
+            if(m.speed>=3 || m.yaw_rate>0 || m.snap>0) CHECK(before.flip_p90>=20);   // v1264 reproduces the moving ghost
+            CHECK(after.flip_p90<=5 && after.flip_max<=10 && after.gap_p90<=5 && after.eye_max==0);
+        }
+        for(const auto& m:events) {   // v1266's predicted step fails each event; v1270's measured rig does not
+            const auto v66=run(m,v1266,limb),v70=run(m,v1270,limb);
+            // gap = the engine pose against the drawn hold: exactly what a render whose draws are not placed shows (the event's flip whatever the
+            // placement did on that render); flip = the certificate's frame-to-frame figure on this run's placed/unplaced pattern
+            std::printf("%-5s %-33s v1266: gap max %6.1f mm, flip max %6.1f | v1270: gap max %4.1f mm, flip max %4.1f, flip p90 <=%3.1f\n",
+                limb?"limb":"prop",m.name,v66.gap_max,v66.flip_max,v70.gap_max,v70.flip_max,v70.flip_p90);
+            CHECK(v66.gap_max>10);                                                                 // the predicted step pops on the event
+            CHECK(v70.gap_max<=10 && v70.flip_max<=10 && v70.flip_p90<=5 && v70.eye_max==0);      // the measured rig does not
+        }
     }
     {   // v1264's own counters from the same model: the share of v1262's "rig read as current" decisions on a walk with turning, the headset's 27 %
         lcg=5;double read_current=0,total=0;   // the session's mix: 25 % of renders turning (one_pose turn 1832 of 7209)
@@ -144,21 +167,26 @@ int main() {
         std::printf("one eye placed: eye_split %llu, eye_mm max %.1f\n",static_cast<unsigned long long>(c.eye_split),c.eye.max);
         CHECK(c.eye_split==1 && std::abs(c.eye.max-40)<.5);
     }
-    {   // rig_of_frame: the root one fixed frame on (the step between the two previous readings); a second sync in the same frame keeps it; standing still
-        // (the same reading past one frame) has none; a teleport is no step; the heading is used as read
-        HeldRenderSlot s;s.publish(1,yawed({0,0,1},0),0.);
-        (void)s.rig_of_frame(HeldCarry{{-.10,0,0},0},.000);
-        const auto a=s.rig_of_frame(HeldCarry{{-.05,0,0},0},.011);
-        CHECK(length(a.root-Vec3{0,0,0})<1e-9 && std::abs(a.heading)<1e-12 && s.stepped);
-        const auto a2=s.rig_of_frame(HeldCarry{{-.05,0,0},0},.013);   // the same frame's second sync
-        CHECK(length(a2.root-Vec3{0,0,0})<1e-9);
-        {HeldRenderSlot t;t.publish(1,yawed({0,0,1},0),0.);   // a 90 deg snap this frame: the step walks the new heading
-         (void)t.rig_of_frame(HeldCarry{{-.10,0,0},0},.000);const auto q=t.rig_of_frame(HeldCarry{{-.05,0,0},1.5707963267948966},.011);
-         CHECK(length(q.root-Vec3{-.05,.05,0})<1e-9);}
-        const auto c=s.rig_of_frame(HeldCarry{{-.05,0,0},-.01},.040);    // standing still since
-        CHECK(length(c.root-Vec3{-.05,0,0})<1e-9 && !s.stepped);
-        const auto d=s.rig_of_frame(HeldCarry{{600,0,0},0},.051);         // a teleport
-        CHECK(length(d.root-Vec3{600,0,0})<1e-9 && !s.stepped);
+    {   // PlayerRigTracker: this frame's root = this frame's body + c, c = root - body from the game thread's own pair (the stale reading with the
+        // previous frame's body); a reading that is already this frame's is recognised against the c held; a second sync of the same frame reuses
+        // the frame; without a body reading the v1266 step is the fallback
+        PlayerRigTracker t;const Vec3 c{.03,.01,.9};
+        const auto rd=[&](Vec3 root,Vec3 body) {return HeldCarry{root,0.,body,true};};
+        (void)t.frame_rig(rd({-.10,0,1},{-.13,-.01,.1}),.000);                              // frame 0: body_0 (root_-1 read, unpaired)
+        const auto a=t.frame_rig(rd({-.10,0,1},{-.08,-.01,.1}),.011);                       // frame 1: stale reading = root_0, this frame's body
+        CHECK(length(a.root-Vec3{-.05,0,1})<1e-9 && t.last_pick==PlayerRigTracker::pick_stale);   // root_1 = body_1 + c
+        const auto a2=t.frame_rig(rd({-.10,0,1},{-.08,-.01,.1}),.012);                      // frame 1's second sync
+        CHECK(length(a2.root-a.root)<1e-12 && !t.fresh);
+        const auto b=t.frame_rig(rd({.00,0,1},{-.03,-.01,.1}),.022);                        // frame 2: the reading is ALREADY this frame's (root_2)
+        CHECK(length(b.root-Vec3{0,0,1})<1e-9 && t.last_pick==PlayerRigTracker::pick_current);
+        const auto s1=t.frame_rig(rd({.00,0,1},{-.03,-.01,.1}),.033);                       // frame 3: stopped (the body did not move)
+        CHECK(length(s1.root-Vec3{0,0,1})<1e-9 && t.last_pick==PlayerRigTracker::pick_still);
+        const auto g=t.frame_rig(rd({.00,0,1},{.12,-.01,.1}),.066);                         // frame 4 after a 3x hitch: 15 cm in one frame, measured
+        CHECK(length(g.root-Vec3{.15,0,1})<1e-9);
+        PlayerRigTracker f;   // no body reading: the v1266 step (counted as fallback)
+        (void)f.frame_rig(HeldCarry{{-.10,0,0},0},.000);const auto fa=f.frame_rig(HeldCarry{{-.05,0,0},0},.011);
+        CHECK(length(fa.root-Vec3{0,0,0})<1e-9 && f.fallback==2 && f.measured==0);
+        (void)c;
     }
     // v1262 review checks -------------------------------------------------------------------------------------------------------------------------
     HeldRenderSlot::drawn_hold=true;
@@ -177,9 +205,9 @@ int main() {
     {   // (3) release + re-grab of the SAME entity: nothing noted for the old hold survives (publish resets only on an entity change)
         HeldRenderSlot s;const auto g=yawed({0,0,1},0);const HeldCarry rig{{0,0,0},0};
         s.publish(7,g,0.);s.note_drawn(yawed({.05,0,1},.1),0.,&rig);WorldTrackedPose out{};bool b=false;CHECK(s.decide(g,.005,out,b,&rig));
-        CHECK(s.recent_n==1 && s.have_seen && s.drawn_ok && s.rel_ok && s.carry_ok);
+        CHECK(s.recent_n==1 && s.drawn_ok && s.rel_ok && s.carry_ok);
         s.end(.01);
-        CHECK(!s.drawn_ok && !s.rel_ok && !s.carry_ok && s.recent_n==0 && !s.have_seen && s.note_dt==0);
+        CHECK(!s.drawn_ok && !s.rel_ok && !s.carry_ok && s.recent_n==0 && s.note_dt==0);
         CHECK(s.decide(g,.02,out,b,&rig) && b);   // the release blend still runs from the last pose given
         s.publish(7,g,.05);   // the same entity again, before the blend ended
         CHECK(s.decide(g,.055,out,b,&rig) && !b && s.used==HeldRenderSlot::given_goal && length(out.position-g.position)<1e-12);   // no old note: the goal

@@ -70,7 +70,55 @@ inline WorldTrackedPose translated_goal(const WorldTrackedPose& bone,const World
     WorldTrackedPose out=bone;Vec3 d=goal.position-bone.position;const double n=length(d);if(n>cap_m) d=d*(cap_m/n);out.position=bone.position+d;return out;
 }
 // v1258: where the player's rig stands for a drawn pose: the anchor root position and (camera heading - head follow), item_advance's reference.
-struct HeldCarry {Vec3 root{};double heading{};};
+struct HeldCarry {Vec3 root{};double heading{};Vec3 body{};bool body_ok{};};   // v1270 body: the player's character body this frame (when read)
+// v1270 (review of v1266: the carry PREDICTED this frame's root as the stale reading + the previous frame's step - one frame wrong on every start,
+// stop and hitch, and resting on an unmeasured "the reading is always stale"). The player's rig of THIS frame is now MEASURED. The body-model root
+// (body model +0x1860) is the output of the player's post-physics attach job; that job's source is the player's character body, which the physics
+// step has already integrated when any POST_PHYSICS sync runs (the prop's 0x80b7c0 and the ragdoll's 0x76d640 both read their own bodies from the
+// same Havok pool at that point). The character body is indexed exactly as the player's character step 0x1b4760 does (0x1b4cb9..0x1b4ce9; dxgi_probe
+// held_rig_now). Root and body differ by the model's fixed offset c = root - body, measured from the game thread's own pair: the stale root reading
+// belongs to the PREVIOUS frame's body (stage order: the sync before the attach job); c is kept as whichever pairing (previous body or this body)
+// agrees with the c already held, so a reading that is already this frame's (an attach job that ran first) is recognised, not assumed away, and
+// counted (picks: stale / current / still). This frame's root = this frame's body + c: no step, no frame time, exact on a start, a stop or a hitch.
+// Without a body reading (no character step seen) the v1266 step remains as the fallback (counted).
+struct PlayerRigTracker {
+    enum Pick:unsigned {pick_stale,pick_current,pick_still,picks_n};
+    static constexpr double same_frame_s=.003,pair_s=.05,step_max_m=.25,frame_s=.02;
+    // c is held in the player's heading frame (the model's offset from the character body turns with the player): c_world = Rz(heading) * c.
+    Vec3 c{};bool c_ok{};Vec3 body_prev{};double heading_prev{},prev_s{};bool prev_ok{};HeldCarry last{};double last_s{};bool last_ok{};
+    static Vec3 turned(Vec3 v,double a) noexcept {const double cs=std::cos(a),sn=std::sin(a);return {cs*v.x-sn*v.y,sn*v.x+cs*v.y,v.z};}
+    std::array<std::uint64_t,picks_n> picks{};std::uint64_t measured{},fallback{};unsigned last_pick{picks_n};bool fresh{};   // fresh: this call measured a new frame
+    HeldCarry seen{};Vec3 step{};double step_heading{},seen_s{};bool have_seen{};   // the v1266 step (fallback only)
+    HeldCarry frame_rig(const HeldCarry& read,double now) noexcept {
+        fresh=true;
+        if(!read.body_ok) {   // fallback: no current source this sync
+            ++fallback;last_pick=picks_n;HeldCarry out=read;
+            if(have_seen && length(read.root-seen.root)>1e-6) {
+                const Vec3 d=read.root-seen.root;step=now>seen_s && now-seen_s<pair_s && length(d)<step_max_m?d:Vec3{};step_heading=seen.heading;seen=read;seen_s=now;
+            } else if(have_seen) {if(!(now-seen_s<frame_s)) step={};else seen.heading=read.heading;}
+            else {seen=read;seen_s=now;have_seen=true;step={};}
+            if(length(step)>1e-6) {const double a=std::remainder(read.heading-step_heading,6.283185307179586),cs=std::cos(a),sn=std::sin(a);
+                out.root=read.root+Vec3{cs*step.x-sn*step.y,sn*step.x+cs*step.y,step.z};}
+            return out;
+        }
+        if(last_ok && length(read.body-last.body)<1e-7 && now-last_s<same_frame_s) {fresh=false;return last;}   // this frame's second sync (another hand, a ragdoll bone)
+        const bool paired=prev_ok && now>prev_s && now-prev_s<pair_s;
+        const Vec3 cb=turned(read.root-read.body,-read.heading);Vec3 pick=cb;unsigned o=pick_current;   // the pair of THIS frame (heading frame)
+        if(paired) {
+            const Vec3 ca=turned(read.root-body_prev,-heading_prev);   // the pair of the PREVIOUS frame (the stale reading with that frame's body)
+            if(length(read.body-body_prev)<1e-6) {pick=ca;o=pick_still;}   // the body did not move: both pairings are the same
+            else if(!c_ok) {pick=ca;o=pick_stale;}                          // the first pairing: by stage order
+            else if(length(ca-c)<=length(cb-c)) {pick=ca;o=pick_stale;} else {pick=cb;o=pick_current;}
+        }
+        HeldCarry out=read;
+        if(paired || c_ok) {
+            if(paired) {c=pick;c_ok=true;++picks[o];last_pick=o;} else last_pick=picks_n;
+            out.root=read.body+turned(c,read.heading);++measured;
+        }
+        body_prev=read.body;heading_prev=read.heading;prev_s=now;prev_ok=true;last=out;last_s=now;last_ok=true;
+        return out;
+    }
+};
 // A world pose drawn with `from` as it is drawn with `to`: turned about the root by the heading change, moved with the root (FullBodyDriver::item_advance).
 inline WorldTrackedPose held_carried(const WorldTrackedPose& drawn,const HeldCarry& from,const HeldCarry& to) noexcept {
     const double a=to.heading-from.heading,c=std::cos(a),s=std::sin(a);
@@ -95,32 +143,8 @@ struct HeldRenderSlot {
     unsigned mode{};std::uintptr_t world{};std::uint32_t handle{};HoldDelta delta{};double delta_s{};bool delta_ok{},bones_seen{},frame_seen{};   // v1253 ragdolls
     WorldTrackedPose written{};bool has_written{};double released_s{};bool offset_set{};Vec3 off_pos{},off_rot{};
     WorldTrackedPose drawn{},drawn_rel{};HeldCarry drawn_carry{};double drawn_s{};bool drawn_ok{},rel_ok{},carry_ok{};unsigned used{};   // v1258: the note; what the last decide gave
-    // v1266 (headset v1264: the held prop "renders once and then snaps to a new point" while walking/running; engine_gap walk p90 <= 35 mm, run <= 100).
-    // The engine is given the drawn hold carried exactly as item_advance carries a held weapon (same rig reads: held_rig_now = advance_attachment's
-    // body-model root and camera heading - head follow; same move: about the root by the heading change, with the root's translation), with ONE fixed
-    // difference: the prop's sync runs in its POST_PHYSICS stage, BEFORE this game frame's post-physics attach job writes the body model frame, so its
-    // root reading is the PREVIOUS frame's root (the weapon's attachment composition already sees this frame's). The heading is this frame's (the
-    // turn is applied in the physics step). So this frame's root = the reading + the step the root made between the previous two frames (one game frame
-    // per render: the motor writes once per render, held_render_pose.published ~= renders). No comparison with a noted rig, no velocity estimate: v1262
-    // guessed "stale or current" against the note and misfired on every turning frame and late note (carried_rig_read 27 %), each one frame of root
-    // motion behind (3 m/s: 33 mm, 7 m/s: 77 mm). A second sync inside one frame (same reading within frame_s) keeps the frame's step; a reading that
-    // stays put longer is a player standing still (no step). A jump beyond step_max_m is a teleport (the Timepiece's 600 m, a load): no step.
-    // The step is walked in the player's heading: it turns with this frame's heading change (the turn is applied before the physics step that moves
-    // the root), so a stick turn or a snap turn while walking moves this frame's step with it.
-    static constexpr double step_max_m=.25,frame_s=.02;
-    HeldCarry seen{};Vec3 step{};double step_heading{},seen_s{};bool have_seen{},stepped{};
-    HeldCarry rig_of_frame(const HeldCarry& read,double now) noexcept {
-        HeldCarry out=read;stepped=false;
-        if(have_seen && length(read.root-seen.root)>1e-6) {   // a new frame's root: the step since the previous frame's, walked in that frame's heading
-            const Vec3 d=read.root-seen.root;step=now>seen_s && now-seen_s<.05 && length(d)<step_max_m?d:Vec3{};step_heading=seen.heading;seen=read;seen_s=now;
-        } else if(have_seen) {if(!(now-seen_s<frame_s)) step={};else seen.heading=read.heading;}   // the same frame's second sync keeps the step; standing still has none
-        else {seen=read;seen_s=now;have_seen=true;step={};}
-        if(length(step)>1e-6) {
-            const double a=std::remainder(read.heading-step_heading,6.283185307179586),c=std::cos(a),sn=std::sin(a);
-            out.root=read.root+Vec3{c*step.x-sn*step.y,sn*step.x+c*step.y,step.z};stepped=true;
-        }
-        return out;
-    }
+    // v1266/v1270: the engine is given the drawn hold carried to the frame's rig exactly as item_advance carries a held weapon (about the root by the
+    // heading change, with the root's translation); the frame's rig comes measured from PlayerRigTracker (HeldRenderPose::frame_rig).
     static constexpr unsigned ring=4;std::array<WorldTrackedPose,ring> recent{};unsigned recent_n{},recent_next{};   // v1258: the last poses given (newest last)
     std::array<WorldTrackedPose,ring> recent_frame{};std::array<bool,ring> recent_frame_ok{};   // v1266: a ragdoll's model frame written with that given (frame site)
     void note_frame(const WorldTrackedPose& f) noexcept {if(recent_n) {const unsigned i=(recent_next+ring-1)%ring;recent_frame[i]=f;recent_frame_ok[i]=true;}}
@@ -133,7 +157,7 @@ struct HeldRenderSlot {
     void end(double now) noexcept {
         if(!held) return;
         held=false;released_s=now;offset_set=false;
-        drawn_ok=rel_ok=carry_ok=false;note_dt=0;recent_n=recent_next=0;have_seen=stepped=false;step={};
+        drawn_ok=rel_ok=carry_ok=false;note_dt=0;recent_n=recent_next=0;
     }
     // v1262 (review): how old a drawn note may be and still be carried by the rig alone. Notes arrive once per render (the publisher at each eye-0
     // begin). The engine's sync runs on the game thread, which may be one frame ahead of the render thread (Setup N is drawn by Begin N+1), so a
@@ -162,7 +186,7 @@ struct HeldRenderSlot {
         if(held) {
             out=goal;
             const bool have_rig=rig && finite(rig->root) && std::isfinite(rig->heading);
-            const HeldCarry tick_rig=have_rig?rig_of_frame(*rig,now):HeldCarry{};   // v1266: the rig history advances at every sync, carried or not
+            const HeldCarry tick_rig=have_rig?*rig:HeldCarry{};   // v1270: this frame's rig, measured by the caller (HeldRenderPose::frame_rig)
             const double age=now-drawn_s;
             if(drawn_hold && drawn_ok && age<=fresh_s) {
                 if(rel_ok) if(const auto d=grip_compose(goal,drawn_rel);grab_pose_valid(d)) {out=d;used=given_relative;}
@@ -220,6 +244,62 @@ public:
         WorldTrackedPose f{};f.position={o[0],o[1],o[2]};for(unsigned k=0;k<3;++k) f.basis[k]={a[k*3],a[k*3+1],a[k*3+2]};
         std::lock_guard<std::mutex> l(m_);for(auto& s:slots_) if(s.entity==entity && s.mode==severed) s.note_frame(f);
     }
+    // v1270: this frame's rig for a sync of `kind` (0 the prop sync, 1 the ragdoll sync): rig_now read, the tracker's measured root, and the
+    // certificate's records (the stale reading for the ordering counts, the carried root against the next publication).
+    bool frame_rig(unsigned kind,HeldCarry& out) noexcept {
+        HeldCarry read{};if(!rig_now || !rig_now(read)) return false;
+        const double now=precise_s();
+        std::lock_guard<std::mutex> l(rig_m_);
+        out=tracker_.frame_rig(read,now);
+        if(tracker_.fresh && pending_n_<pending_.size()) pending_[pending_n_++]={kind&1u,read.root,out.root,now,read.body_ok};
+        return true;
+    }
+    // v1270: a publication (each eye Setup, dxgi_probe): the rig its image is placed with. Rolls the syncs since the previous one into the
+    // certificate: their stale reading against this publication's root (the reading was already this frame's) and the one before it (the previous
+    // frame's: stale), and their carried root against this publication's root, bucketed by the publication's own motion (still/walk/run/turn) and
+    // by the first three publications after the player starts or stops moving.
+    void note_publication(const HeldCarry& rig,double now) noexcept {
+        std::lock_guard<std::mutex> l(rig_m_);
+        if(pub_ok_ && now-pub_s_<.003 && length(rig.root-pub_.root)<1e-6) return;   // the other eye's Setup of the same frame
+        const bool have_prev=pub_ok_;const HeldCarry prev=pub_;const double prev_s=pub_s_;
+        double mps=0,dps=0;
+        if(have_prev && now>prev_s && now-prev_s<.1) {mps=length(rig.root-prev.root)/(now-prev_s);dps=std::abs(std::remainder(rig.heading-prev.heading,6.283185307179586))/(now-prev_s)*57.29577951308232;}
+        const bool moving=mps>=.3;
+        if(moving!=moving_) {moving_=moving;since_change_=0;} else if(since_change_<1000) ++since_change_;
+        const unsigned bucket=dps>=20?3u:mps>=2.5?2u:moving?1u:0u;
+        for(unsigned i=0;i<pending_n_;++i) {
+            const auto& p=pending_[i];
+            const bool cur=length(p.read-rig.root)<1e-5,stale=have_prev && length(p.read-prev.root)<1e-5;
+            ++order_[p.kind][cur?1:stale?0:2];
+            if(p.measured && have_prev && now-prev_s<.1) {
+                const double mm=length(p.carried-rig.root)*1000.;if(mm>1000.) continue;   // a teleport
+                carry_mm_[bucket].add(mm);
+                if(since_change_<3 && have_prev) (moving?start_mm_:stop_mm_).add(mm);
+            }
+        }
+        pending_n_=0;pub_=rig;pub_s_=now;pub_ok_=true;
+    }
+    struct MmHist {
+        static constexpr unsigned bins=10;static constexpr double edge[bins]={.1,.5,1,2,5,10,20,50,100,1e9};
+        std::array<std::uint64_t,bins> n{};double max{};
+        void add(double v) noexcept {if(!std::isfinite(v)) return;unsigned i=0;while(i+1<bins && !(v<=edge[i])) ++i;++n[i];if(v>max) max=v;}
+        std::string json() const {
+            std::uint64_t t=0;for(auto v:n) t+=v;
+            const auto q=[&](double f) {std::uint64_t run=0;for(unsigned i=0;i<bins;++i) {run+=n[i];if(t && double(run)>=f*double(t)) return edge[i];}return 0.;};
+            char b[112];std::snprintf(b,sizeof b,"{\"n\":%llu,\"p50_le\":%g,\"p90_le\":%g,\"max\":%.3f}",static_cast<unsigned long long>(t),q(.5),q(.9),max);return b;
+        }
+    };
+    std::string rig_json() {
+        std::lock_guard<std::mutex> l(rig_m_);
+        std::string o="{\"measured\":"+std::to_string(tracker_.measured)+",\"fallback\":"+std::to_string(tracker_.fallback)+",\"pairing\":{\"stale\":"+std::to_string(tracker_.picks[0])+
+            ",\"current\":"+std::to_string(tracker_.picks[1])+",\"still\":"+std::to_string(tracker_.picks[2])+"},\"order\":{";
+        static constexpr const char* kn[2]={"prop_sync","ragdoll_sync"};
+        for(unsigned k=0;k<2;++k) o+=std::string(k?",":"")+"\""+kn[k]+"\":{\"equals_previous_frame\":"+std::to_string(order_[k][0])+",\"equals_this_frame\":"+std::to_string(order_[k][1])+",\"neither\":"+std::to_string(order_[k][2])+"}";
+        o+="},\"carried_vs_published_mm\":{";
+        static constexpr const char* bn[4]={"still","walk","run","turn"};
+        for(unsigned b=0;b<4;++b) o+=std::string(b?",":"")+"\""+bn[b]+"\":"+carry_mm_[b].json();
+        return o+",\"start3\":"+start_mm_.json()+",\"stop3\":"+stop_mm_.json()+"}}";
+    }
     // v1258: the player's rig now (dxgi_probe: the body model's root position, camera heading - head follow), read on the engine's sync thread.
     using RigNow=bool (*)(HeldCarry&) noexcept;
     inline static RigNow rig_now{};
@@ -254,7 +334,7 @@ public:
             ",\"frames\":"+std::to_string(ragdoll_frames_.load())+",\"bones\":"+std::to_string(ragdoll_bones_.load())+",\"unframed\":"+std::to_string(unframed_.load())+"}"+
             ",\"drawn_hold\":{\"on\":"+(HeldRenderSlot::drawn_hold?"true":"false")+",\"notes\":"+std::to_string(drawn_notes_.load())+",\"refused\":"+std::to_string(drawn_refused_.load())+
             ",\"given\":{\"goal\":"+std::to_string(given_[0].load())+",\"relative\":"+std::to_string(given_[1].load())+",\"carried\":"+std::to_string(given_[2].load())+
-            ",\"carried_no_step\":"+std::to_string(carry_stepped_[0].load())+",\"carried_frame_step\":"+std::to_string(carry_stepped_[1].load())+"}"+   // v1266: carried with no root step (still) / with this frame's root step
+            ",\"carried_measured_rig\":"+std::to_string(carry_stepped_[0].load())+",\"carried_fallback_step\":"+std::to_string(carry_stepped_[1].load())+"}"+   // v1270
             ",\"note_too_old\":"+std::to_string(too_old_.load())+",\"note_age_ms\":["+[&]{std::string a;for(unsigned i=0;i<age_bins;++i) a+=(i?",":"")+std::to_string(age_n_[i].load());return a;}()+
             "],\"note_age_edges_ms\":[5,10,15,20,25,30,40,100,\"inf\"]}}";   // v1262
     }
@@ -292,7 +372,11 @@ private:
     std::mutex m_;std::array<HeldRenderSlot,2> slots_{};std::array<std::atomic<std::uintptr_t>,2> watched_{};std::atomic<bool> installed_{};
     std::atomic<std::uint64_t> published_{},written_{},blended_{},ended_{};std::array<std::atomic<std::uint64_t>,refusals> refused_{};
     std::atomic<std::uint64_t> drawn_notes_{},drawn_refused_{};std::array<std::atomic<std::uint64_t>,3> given_{};   // v1258: [goal, goal * X, carried drawn hold]
-    std::array<std::atomic<std::uint64_t>,2> carry_stepped_{};   // v1258: carried with the rig as read / with the last tick step repeated (the rig read was not yet this tick's)
+    std::array<std::atomic<std::uint64_t>,2> carry_stepped_{};   // v1270: carried with a measured rig / with the fallback step
+    std::mutex rig_m_;PlayerRigTracker tracker_{};   // v1270
+    struct Pending {unsigned kind{};Vec3 read{},carried{};double s{};bool measured{};};
+    std::array<Pending,8> pending_{};unsigned pending_n_{};HeldCarry pub_{};double pub_s_{};bool pub_ok_{},moving_{};unsigned since_change_{1000};
+    std::array<std::array<std::uint64_t,3>,2> order_{};std::array<MmHist,4> carry_mm_{};MmHist start_mm_{},stop_mm_{};
     static constexpr unsigned age_bins=9;static constexpr double age_edge_ms[age_bins]={5,10,15,20,25,30,40,100,1e9};
     std::array<std::atomic<std::uint64_t>,age_bins> age_n_{};std::atomic<std::uint64_t> too_old_{};   // v1262: note age at the sync; carries refused as too old
     static bool same(std::uintptr_t at,const unsigned char* bytes,std::size_t n) noexcept {
@@ -317,7 +401,7 @@ private:
     }
     // Under m_: this tick's rigid move of a ragdoll `entity` (one per sync: the bone requests and the frame of one 0x76d640 call share it).
     bool ragdoll_delta(std::uintptr_t entity,bool frame,HoldDelta& d) noexcept {
-        HeldCarry rig{};const bool have_rig=HeldRenderSlot::drawn_hold && rig_now && rig_now(rig);   // v1266: the same carry as a prop (read before the lock)
+        HeldCarry rig{};const bool have_rig=HeldRenderSlot::drawn_hold && frame_rig(1,rig);   // v1266/v1270: the same carry as a prop (this frame's measured rig)
         std::lock_guard<std::mutex> l(m_);
         for(unsigned i=0;i<2;++i) {
             auto& s=slots_[i];if(s.entity!=entity || s.mode==prop) continue;
@@ -329,7 +413,7 @@ private:
                 WorldTrackedPose body{};body.position={f[12],f[13],f[14]};for(unsigned k=0;k<3;++k) body.basis[k]={f[k*4],f[k*4+1],f[k*4+2]};
                 WorldTrackedPose out{};bool blending=false;
                 if(!grab_pose_valid(body) || !s.decide(body,now,out,blending,have_rig && s.mode==severed?&rig:nullptr)) {watched_[i].store(0,std::memory_order_release);return false;}
-                if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);if(s.used==HeldRenderSlot::given_carried) carry_stepped_[s.stepped?1:0].fetch_add(1,std::memory_order_relaxed);
+                if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);if(s.used==HeldRenderSlot::given_carried) carry_stepped_[have_rig && rig.body_ok?0:1].fetch_add(1,std::memory_order_relaxed);
                 if(s.mode==corpse && !blending) {out=translated_goal(body,out,corpse_cap_m);s.written=out;}
                 if(!finite(out.position) || !grab_pose_valid(out)) {refuse(invalid);s={};watched_[i].store(0);return false;}
                 s.delta={body,out};s.delta_s=now;s.delta_ok=true;
@@ -344,7 +428,7 @@ private:
     bool substitute(std::uintptr_t entity,const float* origin,const float* axis,float* o,float* a) noexcept {
         WorldTrackedPose body{};body.position={origin[0],origin[1],origin[2]};
         for(unsigned i=0;i<3;++i) body.basis[i]={axis[i*3],axis[i*3+1],axis[i*3+2]};
-        HeldCarry rig{};const bool have_rig=HeldRenderSlot::drawn_hold && rig_now && rig_now(rig);   // v1258: read before the lock (game memory)
+        HeldCarry rig{};const bool have_rig=HeldRenderSlot::drawn_hold && frame_rig(0,rig);   // v1258/v1270: this frame's measured rig (read before the lock)
         std::lock_guard<std::mutex> l(m_);
         for(unsigned i=0;i<2;++i) {
             auto& s=slots_[i];if(s.entity!=entity || s.mode!=prop) continue;
@@ -354,7 +438,7 @@ private:
             o[0]=float(out.position.x);o[1]=float(out.position.y);o[2]=float(out.position.z);
             for(unsigned k=0;k<3;++k) {a[k*3]=float(out.basis[k].x);a[k*3+1]=float(out.basis[k].y);a[k*3+2]=float(out.basis[k].z);}
             (blending?blended_:written_).fetch_add(1,std::memory_order_relaxed);if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);
-            if(s.used==HeldRenderSlot::given_carried) carry_stepped_[s.stepped?1:0].fetch_add(1,std::memory_order_relaxed);
+            if(s.used==HeldRenderSlot::given_carried) carry_stepped_[have_rig && rig.body_ok?0:1].fetch_add(1,std::memory_order_relaxed);
             if(!blending && s.drawn_ok) {   // v1262: how old the newest drawn note was at this sync, and syncs it was too old to carry
                 const double ms=(precise_s()-s.drawn_s)*1000.;unsigned bin=0;while(bin+1<age_bins && !(ms<=age_edge_ms[bin])) ++bin;age_n_[bin].fetch_add(1,std::memory_order_relaxed);
                 if(s.carry_ok && s.used!=HeldRenderSlot::given_carried && ms>s.carry_age()*1000.) too_old_.fetch_add(1,std::memory_order_relaxed);
