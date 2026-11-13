@@ -731,7 +731,7 @@ static d2vr::VrCombat vr_combat;static bool vr_combat_enabled=true;static float 
 static d2vr::CombatDecision combat_decision{};
 // Plan G task 3 (src/attack_intent.hpp): without build/legacy-sword-contact a drawn-sword slash or a crouched stab presses the game's attack
 // and the engine decides the stealth kill. Controller thread only, except the atomics (status). reset at StartProbe.
-static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;static d2vr::SwordCharge sword_charge;
+static d2vr::AttackIntent attack_intent;static d2vr::AttackPress attack_press;static d2vr::AttackHonour attack_honour;static d2vr::SwordCharge sword_charge;static d2vr::PoseCharge pose_charge;
 static std::optional<d2vr::OwnedSwordContact> contact_attack_target;
 static bool legacy_sword_contact=false;static bool attack_intent_owns=false,attack_intent_rt=false,attack_intent_block_off=false,attack_intent_ran=false;
 static std::atomic<UINT64> attack_intent_pad_frames{};static std::atomic<UINT64> attack_intent_suppressed_far{};static std::atomic<bool> attack_intent_honour_read{};static std::atomic<UINT64> sword_power_attacks{},sword_charge_starts{};
@@ -15898,6 +15898,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                              if(charge.fired && attack_press.start(f.now_ms,polls,340)) {
                                                  d2vr::NativeInteractionAim::power_attack_until_.store(f.now_ms+1200,std::memory_order_relaxed);
                                                  game_xr->pulse(mh,.9f,.12f);++sword_power_attacks;}}
+                                            // v1298 (user, guide card): fist still by the ear, blade forward charges; a forward thrust releases it.
+                                            {const d2vr::GV3 d=d2vr::sub(cf.pos,cf.head_pos);const d2vr::GV3 flat=d2vr::norm({cf.head_fwd.x,0.f,cf.head_fwd.z});
+                                             d2vr::PoseCharge::Pose pose{};
+                                             pose.near_ear=d2vr::len(d)<=.28f && d2vr::dot(d,flat)<=.12f && std::fabs(d2vr::dot(d,cf.head_right))>=.06f && d.y>=-.2f;
+                                             pose.blade_fwd=d2vr::dot(cf.aim,flat);pose.blade_y=cf.aim.y;pose.hand_speed=game_xr->grip_speeds[mh];pose.fwd_speed=d2vr::dot(cf.vel,flat);
+                                             const auto charge=pose_charge.update(pose,drawn_now,sword_grip.held(),live && !interaction.consume_trigger[mh],f.now_ms);
+                                             if(charge.started) ++sword_charge_starts;
+                                             if(charge.tick) game_xr->pulse(mh,.18f,.03f);
+                                             if(charge.fired && attack_press.start(f.now_ms,polls,340)) {
+                                                 d2vr::NativeInteractionAim::power_attack_until_.store(f.now_ms+1200,std::memory_order_relaxed);
+                                                 game_xr->pulse(mh,.9f,.12f);++sword_power_attacks;}}
                                             const auto to_vec=[](const d2vr::GV3& v){return d2vr::Vec3{v.x,v.y,v.z};};
                                             auto contact_request=live && !attack_press.active()?d2vr::NativeInteractionAim::take_contact_attack(control_reader,f.now_ms,game_xr->pose_epoch()):std::nullopt;
                                             if(contact_attack_target && !d2vr::NativeInteractionAim::contact_attack_current(control_reader,*contact_attack_target,f.now_ms,game_xr->pose_epoch())) {
@@ -17770,7 +17781,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::NativeInteractionAim::legacy_contact_=legacy_sword_contact;
         takedown_anchor_frames=0;takedown_anchor_object_conflicts=0;
         prompt_target_anchor=true; // captured target ownership is required; legacy knob cannot erase identity evidence
-        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};sword_charge.reset();sword_power_attacks=0;sword_charge_starts=0;d2vr::NativeInteractionAim::power_attack_until_=0;npc_trigger_uses=0;npc_prompt_frames=0;attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
+        d2vr::NativeInteractionAim::intent_contact_tick_=0;d2vr::NativeInteractionAim::intent_episode_=d2vr::SlowRejectLatch{};attack_intent=d2vr::AttackIntent{};attack_press=d2vr::AttackPress{};attack_honour=d2vr::AttackHonour{};sword_charge.reset();pose_charge.reset();sword_power_attacks=0;sword_charge_starts=0;d2vr::NativeInteractionAim::power_attack_until_=0;npc_trigger_uses=0;npc_prompt_frames=0;attack_intent_owns=attack_intent_rt=false;attack_intent_pad_frames=0;attack_intent_honour_read=false;
         assassination_receipt_requested=head_requested && fs::exists(root/L"build"/L"assassination-receipts");
         if(assassination_receipt_requested &&
            !d2vr::NativeAssassinationReceipt::process_owner().start(image_base,&read_self,output.when_on()))

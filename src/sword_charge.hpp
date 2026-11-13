@@ -48,4 +48,40 @@ private:
     int level_{};
     std::uint64_t since_{};
 };
+// v1298 (user: the guide card "Fist by your right ear, blade pointing forward: it charges. Thrust forward to release it. Lower
+// the blade to cancel."): a trigger-free power attack. The sword fist held still beside the head with the blade forward
+// charges; a forward thrust of the hand releases it (fires past fire_at). Lowering the blade cancels, and so does a charge
+// that leaves the pose without a thrust (after leave_ms). The caller computes the geometry (stage metres, head-relative).
+class PoseCharge {
+public:
+    static constexpr float charge_seconds=.8f,fire_at=.6f;
+    static constexpr float still_mps=.6f;          // the hand rests at the ear while charging
+    static constexpr float thrust_mps=1.5f;        // hand speed along head-forward that releases
+    static constexpr float blade_fwd_min=.7f;      // blade . flat head-forward (about 45 deg)
+    static constexpr float blade_low=-.5f;         // blade.y below this = lowered: cancel
+    static constexpr std::uint64_t leave_ms=400;   // out of the pose this long without a thrust: cancel
+    struct Pose {bool near_ear{};float blade_fwd{},blade_y{},hand_speed{},fwd_speed{};};
+    struct Out {float charge{};bool charging{},ready{},fired{},tick{},started{};};
+    void reset() noexcept {charge_=0;level_=0;last_ms_=0;in_pose_ms_=0;charging_=false;}
+    Out update(const Pose& p,bool drawn,bool held,bool allowed,std::uint64_t now_ms) noexcept {
+        Out out{};
+        const std::uint64_t dt=last_ms_ && now_ms>last_ms_?std::min<std::uint64_t>(now_ms-last_ms_,100):0;last_ms_=now_ms;
+        if(!allowed || !drawn || !held || p.blade_y<blade_low) {reset();last_ms_=now_ms;return out;}
+        const bool in_pose=p.near_ear && p.blade_fwd>=blade_fwd_min && p.hand_speed<still_mps;
+        if(in_pose) {
+            if(!charging_) {charging_=true;charge_=0;level_=0;out.started=true;}
+            in_pose_ms_=now_ms;
+            charge_=std::min(1.f,charge_+static_cast<float>(dt)/1000.f/charge_seconds);
+            const int level=charge_>=1.f?3:charge_>=.66f?2:charge_>=.33f?1:0;
+            if(level>level_) {level_=level;out.tick=true;}
+        } else if(charging_) {
+            if(charge_>=fire_at && p.fwd_speed>=thrust_mps && p.blade_fwd>=blade_fwd_min) {out.fired=true;reset();last_ms_=now_ms;return out;}
+            if(now_ms-in_pose_ms_>leave_ms) {reset();last_ms_=now_ms;return out;}
+        }
+        out.charging=charging_;out.charge=charge_;out.ready=charge_>=fire_at;return out;
+    }
+private:
+    float charge_{};int level_{};bool charging_{};
+    std::uint64_t last_ms_{},in_pose_ms_{};
+};
 } // namespace d2vr

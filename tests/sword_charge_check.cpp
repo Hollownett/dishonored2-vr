@@ -64,6 +64,21 @@ int main() {
         gate.explicit_block=false;   // the charge owns the trigger press
         assert(d2vr::attack_allowed(gate));
     }
+    {   // v1298 pose charge: fist by the ear, blade forward, charge; a forward thrust releases; lowering the blade cancels
+        using d2vr::PoseCharge;PoseCharge pc;std::uint64_t t=0;
+        const PoseCharge::Pose ear{true,.95f,.1f,.1f,0.f},thrust{false,.95f,.1f,2.f,2.f},low{true,.2f,-.8f,.1f,0.f},away{false,.95f,.1f,.2f,.1f};
+        auto run=[&](const PoseCharge::Pose& p,int frames){PoseCharge::Out o{};for(int i=0;i<frames;++i){t+=16;o=pc.update(p,true,true,true,t);}return o;};
+        auto o=run(ear,10);assert(o.charging && !o.ready);
+        o=run(thrust,1);assert(!o.fired);                          // too early: no fire, still charging (within leave_ms)
+        pc.reset();run(ear,1);o=run(ear,40);assert(o.ready);
+        o=run(thrust,1);assert(o.fired);
+        o=run(thrust,1);assert(!o.fired && !o.charging);           // one shot
+        run(ear,40);o=run(low,1);assert(!o.charging);              // lowered blade cancels
+        o=run(thrust,1);assert(!o.fired);
+        run(ear,40);o=run(away,30);assert(!o.charging);            // wandered off without a thrust: cancelled
+        o=run(thrust,1);assert(!o.fired);
+        run(ear,40);t+=16;o=pc.update(thrust,true,true,false,t);assert(!o.fired && !o.charging);  // a menu or the wheel: nothing
+    }
     std::puts("sword_charge_check ok");
     return 0;
 }
