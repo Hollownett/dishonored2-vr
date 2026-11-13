@@ -1937,6 +1937,7 @@ static bool lens_guard_enabled=true, lens_eye0_camera=false;   // v1256: build/l
 // for eye 1. build/lens-mono = the v1256 head-centre mono pass. build/lens-shared-shadows = v1256 shadows (the lens pass is the shadow
 // share's second eye: writers skipped, eye 0's setup read); without it the lens draws its own shadows (shadow_share Model::on_secondary_begin).
 static bool lens_mono=false,lens_shared_shadows=false;
+static d2vr::secondary_view::StampMode lens_stamp_mode=d2vr::secondary_view::StampMode::borrowed;   // v1269: build/lens-stamp-pass-eye, build/no-lens-stamp (v1264)
 static d2vr::secondary_view::LensMode lens_mode() noexcept {using M=d2vr::secondary_view::LensMode;return lens_eye0_camera?M::eye0:lens_mono?M::centre:M::per_eye;}
 static std::atomic<int> lens_pass_eye{0};static std::atomic<bool> lens_between{false}; // the running pass: its eye (2 = head centre) / inside eye 1's Begin
 static struct LensPending {void* renderer{};void* entry{};std::uintptr_t image{},view{};UINT64 frame{};bool began{};} lens_pending; // render thread: the frame-start pass, for the eye-1 pass
@@ -1960,9 +1961,13 @@ static struct LensStats {
     std::array<std::atomic<UINT64>,3> passes{},camera_match{},camera_mismatch{},shadow_ok{},shadow_bad{};
     std::array<std::atomic<UINT64>,5> second_refused{};std::array<std::atomic<UINT64>,2> composited_own{},composited_other{};
     std::atomic<UINT64> rearm_busy{},pair_frames{},eye0_own_frame{};std::atomic<int> last_pass_eye{-1};
-    // v1265: lens frames by camera path [follow, latched (stale basis, same translation), own (independent camera: mono, engine projection), none];
+    // v1269: lens frames by camera path [follow (same-tick test), own (independent camera: mono, engine projection), none];
     // per pass [eye0, eye1, centre]: the lens image's grid (projection, render rect, fraction) equal / not equal to the compositing eye's
-    std::array<std::atomic<UINT64>,4> camera_path{};std::array<std::atomic<UINT64>,3> grid_match{},grid_mismatch{};
+    std::array<std::atomic<UINT64>,3> camera_path{};std::array<std::atomic<UINT64>,3> grid_match{},grid_mismatch{};   // v1269 path: [follow, own, none]
+    // v1269 (game thread, per owner tick with the engine's follow flag 0x10): the Timepiece axis against the same-tick player camera and against the
+    // prepared views (the v1264 reference), deg bins <=.001 .01 .1 1 5 >5; ticks with the flag set / clear; ticks without a readable reference
+    std::array<std::atomic<UINT64>,6> same_tick_deg{},prepared_deg{};std::array<std::atomic<UINT64>,2> engine_follow_flag{};std::atomic<UINT64> reference_misses{};
+    std::array<std::atomic<UINT64>,4> flag_vs_match{};   // v1271 (ticks with a reference): [flag set & match, set & mismatch, clear & match, clear & mismatch]
     std::array<std::atomic<UINT64>,3> records_kept{},records_changed{};   // v1265: per pass, the borrowed eye's object-motion view records unchanged / changed across it
 } lens_stats;
 void lens_note_pass_begin(std::uintptr_t view) noexcept;
@@ -3024,8 +3029,10 @@ static inline void visibility_stamp_before(ID3D11DeviceContext* context) noexcep
     if(!d2vr::VisibilityStamp::enabled.load(std::memory_order_relaxed)) return;
     const int pass=d2vr::RenderPassMap::current_pass();
     if(pass!=d2vr::VisibilityStamp::forward_world_pass) return;
-    // v1265: a lens pass's FORWARD_WORLD is stamped as v1257 stamped it (the borrowed eye view's stamp); the stamp writes only that job's depth
-    d2vr::VisibilityStamp::before_draw(context,pass,d2vr::ObjectMotion::eye_of_view(d2vr::RenderPassMap::current_job_view()));
+    // v1265/v1269: a lens pass's FORWARD_WORLD is stamped by lens_stamp_mode: default v1257 (the borrowed eye view's stamp), build/lens-stamp-pass-eye
+    // (the pass's own eye), build/no-lens-stamp (v1264: none). The stamp writes only that job's depth.
+    const int job_eye=d2vr::ObjectMotion::eye_of_view(d2vr::RenderPassMap::current_job_view());
+    d2vr::VisibilityStamp::before_draw(context,pass,d2vr::RenderPassMap::current_secondary()?d2vr::secondary_view::lens_stamp_eye(lens_stamp_mode,job_eye,lens_pass_eye.load(std::memory_order_relaxed)):job_eye);
 }
 // v1181: the eye of the pass's view on a paired frame (-1: not an eye view, or the census and paired fix are both off: no lookup)
 static inline int cross_eye_paired_eye() noexcept {
@@ -6866,7 +6873,18 @@ void lens_note_pass_begin(std::uintptr_t view) noexcept {
 }
 // One secondary render (0x366590) drawn for pass_eye (0/1; 2 = head centre), then the borrowed eye view re-created. True when it began.
 static bool lens_isolated=true;   // v1259: build/no-lens-isolation = v1257 (the lens pass's jobs and its borrowed view seen as the eye's)
-static bool lens_follow_latch=true;   // v1265: build/no-lens-follow-latch = v1264 (a stale basis drops the lens to the independent-camera path)
+static bool lens_follow_prepared=false;   // v1269: build/lens-follow-prepared = the v1264 follows test (prepared views, one tick stale while turning)
+// v1269: the player camera the Timepiece reads this tick (0x7e7110(game+0x1f52b8): the list's last camera +0x10; 0x88e140: origin +0xa8, axis +0xcc)
+static bool lens_reference_camera(std::array<float,3>& p,std::array<float,9>& b) noexcept {
+    std::uintptr_t game{},data{},element{};std::uint32_t packed{};
+    if(!read_self(image_base+0x39a5290,&game,8) || !game || !read_self(game+0x1f52b8,&data,8) || !data || !read_self(game+0x1f52b8+8,&packed,4)) return false;
+    const std::uint32_t n=packed&0xffffffu;
+    if(!n || n>256 || !read_self(data+(n-1)*8ull,&element,8) || !element) return false;
+    if(!read_self(element+0x10+0xa8,p.data(),12) || !read_self(element+0x10+0xcc,b.data(),36)) return false;
+    for(float v:p) if(!std::isfinite(v)) return false;
+    for(float v:b) if(!std::isfinite(v)) return false;
+    return true;
+}
 static bool lens_pass(void* renderer,void* entry,std::uintptr_t view,int pass_eye,bool between) noexcept {
     lens_pass_eye=pass_eye;lens_between=between;lens_began=false;lens_pass_camera={};lens_shadow_open=false;lens_grid_same=false;
     lens_eye_grid_ok=read_grid(d2vr::PostTonemapPass::eye_views[pass_eye==1?1:0].load(),lens_eye_grid);   // v1265: the eye that composites this image, before the pass
@@ -6902,7 +6920,7 @@ void __fastcall lens_render_hook(void* renderer,void* entry) {
     ++lens_stats.frames;lens_stats.eye_after=false;
     {const auto l=d2vr::PostTonemapPass::eye_views[0].load(),r=d2vr::PostTonemapPass::eye_views[1].load();++lens_stats.borrowed[view==l?0:(view==r && l!=r)?1:2];}
     {LensCamera c;{std::lock_guard<std::mutex> l(lens_camera_mutex);c=lens_camera;}   // v1265: this lens frame's camera path (lens_setup reads the same)
-     ++lens_stats.camera_path[c.valid && frames.load()<=c.frame+4 && c.path<3?c.path:3u];}
+     ++lens_stats.camera_path[c.valid && frames.load()<=c.frame+4 && c.path<2?c.path:2u];}
     // v1257: the frame-start pass is eye 0's (eye 0 renders first: prepared entries are begun in order, 0x361ff0); eye 1's runs in its Begin
     const bool began=lens_pass(renderer,entry,view,lens_mode()==d2vr::secondary_view::LensMode::centre?2:0,false);
     lens_stats.last_frame=d2vr::secondary_view::lens_pass_frame(began,frames.load(),lens_stats.last_frame.load());
@@ -6955,13 +6973,23 @@ std::uintptr_t __fastcall lens_owner_hook(void* owner,void* a,void* b,void* c) {
         const auto pose=d2vr::decode_render_view(bytes);const auto native=native_views();
         if(!pose || native.size()!=2) return result;
         LensCamera camera;camera.valid=true;camera.frame=frames.load();camera.position=pose->position;camera.basis=pose->basis;
-        // v1265: the prepared views are the previous tick's here; a stale basis keeps a following camera following (secondary_view::follow_path)
-        namespace sv=d2vr::secondary_view;static sv::FollowLatch latch;   // game thread only
-        const auto t_now=sv::translation(pose->position,native[0].pose->position,native[1].pose->position);
-        const auto path=lens_follow_latch?sv::follow_path(latch,sv::follows(pose->basis,native[0].pose->basis),t_now,camera.frame)
-                                         :(sv::follows(pose->basis,native[0].pose->basis)?sv::CameraPath::follow:sv::CameraPath::own);
-        camera.path=static_cast<unsigned>(path);camera.follows=path==sv::CameraPath::follow || path==sv::CameraPath::latched;
-        camera.translation=path==sv::CameraPath::latched?latch.t:t_now;
+        // v1269/v1271: follows = the Timepiece's axis equals this tick's player camera axis, read now - the same values it copied
+        // (secondary_view::follow_same_tick); the translation is this tick's offset. Flag 0x10 (0x890c50 ran) is recorded only. build/lens-follow-prepared:
+        // the v1264 test against the prepared views (the previous tick's while the camera turns).
+        namespace sv=d2vr::secondary_view;
+        const bool engine_follows=(flags&0x10)!=0;
+        std::array<float,3> ref_p{};std::array<float,9> ref_b{};
+        sv::Follow f{};
+        if(!lens_follow_prepared && lens_reference_camera(ref_p,ref_b)) {
+            f=sv::follow_same_tick(pose->position,pose->basis,ref_p,ref_b);
+            ++lens_stats.same_tick_deg[sv::deg_bin(f.angle_deg)];++lens_stats.flag_vs_match[(engine_follows?0u:2u)+(f.follows?0u:1u)];
+        } else {
+            if(!lens_follow_prepared) ++lens_stats.reference_misses;
+            f.follows=sv::follows(pose->basis,native[0].pose->basis);f.translation=sv::translation(pose->position,native[0].pose->position,native[1].pose->position);
+        }
+        ++lens_stats.prepared_deg[sv::deg_bin(sv::basis_angle_deg(native[0].pose->basis,pose->basis))];   // what the v1264 test saw
+        ++lens_stats.engine_follow_flag[engine_follows?0:1];
+        camera.follows=f.follows;camera.translation=f.translation;camera.path=static_cast<unsigned>(f.follows?sv::CameraPath::follow:sv::CameraPath::own);
         {std::lock_guard<std::mutex> l(lens_camera_mutex);lens_camera=camera;}
         ++lens_stats.owner_cameras;
         auto reader=&read_self;const auto machine=native_takedowns.machine(reader);int state=0;
@@ -6986,8 +7014,12 @@ static std::string lens_status_json() {
      <<",\"shadow_ok\":"<<list(lens_stats.shadow_ok)<<",\"shadow_bad\":"<<list(lens_stats.shadow_bad)<<",\"second_refused\":"<<list(lens_stats.second_refused)
      <<",\"composited_own\":"<<list(lens_stats.composited_own)<<",\"composited_other\":"<<list(lens_stats.composited_other)
      <<",\"pair_frames\":"<<lens_stats.pair_frames.load()<<",\"rearm_busy\":"<<lens_stats.rearm_busy.load()
-     // v1265: lens frames by camera path [follow, latched, own, none]; per pass the lens grid (projection, rect, fraction) equal / not to the compositing eye's
-     <<",\"follow_latch\":"<<(lens_follow_latch?"true":"false")<<",\"camera_path_follow_latched_own_none\":"<<list(lens_stats.camera_path)
+     // v1269: lens frames by camera path [follow, own, none]; per pass the lens grid (projection, rect, fraction) equal / not to the compositing eye's
+     <<",\"follow_test\":\""<<(lens_follow_prepared?"prepared":"same_tick")<<"\",\"camera_path_follow_own_none\":"<<list(lens_stats.camera_path)
+     <<",\"same_tick_deg\":"<<list(lens_stats.same_tick_deg)<<",\"prepared_deg\":"<<list(lens_stats.prepared_deg)
+     <<",\"engine_follow_flag_set_clear\":"<<list(lens_stats.engine_follow_flag)<<",\"reference_misses\":"<<lens_stats.reference_misses.load()
+     <<",\"flag_set_match_set_mismatch_clear_match_clear_mismatch\":"<<list(lens_stats.flag_vs_match)
+     <<",\"stamp\":\""<<(lens_stamp_mode==d2vr::secondary_view::StampMode::borrowed?"borrowed":lens_stamp_mode==d2vr::secondary_view::StampMode::pass_eye?"pass_eye":"off")<<'"'
      <<",\"grid_match\":"<<list(lens_stats.grid_match)<<",\"grid_mismatch\":"<<list(lens_stats.grid_mismatch)
      <<",\"eye_records_kept\":"<<list(lens_stats.records_kept)<<",\"eye_records_changed\":"<<list(lens_stats.records_changed)<<'}'
      // v1259: the lens passes kept out of the eyes' draw-time state: [lens draws left as the engine made them, lens per-view writes not classified,
@@ -6995,7 +7027,7 @@ static std::string lens_status_json() {
      <<",\"isolation\":{\"on\":"<<(lens_isolated?"true":"false")<<",\"draws_writes_snapshots\":["<<d2vr::ObjectMotion::secondary_counts()[0]<<','
      <<d2vr::ObjectMotion::secondary_counts()[1]<<','<<d2vr::ObjectMotion::secondary_counts()[2]
      <<"],\"engine_rows_by_pass_eye\":["<<d2vr::ObjectMotion::secondary_draws_by_eye()[0]<<','<<d2vr::ObjectMotion::secondary_draws_by_eye()[1]<<','<<d2vr::ObjectMotion::secondary_draws_by_eye()[2]
-     <<"],\"stamped_as_job_view\":true},\"held_eyes\":"<<d2vr::weapon_draw::Place::eyes_json()
+     <<"]},\"held_eyes\":"<<d2vr::weapon_draw::Place::eyes_json()
      <<",\"owner_cameras\":"<<lens_stats.owner_cameras.load()<<",\"camera_follows\":"<<(camera.follows?"true":"false")
      <<",\"translation\":["<<camera.translation[0]<<','<<camera.translation[1]<<','<<camera.translation[2]<<']'
      <<",\"replays\":"<<lens_stats.replays.load()<<",\"replay_exact\":"<<lens_stats.replay_exact.load()<<",\"replay_differs\":"<<lens_stats.replay_differs.load()
@@ -16984,7 +17016,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             lens_eye0_camera=fs::exists(root/L"build"/L"lens-eye0-camera");   // v1256: the v1246 eye-0 lens camera (default: the head's centre)
             lens_mono=fs::exists(root/L"build"/L"lens-mono");lens_shared_shadows=fs::exists(root/L"build"/L"lens-shared-shadows");   // v1257: v1256 camera / v1256 shadows
             lens_isolated=!fs::exists(root/L"build"/L"no-lens-isolation");   // v1259: build/no-lens-isolation = v1257
-            lens_follow_latch=!fs::exists(root/L"build"/L"no-lens-follow-latch");   // v1265: build/no-lens-follow-latch = v1264
+            lens_follow_prepared=fs::exists(root/L"build"/L"lens-follow-prepared");   // v1269: the v1264 follows test
+            lens_stamp_mode=fs::exists(root/L"build"/L"no-lens-stamp")?d2vr::secondary_view::StampMode::off:   // v1269: v1264 (no stamp on a lens pass)
+                fs::exists(root/L"build"/L"lens-stamp-pass-eye")?d2vr::secondary_view::StampMode::pass_eye:d2vr::secondary_view::StampMode::borrowed;   // default v1257
             if(lens_guard_enabled) {
                 namespace sv=d2vr::secondary_view;
                 static constexpr std::array<unsigned char,16> owner_prologue{0x40,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,0x24};
