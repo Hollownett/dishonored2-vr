@@ -1707,13 +1707,13 @@ static std::string binding_json() {
     std::string text="[";
     for(unsigned side=0;side<2;++side) {
         const auto b=d2vr::weapon_draw::Binder::summary(side);
-        char values[256];
+        char values[320];
         std::snprintf(values,sizeof values,
             "{\"bound\":%d,\"source\":\"%s\",\"space\":\"%s\",\"age\":%u,\"g_m\":%.6f,\"pending\":%u,"
-            "\"learns\":%llu,\"refreshes\":%llu,\"rejects\":%llu,\"fallbacks\":%llu,"
+            "\"learns\":%llu,\"recalls\":%llu,\"refreshes\":%llu,\"rejects\":%llu,\"fallbacks\":%llu,"
             "\"sanity\":{\"n\":%llu,\"gap_mm\":%.3f,\"angle_deg\":%.3f,\"max_mm\":%.3f}}",
             b.bound?1:0,b.bound&&b.source<4?sources[b.source]:"none",spaces[b.space<2?b.space:0],b.age,b.g_m,b.pending,
-            b.learns,b.refreshes,b.rejects,b.fallbacks,b.sanity_n,b.sanity_mm,b.sanity_deg,b.sanity_max_mm);
+            b.learns,static_cast<unsigned long long>(d2vr::weapon_draw::Binder::recalls(side)),b.refreshes,b.rejects,b.fallbacks,b.sanity_n,b.sanity_mm,b.sanity_deg,b.sanity_max_mm);
         text+=side?",":"";text+=values;
     }
     return text+"]";
@@ -8525,7 +8525,7 @@ void prepare_head_view(void* view) noexcept {
         }
         // G2: an open exact-32 cutscene renders its view here too (render only: every side effect below stays on raw logic 2 / render_world_scene())
         if(!render_scene_frame()) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();cutscene_hands_live=false;
-            if(d2vr::clamp_forgets_on(game_logic_mask())) forget_hand_clamp(); // a load or death reload: no planes or hands from before it (N6)
+            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();} // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
             return;}
         // Ruling 15: the cutscene state is read ONCE per displayed frame (the mask can flip between reads); every decision below uses it
         static UINT64 cutscene_frame_of=~0ull;static bool cutscene_frame_latched{};

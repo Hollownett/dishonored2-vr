@@ -264,6 +264,13 @@ public:
             reset_binding(s);   // a weapon swap before the first G: never combine two identities' compositions
         }
         if(!s.bound) {
+            // v1277 (user: weapons glitch/ghost in performance mode; v1276 session: 860 drops/pickups/swaps, 20 learns, left hand unbound on 28 %
+            // of renders = drawn at the engine pose and outside the held mask/own previous rows): the same weapon in the same hand state comes
+            // back at the G it was learned with; a regrip still replaces it through the 3-agree refresh below.
+            if(const Mat* g=recall(hand,candidate.identity,candidate.source,candidate.space)) {
+                s.bound=true;s.g=*g;s.identity=candidate.identity;s.source=candidate.source;s.space=candidate.space;s.age=0;s.pending_n=0;++recalls_[hand];
+                return true;
+            }
             if(!candidate.valid) {if(candidate.attempted) ++s.rejects;++s.fallbacks;return false;}
             if(s.pending_n && same_grip(candidate.g,s.pending)) ++s.pending_n;
             else {s.pending=candidate.g;s.pending_n=1;s.pending_identity=candidate.identity;s.pending_source=candidate.source;s.pending_space=candidate.space;}
@@ -271,7 +278,7 @@ public:
             const unsigned needed=exact?1u:2u;   // a copy service's offset is exact; a writer note can be newer than F
             if(s.pending_n>=needed) {
                 s.bound=true;s.g=candidate.g;s.identity=candidate.identity;s.source=candidate.source;s.space=candidate.space;
-                s.learned_serial=candidate.serial;s.learned_frame=candidate.frame;s.age=0;s.pending_n=0;++s.learns;
+                s.learned_serial=candidate.serial;s.learned_frame=candidate.frame;s.age=0;s.pending_n=0;++s.learns;remember(hand,s);
                 return true;
             }
             ++s.fallbacks;
@@ -283,7 +290,7 @@ public:
             else {
                 if(s.pending_n && same_grip(candidate.g,s.pending)) ++s.pending_n; else {s.pending=candidate.g;s.pending_n=1;}
                 if(s.pending_n>=3) {
-                    s.g=candidate.g;s.learned_serial=candidate.serial;s.learned_frame=candidate.frame;s.age=0;s.pending_n=0;++s.refreshes;
+                    s.g=candidate.g;s.learned_serial=candidate.serial;s.learned_frame=candidate.frame;s.age=0;s.pending_n=0;++s.refreshes;remember(hand,s);
                 }
             }
         } else if(candidate.attempted) ++s.rejects;
@@ -317,7 +324,9 @@ public:
         s.sanity_gap_m=gap;s.sanity_deg=angle(engine,bound_frame)*57.29577951308232;
         if(gap>s.sanity_max_m) s.sanity_max_m=gap;++s.sanity_n;
     }
-    static void clear() {std::lock_guard<std::mutex> lock(mutex_);states_={};}
+    static void clear() {std::lock_guard<std::mutex> lock(mutex_);states_={};known_={};}
+    static void forget() {std::lock_guard<std::mutex> lock(mutex_);known_={};}
+    static std::uint64_t recalls(unsigned hand) {return hand<2?recalls_[hand].load(std::memory_order_relaxed):0;}
     struct Summary {bool bound{};unsigned source{},space{},age{},pending{};double g_m{};unsigned long long learns{},refreshes{},rejects{},fallbacks{},sanity_n{};double sanity_mm{},sanity_deg{},sanity_max_mm{};};
     static Summary summary(unsigned hand) {
         Summary out;
@@ -336,7 +345,22 @@ private:
         s=State{};
         s.learns=learns;s.refreshes=refreshes;s.rejects=rejects;s.fallbacks=fallbacks;
     }
+    // v1277: learned G per hand by (identity, source, space); oldest entry replaced. ponytail: 8 per hand, a pointer reused by another weapon
+    // a load forgets them (forget(), at the clamp's load reset); otherwise the refresh rule corrects a wrong one.
+    struct Known {std::uintptr_t identity{};unsigned source{},space{};Mat g{};std::uint64_t used{};};
+    static const Mat* recall(unsigned hand,std::uintptr_t identity,unsigned source,unsigned space) noexcept {
+        if(!identity) return nullptr;
+        for(auto& k:known_[hand]) if(k.identity==identity && k.source==source && k.space==space) {k.used=++tick_;return &k.g;}
+        return nullptr;
+    }
+    static void remember(unsigned hand,const State& s) noexcept {
+        Known* slot=&known_[hand][0];
+        for(auto& k:known_[hand]) {if(k.identity==s.identity && k.source==s.source && k.space==s.space) {slot=&k;break;}if(k.used<slot->used) slot=&k;}
+        *slot=Known{s.identity,s.source,s.space,s.g,++tick_};
+    }
     inline static std::array<State,2> states_{};
+    inline static std::array<std::array<Known,8>,2> known_{};inline static std::uint64_t tick_{};
+    inline static std::array<std::atomic<std::uint64_t>,2> recalls_{};
     inline static std::mutex mutex_;
 };
 

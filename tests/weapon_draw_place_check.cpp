@@ -426,6 +426,14 @@ int main() {
         CHECK(!Binder::observe(0,GripCandidate{},0x6009,write_engine,space_joint59));
         Mat dropped{};CHECK(!Binder::frame(0,image,dropped));
         CHECK(Binder::summary(0).learns==2);
+        // v1277: the swapped-out weapon comes back: bound at once at its learned G, no relearn; a load forgets it
+        CHECK(Binder::observe(0,GripCandidate{},0x6008,write_engine,space_joint59));
+        Mat back{};CHECK(Binder::frame(0,image,back) && dist(back,mul(image,g3))<1e-9);
+        CHECK(Binder::recalls(0)==1 && Binder::summary(0).learns==2);
+        CHECK(!Binder::observe(0,GripCandidate{},0x6008,write_cross,space_joint59));   // another source: not the same composition
+        Binder::forget();
+        CHECK(!Binder::observe(0,GripCandidate{},0x6008,write_engine,space_joint59));
+        std::printf("v1277 recall: returning weapon bound without relearn, forget clears\n");
         // v1234: sanity is per hold: an idle hand's next sample starts fresh numbers
         Binder::observe(0,c3);Binder::observe(0,c3);
         Mat b3{};Binder::frame(0,image,b3);
