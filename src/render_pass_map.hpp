@@ -437,6 +437,9 @@ public:
     inline static std::atomic<std::uintptr_t> secondary_view{};
     static bool current_secondary() noexcept {const auto v=reinterpret_cast<std::uintptr_t>(current_view_);return v && v==secondary_view.load(std::memory_order_relaxed);}
     static std::uintptr_t current_view() noexcept {return current_secondary()?0:reinterpret_cast<std::uintptr_t>(current_view_);}
+    // v1265: the job's view as the engine named it (a lens job: the borrowed eye view). Only for what v1257 gave the lens pass and that changes no
+    // eye state: the visibility stamp of its FORWARD_WORLD (dxgi_probe visibility_stamp_before).
+    static std::uintptr_t current_job_view() noexcept {return reinterpret_cast<std::uintptr_t>(current_view_);}
     static std::uint64_t current_job() noexcept {return current_job_;} // v1199: 0 outside a pass job
     // Called from the existing FinishCommandList observer, on the deferred job thread, before the
     // thread-local pass is cleared.
