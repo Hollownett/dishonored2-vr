@@ -1968,6 +1968,7 @@ static struct LensStats {
     // prepared views (the v1264 reference), deg bins <=.001 .01 .1 1 5 >5; ticks with the flag set / clear; ticks without a readable reference
     std::array<std::atomic<UINT64>,6> same_tick_deg{},prepared_deg{};std::array<std::atomic<UINT64>,2> engine_follow_flag{};std::atomic<UINT64> reference_misses{};
     std::array<std::atomic<UINT64>,4> flag_vs_match{};   // v1271 (ticks with a reference): [flag set & match, set & mismatch, clear & match, clear & mismatch]
+    std::array<std::atomic<UINT64>,4> same_vs_prepared{};   // v1273 (ticks with a reference): [same & prepared, same only, prepared only, neither]
     std::array<std::atomic<UINT64>,3> records_kept{},records_changed{};   // v1265: per pass, the borrowed eye's object-motion view records unchanged / changed across it
 } lens_stats;
 void lens_note_pass_begin(std::uintptr_t view) noexcept;
@@ -6979,17 +6980,21 @@ std::uintptr_t __fastcall lens_owner_hook(void* owner,void* a,void* b,void* c) {
         namespace sv=d2vr::secondary_view;
         const bool engine_follows=(flags&0x10)!=0;
         std::array<float,3> ref_p{};std::array<float,9> ref_b{};
-        sv::Follow f{};
-        if(!lens_follow_prepared && lens_reference_camera(ref_p,ref_b)) {
-            f=sv::follow_same_tick(pose->position,pose->basis,ref_p,ref_b);
-            ++lens_stats.same_tick_deg[sv::deg_bin(f.angle_deg)];++lens_stats.flag_vs_match[(engine_follows?0u:2u)+(f.follows?0u:1u)];
-        } else {
-            if(!lens_follow_prepared) ++lens_stats.reference_misses;
-            f.follows=sv::follows(pose->basis,native[0].pose->basis);f.translation=sv::translation(pose->position,native[0].pose->position,native[1].pose->position);
-        }
+        // v1273: follows = the same-tick test OR the v1264 prepared-view test (secondary_view::decide_follow): a readable but wrong reference
+        // degrades to v1264, never to all-mono. build/lens-follow-prepared: the prepared test only.
+        sv::Follow same{};
+        const bool reference_ok=!lens_follow_prepared && lens_reference_camera(ref_p,ref_b);
+        const bool prepared_match=sv::follows(pose->basis,native[0].pose->basis);
+        const auto prepared_t=sv::translation(pose->position,native[0].pose->position,native[1].pose->position);
+        if(reference_ok) {
+            same=sv::follow_same_tick(pose->position,pose->basis,ref_p,ref_b);
+            ++lens_stats.same_tick_deg[sv::deg_bin(same.angle_deg)];++lens_stats.flag_vs_match[(engine_follows?0u:2u)+(same.follows?0u:1u)];
+            ++lens_stats.same_vs_prepared[(same.follows?0u:2u)+(prepared_match?0u:1u)];
+        } else if(!lens_follow_prepared) ++lens_stats.reference_misses;
         ++lens_stats.prepared_deg[sv::deg_bin(sv::basis_angle_deg(native[0].pose->basis,pose->basis))];   // what the v1264 test saw
         ++lens_stats.engine_follow_flag[engine_follows?0:1];
-        camera.follows=f.follows;camera.translation=f.translation;camera.path=static_cast<unsigned>(f.follows?sv::CameraPath::follow:sv::CameraPath::own);
+        const auto d=sv::decide_follow(reference_ok,same,prepared_match,prepared_t);
+        camera.follows=d.follows;camera.translation=d.translation;camera.path=static_cast<unsigned>(d.follows?sv::CameraPath::follow:sv::CameraPath::own);
         {std::lock_guard<std::mutex> l(lens_camera_mutex);lens_camera=camera;}
         ++lens_stats.owner_cameras;
         auto reader=&read_self;const auto machine=native_takedowns.machine(reader);int state=0;
@@ -7019,6 +7024,7 @@ static std::string lens_status_json() {
      <<",\"same_tick_deg\":"<<list(lens_stats.same_tick_deg)<<",\"prepared_deg\":"<<list(lens_stats.prepared_deg)
      <<",\"engine_follow_flag_set_clear\":"<<list(lens_stats.engine_follow_flag)<<",\"reference_misses\":"<<lens_stats.reference_misses.load()
      <<",\"flag_set_match_set_mismatch_clear_match_clear_mismatch\":"<<list(lens_stats.flag_vs_match)
+     <<",\"same_and_prepared_same_only_prepared_only_neither\":"<<list(lens_stats.same_vs_prepared)
      <<",\"stamp\":\""<<(lens_stamp_mode==d2vr::secondary_view::StampMode::borrowed?"borrowed":lens_stamp_mode==d2vr::secondary_view::StampMode::pass_eye?"pass_eye":"off")<<'"'
      <<",\"grid_match\":"<<list(lens_stats.grid_match)<<",\"grid_mismatch\":"<<list(lens_stats.grid_mismatch)
      <<",\"eye_records_kept\":"<<list(lens_stats.records_kept)<<",\"eye_records_changed\":"<<list(lens_stats.records_changed)<<'}'
