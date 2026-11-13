@@ -100,7 +100,7 @@ sealed class MainForm : Form
 
     // settings
     readonly OptionList options = new();
-    readonly Option res, aa, hud, turn, snap, smooth, mirror, sharp, hint, crosshair, recenter, cutscenes;
+    readonly Option res, aa, perf, hud, turn, snap, smooth, mirror, sharp, hint, crosshair, recenter, cutscenes;
     readonly ArtButton save = new("Save", Look.Primary), reload = new("Reload", Look.Secondary);
     string settingsMsg = ""; Color settingsMsgColor = Ui.Dim;
     // settings: the Features view (default-on features, each switchable; changes are written at once)
@@ -112,7 +112,9 @@ sealed class MainForm : Form
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
     static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 200% + SMAA - maximum clarity", 11);
+    const string PerfHelp = "Experimental. Draws one eye per frame for a higher frame rate. Some visual artifacts may appear, mostly around moving hands and objects.";
     const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
+    readonly List<Feature> shownFeatures = new();  // the Features page rows, in order (main-settings features have none)
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
     Control settingsLast = null!;  // the last button of the row; the message line sits to its right
@@ -159,6 +161,7 @@ sealed class MainForm : Form
         { IsSlider = true, Min = 50, Max = 200, Step = 5, Page = 25, Format = v => (v / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "x" };
         aa = new Option("Anti-aliasing", AaHelp, AaBase);
         RefreshDlssChoices();
+        perf = new Option("Performance mode (experimental)", PerfHelp, ("Off", 0), ("On", 1));  // the alternate-eye knob file, written on Save through the Features path
         sharp = new Option("Sharpening", "Contrast-adaptive sharpening after upscaling.", ("Off", 0.0), ("Low", .25), ("Medium", .5), ("High", .75), ("Max", 1.0));
         hud = new Option("HUD size", "How large the game HUD is drawn around the centre of your view.", ("55% (centre)", 55), ("65% (default)", 65), ("75%", 75), ("85%", 85), ("100% (game layout)", 100), ("125%", 125), ("150%", 150), ("200%", 200));
         mirror = new Option("Monitor view", "What the desktop window mirrors while you play in VR.", ("Right eye", 0), ("Left eye", 1), ("Both eyes", 2), ("Off (fastest)", 3));
@@ -169,7 +172,7 @@ sealed class MainForm : Form
         turn = new Option("Turning", "Right stick turning style. Snap is the comfort-friendly choice.", ("Native (game default)", 0), ("Snap turn", 1), ("Smooth turn", 2));
         snap = new Option("Snap angle", "Degrees per snap step (used by Snap turn).", ("30 degrees", 30.0), ("45 degrees", 45.0), ("90 degrees", 90.0)) { Active = () => Equals(Val<int>(turn), 1) };
         smooth = new Option("Smooth speed", "Turn speed for Smooth turn.", ("45 deg/s (slow)", 45.0), ("90 deg/s", 90.0), ("120 deg/s (fast)", 120.0)) { Active = () => Equals(Val<int>(turn), 2) };
-        options.Rows.AddRange(new object[] { "DISPLAY", res, aa, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth, "CUTSCENES", recenter, cutscenes });
+        options.Rows.AddRange(new object[] { "DISPLAY", res, aa, perf, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth, "CUTSCENES", recenter, cutscenes });
         options.Selected = 1;
         options.SelectionChanged += () => pages[1].Invalidate(new Rectangle(0, options.Bottom, pages[1].Width, pages[1].Height - options.Bottom));
         save.Click += (_, _) => SaveSettings(); reload.Click += (_, _) => LoadSettings();
@@ -179,9 +182,9 @@ sealed class MainForm : Form
             features = Features.Load(fs);
         }
         catch (Exception ex) { featuresError = "Features list unavailable: " + ex.Message; }
-        foreach (var f in features)
+        foreach (var f in features.Where(f => !f.MainSettings))
         {
-            var row = new ArtCheck(f.Label, f.Help); var feat = f;
+            var row = new ArtCheck(f.Label, f.Help); var feat = f; shownFeatures.Add(f);
             row.Toggled += (_, _) => { if (!loadingFeatures) SetFeature(feat, row); };
             featList.Add(row);
         }
@@ -900,6 +903,7 @@ sealed class MainForm : Form
     void PaintSettings(Graphics g)
     {
         var p = pages[1]; var o = showFeatures ? null : options.Current;
+        if (!showFeatures) aa.Help = Prefs.AaHelpFor(aaHelpBase, Val<int>(perf) == 1);  // follows the Performance mode choice at once
         if (showFeatures) { PaintSettingsMsg(g); return; }
         var plate = new Rectangle(0, options.Bottom + S(12), p.Width, S(84));
         Ui.Image(g, Ui.Art["menu_background"], Rectangle.Inflate(plate, S(30), S(26)), .95f);
@@ -940,8 +944,7 @@ sealed class MainForm : Form
     /// <summary>The Anti-aliasing help carries the performance-mode note while that feature row is on (performance mode retains the selected AA).</summary>
     void RefreshAaNote()
     {
-        int pm = -1; for (int i = 0; i < features.Count; i++) if (features[i].Id == "performance-mode") pm = i;
-        aa.Help = Prefs.AaHelpFor(aaHelpBase, pm >= 0 && pm < featList.Rows.Count && featList.Rows[pm].Checked);
+        aa.Help = Prefs.AaHelpFor(aaHelpBase, perf != null && Val<int>(perf) == 1);
         options.Invalidate();
     }
 
@@ -953,7 +956,8 @@ sealed class MainForm : Form
         try
         {
             var st = Features.State(FeatureBuild, features);
-            for (int i = 0; i < features.Count; i++) featList.Rows[i].SetSilently(st[features[i].Id].On);
+            for (int i = 0; i < shownFeatures.Count; i++) featList.Rows[i].SetSilently(st[shownFeatures[i].Id].On);
+            if (features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf) Select(perf, st[pf.Id].On ? 1 : 0, "");
             RefreshAaNote();
             if (showFeatures) SetSettingsMsg("Each switch is saved at once. It applies the next time VR starts.", Ui.Dim);
         }
@@ -966,7 +970,6 @@ sealed class MainForm : Form
         try
         {
             Features.Set(FeatureBuild, f, row.Checked);
-            RefreshAaNote();
             SetSettingsMsg($"{f.Label}: {(row.Checked ? "on" : "off")}. Applies the next time VR starts.", Ui.Good);
         }
         catch (Exception ex)
@@ -1058,6 +1061,8 @@ sealed class MainForm : Form
             merged.Save(env.SettingsFile);
             prefs = merged;
             ApplyToForm(merged, null);
+            if (features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf && Features.State(FeatureBuild, features)[pf.Id].On != (Val<int>(perf) == 1))
+                Features.Set(FeatureBuild, pf, Val<int>(perf) == 1);
             SetSettingsMsg("Saved. " + (Env.Game() != null ? "Restart VR (Stop, then Launch) to apply." : "Applies on next launch."), Ui.Good);
         }
         catch (Exception ex) { SetSettingsMsg("Not saved: " + ex.Message, Ui.Bad); }

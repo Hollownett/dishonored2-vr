@@ -4,8 +4,8 @@ using System.Text.Json;
 namespace DishonoredVR;
 
 /// <summary>One default feature knob from tools/default_features.json. Kind "enable": file present = on. Kind "disable": file present = off.
-/// Default says whether Apply turns it on for a fresh home. RequiresDllKnob: skipped while the DLL does not contain that knob name.</summary>
-public sealed record Feature(string Id, string File, string Kind, string Label, string Help, bool Default, string? RequiresDllKnob = null)
+/// MainSettings: the switch lives on the main Settings page, so the Features list does not show a row for it. Default says whether Apply turns it on for a fresh home. RequiresDllKnob: skipped while the DLL does not contain that knob name.</summary>
+public sealed record Feature(string Id, string File, string Kind, string Label, string Help, bool Default, string? RequiresDllKnob = null, bool MainSettings = false)
 {
     public bool IsEnable => Kind == "enable";
 }
@@ -44,7 +44,8 @@ public static class Features
             if (def.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new InvalidDataException("default must be a boolean");
             string? req = null;
             if (e.TryGetProperty("requires_dll_knob", out _)) req = Name(e, "requires_dll_knob");
-            list.Add(new Feature(Name(e, "id"), Name(e, "file"), kind, S("label"), S("help"), def.GetBoolean(), req));
+            bool main = e.TryGetProperty("main_settings", out var ms) && ms.ValueKind == JsonValueKind.True;
+            list.Add(new Feature(Name(e, "id"), Name(e, "file"), kind, S("label"), S("help"), def.GetBoolean(), req, main));
         }
         if (list.Select(f => f.Id).Distinct().Count() != list.Count) throw new InvalidDataException("Duplicate feature id");
         if (list.Select(f => f.File).Distinct().Count() != list.Count) throw new InvalidDataException("Duplicate feature file");

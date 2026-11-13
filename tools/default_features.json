@@ -256,7 +256,8 @@
    "kind": "enable",
    "label": "performance mode: one eye per frame (more fps; may double on motion)",
    "help": "The game draws one eye per frame, alternating, and the headset reprojects the other. The two eyes then show the world a frame apart, which can read as a double image in one eye when you move or turn. Your selected anti-aliasing remains active when its per-eye checks pass. Off by default; turn it on here for more fps.",
-   "default": false
+   "default": false,
+   "main_settings": true
   },
   {
    "id": "alternate-native-taa",

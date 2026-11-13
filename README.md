@@ -31,6 +31,7 @@ One launcher file installs it next to your Steam copy of the game; nothing from 
 > **Works today, still growing.** The mod is complete enough to play the whole game in VR. Headset time finds things the
 > author's tests cannot, so please say what you see: [open an issue](https://github.com/Hollownett/dishonored2-vr/issues).
 > **The game's tutorial can be finished in VR (v1126).** One thing there is still rough:
+> - **Crossbow bolt type can be wrong:** after picking a weapon up from the floor or tossing a weapon from hand to hand, the selected bolt type may not be the one you chose.
 > - **Crossbow aim in the firing range looks wrong:** the tutorial puts an invisible wall in front of the range.
 
 Features
@@ -100,7 +101,8 @@ Install and play
   While it is there, every start of the game is a VR start; **Tools > Uninstall proxy** (game closed) makes it flat again.
 - **Settings**: resolution and render scale, anti-aliasing and upscaler, sharpening, HUD size, turning, monitor view,
   cutscene mode. The same page is in the game: pause menu > **VR Settings**.
-- **Features**: optional switches such as performance mode, Quest button labels, and **Save diagnostic logs**.
+- **Features**: optional switches such as Quest button labels and **Save diagnostic logs**. **Performance mode** (experimental: one eye
+  per frame for more fps, some visual artifacts may appear) is in the main **Settings**, next to anti-aliasing.
   Logging is **off by default**; nothing is written to disk while you play unless you turn it on for a bug report.
 - **Stop VR** ends the session; quitting the game does too.
 
@@ -161,7 +163,7 @@ Troubleshooting
 | Walking looks steppy or the game runs at half rate | Disable Synchronous Spacewarp in Virtual Desktop |
 | Nothing happens in the headset | Check the launcher's Play page: the OpenXR runtime (Virtual Desktop or SteamVR) must be active and SteamVR installed |
 | The headset disconnected | The mod reconnects by itself after a second or two |
-| Low frame rate | FSR Quality or Balanced, a lower render scale in VR Settings, or performance mode under Features |
+| Low frame rate | FSR Quality or Balanced, a lower render scale in VR Settings, or the experimental performance mode in the launcher Settings |
 | The game starts flat | Press LAUNCH VR once; it reinstalls the loader next to `Dishonored2.exe` |
 | I want to play flat again | Game closed: Tools > Uninstall proxy |
 | Reporting a bug | Turn on **Save diagnostic logs** under Features, reproduce it, and attach `%LOCALAPPDATA%\DishonoredVR\artifacts` (the Tools page opens it). Turn it off afterwards |

@@ -230,7 +230,7 @@ Headset appearance, combat feel, note readability and complete gameplay have not
 been accepted. See [the verification report](feedback-2026-10-10.md).
 
 ## Performance mode (on by default since v602)
-The launcher row "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)" (file `build/alternate-eye`, on by default since v602; untick it in the launcher Features page to go back to normal drawing)
+The launcher row "performance mode: one eye per frame (more fps; may shimmer on fast motion; anti-aliasing SMAA only)" (file `build/alternate-eye`, on by default since v602; set it to Off in the launcher Settings page, row "Performance mode (experimental)", to go back to normal drawing; experimental, some visual artifacts may appear)
 makes the game draw one eye per frame, alternating left and right, and the headset reprojects the other eye from its last image and pose. On the
 sim rig this took the frame interval from 13.5 ms to 10.4 ms. The costs:
 - fast motion (a head turn while strafing past a guard, a fast sword swing) can shimmer, because the two eyes show moments one frame apart;
