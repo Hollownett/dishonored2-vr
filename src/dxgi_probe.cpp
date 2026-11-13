@@ -3949,62 +3949,69 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 // frame - the dual-wield copies' rigid binding (grip = joint 59 * inverse(attachment_target)). No learning from a lagging physics frame, no
                 // stillness needed, no fallback while running; a 0.12 s ease from where the game had it.
                 if(const auto hd=native_grab.held_draw(hand); hd.valid && hd.entity==thing[hand]) {
+                    namespace wd=d2vr::weapon_draw;
                     auto& ex=held_exact[hand];
+                    const auto hk=native_grab.held(hand);
+                    const bool limb=hk && hk->entity==thing[hand] && hk->limb>=0;   // v1266: a severed part (a jointed skinned clone), held like a prop
                     if(ex.serial!=hd.serial) {
                         ex={};ex.serial=hd.serial;ex.since=t;
-                        d2vr::weapon_draw::Mat inv_body{};
-                        if(d2vr::weapon_draw::inverse(d2vr::weapon_draw::pose_mat(hd.body),inv_body)) {
-                            ex.k=d2vr::weapon_draw::mul(inv_body,d2vr::weapon_draw::model_of(hd.frame.data()));
-                            ex.valid=d2vr::weapon_draw::finite(ex.k) && std::hypot(ex.k[3],ex.k[7],ex.k[11])<1.;
+                        wd::Mat inv_body{};
+                        if(wd::inverse(wd::pose_mat(hd.body),inv_body)) {
+                            ex.k=wd::mul(inv_body,wd::model_of(hd.frame.data()));
+                            ex.valid=wd::finite(ex.k) && ((limb && !legacy_held_render_goal) || std::hypot(ex.k[3],ex.k[7],ex.k[11])<1.);   // a clone's frame body can sit far from the held body
                         }
                     }
-                    // v1075 guard: the exact draw assumes the model frame moves rigidly with the held body. A thing whose frame does not follow its body (a
-                    // skinned or jointed one) would be carried away from the hand: 3 renders with the game's frame > 0.2 m from body * K end it for the hold.
-                    if(ex.valid) if(const auto hb=native_grab.held(hand); hb && hb->entity==thing[hand]) {
-                        const double off=d2vr::weapon_draw::distance(d2vr::weapon_draw::mul(d2vr::weapon_draw::pose_mat(d2vr::held_render_pose().source(hb->entity).value_or(hb->pose)),ex.k),d2vr::weapon_draw::model_of(raw[hand].data()));
+                    // v1075 guard (props, legacy): the exact draw assumes the model frame moves rigidly with the held body; 3 renders > 0.2 m off end it.
+                    // v1266: the placement below is relative to the pose the engine was GIVEN for the held body (no rigid K), so it needs no guard; a severed
+                    // part's frame body is another body of the clone (jointed, never rigid with the held one) and was always dropped by it (v1264 census:
+                    // severed 21 renders against ~2000 held frames, held_bind learning 1584).
+                    if(ex.valid && legacy_held_render_goal) if(hk && hk->entity==thing[hand]) {   // legacy = v1256 for every kind
+                        const double off=wd::distance(wd::mul(wd::pose_mat(d2vr::held_render_pose().source(hk->entity).value_or(hk->pose)),ex.k),wd::model_of(raw[hand].data()));
                         if(!(off<=.2)) {if(++ex.off_frames>=3) {ex.valid=false;++held_exact_dropped;}} else ex.off_frames=0;
                     }
                     if(ex.valid) {
                         const auto grip=d2vr::body::mul(*image,d2vr::body::inverse(full_body.attachment_target(hand,d2vr::fullbody::Xf{})));
-                        auto b=d2vr::weapon_draw::mul(d2vr::weapon_draw::mul(weapon_mat(grip),d2vr::weapon_draw::pose_mat(hd.relative)),ex.k);
-                        if(t-ex.since<.12) b=d2vr::weapon_draw::HeldBind::eased(d2vr::weapon_draw::model_of(raw[hand].data()),b,(t-ex.since)/.12);
-                        if(d2vr::weapon_draw::finite(b)) {
-                            namespace wd=d2vr::weapon_draw;
+                        const auto f_read=wd::model_of(raw[hand].data());
+                        // v1266: H = the held BODY as this render draws it (the drawn grip * the hold); G = the body pose the engine was given that the read
+                        // frame F was written from (props: the given whose given * K is F; severed parts: the given whose recorded clone frame is F). Then
+                        // B = H * inverse(G) * F: the engine's own frame moved by exactly the drawn-vs-given difference - for a rigid prop that is H * K with
+                        // the engine's own K, for a jointed clone the whole clone moved rigidly so the held body lands in the hand. H and G are rigid by
+                        // construction. v1258/v1262 placed props at H * K_bind; build/legacy-held-render-goal keeps that.
+                        const auto h_target=wd::mul(weapon_mat(grip),wd::pose_mat(hd.relative));
+                        d2vr::WorldTrackedPose given[d2vr::HeldRenderSlot::ring]{},given_f[d2vr::HeldRenderSlot::ring]{};bool given_f_ok[d2vr::HeldRenderSlot::ring]{};
+                        const unsigned given_n=legacy_held_render_goal?0u:d2vr::held_render_pose().recent(thing[hand],given,d2vr::HeldRenderSlot::ring,given_f,given_f_ok);
+                        int gi=-1;double g_best=.01;
+                        for(unsigned i=0;i<given_n;++i) {
+                            wd::Mat gf{};
+                            if(given_f_ok[i]) {   // the clone frame the ragdoll sync wrote with this given (axes only: the read frame's scales applied)
+                                gf=wd::pose_mat(given_f[i]);
+                                for(unsigned c=0;c<3;++c) {const double n=std::sqrt(f_read[c]*f_read[c]+f_read[4+c]*f_read[4+c]+f_read[8+c]*f_read[8+c]);for(unsigned r=0;r<3;++r) gf[r*4+c]*=n;}
+                            } else if(!limb) gf=wd::mul(wd::pose_mat(given[i]),ex.k);
+                            else continue;
+                            const double d=wd::distance(gf,f_read);
+                            if(d<g_best && wd::frame_angle(gf,f_read)<.035) {g_best=d;gi=static_cast<int>(i);}
+                        }
+                        if(gi<0 && limb && given_n) gi=0;   // a clone frame not recorded yet: the newest given (the frame site writes right after it)
+                        wd::Mat g_inv{},k_inv{};
+                        const bool relative=gi>=0 && wd::inverse(wd::pose_mat(given[gi]),g_inv);
+                        auto h=h_target;
+                        if(t-ex.since<.12) h=wd::HeldBind::eased(relative?wd::pose_mat(given[gi]):wd::inverse(ex.k,k_inv)?wd::mul(f_read,k_inv):h_target,h_target,(t-ex.since)/.12);
+                        auto b=relative?wd::mul(wd::mul(h,g_inv),f_read):wd::mul(h,ex.k);   // an unmatched prop: H * K_bind (v1258)
+                        if(legacy_held_render_goal) {b=wd::mul(h_target,ex.k);if(t-ex.since<.12) b=wd::HeldBind::eased(f_read,b,(t-ex.since)/.12);}
+                        if(wd::finite(b) && (!limb || relative || legacy_held_render_goal)) {
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
-                            const auto f_read=wd::model_of(raw[hand].data());
-                            const auto hk=native_grab.held(hand);
-                            if(hk) d2vr::hold_sync().engine(hk->limb>=0?d2vr::HoldSync::severed:d2vr::HoldSync::prop,player_speed,wd::distance(b,f_read));   // v1249 engine_gap
-                            // v1258 (headset v1256: 57 % of held-prop renders had no draw placed and showed the engine pose, 35-100 mm from B): the engine
-                            // is given the hold as THIS render draws it (held_render_pose.hpp HeldRenderSlot::note_drawn), so every draw the placement misses
-                            // is composed at the hand too. The body->model map is the engine's own: K = inverse(given) * F for the pose the read F was
-                            // written from (the nearest recent given * the bind's K within 1 cm / 2 deg), else the bind's K.
-                            d2vr::WorldTrackedPose given[d2vr::HeldRenderSlot::ring]{};
-                            const unsigned given_n=legacy_held_render_goal?0u:d2vr::held_render_pose().recent(thing[hand],given,d2vr::HeldRenderSlot::ring);
-                            // v1262 (review): K carries the model's own scales, which can be signed or non-uniform (prop-grips: signed scales). The engine's map
-                            // cannot change them, so a K measured from the given ring is taken only with the bind K's scales and handedness (each column length
-                            // within 1 %, the same determinant sign); and the drawn body pose b * inverse(K) must come out rigid (unit columns within 2 %,
-                            // orthogonal, right-handed) BEFORE it is normalised - a mirrored or scaled result is refused, never repaired into a valid-looking pose.
-                            const auto col=[](const wd::Mat& m,unsigned c) {return std::sqrt(m[c]*m[c]+m[4+c]*m[4+c]+m[8+c]*m[8+c]);};
-                            const auto det=[](const wd::Mat& g) {return g[0]*(g[5]*g[10]-g[6]*g[9])-g[1]*(g[4]*g[10]-g[6]*g[8])+g[2]*(g[4]*g[9]-g[5]*g[8]);};
-                            const auto same_scales=[&](const wd::Mat& a,const wd::Mat& r) {
-                                for(unsigned c=0;c<3;++c) {const double ra=col(r,c);if(!(ra>1e-6) || !(std::abs(col(a,c)/ra-1)<=.01)) return false;}
-                                return det(a)*det(r)>0;
-                            };
-                            wd::Mat kt=ex.k;double kt_best=.01;
-                            for(unsigned i=0;i<given_n;++i) {
-                                const auto gm=wd::pose_mat(given[i]);const auto gk=wd::mul(gm,ex.k);const double d=wd::distance(gk,f_read);
-                                if(d<kt_best && wd::frame_angle(gk,f_read)<.035) if(wd::Mat ig{};wd::inverse(gm,ig)) if(const auto k=wd::mul(ig,f_read);same_scales(k,ex.k)) {kt_best=d;kt=k;}
-                            }
-                            const wd::Mat given_frame=given_n?wd::mul(wd::pose_mat(given[0]),kt):wd::Mat{},body_now=hk?wd::mul(wd::pose_mat(hk->pose),kt):wd::Mat{};
+                            if(const double gap=wd::distance(b,f_read);hk && gap<1.) d2vr::hold_sync().engine(limb?d2vr::HoldSync::severed:d2vr::HoldSync::prop,player_speed,gap);   // v1249 engine_gap (v1266: a teleport is no gap)
+                            // v1258/v1266: the engine is given the held body as THIS render draws it (held_render_pose.hpp note_drawn: props and severed parts),
+                            // carried to each later frame's rig, so a draw the placement misses is composed at the hand as well.
+                            const wd::Mat to_f=relative?wd::mul(g_inv,f_read):ex.k;   // body -> this frame's model frame
+                            const wd::Mat given_frame=given_n?wd::mul(wd::pose_mat(given[0]),to_f):wd::Mat{},body_now=hk?wd::mul(wd::pose_mat(hk->pose),to_f):wd::Mat{};
                             double rig_mm=-1,rig_deg=-1;   // v1262
-                            if(!legacy_held_render_goal) if(wd::Mat ikt{};wd::inverse(kt,ikt)) if(const auto d=wd::mul(b,ikt);
-                               std::abs(col(d,0)-1)<=.02 && std::abs(col(d,1)-1)<=.02 && std::abs(col(d,2)-1)<=.02 && det(d)>.94) {
-                                d2vr::WorldTrackedPose drawn{};drawn.position={d[3],d[7],d[11]};
-                                for(unsigned c=0;c<3;++c) drawn.basis[c]=d2vr::Vec3{d[c],d[4+c],d[8+c]}*(1/col(d,c));
+                            if(!legacy_held_render_goal) {
+                                d2vr::WorldTrackedPose drawn{};drawn.position={h[3],h[7],h[11]};
+                                for(unsigned c=0;c<3;++c) {const d2vr::Vec3 axis{h[c],h[4+c],h[8+c]};const double n=d2vr::length(axis);drawn.basis[c]=n>1e-9?axis*(1/n):axis;}
                                 const auto carry=full_body.image_carry(now);   // the rig this render's image was placed with
                                 const d2vr::HeldCarry from=carry?d2vr::HeldCarry{carry->root,carry->heading}:d2vr::HeldCarry{};
-                                // v1262 live check of the one rig definition: the noted rig (read at this image's Setup) against the same reading now. Standing
-                                // still it must be 0 (a fixed offset between the two ends would show here); moving, at most the rig's motion since the Setup.
+                                // v1262 live check of the one rig definition: the noted rig (read at this image's Setup) against the same reading now.
                                 if(d2vr::HeldCarry at_begin{};carry && held_rig_now(at_begin)) {rig_mm=d2vr::length(at_begin.root-from.root)*1000.;rig_deg=std::abs(std::remainder(at_begin.heading-from.heading,6.283185307179586))*57.29577951308232;}
                                 d2vr::held_render_pose().note_drawn(thing[hand],drawn,d2vr::precise_s(),carry?&from:nullptr);
                             }

@@ -95,25 +95,35 @@ struct HeldRenderSlot {
     unsigned mode{};std::uintptr_t world{};std::uint32_t handle{};HoldDelta delta{};double delta_s{};bool delta_ok{},bones_seen{},frame_seen{};   // v1253 ragdolls
     WorldTrackedPose written{};bool has_written{};double released_s{};bool offset_set{};Vec3 off_pos{},off_rot{};
     WorldTrackedPose drawn{},drawn_rel{};HeldCarry drawn_carry{};double drawn_s{};bool drawn_ok{},rel_ok{},carry_ok{};unsigned used{};   // v1258: the note; what the last decide gave
-    HeldCarry seen{};double seen_s{},seen_dt{};bool have_seen{},stepped{};   // v1258: the rig read at the previous sync and the interval before it; a repeated step
-    static constexpr double step_max_mps=15.,step_max_rps=6.;   // faster than any walk or stick turn: a teleport or a snap turn, never repeated
-    // The rig of THIS tick from the reading at the sync. The body model's frame is written by the post-physics attach job, which can still be pending
-    // when the prop's own sync runs: then the reading equals the rig the last image was drawn with although the player moves. Then the rig's velocity
-    // over the last tick (the step between the two previous readings over their interval) is carried over this tick's interval (now - the last sync):
-    // the root steps once per tick and the drawn hand with it. A rig that already moved is used as read. A snap turn's own tick is not predicted.
-    HeldCarry rig_of_tick(const HeldCarry& read,double now) noexcept {
+    // v1266 (headset v1264: the held prop "renders once and then snaps to a new point" while walking/running; engine_gap walk p90 <= 35 mm, run <= 100).
+    // The engine is given the drawn hold carried exactly as item_advance carries a held weapon (same rig reads: held_rig_now = advance_attachment's
+    // body-model root and camera heading - head follow; same move: about the root by the heading change, with the root's translation), with ONE fixed
+    // difference: the prop's sync runs in its POST_PHYSICS stage, BEFORE this game frame's post-physics attach job writes the body model frame, so its
+    // root reading is the PREVIOUS frame's root (the weapon's attachment composition already sees this frame's). The heading is this frame's (the
+    // turn is applied in the physics step). So this frame's root = the reading + the step the root made between the previous two frames (one game frame
+    // per render: the motor writes once per render, held_render_pose.published ~= renders). No comparison with a noted rig, no velocity estimate: v1262
+    // guessed "stale or current" against the note and misfired on every turning frame and late note (carried_rig_read 27 %), each one frame of root
+    // motion behind (3 m/s: 33 mm, 7 m/s: 77 mm). A second sync inside one frame (same reading within frame_s) keeps the frame's step; a reading that
+    // stays put longer is a player standing still (no step). A jump beyond step_max_m is a teleport (the Timepiece's 600 m, a load): no step.
+    // The step is walked in the player's heading: it turns with this frame's heading change (the turn is applied before the physics step that moves
+    // the root), so a stick turn or a snap turn while walking moves this frame's step with it.
+    static constexpr double step_max_m=.25,frame_s=.02;
+    HeldCarry seen{};Vec3 step{};double step_heading{},seen_s{};bool have_seen{},stepped{};
+    HeldCarry rig_of_frame(const HeldCarry& read,double now) noexcept {
         HeldCarry out=read;stepped=false;
-        const double dt=have_seen?now-seen_s:0.;
-        const bool unmoved=carry_ok && length(read.root-drawn_carry.root)<1e-4 && std::abs(std::remainder(read.heading-drawn_carry.heading,6.283185307179586))<1e-5;
-        if(unmoved && have_seen && dt>0 && dt<.05 && seen_dt>0 && seen_dt<.05) {
-            const Vec3 v=(read.root-seen.root)*(1/seen_dt);const double w=std::remainder(read.heading-seen.heading,6.283185307179586)/seen_dt;
-            if(length(v)<step_max_mps) {out.root=read.root+v*dt;stepped=length(v)*dt>1e-6;}
-            if(std::abs(w)<step_max_rps) {out.heading=read.heading+w*dt;stepped=stepped || std::abs(w)*dt>1e-7;}
+        if(have_seen && length(read.root-seen.root)>1e-6) {   // a new frame's root: the step since the previous frame's, walked in that frame's heading
+            const Vec3 d=read.root-seen.root;step=now>seen_s && now-seen_s<.05 && length(d)<step_max_m?d:Vec3{};step_heading=seen.heading;seen=read;seen_s=now;
+        } else if(have_seen) {if(!(now-seen_s<frame_s)) step={};else seen.heading=read.heading;}   // the same frame's second sync keeps the step; standing still has none
+        else {seen=read;seen_s=now;have_seen=true;step={};}
+        if(length(step)>1e-6) {
+            const double a=std::remainder(read.heading-step_heading,6.283185307179586),c=std::cos(a),sn=std::sin(a);
+            out.root=read.root+Vec3{c*step.x-sn*step.y,sn*step.x+c*step.y,step.z};stepped=true;
         }
-        seen_dt=dt;seen=read;seen_s=now;have_seen=true;
         return out;
     }
     static constexpr unsigned ring=4;std::array<WorldTrackedPose,ring> recent{};unsigned recent_n{},recent_next{};   // v1258: the last poses given (newest last)
+    std::array<WorldTrackedPose,ring> recent_frame{};std::array<bool,ring> recent_frame_ok{};   // v1266: a ragdoll's model frame written with that given (frame site)
+    void note_frame(const WorldTrackedPose& f) noexcept {if(recent_n) {const unsigned i=(recent_next+ring-1)%ring;recent_frame[i]=f;recent_frame_ok[i]=true;}}
     void publish(std::uintptr_t e,const WorldTrackedPose& g,double now) noexcept {
         if(e!=entity) *this={};
         entity=e;goal=g;at_s=now;held=true;offset_set=false;
@@ -123,7 +133,7 @@ struct HeldRenderSlot {
     void end(double now) noexcept {
         if(!held) return;
         held=false;released_s=now;offset_set=false;
-        drawn_ok=rel_ok=carry_ok=false;note_dt=0;recent_n=recent_next=0;have_seen=stepped=false;seen_dt=0;
+        drawn_ok=rel_ok=carry_ok=false;note_dt=0;recent_n=recent_next=0;have_seen=stepped=false;step={};
     }
     // v1262 (review): how old a drawn note may be and still be carried by the rig alone. Notes arrive once per render (the publisher at each eye-0
     // begin). The engine's sync runs on the game thread, which may be one frame ahead of the render thread (Setup N is drawn by Begin N+1), so a
@@ -152,14 +162,14 @@ struct HeldRenderSlot {
         if(held) {
             out=goal;
             const bool have_rig=rig && finite(rig->root) && std::isfinite(rig->heading);
-            const HeldCarry tick_rig=have_rig?rig_of_tick(*rig,now):HeldCarry{};   // v1262: the rig history advances at every sync, carried or not
+            const HeldCarry tick_rig=have_rig?rig_of_frame(*rig,now):HeldCarry{};   // v1266: the rig history advances at every sync, carried or not
             const double age=now-drawn_s;
             if(drawn_hold && drawn_ok && age<=fresh_s) {
                 if(rel_ok) if(const auto d=grip_compose(goal,drawn_rel);grab_pose_valid(d)) {out=d;used=given_relative;}
                 if(carry_ok && have_rig && age<=carry_age()) if(const auto d=held_carried(drawn,drawn_carry,tick_rig);
                     grab_pose_valid(d) && length(d.position-drawn.position)<=carry_max_m) {out=d;used=given_carried;}   // a teleport / load is not motion
             }
-            written=out;has_written=true;recent[recent_next]=out;recent_next=(recent_next+1)%ring;if(recent_n<ring) ++recent_n;return true;
+            written=out;has_written=true;recent[recent_next]=out;recent_frame_ok[recent_next]=false;recent_next=(recent_next+1)%ring;if(recent_n<ring) ++recent_n;return true;
         }
         if(!has_written || !(now>=released_s) || !(now-released_s<blend_s)) {*this={};return false;}
         if(!offset_set) {off_pos=written.position-body.position;off_rot=grab_rotation_error(body,written);offset_set=true;}
@@ -203,18 +213,27 @@ public:
     bool note_drawn(std::uintptr_t entity,const WorldTrackedPose& drawn,double now,const HeldCarry* carry=nullptr) noexcept {
         if(!entity || !installed_.load(std::memory_order_relaxed)) return false;
         std::lock_guard<std::mutex> l(m_);
-        for(auto& s:slots_) if(s.entity==entity && s.held && s.mode==prop) {const bool ok=s.note_drawn(drawn,now,carry);(ok?drawn_notes_:drawn_refused_).fetch_add(1,std::memory_order_relaxed);return ok;}
+        for(auto& s:slots_) if(s.entity==entity && s.held && s.mode!=corpse) {const bool ok=s.note_drawn(drawn,now,carry);(ok?drawn_notes_:drawn_refused_).fetch_add(1,std::memory_order_relaxed);return ok;}   // v1266: severed parts too
         return false;
+    }
+    void note_frame(std::uintptr_t entity,const float* o,const float* a) noexcept {   // v1266: the ragdoll's model frame written at the frame site
+        WorldTrackedPose f{};f.position={o[0],o[1],o[2]};for(unsigned k=0;k<3;++k) f.basis[k]={a[k*3],a[k*3+1],a[k*3+2]};
+        std::lock_guard<std::mutex> l(m_);for(auto& s:slots_) if(s.entity==entity && s.mode==severed) s.note_frame(f);
     }
     // v1258: the player's rig now (dxgi_probe: the body model's root position, camera heading - head follow), read on the engine's sync thread.
     using RigNow=bool (*)(HeldCarry&) noexcept;
     inline static RigNow rig_now{};
     // v1258: the poses the engine was given for `entity` (newest first, at most HeldRenderSlot::ring): the publisher finds the one its model frame came from.
-    unsigned recent(std::uintptr_t entity,WorldTrackedPose* out,unsigned max) noexcept {
+    // v1266: severed parts too; `frames` (optional): the model frame the ragdoll sync wrote with each given (frame_ok false: none recorded, a prop).
+    unsigned recent(std::uintptr_t entity,WorldTrackedPose* out,unsigned max,WorldTrackedPose* frames=nullptr,bool* frame_ok=nullptr) noexcept {
         if(!entity || !out) return 0;
         std::lock_guard<std::mutex> l(m_);
-        for(const auto& s:slots_) if(s.entity==entity && s.mode==prop) {
-            unsigned n=0;for(unsigned i=0;i<s.recent_n && n<max;++i) out[n++]=s.recent[(s.recent_next+HeldRenderSlot::ring-1-i)%HeldRenderSlot::ring];
+        for(const auto& s:slots_) if(s.entity==entity && s.mode!=corpse) {
+            unsigned n=0;
+            for(unsigned i=0;i<s.recent_n && n<max;++i) {
+                const unsigned k=(s.recent_next+HeldRenderSlot::ring-1-i)%HeldRenderSlot::ring;
+                if(frames) frames[n]=s.recent_frame[k];if(frame_ok) frame_ok[n]=s.recent_frame_ok[k];out[n++]=s.recent[k];
+            }
             return n;
         }
         return 0;
@@ -235,7 +254,7 @@ public:
             ",\"frames\":"+std::to_string(ragdoll_frames_.load())+",\"bones\":"+std::to_string(ragdoll_bones_.load())+",\"unframed\":"+std::to_string(unframed_.load())+"}"+
             ",\"drawn_hold\":{\"on\":"+(HeldRenderSlot::drawn_hold?"true":"false")+",\"notes\":"+std::to_string(drawn_notes_.load())+",\"refused\":"+std::to_string(drawn_refused_.load())+
             ",\"given\":{\"goal\":"+std::to_string(given_[0].load())+",\"relative\":"+std::to_string(given_[1].load())+",\"carried\":"+std::to_string(given_[2].load())+
-            ",\"carried_rig_read\":"+std::to_string(carry_stepped_[0].load())+",\"carried_step_repeated\":"+std::to_string(carry_stepped_[1].load())+"}"+   // v1258: what the engine was given
+            ",\"carried_no_step\":"+std::to_string(carry_stepped_[0].load())+",\"carried_frame_step\":"+std::to_string(carry_stepped_[1].load())+"}"+   // v1266: carried with no root step (still) / with this frame's root step
             ",\"note_too_old\":"+std::to_string(too_old_.load())+",\"note_age_ms\":["+[&]{std::string a;for(unsigned i=0;i<age_bins;++i) a+=(i?",":"")+std::to_string(age_n_[i].load());return a;}()+
             "],\"note_age_edges_ms\":[5,10,15,20,25,30,40,100,\"inf\"]}}";   // v1262
     }
@@ -298,6 +317,7 @@ private:
     }
     // Under m_: this tick's rigid move of a ragdoll `entity` (one per sync: the bone requests and the frame of one 0x76d640 call share it).
     bool ragdoll_delta(std::uintptr_t entity,bool frame,HoldDelta& d) noexcept {
+        HeldCarry rig{};const bool have_rig=HeldRenderSlot::drawn_hold && rig_now && rig_now(rig);   // v1266: the same carry as a prop (read before the lock)
         std::lock_guard<std::mutex> l(m_);
         for(unsigned i=0;i<2;++i) {
             auto& s=slots_[i];if(s.entity!=entity || s.mode==prop) continue;
@@ -308,7 +328,8 @@ private:
                 float f[16]{};if(!body_of(s.world,s.handle,f)) {refuse(unread);s={};watched_[i].store(0);return false;}
                 WorldTrackedPose body{};body.position={f[12],f[13],f[14]};for(unsigned k=0;k<3;++k) body.basis[k]={f[k*4],f[k*4+1],f[k*4+2]};
                 WorldTrackedPose out{};bool blending=false;
-                if(!grab_pose_valid(body) || !s.decide(body,now,out,blending)) {watched_[i].store(0,std::memory_order_release);return false;}
+                if(!grab_pose_valid(body) || !s.decide(body,now,out,blending,have_rig && s.mode==severed?&rig:nullptr)) {watched_[i].store(0,std::memory_order_release);return false;}
+                if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);if(s.used==HeldRenderSlot::given_carried) carry_stepped_[s.stepped?1:0].fetch_add(1,std::memory_order_relaxed);
                 if(s.mode==corpse && !blending) {out=translated_goal(body,out,corpse_cap_m);s.written=out;}
                 if(!finite(out.position) || !grab_pose_valid(out)) {refuse(invalid);s={};watched_[i].store(0);return false;}
                 s.delta={body,out};s.delta_s=now;s.delta_ok=true;
@@ -355,7 +376,7 @@ private:
         }
         original_(holder,replaced?o:origin,replaced?a:axis,linear,angular,tag,flag);
         // v1253: the ragdoll sync wrote the model frame itself (0x76da05) from the unmoved origin/axis: the moved one, as it would have
-        if(replaced && from==frame_site_ && write_model_frame(e,o,a)) p.ragdoll_frames_.fetch_add(1,std::memory_order_relaxed);
+        if(replaced && from==frame_site_ && write_model_frame(e,o,a)) {p.ragdoll_frames_.fetch_add(1,std::memory_order_relaxed);p.note_frame(e,o,a);}   // v1266: paired with its given
         depth_.fetch_sub(1);
     }
     // v1253: a ragdoll's world bone request (0x53fbe0 from 0x76db00): the bone moved with the held body's move of this tick.

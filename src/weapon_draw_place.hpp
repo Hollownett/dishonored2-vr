@@ -941,7 +941,9 @@ public:
                 const OneCell& c=cert_[k][bk];char b[160];
                 std::snprintf(b,sizeof b,"\"%s\":{\"renders\":%llu,\"unplaced\":%llu,\"unplaced_no_held_draw\":%llu,\"eye_split\":%llu,\"shown_deg_max\":%.2f",bn[bk],
                     static_cast<unsigned long long>(c.renders),static_cast<unsigned long long>(c.unplaced),static_cast<unsigned long long>(c.unseen),static_cast<unsigned long long>(c.eye_split),c.deg_max);
-                o+=std::string(bk?",":"")+b+",\"shown_mm\":"+c.shown.json()+",\"flip_mm\":"+c.flip.json()+",\"intra_mm\":"+c.intra.json()+",\"eye_mm\":"+c.eye.json()+",\"rig_mm\":"+c.rig_mm.json()+",\"rig_deg\":"+c.rig_deg.json()+",\"source_mm\":{";
+                char d2[200];std::snprintf(d2,sizeof d2,",\"teleports\":%llu,\"decode\":{\"other_eye_vp\":%llu,\"previous_vp\":%llu,\"rigid_same_shader\":%llu}",   // v1266
+                    static_cast<unsigned long long>(c.teleports),static_cast<unsigned long long>(c.other_eye),static_cast<unsigned long long>(c.previous),static_cast<unsigned long long>(c.rigid_seen));
+                o+=std::string(bk?",":"")+b+d2+",\"shown_mm\":"+c.shown.json()+",\"flip_mm\":"+c.flip.json()+",\"intra_mm\":"+c.intra.json()+",\"eye_mm\":"+c.eye.json()+",\"rig_mm\":"+c.rig_mm.json()+",\"rig_deg\":"+c.rig_deg.json()+",\"source_mm\":{";
                 for(unsigned i=0;i<4;++i) o+=std::string(i?",":"")+"\""+sn[i]+"\":"+c.source[i].json();
                 o+="}}";
             }
@@ -1097,7 +1099,7 @@ public:
         const Slot* slot=slot_of(frame);if(!slot) return r;
         const Views* v=get_views(frame,slot->side[0].valid?slot->side[0].prev_frame:0,slot->side[1].valid?slot->side[1].prev_frame:0);
         const unsigned e=pass_eye==0 || pass_eye==1?static_cast<unsigned>(pass_eye):tag_eye==1?1u:0u;
-        if(v && v->ok[e]) {const Rows m=model_rows(v->inv[e].data(),cur);near_of(*slot,m,r);source_probe(*slot,full(m),draw_key);}
+        if(v && v->ok[e]) {const Rows m=model_rows(v->inv[e].data(),cur);near_of(*slot,m,r);source_probe(*slot,full(m),draw_key);decode_probe(*slot,*v,cur,e);}
         return r;
     }
     // v1258 one-pose source probe: an unplaced draw with the shader + cb2 size of a part this hold placed, through that part's settled L, is the thing
@@ -1109,13 +1111,33 @@ public:
             const Side& w=slot.side[s];if(!w.valid || !w.bound || !w.rigid) continue;
             Mat l{},il{};if(!RigidLocal::settled_l(s,key,l) || !inverse(l,il)) continue;
             const Mat raw=mul(m,il);if(!finite(raw) || distance(raw,w.model)>1.6) continue;   // farther than the motor ever lets a held thing go: another object
-            bits_[s].fetch_or(32u,std::memory_order_relaxed);
+            bits_[s].fetch_or(32u|(like_frame(raw,w.model)?1024u:0u),std::memory_order_relaxed);   // v1266: 1024 = a rigid frame like the thing's (else a skewed decode)
             const Mat* cand[4]={&w.model,&w.bound_frame,w.nsrc>0?&w.src[0]:nullptr,w.nsrc>1?&w.src[1]:nullptr};
-            for(unsigned i=0;i<4;++i) {
-                if(!cand[i] || (*cand[i])[15]!=1. || !(frame_angle(raw,*cand[i])<=.035)) continue;
+            for(unsigned i=0;i<4;++i) {   // v1266: the nearest such draw to each pose whatever its angle (v1264's 2 deg gate left every cell empty)
+                if(!cand[i] || (*cand[i])[15]!=1.) continue;
                 const auto um=static_cast<std::uint64_t>(std::min(distance(raw,*cand[i])*1e6,1e12))+1;   // +1: 0 = no such draw this render
                 auto& slot_min=src_min_um_[s][i];for(auto old=slot_min.load(std::memory_order_relaxed);(!old || um<old) && !slot_min.compare_exchange_weak(old,um);) {}
             }
+        }
+    }
+    static bool like_frame(const Mat& a,const Mat& r) noexcept {   // a rigid frame with r's axis lengths, orthogonal, the same handedness (RigidLocal's test)
+        if(!finite(a)) return false;double n[3]{};
+        for(int c=0;c<3;++c) {double na=0,nr=0;for(int k=0;k<3;++k) {const auto i=static_cast<std::size_t>(k*4+c);na+=a[i]*a[i];nr+=r[i]*r[i];}
+            na=std::sqrt(na);nr=std::sqrt(nr);if(!(nr>1e-9) || !(std::abs(na/nr-1.)<=.02)) return false;n[c]=na;}
+        for(int x=0;x<3;++x) for(int y=x+1;y<3;++y) {double d=0;for(int k=0;k<3;++k) d+=a[static_cast<std::size_t>(k*4+x)]*a[static_cast<std::size_t>(k*4+y)];if(!(std::abs(d/(n[x]*n[y]))<=.02)) return false;}
+        const auto det=[](const Mat& g) {return g[0]*(g[5]*g[10]-g[6]*g[9])-g[1]*(g[4]*g[10]-g[6]*g[8])+g[2]*(g[4]*g[9]-g[5]*g[8]);};
+        return det(a)*det(r)>0;
+    }
+    // v1266 decode probe (status one_pose.*.decode): an unplaced draw re-read through the OTHER eye's view-projection, and through this eye's PREVIOUS
+    // render's, against the thing's frame F (orientation within the placement's own tolerance, origin within its reach). A match names why the
+    // draw was refused: its constants were composed for another view than the pass named (bit 256) or for the previous render (bit 512).
+    static void decode_probe(const Slot& slot,const Views& v,const float* cur,unsigned e) noexcept {
+        const double tol=axes_tol.load(std::memory_order_relaxed);
+        for(unsigned s=0;s<2;++s) {
+            const Side& w=slot.side[s];if(!w.valid || !w.bound || !w.rigid) continue;
+            const auto hit=[&](const Mat& inv) {const Rows m=model_rows(inv.data(),cur);return same_orientation(m,w.model,tol) && origin_distance(m,w.model)<=reach_of(w);};
+            if(v.ok[e^1u] && hit(v.inv[e^1u])) bits_[s].fetch_or(256u,std::memory_order_relaxed);
+            if(v.prev_ok[s][e] && hit(v.prev_inv[s][e])) bits_[s].fetch_or(512u,std::memory_order_relaxed);
         }
     }
     // Which bound side's F / previous read / child this unplaced draw's model is within reach of (nearest), and whether its axes nearly agree.
@@ -1284,7 +1306,7 @@ public:
             char b[112];std::snprintf(b,sizeof b,"{\"n\":%llu,\"p50_le\":%g,\"p90_le\":%g,\"max\":%.3f}",static_cast<unsigned long long>(t),q(.5),q(.9),max);return b;
         }
     };
-    struct OneCell {std::uint64_t renders{},unplaced{},unseen{},eye_split{};double deg_max{};OneHist shown,flip,intra,eye,rig_mm,rig_deg;std::array<OneHist,4> source;};
+    struct OneCell {std::uint64_t renders{},unplaced{},unseen{},eye_split{},other_eye{},previous{},rigid_seen{},teleports{};double deg_max{};OneHist shown,flip,intra,eye,rig_mm,rig_deg;std::array<OneHist,4> source;};
     static OneCell one_pose_cell(unsigned kind,unsigned bucket) {std::lock_guard<std::mutex> lock(cert_mutex_);return kind<kinds && bucket<buckets?cert_[kind][bucket]:OneCell{};}
     static void reset_one_pose() {std::lock_guard<std::mutex> lock(cert_mutex_);cert_={};cert_prev_={};cert_pending_={};for(auto& s:src_min_um_) for(auto& v:s) v.store(0);}
 private:
@@ -1308,10 +1330,12 @@ private:
         const auto dev=placed?std::array<double,3>{}:offset_in(c.b,c.f);
         const double dev_mm=std::hypot(dev[0],std::hypot(dev[1],dev[2]))*1000.,full_mm=distance(c.f,c.b)*1000.;
         std::lock_guard<std::mutex> lock(cert_mutex_);
-        OneCell& cell=cert_[c.kind][c.bucket];++cell.renders;
+        OneCell& cell=cert_[c.kind][c.bucket];
+        if(!(full_mm<=1000.)) {++cell.teleports;cert_prev_[s]={};return;}   // v1266: the engine frame a metre or more from the hold is a teleport (a time shift, a load), not a pose
+        ++cell.renders;
         if(c.rig_mm>=0) cell.rig_mm.add(c.rig_mm);if(c.rig_deg>=0) cell.rig_deg.add(c.rig_deg);   // v1262
         cell.shown.add(dev_mm);
-        if(!placed) {++cell.unplaced;if(!(b&32u)) ++cell.unseen;const double deg=frame_angle(c.f,c.b)*57.29577951308232;if(deg>cell.deg_max) cell.deg_max=deg;
+        if(!placed) {++cell.unplaced;if(!(b&32u)) ++cell.unseen;if(b&256u) ++cell.other_eye;if(b&512u) ++cell.previous;if(b&1024u) ++cell.rigid_seen;const double deg=frame_angle(c.f,c.b)*57.29577951308232;if(deg>cell.deg_max) cell.deg_max=deg;
             for(unsigned i=0;i<4;++i) if(mins[i]) cell.source[i].add(static_cast<double>(mins[i]-1)/1000.);}
         if(placed) {
             cell.intra.add((b&4u)?full_mm:0.);
