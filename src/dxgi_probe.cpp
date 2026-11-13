@@ -530,7 +530,7 @@ static d2vr::rig::FingerTouchCurl finger_touch_curl;static d2vr::rig::FingerTouc
 // G4 grip ease (plan Task 9): the 0.25 s grip pose blend per hand (render thread, finger block), the drawn angles it starts from, and the
 // knob build/legacy-finger-ease (no blend, no hover shape, no eased opening, the reach flips, the touch floor clamped after its filter).
 static std::array<d2vr::rig::GripPoseBlend,2> grip_pose_blend;static std::array<d2vr::rig::FingerAngles,2> finger_drawn_angles{};static std::array<bool,2> finger_drawn_valid{};
-static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static std::array<std::atomic<std::uintptr_t>,2> held_bound_entity{};static std::array<std::atomic<unsigned long long>,4> prop_seat_frames{};struct HeldExact {std::uint64_t serial{};bool valid{};double since{};unsigned off_frames{};d2vr::weapon_draw::Mat k{};};static std::atomic<unsigned long long> held_exact_dropped{};static std::array<HeldExact,2> held_exact{};struct UseTargets {std::uintptr_t entity{};unsigned side{};std::array<d2vr::WorldTrackedPose,8> ring{};unsigned count{},next{};double at{};std::optional<d2vr::weapon_draw::Mat> k,k_try;unsigned agree{};double since{};};static UseTargets use_targets{};static std::mutex use_targets_mutex;   // v1074: a Use hold's own targets
+static bool no_held_draw_place=false;static d2vr::weapon_draw::HeldBind held_bind;static std::array<std::atomic<unsigned long long>,2> held_draw_placed{};static std::array<std::atomic<std::uintptr_t>,2> held_bound_entity{};static std::array<std::atomic<unsigned long long>,4> prop_seat_frames{};struct HeldExact {std::uint64_t serial{};bool valid{};double since{};unsigned off_frames{};d2vr::weapon_draw::Mat k{};d2vr::HeldKGuard guard{};};static std::atomic<unsigned long long> held_exact_dropped{},held_exact_rearmed{};static std::array<HeldExact,2> held_exact{};struct UseTargets {std::uintptr_t entity{};unsigned side{};std::array<d2vr::WorldTrackedPose,8> ring{};unsigned count{},next{};double at{};std::optional<d2vr::weapon_draw::Mat> k,k_try;unsigned agree{};double since{};};static UseTargets use_targets{};static std::mutex use_targets_mutex;   // v1074: a Use hold's own targets
 static std::array<std::atomic<unsigned long long>,2> held_use_exact{};
 static std::array<std::atomic<unsigned long long>,2> held_exact_placed{};   // v1074: props drawn at grip * hold * (body -> model frame)
 // v1254: the engine render frame of a held thing follows the drawn hand every render (held_engine_pose.hpp); written by held_engine_pose_write().
@@ -1720,7 +1720,7 @@ static std::string binding_json() {
 }
 static std::string weapon_draw_json() {
     const auto types=weapon_live_types();
-    std::string text=",\"held_draw_placed\":["+std::to_string(held_draw_placed[0].load())+","+std::to_string(held_draw_placed[1].load())+"]"+",\"held_bind\":"+[]{std::string o="[";for(unsigned h=0;h<2;++h){o+=h?",[":"[";for(unsigned k=0;k<d2vr::weapon_draw::HeldBind::outcomes;++k) o+=(k?",":"")+std::to_string(held_bind.count(h,k));o+="]";}return o+"]";}()+",\"held_exact_placed\":["+std::to_string(held_exact_placed[0].load())+","+std::to_string(held_exact_placed[1].load())+"]"+",\"held_exact_dropped\":"+std::to_string(held_exact_dropped.load())+",\"held_limb_unmatched\":"+std::to_string(held_limb_unmatched.load())+",\"held_use_exact\":["+std::to_string(held_use_exact[0].load())+","+std::to_string(held_use_exact[1].load())+"]"+",\"held_skip\":[["+std::to_string(held_skip[0][0].load())+","+std::to_string(held_skip[0][1].load())+","+std::to_string(held_skip[0][2].load())+"],["+std::to_string(held_skip[1][0].load())+","+std::to_string(held_skip[1][1].load())+","+std::to_string(held_skip[1][2].load())+"]]"+",\"prop_seat_frames\":["+std::to_string(prop_seat_frames[0].load())+","+std::to_string(prop_seat_frames[1].load())+","+std::to_string(prop_seat_frames[2].load())+","+std::to_string(prop_seat_frames[3].load())+"]"+",\"weapon_draw\":{\"published\":["+std::to_string(weapon_draw_published[0].load())+","+std::to_string(weapon_draw_published[1].load())+"],\"skipped\":["+
+    std::string text=",\"held_draw_placed\":["+std::to_string(held_draw_placed[0].load())+","+std::to_string(held_draw_placed[1].load())+"]"+",\"held_bind\":"+[]{std::string o="[";for(unsigned h=0;h<2;++h){o+=h?",[":"[";for(unsigned k=0;k<d2vr::weapon_draw::HeldBind::outcomes;++k) o+=(k?",":"")+std::to_string(held_bind.count(h,k));o+="]";}return o+"]";}()+",\"held_exact_placed\":["+std::to_string(held_exact_placed[0].load())+","+std::to_string(held_exact_placed[1].load())+"]"+",\"held_exact_dropped\":"+std::to_string(held_exact_dropped.load())+",\"held_exact_rearmed\":"+std::to_string(held_exact_rearmed.load())+",\"held_limb_unmatched\":"+std::to_string(held_limb_unmatched.load())+",\"held_use_exact\":["+std::to_string(held_use_exact[0].load())+","+std::to_string(held_use_exact[1].load())+"]"+",\"held_skip\":[["+std::to_string(held_skip[0][0].load())+","+std::to_string(held_skip[0][1].load())+","+std::to_string(held_skip[0][2].load())+"],["+std::to_string(held_skip[1][0].load())+","+std::to_string(held_skip[1][1].load())+","+std::to_string(held_skip[1][2].load())+"]]"+",\"prop_seat_frames\":["+std::to_string(prop_seat_frames[0].load())+","+std::to_string(prop_seat_frames[1].load())+","+std::to_string(prop_seat_frames[2].load())+","+std::to_string(prop_seat_frames[3].load())+"]"+",\"weapon_draw\":{\"published\":["+std::to_string(weapon_draw_published[0].load())+","+std::to_string(weapon_draw_published[1].load())+"],\"skipped\":["+
         std::to_string(weapon_draw_skipped[0].load())+","+std::to_string(weapon_draw_skipped[1].load())+"],\"frames\":["+std::to_string(weapon_wobble[0][0].n)+","+std::to_string(weapon_wobble[1][0].n)+"]"+",\"skip_reasons\":["+skip_reasons();
     text+=",\"source\":["+source_counts();
     text+=",\"no_writer\":["+std::to_string(weapon_draw_no_writer[0].load())+","+std::to_string(weapon_draw_no_writer[1].load())+"]";
@@ -3758,7 +3758,7 @@ static void publish_held_mask() noexcept {
         d2vr::ObjectMotion::publish_held_frames(h);
     } catch(...) {}
 }
-static bool held_rig_now(d2vr::HeldCarry& out) noexcept;   // v1262 (defined beside advance_attachment)
+static bool held_rig_now(d2vr::HeldCarry& out,bool sync=false) noexcept;   // v1262 (defined beside advance_attachment); v1274 sync: the engine's sync
 static void publish_weapon_draw(std::uintptr_t view) noexcept {
     // v1140: weapons stay opt-in (v1019, build/weapon-draw-place); held props are placed by default (ObjectMotion::held_wanted).
     const bool weapons=d2vr::ObjectMotion::weapon_wanted();
@@ -4011,12 +4011,19 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         if(t-ex.since<.12) h=wd::HeldBind::eased(relative?wd::pose_mat(given[gi]):wd::inverse(ex.k,k_inv)?wd::mul(f_read,k_inv):h_target,h_target,(t-ex.since)/.12);
                         auto b=relative?wd::mul(wd::mul(h,g_inv),f_read):wd::mul(h,ex.k);   // an unmatched prop: H * K_bind (v1258)
                         if(legacy_held_render_goal) {b=wd::mul(h_target,ex.k);if(t-ex.since<.12) b=wd::HeldBind::eased(f_read,b,(t-ex.since)/.12);}
-                        // v1270 safety net (default path, every kind): the placement's own residual - how far it moves the engine's frame. The engine is given
-                        // the carried drawn hold, so a sound placement moves it by millimetres; 3 renders in a row beyond 0.2 m (a wrong K on an unmatched
-                        // prop, a frame that is not the held body's) end the placement for the hold, as v1075 did. It never asks whether the frame body is the
-                        // held body, so a jointed clone placed relative to its given pose passes.
-                        if(!legacy_held_render_goal && wd::finite(b)) {const double residual=wd::distance(b,f_read);if(residual>.2 && residual<1.) {if(++ex.off_frames>=3) {ex.valid=false;++held_exact_dropped;}} else ex.off_frames=0;}   // > 1 m: a teleport, not a wrong K
-                        if(ex.valid && wd::finite(b) && (!limb || relative || legacy_held_render_goal)) {
+                        // v1274 safety net (held_render_pose.hpp HeldKGuard; v1270 ended the hold's placement on a hard swing): only a prop placed with K can
+                        // be wrong in a way the placement cannot see (B = H * inverse(G) * F needs no K; a limb is placed only that way), so the residual is K's
+                        // own disagreement with the engine: |E * K - F|, E = the entity frame (+0x300 origin, +0x30c axes) that the same attach job 0x753c10
+                        // wrote F from (0x541420/0x541390, or F = E at 0x754113). No hand and no given pose is in it. 3 renders over 0.2 m suspend, the
+                        // first one back under re-arms.
+                        bool k_ok=true;
+                        if(!legacy_held_render_goal && !limb) {
+                            std::array<float,15> e_raw{};double k_residual=std::numeric_limits<double>::quiet_NaN();
+                            if(read_self(thing[hand]+0x300,e_raw.data(),12*sizeof(float))) {e_raw[12]=e_raw[13]=e_raw[14]=1.f;k_residual=wd::distance(wd::mul(wd::model_of(e_raw.data()),ex.k),f_read);}
+                            d2vr::HeldKGuard::Event e{};k_ok=ex.guard.place(k_residual,e);
+                            if(e==d2vr::HeldKGuard::suspend) ++held_exact_dropped;else if(e==d2vr::HeldKGuard::rearm) ++held_exact_rearmed;
+                        }
+                        if(ex.valid && k_ok && wd::finite(b) && (!limb || relative || legacy_held_render_goal)) {
                             bound[hand]=b;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];reach[hand]=.5;place_ids[hand]=thing[hand];
                             if(const double gap=wd::distance(b,f_read);hk && gap<1.) d2vr::hold_sync().engine(limb?d2vr::HoldSync::severed:d2vr::HoldSync::prop,player_speed,gap);   // v1249 engine_gap (v1266: a teleport is no gap)
                             // v1258/v1266: the engine is given the held body as THIS render draws it (held_render_pose.hpp note_drawn: props and severed parts),
@@ -8450,9 +8457,19 @@ static std::optional<d2vr::rig::Transform> advance_attachment(unsigned side,cons
         return d2vr::fullbody::to_transform(d2vr::fullbody::to_model(live_frame,wanted));
     } catch(...) {return {};}
 }
+// v1274: [0] the engine's game object whose vtable slot 0xc0 is the frame number 0x754ea0 stamps a reference frame with (0x754eb6: mov rcx,[rip+d];
+// 0x754ec9: call [rax+0xc0]); [1] the "no absolute model origin" value 0x53c4f0 compares +0x3bc with (0x53c4fc: ucomiss xmm0,[rip+d]). Both resolved
+// from those instructions at install (zero: not this executable, no frame root).
+static std::array<std::uintptr_t,2> held_frame_globals{};
+static bool held_engine_frame(std::uint32_t& out) noexcept {   // the engine's sync threads only (0x754ea0 calls it there)
+    __try {
+        const auto game=*reinterpret_cast<void* const*>(held_frame_globals[0]);if(!game) return false;
+        using Get=int (__fastcall*)(void*);out=static_cast<std::uint32_t>((*reinterpret_cast<Get const* const*>(game))[0xc0/8](game));return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
 // v1258 (held_render_pose.hpp HeldRenderPose::rig_now): the player's rig as advance_attachment reads it for an item placed this tick - the body
 // model's root position and (camera heading - head follow) - so a held prop's engine pose is the last drawn hold carried exactly as the weapons are.
-static bool held_rig_now(d2vr::HeldCarry& out) noexcept {
+static bool held_rig_now(d2vr::HeldCarry& out,bool sync) noexcept {
     try {
         const auto binding=arm_binding_cache.load();if(!binding) return false;
         const auto body_model=d2vr::rig::value<std::uintptr_t>(read_self,binding->arms[0].player+0xf0);
@@ -8460,18 +8477,29 @@ static bool held_rig_now(d2vr::HeldCarry& out) noexcept {
         if(!body_model || !d2vr::rig::pointer(*body_model) || !read_self(*body_model+0x1860,root.data(),sizeof(root))) return false;
         const auto camera=d2vr::native_player_camera(read_self,image_base,head_body_camera);if(!camera) return false;
         out.root=d2vr::fullbody::frame_of(root).rigid.p;out.heading=camera->heading-native_turning.head_follow_total();
-        // v1270: the player's character body, as the character step 0x1b4760 indexes it (0x1b4cb9..0x1b4ce9): world = [[delegate+0x138]+0x190],
-        // record = [world+0x28] + (handle & 0xffffff) * 0xb0 (handle < [world+0x30]), the record's own handle at +0x70; its position at +0x30 (the
-        // layout the rigid-body sync 0x80b7c0 reads its body from). The handle is the step's third argument (NativeTurning::step_body), taken only
-        // when that step ran for this camera's own delegate.
-        out.body_ok=false;
-        if(const auto delegate=camera->heading_delegate;delegate && d2vr::NativeTurning::step_delegate()==delegate) {
-            const std::uint32_t handle=d2vr::NativeTurning::step_body(),index=handle&0xffffffu;
-            std::uintptr_t holder{},world{},pool{};std::uint32_t count{},own{};std::array<float,3> at{};
-            if(index!=0xffffffu && read_self(delegate+0x138,&holder,8) && holder && read_self(holder+0x190,&world,8) && world && read_self(world+0x28,&pool,8) && pool &&
-               read_self(world+0x30,&count,4) && index<count && read_self(pool+std::uintptr_t(index)*0xb0+0x70,&own,4) && own==handle &&
-               read_self(pool+std::uintptr_t(index)*0xb0+0x30,at.data(),sizeof at)) {
-                out.body={at[0],at[1],at[2]};out.body_ok=d2vr::finite(out.body) && d2vr::length(out.body-out.root)<5.;   // the character stays with the player
+        // v1274 (held_render_pose.hpp PlayerRigTracker; replaces v1270's read of the step's third argument, which is the ground under the player): this
+        // frame's root as the attach job 0x753c10 will write it. rf = [[delegate+0x130] - 8] (the character step's frame callback 0x800f70 -> 0x754ea0),
+        // owned by the player (rf+0x10), origin rf+0x30, stamped rf+0x84 with the engine's frame number. Model origin = entity origin + the model
+        // component's offset +0x3b0 unless its absolute override +0x3bc is set (0x53c4f0); that component is rf+0x3f8 and draws the body model (+0x38).
+        // The same formula must reproduce the root the last attach wrote from the entity origin it wrote (+0x300), within 5 mm, or nothing is taken
+        // (why = root_formula_off: a stance change this frame, an attach in progress, or this reading of the engine is wrong).
+        // The stamp is read before the origin: 0x18e050 writes the origin first and the stamp last, so a stamp of this frame means the origin is this frame's.
+        out.frame_ok=false;out.source=0;out.why=sync?d2vr::HeldCarry::no_source:d2vr::HeldCarry::not_asked;
+        if(const auto delegate=camera->heading_delegate;sync && delegate && held_frame_globals[0] && held_frame_globals[1]) {
+            const auto player=binding->arms[0].player;
+            std::uintptr_t iface{},rf{},owner{},comp{},drawn{};std::uint32_t stamp{},frame{};std::array<float,3> origin{},offset{},fixed{},unset{},entity{};
+            if(read_self(delegate+0x130,&iface,8) && iface>8 && read_self(iface-8,&rf,8) && rf && read_self(rf+0x10,&owner,8) && owner==player &&
+               read_self(rf+0x84,&stamp,4) && (std::atomic_thread_fence(std::memory_order_acquire),read_self(rf+0x30,origin.data(),sizeof origin)) && read_self(rf+0x3f8,&comp,8) && comp &&
+               read_self(comp+0x38,&drawn,8) && drawn==*body_model && read_self(comp+0x3b0,offset.data(),sizeof offset) &&
+               read_self(comp+0x3bc,fixed.data(),sizeof fixed) && read_self(held_frame_globals[1],unset.data(),sizeof unset) &&
+               read_self(player+0x300,entity.data(),sizeof entity)) {
+                out.source=rf;
+                const bool absolute=!(fixed[0]==unset[0] && fixed[1]==unset[1] && fixed[2]==unset[2]);   // 0x53c4fc: the override when any differs
+                const auto model_at=[&](const std::array<float,3>& o) {return absolute?d2vr::Vec3{fixed[0],fixed[1],fixed[2]}:d2vr::Vec3{o[0]+offset[0],o[1]+offset[1],o[2]+offset[2]};};
+                out.frame_root=model_at(origin);
+                if(!(d2vr::finite(out.frame_root) && d2vr::length(model_at(entity)-out.root)<.005)) out.why=d2vr::HeldCarry::root_formula_off;
+                else if(!held_engine_frame(frame) || frame!=stamp) out.why=d2vr::HeldCarry::not_this_frame;
+                else {out.frame_ok=true;out.why=d2vr::HeldCarry::taken;}
             }
         }
         return d2vr::finite(out.root) && std::isfinite(out.heading);
@@ -17208,6 +17236,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             native_grab.attach_corpse_trace(&corpse_trace);
             d2vr::HeldRenderPose::ragdolls=!fs::exists(root/L"build"/L"no-held-render-pose-severed");d2vr::HeldRenderPose::corpses=fs::exists(root/L"build"/L"held-render-pose-corpse");   // v1253
             d2vr::HeldRenderPose::rig_now=&held_rig_now;   // v1258: the drawn hold carried to the rig of the engine's sync
+            {   // v1274: held_frame_globals from the engine's own instructions
+                std::array<unsigned char,3> a{},b{};std::array<unsigned char,6> call{};std::int32_t da{},db{};
+                if(read_self(image_base+0x754eb6,a.data(),3) && a[0]==0x48 && a[1]==0x8b && a[2]==0x0d && read_self(image_base+0x754eb9,&da,4) &&
+                   read_self(image_base+0x754ec9,call.data(),call.size()) && call==std::array<unsigned char,6>{0xff,0x90,0xc0,0x00,0x00,0x00} &&
+                   read_self(image_base+0x53c4fc,b.data(),3) && b[0]==0x0f && b[1]==0x2e && b[2]==0x05 && read_self(image_base+0x53c4ff,&db,4))
+                    held_frame_globals={image_base+0x754ebd+static_cast<std::intptr_t>(da),image_base+0x53c503+static_cast<std::intptr_t>(db)};
+            }
             if(!fs::exists(root/L"build"/L"no-held-render-pose")) (void)d2vr::HeldRenderPose::install(image_base);   // v1249: a held prop's engine render frame = the hold's goal
             legacy_held_render_goal=fs::exists(root/L"build"/L"legacy-held-render-goal");d2vr::HeldRenderSlot::drawn_hold=!legacy_held_render_goal;   // v1258
             d2vr::HeldEnginePose::on=fs::exists(root/L"build"/L"held-engine-pose");   // v1255: opt-in (v1254 wrote it every render; the flip was

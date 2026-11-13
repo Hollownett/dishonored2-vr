@@ -70,53 +70,64 @@ inline WorldTrackedPose translated_goal(const WorldTrackedPose& bone,const World
     WorldTrackedPose out=bone;Vec3 d=goal.position-bone.position;const double n=length(d);if(n>cap_m) d=d*(cap_m/n);out.position=bone.position+d;return out;
 }
 // v1258: where the player's rig stands for a drawn pose: the anchor root position and (camera heading - head follow), item_advance's reference.
-struct HeldCarry {Vec3 root{};double heading{};Vec3 body{};bool body_ok{};};   // v1270 body: the player's character body this frame (when read)
-// v1270 (review of v1266: the carry PREDICTED this frame's root as the stale reading + the previous frame's step - one frame wrong on every start,
-// stop and hitch, and resting on an unmeasured "the reading is always stale"). The player's rig of THIS frame is now MEASURED. The body-model root
-// (body model +0x1860) is the output of the player's post-physics attach job; that job's source is the player's character body, which the physics
-// step has already integrated when any POST_PHYSICS sync runs (the prop's 0x80b7c0 and the ragdoll's 0x76d640 both read their own bodies from the
-// same Havok pool at that point). The character body is indexed exactly as the player's character step 0x1b4760 does (0x1b4cb9..0x1b4ce9; dxgi_probe
-// held_rig_now). Root and body differ by the model's fixed offset c = root - body, measured from the game thread's own pair: the stale root reading
-// belongs to the PREVIOUS frame's body (stage order: the sync before the attach job); c is kept as whichever pairing (previous body or this body)
-// agrees with the c already held, so a reading that is already this frame's (an attach job that ran first) is recognised, not assumed away, and
-// counted (picks: stale / current / still). This frame's root = this frame's body + c: no step, no frame time, exact on a start, a stop or a hitch.
-// Without a body reading (no character step seen) the v1266 step remains as the fallback (counted).
+// v1274 frame_root: the body-model root of THIS frame as the attach job will write it (dxgi_probe held_rig_now, sync reads only); frame_ok: read and
+// stamped this frame; source: the player's reference frame it was read from (0: none); why: the reading's outcome (sync reads).
+struct HeldCarry {
+    enum Why:unsigned {not_asked,taken,no_source,not_this_frame,root_formula_off,whys};
+    Vec3 root{};double heading{};Vec3 frame_root{};bool frame_ok{};std::uintptr_t source{};unsigned why{};
+};
+// v1274 (static RE, Dishonored2.exe): v1270's "character body" was the GROUND the player stands on. The step's third argument is the movement
+// component's +0x2b4, written by the ground cast (0x7ff437..0x7ff540: hit body id when that body is dynamic or keyframed, else 0xffffff); the step
+// reads that body's velocity at the character proxy (0x1b4d0a..0x1b4d30, standing on a moving platform). So v1270 fell back nearly always, and
+// on a crate or a boat it paired the root with that object's body.
+// The player's root comes from this chain:
+//  - the character step 0x1b4760 ends by giving its reference frame the character proxy's position ([delegate+0x148]+0x80, copied to delegate+0xf8)
+//    and the heading's axes (delegate+0xd0 -> 0x10e6a0): [delegate+0x130] slot 0 = 0x800f70 -> 0x754ea0(rf...) -> 0x18e050 (rf+0x30 origin, +0x3c
+//    axes, rf+0x84 = the engine's frame number, the getter 0x754ea0 itself calls);
+//  - the attach job 0x753c10 copies rf+0x30.. to the entity (+0x300..) with no filter and writes the model origin = entity origin + the model
+//    component's +0x3b0 (0x541420 -> 0x53c4f0). +0x3b0 is a world vector set only by the stance code (0x5401c0 from 0x858950 etc.: (0, 0, dz));
+//    the rate-limited step height (delegate+0xbc) goes to rf+0x78, not to the origin.
+// So the root follows the capsule rigidly, and a step-up or mantle pop moves the root, the drawn hands and the carried prop together; there is no
+// root smoothing to clamp against. This frame's root = rf+0x30 + (model root - entity origin), where the offset comes from the last attach. It is
+// taken when rf+0x84 is this frame's number, which means the player's step already ran this frame. There is no learned offset and no pairing, and
+// NPC steps write their own rf. A sync that runs before the player's step (stamp from the previous frame) uses the v1266 step as the fallback (counted).
 struct PlayerRigTracker {
-    enum Pick:unsigned {pick_stale,pick_current,pick_still,picks_n};
     static constexpr double same_frame_s=.003,pair_s=.05,step_max_m=.25,frame_s=.02;
-    // c is held in the player's heading frame (the model's offset from the character body turns with the player): c_world = Rz(heading) * c.
-    Vec3 c{};bool c_ok{};Vec3 body_prev{};double heading_prev{},prev_s{};bool prev_ok{};HeldCarry last{};double last_s{};bool last_ok{};
-    static Vec3 turned(Vec3 v,double a) noexcept {const double cs=std::cos(a),sn=std::sin(a);return {cs*v.x-sn*v.y,sn*v.x+cs*v.y,v.z};}
-    std::array<std::uint64_t,picks_n> picks{};std::uint64_t measured{},fallback{};unsigned last_pick{picks_n};bool fresh{};   // fresh: this call measured a new frame
-    HeldCarry seen{};Vec3 step{};double step_heading{},seen_s{};bool have_seen{};   // the v1266 step (fallback only)
+    HeldCarry last{};double last_s{};bool last_ok{},fresh{};std::uintptr_t source{};   // fresh: this call measured a new frame
+    std::uint64_t measured{},fallback{},resets{};std::array<std::uint64_t,HeldCarry::whys> why{};   // why: the fallbacks' reasons
+    HeldCarry seen{};Vec3 step{};double step_heading{},seen_s{};bool have_seen{};   // the v1266 step (fallback only), fed by every reading
     HeldCarry frame_rig(const HeldCarry& read,double now) noexcept {
         fresh=true;
-        if(!read.body_ok) {   // fallback: no current source this sync
-            ++fallback;last_pick=picks_n;HeldCarry out=read;
-            if(have_seen && length(read.root-seen.root)>1e-6) {
-                const Vec3 d=read.root-seen.root;step=now>seen_s && now-seen_s<pair_s && length(d)<step_max_m?d:Vec3{};step_heading=seen.heading;seen=read;seen_s=now;
-            } else if(have_seen) {if(!(now-seen_s<frame_s)) step={};else seen.heading=read.heading;}
-            else {seen=read;seen_s=now;have_seen=true;step={};}
-            if(length(step)>1e-6) {const double a=std::remainder(read.heading-step_heading,6.283185307179586),cs=std::cos(a),sn=std::sin(a);
-                out.root=read.root+Vec3{cs*step.x-sn*step.y,sn*step.x+cs*step.y,step.z};}
-            return out;
-        }
-        if(last_ok && length(read.body-last.body)<1e-7 && now-last_s<same_frame_s) {fresh=false;return last;}   // this frame's second sync (another hand, a ragdoll bone)
-        const bool paired=prev_ok && now>prev_s && now-prev_s<pair_s;
-        const Vec3 cb=turned(read.root-read.body,-read.heading);Vec3 pick=cb;unsigned o=pick_current;   // the pair of THIS frame (heading frame)
-        if(paired) {
-            const Vec3 ca=turned(read.root-body_prev,-heading_prev);   // the pair of the PREVIOUS frame (the stale reading with that frame's body)
-            if(length(read.body-body_prev)<1e-6) {pick=ca;o=pick_still;}   // the body did not move: both pairings are the same
-            else if(!c_ok) {pick=ca;o=pick_stale;}                          // the first pairing: by stage order
-            else if(length(ca-c)<=length(cb-c)) {pick=ca;o=pick_stale;} else {pick=cb;o=pick_current;}
-        }
-        HeldCarry out=read;
-        if(paired || c_ok) {
-            if(paired) {c=pick;c_ok=true;++picks[o];last_pick=o;} else last_pick=picks_n;
-            out.root=read.body+turned(c,read.heading);++measured;
-        }
-        body_prev=read.body;heading_prev=read.heading;prev_s=now;prev_ok=true;last=out;last_s=now;last_ok=true;
+        if(read.source && read.source!=source) {if(source) ++resets;last_ok=have_seen=false;step={};source=read.source;}   // a new player (level or save load)
+        HeldCarry fb=read;   // the v1266 step: the stale reading moved on by the step between the previous two readings
+        if(have_seen && length(read.root-seen.root)>1e-6) {
+            const Vec3 d=read.root-seen.root;step=now>seen_s && now-seen_s<pair_s && length(d)<step_max_m?d:Vec3{};step_heading=seen.heading;seen=read;seen_s=now;
+        } else if(have_seen) {if(!(now-seen_s<frame_s)) step={};else seen.heading=read.heading;}
+        else {seen=read;seen_s=now;have_seen=true;step={};}
+        if(length(step)>1e-6) {const double a=std::remainder(read.heading-step_heading,6.283185307179586),cs=std::cos(a),sn=std::sin(a);
+            fb.root=read.root+Vec3{cs*step.x-sn*step.y,sn*step.x+cs*step.y,step.z};}
+        if(!read.frame_ok || !finite(read.frame_root)) {++fallback;++why[read.why<HeldCarry::whys?read.why:HeldCarry::no_source];return fb;}
+        HeldCarry out=read;out.root=read.frame_root;
+        if(last_ok && length(out.root-last.root)<1e-7 && now-last_s<same_frame_s) {fresh=false;return last;}   // this frame's second sync (another hand, a ragdoll bone)
+        ++measured;last=out;last_s=now;last_ok=true;
         return out;
+    }
+};
+// v1274: the held-exact safety net (dxgi_probe publish_weapon_draw, props placed with K). It guards against a wrong K (the bind's body -> model frame
+// map), which stays wrong; a swing does not. Its residual is K's own disagreement with the engine, |E * K - F|: E is the prop's entity frame and F
+// its model frame, both written by one attach job, so no hand and no given pose enters it. The v1270 residual (how far the placement moves F) grew
+// with the hand's motion since the given and ended the hold's placement for good: 22 cm after a 10 m/s swing with the given two frames old. Three
+// renders over 0.2 m suspend the placement and the first render back under re-arms it. >= 1 m (a teleport) or no reading: no evidence.
+struct HeldKGuard {
+    static constexpr double limit_m=.2,teleport_m=1.;static constexpr unsigned trip=3;
+    unsigned over{};bool suspended{};
+    enum Event:unsigned {none,suspend,rearm};
+    bool place(double residual,Event& event) noexcept {   // true: place this render
+        event=none;
+        if(!(residual<teleport_m)) {over=0;return !suspended;}
+        if(residual>limit_m) {if(!suspended && ++over>=trip) {suspended=true;event=suspend;}}
+        else {over=0;if(suspended) {suspended=false;event=rearm;}}
+        return !suspended;
     }
 };
 // A world pose drawn with `from` as it is drawn with `to`: turned about the root by the heading change, moved with the root (FullBodyDriver::item_advance).
@@ -247,11 +258,11 @@ public:
     // v1270: this frame's rig for a sync of `kind` (0 the prop sync, 1 the ragdoll sync): rig_now read, the tracker's measured root, and the
     // certificate's records (the stale reading for the ordering counts, the carried root against the next publication).
     bool frame_rig(unsigned kind,HeldCarry& out) noexcept {
-        HeldCarry read{};if(!rig_now || !rig_now(read)) return false;
+        HeldCarry read{};if(!rig_now || !rig_now(read,true)) return false;
         const double now=precise_s();
         std::lock_guard<std::mutex> l(rig_m_);
         out=tracker_.frame_rig(read,now);
-        if(tracker_.fresh && pending_n_<pending_.size()) pending_[pending_n_++]={kind&1u,read.root,out.root,now,read.body_ok};
+        if(tracker_.fresh && pending_n_<pending_.size()) pending_[pending_n_++]={kind&1u,read.root,out.root,now,read.frame_ok};
         return true;
     }
     // v1270: a publication (each eye Setup, dxgi_probe): the rig its image is placed with. Rolls the syncs since the previous one into the
@@ -291,8 +302,9 @@ public:
     };
     std::string rig_json() {
         std::lock_guard<std::mutex> l(rig_m_);
-        std::string o="{\"measured\":"+std::to_string(tracker_.measured)+",\"fallback\":"+std::to_string(tracker_.fallback)+",\"pairing\":{\"stale\":"+std::to_string(tracker_.picks[0])+
-            ",\"current\":"+std::to_string(tracker_.picks[1])+",\"still\":"+std::to_string(tracker_.picks[2])+"},\"order\":{";
+        std::string o="{\"measured\":"+std::to_string(tracker_.measured)+",\"fallback\":"+std::to_string(tracker_.fallback)+",\"fallback_why\":{\"no_source\":"+std::to_string(tracker_.why[HeldCarry::no_source]+tracker_.why[HeldCarry::not_asked])+   // v1274
+            ",\"not_this_frame\":"+std::to_string(tracker_.why[HeldCarry::not_this_frame])+",\"root_formula_off\":"+std::to_string(tracker_.why[HeldCarry::root_formula_off])+"}"+
+            ",\"player_resets\":"+std::to_string(tracker_.resets)+",\"order\":{";
         static constexpr const char* kn[2]={"prop_sync","ragdoll_sync"};
         for(unsigned k=0;k<2;++k) o+=std::string(k?",":"")+"\""+kn[k]+"\":{\"equals_previous_frame\":"+std::to_string(order_[k][0])+",\"equals_this_frame\":"+std::to_string(order_[k][1])+",\"neither\":"+std::to_string(order_[k][2])+"}";
         o+="},\"carried_vs_published_mm\":{";
@@ -301,7 +313,7 @@ public:
         return o+",\"start3\":"+start_mm_.json()+",\"stop3\":"+stop_mm_.json()+"}}";
     }
     // v1258: the player's rig now (dxgi_probe: the body model's root position, camera heading - head follow), read on the engine's sync thread.
-    using RigNow=bool (*)(HeldCarry&) noexcept;
+    using RigNow=bool (*)(HeldCarry&,bool sync) noexcept;   // v1274 sync: on the engine's sync (frame_root wanted)
     inline static RigNow rig_now{};
     // v1258: the poses the engine was given for `entity` (newest first, at most HeldRenderSlot::ring): the publisher finds the one its model frame came from.
     // v1266: severed parts too; `frames` (optional): the model frame the ragdoll sync wrote with each given (frame_ok false: none recorded, a prop).
@@ -413,7 +425,7 @@ private:
                 WorldTrackedPose body{};body.position={f[12],f[13],f[14]};for(unsigned k=0;k<3;++k) body.basis[k]={f[k*4],f[k*4+1],f[k*4+2]};
                 WorldTrackedPose out{};bool blending=false;
                 if(!grab_pose_valid(body) || !s.decide(body,now,out,blending,have_rig && s.mode==severed?&rig:nullptr)) {watched_[i].store(0,std::memory_order_release);return false;}
-                if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);if(s.used==HeldRenderSlot::given_carried) carry_stepped_[have_rig && rig.body_ok?0:1].fetch_add(1,std::memory_order_relaxed);
+                if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);if(s.used==HeldRenderSlot::given_carried) carry_stepped_[have_rig && rig.frame_ok?0:1].fetch_add(1,std::memory_order_relaxed);
                 if(s.mode==corpse && !blending) {out=translated_goal(body,out,corpse_cap_m);s.written=out;}
                 if(!finite(out.position) || !grab_pose_valid(out)) {refuse(invalid);s={};watched_[i].store(0);return false;}
                 s.delta={body,out};s.delta_s=now;s.delta_ok=true;
@@ -438,7 +450,7 @@ private:
             o[0]=float(out.position.x);o[1]=float(out.position.y);o[2]=float(out.position.z);
             for(unsigned k=0;k<3;++k) {a[k*3]=float(out.basis[k].x);a[k*3+1]=float(out.basis[k].y);a[k*3+2]=float(out.basis[k].z);}
             (blending?blended_:written_).fetch_add(1,std::memory_order_relaxed);if(!blending && s.used<3) given_[s.used].fetch_add(1,std::memory_order_relaxed);
-            if(s.used==HeldRenderSlot::given_carried) carry_stepped_[have_rig && rig.body_ok?0:1].fetch_add(1,std::memory_order_relaxed);
+            if(s.used==HeldRenderSlot::given_carried) carry_stepped_[have_rig && rig.frame_ok?0:1].fetch_add(1,std::memory_order_relaxed);
             if(!blending && s.drawn_ok) {   // v1262: how old the newest drawn note was at this sync, and syncs it was too old to carry
                 const double ms=(precise_s()-s.drawn_s)*1000.;unsigned bin=0;while(bin+1<age_bins && !(ms<=age_edge_ms[bin])) ++bin;age_n_[bin].fetch_add(1,std::memory_order_relaxed);
                 if(s.carry_ok && s.used!=HeldRenderSlot::given_carried && ms>s.carry_age()*1000.) too_old_.fetch_add(1,std::memory_order_relaxed);

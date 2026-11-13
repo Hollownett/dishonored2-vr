@@ -11,12 +11,15 @@
 // the whole clone so the held body is at the pose it was given; placement B = H * inverse(G) * F.
 //   v1264: the v1262 rig rule (stale-or-current guessed against the noted rig, velocity from sync readings); the limb given the bare motor goal.
 //   v1266: the root one fixed frame on from the reading (the step between the previous two readings), the heading as read; the limb carried too.
+//   v1270 (shared step slot): measured only when the last character step before the sync was the player's (an NPC step after it: fallback).
+//   v1274: this frame's root read from the player's own reference frame, stamped with the frame (held_rig_now); NPC steps write their own.
 #define NOMINMAX
 #include "../src/held_render_pose.hpp"
 #include "../src/held_engine_pose.hpp"
 #include "../src/weapon_draw_place.hpp"
 #include <cstdio>
 #include <vector>
+#include <limits>
 using namespace d2vr;
 namespace wd=d2vr::weapon_draw;
 static int failures=0;
@@ -48,23 +51,25 @@ struct V1262Rig {
 };
 // rate: frames per second; stop_at / start_at (s): the player stops / starts there; hitch_at: one frame 3x long; current_every: every n-th sync's root
 // reading is already this frame's (an attach job that ran before the sync)
-struct Motion {const char* name{};double speed{},yaw_rate{},snap{},rate{90},stop_at{},start_at{},hitch_at{};unsigned current_every{};};
-struct Result {double shown_p90{},flip_p90{},flip_max{},eye_max{},gap_p90{},gap_max{};std::uint64_t renders{},unplaced{},stepped{},carried{};};
+// npc_every: an NPC's character step runs after the player's on every n-th frame; step_after_every: the player's own step runs after the sync on
+// every n-th frame (its stamp is the previous frame's)
+struct Motion {const char* name{};double speed{},yaw_rate{},snap{},rate{90},stop_at{},start_at{},hitch_at{};unsigned current_every{},npc_every{},step_after_every{};};
+struct Result {double shown_p90{},flip_p90{},flip_max{},eye_max{},gap_p90{},gap_max{};std::uint64_t renders{},unplaced{},stepped{},carried{},measured{},fallback{};};
 static double edge_p(const wd::Place::OneHist& h,double q) {
     std::uint64_t t=0;for(auto v:h.n) t+=v;std::uint64_t run=0;
     for(unsigned i=0;i<wd::Place::OneHist::bins;++i) {run+=h.n[i];if(t && double(run)>=q*double(t)) return wd::Place::OneHist::edge[i];}
     return 0;
 }
 static wd::Place::OneHist merged(const wd::Place::OneHist& a,const wd::Place::OneHist& b) {auto o=a;for(unsigned i=0;i<o.n.size();++i) o.n[i]+=b.n[i];o.max=std::max(a.max,b.max);return o;}
-// v1264: the v1262 rule; v1266: the predicted step (= PlayerRigTracker without a body reading); v1270: the measured rig (the character body)
-enum Mode {v1264,v1266,v1270};
+// v1264: the v1262 rule; v1266: the predicted step (PlayerRigTracker without a frame reading); v1270: measured only when the shared step slot holds
+// the player's step; v1274: the player's own stamped reference frame
+enum Mode {v1264,v1266,v1270,v1274};
 static double begin_before_p=.9;
 static Result run(const Motion& m,Mode mode,bool limb) {
     lcg=11;HeldRenderSlot::drawn_hold=true;wd::Place::clear();wd::Place::reset_one_pose();
     HeldRenderSlot slot;V1262Rig old;PlayerRigTracker tracker;const std::uintptr_t entity=0x1234;
     const WorldTrackedPose rel=tilt(yawed({.10,.02,-.03},.4),{1,0,0},.3);          // the held body in the drawn grip
     const WorldTrackedPose motor_off=tilt(yawed({.035,.018,-.01},.12),{0,1,0},.06); // the motor's hand vs the drawn hand (~40 mm, ~8 deg)
-    const Vec3 body_local{.03,.01,-.9};   // the character body against the model root (turns with the heading)
     const auto track_at=[&](double t) {   // the hand in the rig (tracking): a 2 cm sway and wrist turn (~0.13 m/s, ~0.4 rad/s)
         return tilt(yawed({.35+.02*std::sin(t*6.3),-.2+.015*std::sin(t*4.1),1.1+.01*std::sin(t*7.7)},.2*std::sin(t*2.)),{1,0,0},.1*std::sin(t*3.3));};
     const auto joint_at=[&](double t) {   // limb: the clone's frame body against the held body (a 30 cm lever flopping +-17 deg)
@@ -79,8 +84,6 @@ static Result run(const Motion& m,Mode mode,bool limb) {
         r.root=r.root+Vec3{std::cos(r.heading),std::sin(r.heading),0}*(speed_at(T.back()+dt)*dt);
         T.push_back(T.back()+dt);rig.push_back(r);
     }
-    const auto body_of=[&](std::size_t k) {const double c=std::cos(rig[k].heading),s=std::sin(rig[k].heading);
-        return rig[k].root-Vec3{c*body_local.x-s*body_local.y,s*body_local.x+c*body_local.y,body_local.z};};
     const auto drawn_at=[&](std::size_t k) {return grip_compose(grip_compose(yawed(rig[k].root,rig[k].heading),track_at(T[k])),rel);};   // B (body) of render k
     std::vector<double> gaps;std::uint64_t stepped=0,carried=0;
     std::size_t last_note=0;bool noted=false;
@@ -93,7 +96,9 @@ static Result run(const Motion& m,Mode mode,bool limb) {
         auto goal=grip_compose(sample,rel);goal.position=goal.position+Vec3{std::cos(rig[k].heading),std::sin(rig[k].heading),0}*(speed_at(T[k])*(T[k]-T[k-1]));
         slot.publish(entity,goal,T[k]);
         const bool current=m.current_every && k%m.current_every==0;   // the attach job ran before this sync
-        HeldCarry read{current?rig[k].root:rig[k-1].root,rig[k].heading,body_of(k),mode==v1270};
+        const bool step_after=m.step_after_every && k%m.step_after_every==0,npc_after=m.npc_every && k%m.npc_every==0;
+        const bool frame_ok=(mode==v1274 && !step_after) || (mode==v1270 && !step_after && !npc_after);
+        HeldCarry read{current?rig[k].root:rig[k-1].root,rig[k].heading,rig[k].root,frame_ok,0x5000,frame_ok?HeldCarry::taken:HeldCarry::not_this_frame};
         WorldTrackedPose given{};bool blending=false;const double now=T[k]+.002;
         if(mode==v1264) {
             if(limb) given=goal;   // v1264: a severed part was given the bare motor goal
@@ -120,32 +125,46 @@ static Result run(const Motion& m,Mode mode,bool limb) {
         all.renders+=c.renders;all.unplaced+=c.unplaced;all.shown=merged(all.shown,c.shown);all.flip=merged(all.flip,c.flip);all.eye=merged(all.eye,c.eye);}
     std::sort(gaps.begin(),gaps.end());
     return {edge_p(all.shown,.9),edge_p(all.flip,.9),all.flip.max,all.eye.max,gaps.empty()?0:gaps[static_cast<std::size_t>(.9*double(gaps.size()-1))],gaps.empty()?0:gaps.back(),
-            all.renders,all.unplaced,stepped,carried};
+            all.renders,all.unplaced,stepped,carried,tracker.measured,tracker.fallback};
 }
 int main() {
     const Motion motions[]={{"still",0,0,0},{"walk 1.5 m/s",1.5,0,0},{"walk 3 m/s",3,0,0},{"run 7 m/s",7,0,0},{"walk 1.5 + stick turn 90/s",1.5,1.571,0},
                             {"run 5 + stick turn 60/s",5,1.047,0},{"walk 1.5 + snap 45 deg",1.5,0,.785}};
     const Motion events[]={{"stop from 3 m/s, 90 Hz",3,0,0,90,1.},{"stop from 3 m/s, 120 Hz",3,0,0,120,1.},{"stop from 7 m/s, 90 Hz",7,0,0,90,1.},{"stop from 7 m/s, 120 Hz",7,0,0,120,1.},
                            {"start to 3 m/s, 90 Hz",3,0,0,90,0,1.},{"start to 7 m/s, 120 Hz",7,0,0,120,0,1.},{"run 7, one 3x hitch frame",7,0,0,90,0,0,1.},
-                           {"run 7, every 5th reading current",7,0,0,90,0,0,0,5}};
+                           {"run 7, every 5th reading current",7,0,0,90,0,0,0,5},{"run 7, player step after sync 1/7",7,0,0,90,0,0,0,0,0,7}};
     for(const bool limb:{false,true}) {
         for(const auto& m:motions) {
-            const auto before=run(m,v1264,limb),after=run(m,v1270,limb);
-            std::printf("%-5s %-33s v1264: gap p90 %5.1f, flip p90 <=%5.1f max %6.1f | v1270: gap p90 %4.1f, flip p90 <=%4.1f max %5.1f, eye %.1f (%llu renders, %llu unplaced)\n",
+            const auto before=run(m,v1264,limb),after=run(m,v1274,limb);
+            std::printf("%-5s %-33s v1264: gap p90 %5.1f, flip p90 <=%5.1f max %6.1f | v1274: gap p90 %4.1f, flip p90 <=%4.1f max %5.1f, eye %.1f (%llu renders, %llu unplaced)\n",
                 limb?"limb":"prop",m.name,before.gap_p90,before.flip_p90,before.flip_max,after.gap_p90,after.flip_p90,after.flip_max,after.eye_max,
                 static_cast<unsigned long long>(after.renders),static_cast<unsigned long long>(after.unplaced));
             CHECK(after.renders>200 && after.unplaced>after.renders/3);
             if(m.speed>=3 || m.yaw_rate>0 || m.snap>0) CHECK(before.flip_p90>=20);   // v1264 reproduces the moving ghost
             CHECK(after.flip_p90<=5 && after.flip_max<=10 && after.gap_p90<=5 && after.eye_max==0);
         }
-        for(const auto& m:events) {   // v1266's predicted step fails each event; v1270's measured rig does not
-            const auto v66=run(m,v1266,limb),v70=run(m,v1270,limb);
+        for(const auto& m:events) {   // v1266's predicted step fails each event; v1274's measured rig does not
+            const auto v66=run(m,v1266,limb),v70=run(m,v1274,limb);
             // gap = the engine pose against the drawn hold: exactly what a render whose draws are not placed shows (the event's flip whatever the
             // placement did on that render); flip = the certificate's frame-to-frame figure on this run's placed/unplaced pattern
-            std::printf("%-5s %-33s v1266: gap max %6.1f mm, flip max %6.1f | v1270: gap max %4.1f mm, flip max %4.1f, flip p90 <=%3.1f\n",
-                limb?"limb":"prop",m.name,v66.gap_max,v66.flip_max,v70.gap_max,v70.flip_max,v70.flip_p90);
+            std::printf("%-5s %-33s v1266: gap max %6.1f mm, flip max %6.1f | v1274: gap max %4.1f mm, flip max %4.1f, flip p90 <=%3.1f (%llu measured, %llu fallback)\n",
+                limb?"limb":"prop",m.name,v66.gap_max,v66.flip_max,v70.gap_max,v70.flip_max,v70.flip_p90,static_cast<unsigned long long>(v70.measured),static_cast<unsigned long long>(v70.fallback));
+            if(m.step_after_every) {   // a sync before the player's step: the v1266 step on those frames only (counted), the rest measured
+                CHECK(v70.fallback>0 && v70.measured>5*v70.fallback && v70.flip_p90<=5);continue;
+            }
             CHECK(v66.gap_max>10);                                                                 // the predicted step pops on the event
             CHECK(v70.gap_max<=10 && v70.flip_max<=10 && v70.flip_p90<=5 && v70.eye_max==0);      // the measured rig does not
+        }
+        // v1274 review (1): an NPC's character step after the player's. v1270 kept ONE slot for the last step's delegate and body, so the player's frame
+        // was measured only when no NPC step followed; v1274 reads the player's own reference frame.
+        for(const unsigned every:{1u,2u}) {
+            const Motion m{every==1?"run 5 + turn 60/s, stop, NPC step after every frame":"run 5 + turn 60/s, stop, NPC step after every 2nd",5,1.047,0,90,1.,0,0,0,every};
+            const auto v70=run(m,v1270,limb),v74=run(m,v1274,limb);
+            std::printf("%-5s %-46s v1270: %llu measured / %llu fallback, gap max %5.1f, flip max %5.1f | v1274: %llu / %llu, gap max %3.1f, flip max %3.1f\n",
+                limb?"limb":"prop",m.name,static_cast<unsigned long long>(v70.measured),static_cast<unsigned long long>(v70.fallback),v70.gap_max,v70.flip_max,
+                static_cast<unsigned long long>(v74.measured),static_cast<unsigned long long>(v74.fallback),v74.gap_max,v74.flip_max);
+            CHECK(v70.fallback>v70.measured/3);                                              // v1270: the NPC's step takes the slot
+            CHECK(v74.fallback==0 && v74.flip_p90<=5 && v74.flip_max<=5 && v74.gap_max<=5);   // v1274: always measured
         }
     }
     {   // v1264's own counters from the same model: the share of v1262's "rig read as current" decisions on a walk with turning, the headset's 27 %
@@ -167,26 +186,76 @@ int main() {
         std::printf("one eye placed: eye_split %llu, eye_mm max %.1f\n",static_cast<unsigned long long>(c.eye_split),c.eye.max);
         CHECK(c.eye_split==1 && std::abs(c.eye.max-40)<.5);
     }
-    {   // PlayerRigTracker: this frame's root = this frame's body + c, c = root - body from the game thread's own pair (the stale reading with the
-        // previous frame's body); a reading that is already this frame's is recognised against the c held; a second sync of the same frame reuses
-        // the frame; without a body reading the v1266 step is the fallback
-        PlayerRigTracker t;const Vec3 c{.03,.01,.9};
-        const auto rd=[&](Vec3 root,Vec3 body) {return HeldCarry{root,0.,body,true};};
-        (void)t.frame_rig(rd({-.10,0,1},{-.13,-.01,.1}),.000);                              // frame 0: body_0 (root_-1 read, unpaired)
-        const auto a=t.frame_rig(rd({-.10,0,1},{-.08,-.01,.1}),.011);                       // frame 1: stale reading = root_0, this frame's body
-        CHECK(length(a.root-Vec3{-.05,0,1})<1e-9 && t.last_pick==PlayerRigTracker::pick_stale);   // root_1 = body_1 + c
-        const auto a2=t.frame_rig(rd({-.10,0,1},{-.08,-.01,.1}),.012);                      // frame 1's second sync
-        CHECK(length(a2.root-a.root)<1e-12 && !t.fresh);
-        const auto b=t.frame_rig(rd({.00,0,1},{-.03,-.01,.1}),.022);                        // frame 2: the reading is ALREADY this frame's (root_2)
-        CHECK(length(b.root-Vec3{0,0,1})<1e-9 && t.last_pick==PlayerRigTracker::pick_current);
-        const auto s1=t.frame_rig(rd({.00,0,1},{-.03,-.01,.1}),.033);                       // frame 3: stopped (the body did not move)
-        CHECK(length(s1.root-Vec3{0,0,1})<1e-9 && t.last_pick==PlayerRigTracker::pick_still);
-        const auto g=t.frame_rig(rd({.00,0,1},{.12,-.01,.1}),.066);                         // frame 4 after a 3x hitch: 15 cm in one frame, measured
-        CHECK(length(g.root-Vec3{.15,0,1})<1e-9);
-        PlayerRigTracker f;   // no body reading: the v1266 step (counted as fallback)
-        (void)f.frame_rig(HeldCarry{{-.10,0,0},0},.000);const auto fa=f.frame_rig(HeldCarry{{-.05,0,0},0},.011);
-        CHECK(length(fa.root-Vec3{0,0,0})<1e-9 && f.fallback==2 && f.measured==0);
-        (void)c;
+    {   // PlayerRigTracker (v1274): a stamped reading is this frame's root as read; a second sync of the same frame reuses it; a reading stamped with the
+        // previous frame takes the v1266 step (counted by reason); a new player (a load) starts the fallback over
+        PlayerRigTracker t;const std::uintptr_t rf=0x7000;
+        const auto rd=[&](Vec3 stale,Vec3 now_root,bool ok) {return HeldCarry{stale,0.,now_root,ok,rf,ok?HeldCarry::taken:HeldCarry::not_this_frame};};
+        const auto a=t.frame_rig(rd({-.10,0,1},{-.05,0,1},true),.000);CHECK(length(a.root-Vec3{-.05,0,1})<1e-12 && t.measured==1);
+        const auto a2=t.frame_rig(rd({-.10,0,1},{-.05,0,1},true),.001);CHECK(length(a2.root-a.root)<1e-12 && !t.fresh && t.measured==1);
+        const auto b=t.frame_rig(rd({-.05,0,1},{0,0,1},true),.011);CHECK(length(b.root-Vec3{0,0,1})<1e-12 && t.measured==2);
+        const auto c=t.frame_rig(rd({0,0,1},{0,0,1},false),.022);   // the player's step had not run yet: the stale reading + the last step (5 cm)
+        CHECK(length(c.root-Vec3{.05,0,1})<1e-9 && t.fallback==1 && t.why[HeldCarry::not_this_frame]==1);
+        HeldCarry other=rd({30,0,1},{30.05,0,1},false);other.source=0x8000;   // a level load: another reference frame
+        const auto d=t.frame_rig(other,.033);CHECK(length(d.root-Vec3{30,0,1})<1e-9 && t.resets==1);   // no step carried over from the old level
+    }
+    {   // v1274 review (2): a grab while running at 7 m/s, 90 Hz, every root reading already this frame's (the attach job ran before the sync). v1270
+        // seeded c from its first pairing by stage order (the stale pairing) and then kept whichever pairing agreed with it: one step of lead for good.
+        struct V1270Tracker {   // held_render_pose.hpp v1270, its offset learning (the premise: the body is this frame's character body)
+            Vec3 c{},body_prev{};bool c_ok{},prev_ok{};double heading_prev{},prev_s{};
+            static Vec3 turned(Vec3 v,double a) {const double cs=std::cos(a),sn=std::sin(a);return {cs*v.x-sn*v.y,sn*v.x+cs*v.y,v.z};}
+            Vec3 root(Vec3 read_root,double heading,Vec3 body,double now) {
+                const bool paired=prev_ok && now>prev_s && now-prev_s<.05;const Vec3 cb=turned(read_root-body,-heading);
+                if(paired) {const Vec3 ca=turned(read_root-body_prev,-heading_prev);
+                    c=length(body-body_prev)<1e-6 || !c_ok || length(ca-c)<=length(cb-c)?ca:cb;c_ok=true;}
+                body_prev=body;heading_prev=heading;prev_s=now;prev_ok=true;
+                return c_ok?body+turned(c,heading):read_root;
+            }
+        };
+        V1270Tracker old;PlayerRigTracker now_t;const Vec3 c_true{0,0,.9};double lead70=0,lead74=0;
+        for(int k=0;k<60;++k) {
+            const double t=k/90.;const Vec3 body{7*t,0,.1},root=body+c_true;   // the grab at k = 0, mid-run
+            const Vec3 r70=old.root(root,0,body,t);
+            const auto r74=now_t.frame_rig(HeldCarry{root,0.,root,true,0x7000,HeldCarry::taken},t).root;   // held_rig_now: the stamped frame root
+            if(k>=5) {lead70=std::max(lead70,length(r70-root)*1000);lead74=std::max(lead74,length(r74-root)*1000);}
+        }
+        std::printf("grab while running 7 m/s, first reading current: v1270 constant lead %.1f mm, v1274 %.3f mm\n",lead70,lead74);
+        CHECK(lead70>70 && lead74<1e-6);
+    }
+    {   // v1274 review (3): the held-exact safety net. A 10 m/s swing for 5 frames with a wrist turn of 6 rad/s; the engine's frame F written from the
+        // pose given two frames before the render (the game frame a frame ahead, the note a render old). v1270's residual |B - F| is the hand's motion
+        // since that given: 3 renders over 0.2 m ended the placement for the hold. HeldKGuard's residual |E * K - F| (E: the entity frame the same
+        // attach job wrote F from) has no hand in it; it suspends a wrong K for good and re-arms after a passing disagreement.
+        const auto K=wd::pose_mat(tilt(yawed({.04,.01,-.12},.3),{1,0,0},.2));
+        // torn_at: one render whose E is a frame newer than its F (an attach between the two reads) at 20 m/s; off_from/off_to: F off E * K by 0.3 m
+        const auto run_guard=[&](const wd::Mat& k_used,int torn_at,int off_from,int off_to,unsigned& placed70,unsigned& placed74,unsigned& rearms) {
+            std::vector<WorldTrackedPose> hand;double x=0,yaw=0;
+            for(int k=0;k<60;++k) {if(k>=10 && k<15) {x+=10./90;yaw+=6./90;} if(k==torn_at) x+=20./90;hand.push_back(yawed({.4+x,-.2,1.1},yaw));}
+            bool valid70=true;unsigned off70=0;HeldKGuard guard;placed70=placed74=rearms=0;
+            for(int k=8;k<60;++k) {
+                const auto G=wd::pose_mat(hand[static_cast<std::size_t>(k-2)]);auto F=wd::mul(G,K);   // the given F was written from: E = G
+                if(k>=off_from && k<off_to) F[3]+=.3;
+                const auto E=k==torn_at+1?wd::pose_mat(hand[static_cast<std::size_t>(k-1)]):G;
+                wd::Mat g_inv{};wd::inverse(G,g_inv);
+                const auto B=wd::mul(wd::mul(wd::pose_mat(hand[static_cast<std::size_t>(k)]),g_inv),F);
+                const double old_res=wd::distance(B,F);if(old_res>.2 && old_res<1.) {if(++off70>=3) valid70=false;} else off70=0;
+                HeldKGuard::Event e{};const bool place=guard.place(wd::distance(wd::mul(E,k_used),F),e);if(e==HeldKGuard::rearm) ++rearms;
+                if(k>=20) {placed70+=valid70?1u:0u;placed74+=place?1u:0u;}
+            }
+        };
+        unsigned p70{},p74{},re{};
+        run_guard(K,-10,0,0,p70,p74,re);
+        std::printf("10 m/s swing for 5 frames: renders placed afterwards (of 40) v1270 %u, v1274 %u\n",p70,p74);
+        CHECK(p70==0 && p74==40);
+        run_guard(K,30,0,0,p70,p74,re);
+        std::printf("one torn entity/model pair at 20 m/s: v1274 placed %u of 40 (needs 3 in a row)\n",p74);
+        CHECK(p74==40);
+        run_guard(K,-10,30,34,p70,p74,re);
+        std::printf("F off E * K for 4 renders: v1274 suspended 2, re-armed %u time(s), %u of 40 placed\n",re,p74);
+        CHECK(re==1 && p74==38);
+        auto k_wrong=K;k_wrong[3]+=.3;
+        run_guard(k_wrong,-10,0,0,p70,p74,re);
+        std::printf("wrong K (30 cm): v1274 placed %u of 40 renders after it (suspended, no re-arm)\n",p74);
+        CHECK(p74==0 && re==0);
     }
     // v1262 review checks -------------------------------------------------------------------------------------------------------------------------
     HeldRenderSlot::drawn_hold=true;

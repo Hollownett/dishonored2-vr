@@ -145,18 +145,11 @@ class NativeTurning {
         }}
     }
     static void __fastcall step(void* delegate,std::uint32_t dt,std::uint32_t body,void* a,void* b,void* c) {
-        step_delegate_.store(reinterpret_cast<std::uintptr_t>(delegate),std::memory_order_relaxed);step_body_.store(body,std::memory_order_release);   // v1270
         auto& self=*instance_;self.depth_.fetch_add(1,std::memory_order_acq_rel);const auto call=++self.calls_;
         __try {self.invoke(delegate,dt,body,a,b,c,call);}
         __finally {self.depth_.fetch_sub(1,std::memory_order_acq_rel);}
     }
 public:
-    // v1270: the last physics step's delegate and body handle. 0x1b4760 (this hook) is the player's character step: its third argument is the
-    // character's Havok body, indexed exactly as 0x1b4cb9..0x1b4ce9 does (world = [[delegate+0x138]+0x190], record = [world+0x28] + (body & 0xffffff)
-    // * 0xb0, checked by record+0x70 == body). Read-only users: dxgi_probe held_rig_now (a held thing's engine pose carried by this frame's motion).
-    inline static std::atomic<std::uintptr_t> step_delegate_{};inline static std::atomic<std::uint32_t> step_body_{};
-    static std::uintptr_t step_delegate() noexcept {return step_delegate_.load(std::memory_order_relaxed);}
-    static std::uint32_t step_body() noexcept {return step_body_.load(std::memory_order_acquire);}
     void publish_head(double yaw,UINT64 now,UINT64 reference,const NativePlayerCamera& owner,bool usable) {
         std::lock_guard<std::mutex> lock(feedback_mutex_);
         head_follow_.publish(yaw,now,reference,owner.player,owner.camera,owner.camera_identity.generation,usable);
