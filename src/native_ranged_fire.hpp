@@ -280,30 +280,33 @@ public:
         if(!item || !ammo) return 0;
         const int w=wheel_hand_.load();if(w<0 || w>1) return 0;
         const unsigned side=static_cast<unsigned>(w);
-        // v1278 (user, v1277: choosing the crossbow with the OTHER hand put that hand's bolt into the first hand's crossbow; a copy started with
-        // an old bolt): each hand's bolt choice is its own. The choice is kept per hand (a copy created later in that hand starts from it), and
-        // when the native weapon chosen is already in slot 1 and drawn by the OTHER hand (the "same item" route: this hand gets a copy), the
-        // game is handed the native's current ammo, so the first hand keeps its bolt. Decided here, exactly, not 400 ms later.
+        // v1279 (user, v1278: "a weapon behaves as a weapon and the user selects what the user selects"; bolts mixed after tosses and pickups):
+        // every crossbow / pistol INSTANCE owns its ammo (own_: per component, the native's own is seen_ammo_). A wheel choice changes only the
+        // instance the choosing hand holds or is about to hold:
+        //  - the hand holds a copy of the chosen weapon: that copy's own; the game is handed the native's current ammo (no change there);
+        //  - the native is in slot 1 and drawn by the OTHER hand ("same item" route: this hand gets a copy): the choice is kept for the copy
+        //    to come (hand_choice_), the native keeps its own;
+        //  - otherwise the native goes to this hand: the choice is the native's own.
+        // track_ammo then holds every instance at its own (the game may change the native only when its own type ran out).
         for(unsigned kk=0;kk<2;++kk) {
             Why wk{};const auto lk=locate(base,read,static_cast<Shot::Kind>(kk),wk);
             if(!lk || rig::value<std::uintptr_t>(read,lk->record)!=item) continue;
-            hand_choice_[side][kk]=ammo;
-            const int holder=slot1_hand_.load();
-            if(copy_kind_[side].load()!=static_cast<int>(kk) && holder>=0 && holder!=w && rig::value<std::uintptr_t>(read,lk->inventory+0x70)==lk->record) {
-                copy_ammo_[side][kk]=0;wheel_done_=true;++same_item_keeps_;
-                const auto keep=rig::value<std::uintptr_t>(read,lk->ammo);
-                return keep && *keep?*keep:0;
+            const auto native_keep=[&]()->std::uintptr_t {const auto keep=rig::value<std::uintptr_t>(read,lk->ammo);return keep && *keep?*keep:0;};
+            const bool in_slot1=rig::value<std::uintptr_t>(read,lk->inventory+0x70)==lk->record;
+            ++wheel_picks_;
+            if(const auto cc=copy_comp_[side];cc && copy_kind_[side].load()==static_cast<int>(kk)) {   // this hand's copy
+                const auto entry=ammo_entry(read,cc,ammo);if(!entry) return 0;
+                set_own(cc,entry);copy_ammo_[side][kk]=entry;hand_choice_[side][kk]=ammo;
+                if(rig::value<std::uintptr_t>(read,cc+0x98)!=entry && select_ammo(base,cc,ammo)) ++copy_ammo_sets_;
+                return in_slot1?native_keep():0;
             }
+            const int holder=slot1_hand_.load();
+            if(holder>=0 && holder!=w && in_slot1) {hand_choice_[side][kk]=ammo;copy_ammo_[side][kk]=0;++same_item_keeps_;return native_keep();}
+            if(const auto entry=ammo_entry(read,lk->comp,ammo)) {seen_ammo_[kk]=entry;set_own(lk->comp,entry);}   // the native's own (the game equips it)
+            hand_choice_[side][kk]=ammo;
+            return 0;
         }
-        const int k=copy_kind_[side].load();const auto cc=copy_comp_[side];if(k<0 || k>1 || !cc) return 0;
-        Why why{};const auto l=locate(base,read,static_cast<Shot::Kind>(k),why);if(!l) return 0;
-        if(rig::value<std::uintptr_t>(read,l->record)!=item) return 0;            // another item was chosen: the arms route it
-        const auto entry=ammo_entry(read,cc,ammo);if(!entry) return 0;             // not an ammo this weapon takes
-        copy_ammo_[side][static_cast<unsigned>(k)]=entry;wheel_done_=true;++wheel_picks_;
-        if(rig::value<std::uintptr_t>(read,cc+0x98)!=entry && select_ammo(base,cc,ammo)) ++copy_ammo_sets_;
-        if(rig::value<std::uintptr_t>(read,l->inventory+0x70)!=l->record) return 0; // the native weapon is not in slot 1: the game's equip is wanted as is
-        const auto keep=rig::value<std::uintptr_t>(read,l->ammo);                   // the native weapon's own ammo item
-        return keep && *keep?*keep:0;
+        return 0;
     }
     // The weapon decl's ammo entry (+0x188 array, stride 0x70, +0 item) for an ammo item; 0 = none.
     template<class Read> static std::uintptr_t ammo_entry(Read& read,std::uintptr_t comp,std::uintptr_t ammo_item) {
@@ -386,7 +389,7 @@ public:
          <<"},\"moved_100ms\":"<<moved_.load()<<",\"stationary_100ms\":"<<stationary_.load()<<",\"ended_early\":"<<ended_early_.load()
          <<",\"alive_4s\":"<<alive_4s_.load()<<",\"entity_finds\":"<<entity_finds_.load()<<",\"unstarted_shots\":"<<unstarted_shots_.load()<<",\"ammo\":{\"pool_before\":"<<pool_before_.load()<<",\"pool_after\":"<<pool_after_.load()
          <<",\"mag_before\":"<<mag_before_.load()<<",\"mag_after\":"<<mag_after_.load()<<",\"spent\":"<<spent_.load()
-         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"v1094\":["<<ammo_swaps_.load()<<','<<ammo_splits_.load()<<','<<spreads_.load()<<','<<bursts_.load()<<','<<own_shots_.load()<<','<<copy_ammo_sets_.load()<<','<<wheel_picks_.load()<<','<<same_item_keeps_.load()<<"],\"gate\":["<<gate_state_.load()<<','<<gated_.load()<<','<<gate_passed_.load()
+         <<",\"mismatch\":"<<ammo_mismatch_.load()<<"},\"v1094\":["<<ammo_swaps_.load()<<','<<ammo_splits_.load()<<','<<spreads_.load()<<','<<bursts_.load()<<','<<own_shots_.load()<<','<<copy_ammo_sets_.load()<<','<<wheel_picks_.load()<<','<<same_item_keeps_.load()<<','<<native_follows_.load()<<"],\"gate\":["<<gate_state_.load()<<','<<gated_.load()<<','<<gate_passed_.load()
          <<','<<hook_status_[0]<<','<<hook_status_[1]<<','<<dry_pulls_.load()<<','<<scene_refills_.load()<<"],\"hands\":[";   // v1117: copy WEAPON_FIRE gate [state, swallowed, passed, MH gun, MH crossbow], dry pulls
         const auto now=clock();
         for(unsigned s=0;s<2;++s) {
@@ -688,37 +691,45 @@ private:
     template<class Read> static void track_ammo(std::uintptr_t base,Read& read) {
         const auto now=clock();if(now-ammo_looked_<100) return;
         ammo_looked_=now;
-        for(unsigned k=0;k<2;++k) {
+        for(unsigned k=0;k<2;++k) {   // v1279: the native instance keeps its own ammo (wheel_pick sets it); only an empty own type lets the game switch
             Why why{};const auto l=locate(base,read,static_cast<Shot::Kind>(k),why);if(!l) continue;
-            if(seen_comp_[k]!=l->comp) {seen_comp_[k]=l->comp;seen_ammo_[k]=l->ammo;copy_ammo_[0][k]=copy_ammo_[1][k]=0;hand_choice_[0][k]=hand_choice_[1][k]=0;continue;}
-            const auto cur=l->ammo;
-            const int w=wheel_hand_.load();const auto since=now-wheel_tick_.load();const bool recent=since<2500;
-            // a wheel choice by a hand that now holds a copy of this weapon, once the equip has run (0.4 s): what it selected is the copy's
-            if(recent && since>=400 && !wheel_done_.load() && w>=0 && copy_kind_[w].load()==static_cast<int>(k)) {
-                wheel_done_=true;copy_ammo_[w][k]=cur;
-                if(cur!=seen_ammo_[k]) {
-                    const auto back=rig::value<std::uintptr_t>(read,seen_ammo_[k]);
-                    if(entry_valid(read,l->comp,seen_ammo_[k]) && back && *back && select_ammo(base,l->comp,*back)) ++ammo_splits_;
-                    else seen_ammo_[k]=cur;
-                }
-                continue;
+            if(seen_comp_[k]!=l->comp) {
+                seen_comp_[k]=l->comp;const auto m=own_of(l->comp);
+                seen_ammo_[k]=m && entry_valid(read,l->comp,m)?m:l->ammo;set_own(l->comp,seen_ammo_[k]);continue;
             }
-            if(cur!=seen_ammo_[k] && !recent) {seen_ammo_[k]=cur;if(hand_choice_[0][k]!=cur) hand_choice_[0][k]=0;if(hand_choice_[1][k]!=cur) hand_choice_[1][k]=0;}   // the native hand's own choice (or a pickup, or the game switching an empty type): accepted once no wheel choice is pending
+            const auto cur=l->ammo,own=seen_ammo_[k];if(cur==own) continue;
+            const auto own_decl=entry_valid(read,l->comp,own)?rig::value<std::uintptr_t>(read,own):std::nullopt;
+            if(!own_decl || !*own_decl || pool_count(read,l->inventory,*own_decl)<=0) {seen_ammo_[k]=cur;set_own(l->comp,cur);++native_follows_;continue;}   // ran out: the game's switch stands
+            if(select_ammo(base,l->comp,*own_decl)) ++ammo_splits_;
         }
         for(unsigned side=0;side<2;++side) if(const int t=test_ammo_[side].exchange(-1);t>=0) { // the test command
             const int k=copy_kind_[side].load();const auto cc=copy_comp_[side];if(k<0 || k>1 || !cc) continue;
             const auto decl=rig::value<std::uintptr_t>(read,cc+8);const auto first=decl?rig::value<std::uintptr_t>(read,*decl+0x188):std::nullopt;
-            if(first && *first) copy_ammo_[side][k]=*first+static_cast<std::uintptr_t>(t)*0x70;
+            if(first && *first) {copy_ammo_[side][k]=*first+static_cast<std::uintptr_t>(t)*0x70;set_own(cc,copy_ammo_[side][k]);}
         }
-        for(unsigned side=0;side<2;++side) { // v1096: a real copy selects its hand's ammo itself (0x63a490 on its component: the bolt and magazine follow)
+        for(unsigned side=0;side<2;++side) { // v1096: a real copy selects its own ammo itself (0x63a490 on its component: the bolt and magazine follow)
             const int k=copy_kind_[side].load();const auto cc=copy_comp_[side];if(k<0 || k>1 || !cc) continue;
-            const auto chosen=copy_ammo_[side][k] || !hand_choice_[side][k]?0:ammo_entry(read,cc,hand_choice_[side][k]);   // v1278: a new copy = this hand's last bolt
-            const auto want=copy_ammo_[side][k]?copy_ammo_[side][k]:chosen?chosen:seen_ammo_[k];if(!want || !entry_valid(read,cc,want)) continue;
-            copy_ammo_[side][k]=want; // v1101: a copy starts as the weapon it copies and then keeps its own ammo: the native hand's later choice is that hand's
+            // v1279: the instance's own (kept through tosses, catches and hand changes); a copy never seen starts from this hand's last
+            // choice for the weapon, else from the native's
+            auto want=own_of(cc);
+            if(!want || !entry_valid(read,cc,want)) {const auto chosen=hand_choice_[side][k]?ammo_entry(read,cc,hand_choice_[side][k]):0;want=chosen?chosen:seen_ammo_[k];}
+            if(!want || !entry_valid(read,cc,want)) continue;
+            set_own(cc,want);copy_ammo_[side][k]=want;
             const auto have=rig::value<std::uintptr_t>(read,cc+0x98);if(!have || *have==want) continue;
             const auto item=rig::value<std::uintptr_t>(read,want);
             if(item && *item && select_ammo(base,cc,*item)) ++copy_ammo_sets_;
         }
+    }
+    // v1279: each weapon instance's own ammo entry, by component (game thread). ponytail: 16 instances, least recently used replaced.
+    struct OwnAmmo {std::uintptr_t comp{},entry{};std::uint64_t used{};};
+    inline static std::array<OwnAmmo,16> own_{};inline static std::uint64_t own_tick_{};
+    inline static std::atomic<std::uint64_t> native_follows_{};
+    static std::uintptr_t own_of(std::uintptr_t comp) noexcept {for(auto& o:own_) if(comp && o.comp==comp) {o.used=++own_tick_;return o.entry;}return 0;}
+    static void set_own(std::uintptr_t comp,std::uintptr_t entry) noexcept {
+        if(!comp || !entry) return;
+        OwnAmmo* slot=&own_[0];
+        for(auto& o:own_) {if(o.comp==comp) {slot=&o;break;}if(o.used<slot->used) slot=&o;}
+        *slot=OwnAmmo{comp,entry,++own_tick_};
     }
     inline static ranged_fire::HandState hands_[2]{};
     inline static std::vector<std::string> shots_,plans_;
