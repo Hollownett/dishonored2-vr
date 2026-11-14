@@ -3216,7 +3216,10 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
-    if(instances>1 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig()) {   // v1307: a held mesh batched with its twin
+    // v1309 (user, v1308 headset: strong ghosting on the far half of EVERY weapon while walking, no copy out; status: 34 instanced draws a render
+    // of world things whose mesh key matched a held mesh, with 3-4+ instances): those marks had no rig target, so their outline votes made AFW
+    // stand the hand's held layer down. Only a twin (both hands hold a published weapon) and exactly 2 instances.
+    if(instances==2 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig() && d2vr::weapon_draw::Place::twin_weapons()) {   // v1307
         if(held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {d2vr::RigMask::mark_held_untargeted();probe_instance_srvs(context,count,instances,first);}
     }
     if(d2vr::RigMask::draw_is_held() || d2vr::RigMask::draw_depth()) held_instances[(d2vr::RigMask::draw_is_held()?0:4)+std::min<UINT>(instances,4u)-1u].fetch_add(1,std::memory_order_relaxed);   // v1306 diagnostics

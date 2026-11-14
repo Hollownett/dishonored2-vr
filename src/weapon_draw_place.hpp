@@ -1472,6 +1472,12 @@ public:
     // the view's cbuffer, so the world rows are eye-independent). A record whose world rows are a published held thing's frame (F, previous read,
     // a part, an earlier read: the matching place_one_view uses) is placed like any of its draws: m = delta * m, and its previous rows with the
     // previous frame's delta (the hand's motion), else the current delta. Job threads, at the record's Unmap. Returns the matched side, else -1.
+    // v1309: both hands hold a published weapon this render (the only case the engine batches a held weapon's parts with a twin)
+    static bool twin_weapons() noexcept {
+        const std::uint32_t frame=latest_frame();const Slot* slot=slot_of(frame);if(!slot) return false;
+        for(unsigned s=0;s<2;++s) if(!slot->side[s].valid || !slot->side[s].bound || kind_[s].load(std::memory_order_relaxed)!=kind_weapon) return false;
+        return true;
+    }
     static int place_world(Mat& m,Mat& p) noexcept {
         const std::uint32_t frame=latest_frame();const Slot* slot=slot_of(frame);if(!slot) return -1;
         Rows r{};for(std::size_t i=0;i<12;++i) r[i]=m[i];
