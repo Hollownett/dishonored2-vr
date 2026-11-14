@@ -627,6 +627,12 @@ struct Side {
     // at the engine's lagging pose beside the placed thing. Their frames are matched too; delta is the held thing's (B * inverse(F)).
     static constexpr unsigned max_extra=8;   // v1290: a crossbow's bolt + its upgrades' parts (was 4)
     unsigned extras{};std::array<Mat,max_extra> extra{};
+    // v1304 (user: a summoned copy crossbow's bolt and attachments ghost, the native's do not): a copy has no animation component, so its parts
+    // are bound at a fixed offset (native_weapon_hands upgrades_sync) and the engine can move them from the copy's PREVIOUS frame: E_k lags F by
+    // one frame of the hand's motion and B * inverse(F) * E_k put the part beside the placed body. extra_r[k] = L_k * inverse(E_k), L_k = the
+    // part's place on the weapon (relative to this F or to the previous F, whichever agrees with the place learned while the weapon stood
+    // still): a part draw composed from E_k goes to B * L_k. build/legacy-child-place = v1303.
+    std::array<Mat,max_extra> extra_r{};std::array<bool,max_extra> extra_rok{};
     // v1239 (held things only): the publisher's earlier distinct reads of the thing (ages 1..7, the previous read included), each an exact
     // match of the tick it was read at (frame index 2+max_extra+j), and the predicted-match gates from the thing's speed (0.05 s of motion).
     static constexpr unsigned max_hist=7;
@@ -953,7 +959,30 @@ public:
             out.bound=true;out.bound_frame=*bound[s];out.provisional=staged_[s].provisional;
             if(out.provisional) provisional_renders_.fetch_add(1,std::memory_order_relaxed);
             out.delta=mul(*bound[s],inverse_model);
-            for(unsigned k=0;k<staged_[s].extras && out.extras<Side::max_extra;++k) if(finite(staged_[s].extra[k]) && distance(staged_[s].extra[k],model)<=alt_max_m) out.extra[out.extras++]=staged_[s].extra[k];
+            {   // v1304: each part's place on the weapon (see Side::extra_r)
+                const bool prior_same=rd.prior_ok && rd.prior_id==ids[s];Mat inv_prior{};const bool have_prior=prior_same && inverse(rd.prior,inv_prior);
+                const bool still_f=prior_same && distance(rd.prior,model)<1e-5 && frame_angle(rd.prior,model)<1e-5;
+                if(kid_owner_[s]!=ids[s]) {kid_owner_[s]=ids[s];kidk_[s]={};}
+                for(unsigned k=0;k<staged_[s].extras && out.extras<Side::max_extra;++k) {
+                    const Mat& e=staged_[s].extra[k];
+                    if(!finite(e) || distance(e,model)>alt_max_m) continue;
+                    const unsigned i=out.extras++;out.extra[i]=e;
+                    const std::uintptr_t id=staged_[s].extra_id[k];Mat inv_e{};
+                    if(!child_rebase.load(std::memory_order_relaxed) || !id || !inverse(e,inv_e)) continue;
+                    KidK* kk=nullptr;for(auto& c:kidk_[s]) if(c.id==id) {kk=&c;break;}
+                    if(!kk) for(auto& c:kidk_[s]) if(!c.id) {c={};c.id=id;kk=&c;break;}
+                    if(!kk) continue;
+                    const Mat l0=mul(inverse_model,e);Mat l=l0;
+                    if(kk->ok && have_prior) {
+                        const Mat l1=mul(inv_prior,e);
+                        const double d0=distance(l0,kk->k)+.1*frame_angle(l0,kk->k),d1=distance(l1,kk->k)+.1*frame_angle(l1,kk->k);
+                        if(d1+.0005<d0) {l=l1;kid_lagged_.fetch_add(1,std::memory_order_relaxed);} else kid_current_.fetch_add(1,std::memory_order_relaxed);
+                    }
+                    if(still_f && kk->have_e && distance(kk->e,e)<1e-5 && frame_angle(kk->e,e)<1e-5) {kk->k=l0;kk->ok=true;}   // weapon and part at rest: its place
+                    kk->e=e;kk->have_e=true;
+                    out.extra_r[i]=mul(l,inv_e);out.extra_rok[i]=true;
+                }
+            }
             if(out.extras) children_.fetch_add(out.extras,std::memory_order_relaxed);
             kind_[s].store(staged_[s].kind,std::memory_order_relaxed);
             Last& l=last_[s];
@@ -1010,10 +1039,10 @@ public:
     // placed at all; and per draw placed / with previous rows / child-matched / unplaced near-like / unplaced near-other.
     enum Kind:unsigned {kind_none,kind_weapon,kind_prop,kind_use,kind_bind,kind_severed,kinds};
     // Publisher, before publish_bound: what this side holds and the frames of the entities bound to it (children, max Side::max_extra).
-    static void stage(unsigned s,unsigned kind,const Mat* extra=nullptr,unsigned n=0,bool provisional=false) noexcept {
+    static void stage(unsigned s,unsigned kind,const Mat* extra=nullptr,unsigned n=0,bool provisional=false,const std::uintptr_t* ids=nullptr) noexcept {
         if(s>1) return;
         staged_[s].kind=kind<kinds?kind:0u;staged_[s].provisional=provisional;   // v1284 (C2)
-        for(unsigned k=0;extra && k<n && staged_[s].extras<Side::max_extra;++k) staged_[s].extra[staged_[s].extras++]=extra[k];
+        for(unsigned k=0;extra && k<n && staged_[s].extras<Side::max_extra;++k) {staged_[s].extra_id[staged_[s].extras]=ids?ids[k]:0;staged_[s].extra[staged_[s].extras++]=extra[k];}
     }
     // v1258 one-pose certificate (status weapon_draw.place.one_pose). Publisher, before publish_bound: the player's motion this render (bucket
     // still / walk / turn) and the engine-side poses an unplaced draw of the thing could have been composed from, as model frames: [0] the pose the
@@ -1476,22 +1505,25 @@ public:
         Mat l=predicted_l;const unsigned lref=predicted?static_cast<unsigned>(hit):l_ref(hit);
         const bool rigid=predicted || rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,full(m),hit,l);
         const Mat model=predicted?predicted_x:rigid?mul(matched,l):full(m);
-        const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:w.delta; // v1223
+        const bool use_kid=hit>1 && hit<hist0 && w.extra_rok[static_cast<std::size_t>(hit-2)];   // v1304: a part through its place on the weapon
+        const Mat kid_delta=use_kid?mul(w.bound_frame,w.extra_r[static_cast<std::size_t>(hit-2)]):Mat{};
+        const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:use_kid?kid_delta:w.delta; // v1223
         note_l(matched,model,frame);   // v1240 severed diagnostic (L relative to the matched frame)
         const Mat now=rigid?rigid_now(w,vp,lref,l):mul(mul(vp,delta),model);   // v1241: one product for every pass and match kind
         Mat before=mul(mul(prev_vp,delta),model);
         if(still_out) for(std::size_t i=0;i<16;++i) still_out[i]=static_cast<float>(before[i]); // v1218: camera-only, the current binding
         const Last& o=older2_[static_cast<unsigned>(candidate)];
         Mat inverse_f{};const Mat& f_used=use_alt || use_hist?matched:w.model;
+        const bool inv_ok=use_kid?(inverse_f=w.extra_r[static_cast<std::size_t>(hit-2)],true):inverse(f_used,inverse_f);   // v1304: previous B * L_k * inverse(E_k)
         unsigned gap_slot=5;
-        if(prev_frame && prev_frame!=frame && inverse(f_used,inverse_f)) if(const Slot* ps=slot_of(prev_frame)) {   // v1284 (C5): this eye's previous render
+        if(prev_frame && prev_frame!=frame && inv_ok) if(const Slot* ps=slot_of(prev_frame)) {   // v1284 (C5): this eye's previous render
             const Side& pw=ps->side[static_cast<unsigned>(candidate)];
             if(pw.valid && pw.bound && distance(pw.model,w.model)<=alt_max_m) {
                 const Mat b_prev=pw.bound_frame;
                 if(still(*ps,prev_frame)) {before=mul(mul(prev_vp,mul(b_prev,inverse_f)),model);own_prev=true;gap_slot=std::min(frame-prev_frame,4u)-1u;}
             }
         }
-        if(!own_prev && o.valid && frame-o.frame==2 && inverse(f_used,inverse_f)) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;gap_slot=4;}
+        if(!own_prev && o.valid && frame-o.frame==2 && inv_ok) {before=mul(mul(prev_vp,mul(o.placed,inverse_f)),model);own_prev=true;gap_slot=4;}
         if(weapon_perf::enabled()) own_prev_gap_[gap_slot].fetch_add(1,std::memory_order_relaxed);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
         if(rigid && weapon_perf::enabled()) RigidLocal::note_placed(static_cast<unsigned>(candidate),lref,frame,l,vp,cur_out);   // v1241 pass_spread_renders (v1284 B6: diagnostics)
@@ -1515,7 +1547,7 @@ public:
     // v1241: a held part's current rows VP * (B * L), B the drawn binding of the frame L is relative to (the thing: bound_frame; its child k: B * inverse(F) * E_k).
     // Every pass, eye-matched or one-view, exact or predicted, earlier read or latest, goes through this one product: identical inputs, identical floats.
     static Mat rigid_now(const Side& w,const Mat& vp,unsigned ref,const Mat& l) noexcept {
-        const Mat base=ref>=2 && ref-2<w.extras?mul(w.delta,w.extra[ref-2]):w.bound_frame;
+        const Mat base=ref>=2 && ref-2<w.extras?(w.extra_rok[ref-2]?mul(w.bound_frame,mul(w.extra_r[ref-2],w.extra[ref-2])):mul(w.delta,w.extra[ref-2])):w.bound_frame;   // v1304: B * L_k
         return mul(vp,mul(base,l));
     }
 private:
@@ -1525,8 +1557,15 @@ private:
     struct SevDraw {std::uint64_t key{},layout{},passes{},placed{};unsigned size{};double scale_min{1e9},scale_max{},ortho_max{};std::array<double,3> l_mm{};};
     inline static std::mutex sev_mutex_;inline static std::array<SevDraw,8> sev_{};inline static unsigned sev_n_{};
     inline static std::uint32_t last_frame_l_{};inline static Mat sev_first_{};inline static std::uint64_t sev_first_key_{},sev_pairs_{},sev_apart_{};inline static double sev_spread_um_{};
-    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};bool provisional{};};   // v1258: motion bucket, source poses
+    struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};std::array<std::uintptr_t,Side::max_extra> extra_id{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};bool provisional{};};   // v1258: motion bucket, source poses
     inline static std::array<Staged,2> staged_{};
+    struct KidK {std::uintptr_t id{};Mat k{},e{};bool ok{},have_e{};};   // v1304 (publisher thread): a part's place on the weapon, learned at rest
+    inline static std::array<std::array<KidK,16>,2> kidk_{};inline static std::array<std::uintptr_t,2> kid_owner_{};
+    inline static std::atomic<std::uint64_t> kid_lagged_{},kid_current_{};
+public:
+    inline static std::atomic<bool> child_rebase{true};   // v1304: off = build/legacy-child-place
+    static std::string kid_json() {return "{\"lagged\":"+std::to_string(kid_lagged_.load())+",\"current\":"+std::to_string(kid_current_.load())+"}";}
+private:
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
     inline static std::array<std::uint32_t,2> census_frame_{};
     inline static std::atomic<bool> secondary_next_{};inline static std::array<bool,2> census_secondary_{};   // v1259 (publisher thread)

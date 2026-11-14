@@ -365,6 +365,35 @@ static void v1284_own_prev_lab(const Mat& part) {
     CHECK(r.side==0 && own && err<2e-4 && own_old && err_old<2e-4);
 }
 
+// ---- v1304: a copy weapon's part bound at a fixed offset, moved by the engine from the copy's PREVIOUS frame (E_n = F_(n-1) * L): placed
+// at B * L (its place on the weapon), not B * inverse(F_n) * E_n (beside the body by one frame of the hand's motion)
+static void v1304_lagged_kid_lab() {
+    const Mat l=rigid(rot(.3,.1,.2,.6),.05,.02,-.03),mesh=rigid(identity(),.01,0,.005),g=rigid(identity(),.02,0,0);
+    const std::uintptr_t kid=0x5151;
+    const auto f_at=[](int n) {return rigid(rot(0,0,1,.5+.03*n),-91.7+.03*n,-92.4+.01*n,4.9+.02*n);};   // ~3.7 cm and 1.7 deg a frame
+    double worst_on=0,worst_off=0;int placed=0;
+    for(int pass=0;pass<2;++pass) {
+        Binder::clear();Place::clear();Place::child_rebase.store(pass==0);
+        for(int n=0;n<14;++n) {
+            const int at=n<4?0:n-3;   // 4 frames at rest (the place is learned), then moving with the part one frame behind
+            const Mat f=f_at(at),e=mul(f_at(n<4?0:at-1),l),b=mul(f,g);
+            const std::uint32_t frame=1700u+static_cast<std::uint32_t>(n+20*pass);
+            Place::stage(0,Place::kind_weapon,&e,1,false,&kid);
+            publish_frame(frame,f,true,b,Mat{},false,Mat{},60+n);
+            if(n<5) continue;
+            const Wp& w=frames_seen.at(frame);
+            const auto cur=floats(mul(w.vp[1],mul(e,mesh)));std::array<float,16> o{},q{};bool own=false;
+            const Result r=Place::place_one_view(w.vp[1],w.vp[1],cur.data(),o.data(),q.data(),own,nullptr,0);
+            if(r.side!=0) continue;
+            const double err=worst_rows(o.data(),floats(mul(w.vp[1],mul(mul(b,l),mesh))).data());
+            double& worst=pass==0?worst_on:worst_off;worst=std::max(worst,err);if(pass==0) ++placed;
+        }
+    }
+    Place::child_rebase.store(true);
+    std::printf("v1304 lagged copy part: placed %d, row error at B*L %.2e (v1303 rule %.2e); %s\n",placed,worst_on,worst_off,Place::kid_json().c_str());
+    CHECK(placed==9 && worst_on<2e-4 && worst_off>1e-2);
+}
+
 int main() {
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
     const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
@@ -718,6 +747,7 @@ int main() {
     v1284_cross_recall_lab();
     v1284_cull_lab(part);
     v1284_own_prev_lab(part);
+    v1304_lagged_kid_lab();
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

@@ -1685,6 +1685,9 @@ static std::atomic<std::uint64_t> item_shift_um_sum{},item_shift_count{},item_sh
 static std::atomic<std::uint64_t> item_shift_skipped{}; // v862: corrections over 0.25 m left as the engine placed them
 // v1302: the body root an attached item is carried to: this frame's (the player's stamped reference frame, held_rig_now sync, as held props since v1274)
 // [taken, no stamp this frame], and how far the body model's root (+0x1860, the previous frame's until the attach job runs) was from it. build/legacy-weapon-root = v1301.
+// v1303 (copy crossbow parts ghost in performance mode, the native's do not): per physical hand [native, copy] the parts bound_children found
+// (last, max) and renders that found more than Side::max_extra (the rest were never placed nor held)
+static std::array<std::array<std::atomic<unsigned>,2>,2> weapon_kids_last{},weapon_kids_max{};static std::array<std::atomic<std::uint64_t>,2> weapon_kids_capped{};
 static std::atomic<std::uint64_t> item_root_now{},item_root_old{},item_root_lag_um_sum{},item_root_lag_um_max{};static bool legacy_weapon_root{};
 static d2vr::ArmFlicker arm_flicker;
 static std::string arm_flicker_json(); // status arm_flicker: tracked<->fallback transitions of the hand/sword palette
@@ -1784,6 +1787,8 @@ static std::string weapon_draw_json() {
     text+=",\"near_cost\":"+d2vr::weapon_perf::json(d2vr::weapon_draw::Place::published());   // v1283 (plan A1)
     text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
+    text+=",\"kids\":[";for(unsigned h=0;h<2;++h) text+=std::string(h?",":"")+"{\"native\":["+std::to_string(weapon_kids_last[h][0].load())+","+std::to_string(weapon_kids_max[h][0].load())+"],\"copy\":["+
+        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();   // v1303
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
     text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
@@ -3836,7 +3841,7 @@ static std::uint64_t weapon_copy_write(unsigned side,std::uintptr_t entity,std::
         return d2vr::weapon_draw::WriteLog::note(side,entity,-1,kind,read15,frames.load(),d2vr::weapon_draw::read_grip);
     } catch(...) {return 0;}
 }
-static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max) noexcept;
+static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max,std::uintptr_t* ids=nullptr) noexcept;
 // v1183 (knob build/stale-eye-held-mask, one-view frames): the engine frames of what the hands hold for ObjectMotion's held match (rig mask 253):
 // each hand's weapon render model, a dual-wield copy's drawn frame, a held prop (native grab, else the game's Use hold). No placement here.
 static void publish_held_mask() noexcept {
@@ -3870,7 +3875,7 @@ static void publish_held_mask() noexcept {
 static bool held_rig_now(d2vr::HeldCarry& out,bool sync=false) noexcept;   // v1262 (defined beside advance_attachment); v1274 sync: the engine's sync
 // v1237/v1278: the model frames of the entities the engine binds to `entity` (its +0xb0 children, count +0xb8: the bind/Hide/Show list,
 // d2vr-upgrade-attach-abi: a weapon's bolt and upgrade parts, a carried head's helmet), finite and within 0.6 m of F, appended to kids.
-static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max) noexcept {
+static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max,std::uintptr_t* ids) noexcept {
     if(!entity) return;
     const auto add=[&](std::uintptr_t child) {
         std::uintptr_t model{};std::array<float,15> frame{};
@@ -3878,6 +3883,7 @@ static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f
         const auto c=d2vr::weapon_draw::model_of(frame.data());
         if(!d2vr::weapon_draw::finite(c) || d2vr::weapon_draw::distance(c,f)>.6) return;
         for(unsigned k=0;k<n;++k) if(d2vr::weapon_draw::distance(kids[k],c)<1e-5 && d2vr::weapon_draw::angle(kids[k],c)<1e-5) return;   // the same frame twice
+        if(ids) ids[n]=child;   // v1304: which entity each part is (its learned place on the weapon is kept per entity)
         kids[n++]=c;
     };
     try {
@@ -4039,10 +4045,12 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             const bool is_bound=d2vr::weapon_draw::Binder::observe(hand,candidate,identity,held_source,held_space);
             // v1278/v1279: the weapon's bound parts (bolt, upgrades: entities bound to it with their own frames) are published as its children
             const auto stage_weapon=[&](bool provisional) {
-                std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
-                if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()));
-                else if(engine_side>=0 && engine_side<2) bound_children(native_ent[static_cast<unsigned>(engine_side)],live,kids.data(),n,static_cast<unsigned>(kids.size()));
-                d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n,provisional);hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;d2vr::held_walk_burst::note_place(hand,d2vr::held_walk_burst::weapon);   // v1300 diagnostics: 16 consecutive final frames of a held weapon while walking
+                std::array<d2vr::weapon_draw::Mat,32> kids{};std::array<std::uintptr_t,32> kid_ids{};unsigned n=0;   // v1303: all parts found, the first Side::max_extra staged (status weapon_draw.kids)
+                if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()),kid_ids.data());
+                else if(engine_side>=0 && engine_side<2) bound_children(native_ent[static_cast<unsigned>(engine_side)],live,kids.data(),n,static_cast<unsigned>(kids.size()),kid_ids.data());
+                weapon_kids_last[hand][copy.valid?1:0].store(n,std::memory_order_relaxed);for(auto m=weapon_kids_max[hand][copy.valid?1:0].load();n>m && !weapon_kids_max[hand][copy.valid?1:0].compare_exchange_weak(m,n);) {}
+                if(n>d2vr::weapon_draw::Side::max_extra) {weapon_kids_capped[hand].fetch_add(1,std::memory_order_relaxed);n=d2vr::weapon_draw::Side::max_extra;}
+                d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n,provisional,kid_ids.data());hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;d2vr::held_walk_burst::note_place(hand,d2vr::held_walk_burst::weapon);   // v1300 diagnostics: 16 consecutive final frames of a held weapon while walking
             };
             if(!is_bound) {   // no valid G yet (counted)
                 skip(candidate.attempted&&!candidate.valid?4u:3u);

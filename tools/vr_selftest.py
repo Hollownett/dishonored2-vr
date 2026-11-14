@@ -1239,6 +1239,7 @@ def main():
                     help='with --launch: inject at the title screen, then load the save (UI movies loaded with the level get the owned-load patches, as the headset launcher does)')
     ap.add_argument('--blind-ai', action='store_true', help='NPC vision budget ark_vision_max_checks 0 during the scenario (restored to 150): guards do not spot or kill the test player (unverified live)')
     ap.add_argument('--item', metavar='NAME', help='with --near item: the nearest pickup whose entity name contains NAME (e.g. coin)')
+    ap.add_argument('--load-slot', type=int, help='after Continue, load this save slot (console loadgame N) before the gameplay wait')
     ap.add_argument('--script', metavar='FILE', help='play this gameplay script JSON as is (e.g. artifacts/claude/trace-replay-auto.json: a recorded human session) instead of a scenario; god mode + invulnerable')
     ap.add_argument('--skip-npc', metavar='SUBSTR[,SUBSTR]', help='--near npc*: never pick an NPC whose entity name contains one of these (e.g. def_10939)')
     ap.add_argument('--npc-index', type=int, default=0, help='--near npc*: take the Nth nearest candidate (default 0)')
@@ -1343,7 +1344,10 @@ def main():
                 print('  ' + line)
         if a.inject_at_title:
             time.sleep(8)
-            keys(0x0D, 0x0D, 0x0D)  # title -> Campaign -> Continue, with the mod already in
+            if a.load_slot is not None:  # the newest save may open on a cutscene: load this slot from the title instead (Steam Cloud restores hidden slots)
+                command('console loadgame %d' % a.load_slot)
+            else:
+                keys(0x0D, 0x0D, 0x0D)  # title -> Campaign -> Continue, with the mod already in
             time.sleep(10)
         reached = drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3 - (time.time() - proc_start))
         home = None  # teleports are undone before the session ends: a player left in water drowns afterwards
