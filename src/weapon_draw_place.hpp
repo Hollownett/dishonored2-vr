@@ -1480,9 +1480,11 @@ public:
         if(!(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return result;
         const std::uint32_t frame=latest_frame();
         const Slot* slot=slot_of(frame);if(!slot) return result;
-        if(cull.load(std::memory_order_relaxed) && !in_any(slot->sph,slot->nsph,vp,cur)) return result;   // v1284 (B1): before any inverse
+        const bool culled=cull.load(std::memory_order_relaxed) && !in_any(slot->sph,slot->nsph,vp,cur);
+        if(culled && !weapon_perf::enabled()) return result;   // v1284 (B1): before any inverse
         Mat inv{};if(!inverse_cached(vp,inv)) {result.stage=no_views;return result;}   // v1284 (B2)
         const Rows m=model_rows(inv.data(),cur);
+        if(culled) {miss_probe(*slot,m,0);return result;}   // v1305 diagnostics: a culled draw near a held weapon
         const double tol=axes_tol.load(std::memory_order_relaxed);
         int candidate=-1,hit=0;double best=-1;
         for(unsigned side=0;side<2;++side) {
@@ -1497,7 +1499,7 @@ public:
         }
         bool predicted=false;Mat predicted_x{},predicted_l{};
         if(candidate<0 && predict_place(*slot,full(m),draw_key,frame,candidate,hit,predicted_x,predicted_l)) predicted=true;   // v1239
-        if(candidate<0) {result.stage=rejected;near_of(*slot,m,result);refusal_probe(*slot,m);return result;}
+        if(candidate<0) {result.stage=rejected;near_of(*slot,m,result);refusal_probe(*slot,m);if(weapon_perf::enabled()) miss_probe(*slot,m,1);return result;}
         const Side& w=slot->side[static_cast<unsigned>(candidate)];
         const bool use_alt=hit==1,use_hist=hit>=hist0;const Mat& matched=frame_of(w,hit);
         Mat hist_delta{},hist_prev{};
@@ -1527,7 +1529,7 @@ public:
         if(weapon_perf::enabled()) own_prev_gap_[gap_slot].fetch_add(1,std::memory_order_relaxed);
         for(std::size_t i=0;i<16;++i) {cur_out[i]=static_cast<float>(now[i]);prev_out[i]=static_cast<float>(before[i]);}
         if(rigid && weapon_perf::enabled()) RigidLocal::note_placed(static_cast<unsigned>(candidate),lref,frame,l,vp,cur_out);   // v1241 pass_spread_renders (v1284 B6: diagnostics)
-        if(!still(*slot,frame)) {result.stage=rejected;return result;}
+        if(!still(*slot,frame)) {result.stage=rejected;if(weapon_perf::enabled()) miss_probe(*slot,m,2);return result;}
         result.side=candidate;result.eye=-1;result.alt=use_alt;result.extra=hit>1 && hit<hist0;result.predicted=predicted;result.age=age_of(w,hit);result.stage=placed_pass;
         if(weapon_perf::enabled()) note_match(static_cast<unsigned>(candidate),result);   // v1284 (B6)
         return result;
@@ -1542,6 +1544,29 @@ public:
         if(!w.rigid || side>1 || !RigidLocal::on.load(std::memory_order_relaxed) || !inverse(f,inv_f)) return false;
         RigidLocal::use(side,key,frame,mul(inv_f,m),l,l_ref(h),&m);
         return true;
+    }
+    // v1305 (sims: with a copy out 8 part draws a render per weapon were never placed): a near draw within 0.3 m of a published side's frame that
+    // was [culled by the spheres, matched no frame, lost its slot] per side; for the no-match ones the row difference to the nearest frame
+    // (bins < .004 .01 .05 .2 1 >=1) and its kind (F, previous read, child, earlier read)
+    static void miss_probe(const Slot& slot,const Rows& m,unsigned why) noexcept {
+        double best=.85;int side=-1,hb=-1;const Mat* f=nullptr;
+        for(unsigned s=0;s<2;++s) {const Side& w=slot.side[s];if(!w.valid) continue;
+            for(int h=0;h<frames_end(w);++h) if(has_frame(w,h)) {const double d=origin_distance(m,frame_of(w,h));if(d<best) {best=d;side=static_cast<int>(s);hb=h;f=&frame_of(w,h);}}}
+        if(side<0) return;
+        miss_[why][static_cast<unsigned>(side)].fetch_add(1,std::memory_order_relaxed);
+        if(why!=1 || !f) return;
+        double diff=0;for(int r=0;r<3;++r) for(int c=0;c<3;++c) diff=std::max(diff,std::abs(m[static_cast<std::size_t>(r*4+c)]-(*f)[static_cast<std::size_t>(r*4+c)]));
+        static constexpr double edge[5]={.004,.01,.05,.2,1};unsigned b=0;while(b<5 && !(diff<edge[b])) ++b;
+        miss_diff_[b].fetch_add(1,std::memory_order_relaxed);
+        miss_mm_[std::min<unsigned>(static_cast<unsigned>(best*10),8u)][static_cast<unsigned>(side)].fetch_add(1,std::memory_order_relaxed);   // by 10 cmmiss_kind_[hb<=0?0:hb==1?1:hb<hist0?2:3].fetch_add(1,std::memory_order_relaxed);
+    }
+    inline static std::array<std::array<std::atomic<std::uint64_t>,2>,3> miss_{};inline static std::array<std::atomic<std::uint64_t>,6> miss_diff_{};inline static std::array<std::atomic<std::uint64_t>,4> miss_kind_{};inline static std::array<std::array<std::atomic<std::uint64_t>,2>,9> miss_mm_{};
+    static std::string miss_json() {
+        std::string o="{\"culled\":["+std::to_string(miss_[0][0].load())+","+std::to_string(miss_[0][1].load())+"],\"no_match\":["+std::to_string(miss_[1][0].load())+","+std::to_string(miss_[1][1].load())+
+            "],\"not_still\":["+std::to_string(miss_[2][0].load())+","+std::to_string(miss_[2][1].load())+"],\"diff\":[";
+        for(unsigned i=0;i<6;++i) o+=(i?",":"")+std::to_string(miss_diff_[i].load());
+        o+="],\"kind\":[";for(unsigned i=0;i<4;++i) o+=(i?",":"")+std::to_string(miss_kind_[i].load());
+        o+="],\"dm\":[";for(unsigned i=0;i<9;++i) o+=(i?",":"")+std::string("[")+std::to_string(miss_mm_[i][0].load())+","+std::to_string(miss_mm_[i][1].load())+"]";return o+"]}";
     }
     static unsigned l_ref(int h) noexcept {return h>1 && h<hist0?static_cast<unsigned>(h):0u;}   // L is kept relative to the thing (0) or its child h
     // v1241: a held part's current rows VP * (B * L), B the drawn binding of the frame L is relative to (the thing: bound_frame; its child k: B * inverse(F) * E_k).

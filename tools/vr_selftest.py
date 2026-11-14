@@ -1684,10 +1684,11 @@ def main():
                         dr['timeline'].append(('GAME PROCESS GONE', tl_dr))
             if segs:  # a segment's "command" (mod test commands split by ';', e.g. "equip pistol") is sent once when the script reaches it
                 seg_c = script_segment()
-                if 0 <= seg_c < len(segs) and segs[seg_c].get('command') and seg_c not in cmd_sent:
-                    cmd_sent.add(seg_c)
-                    for c in segs[seg_c]['command'].split(';'):
-                        command(c.strip())
+                for seg_i in range(min(seg_c, len(segs) - 1) + 1 if seg_c >= 0 else 0):  # every reached segment (a slow poll skips 150 ms segments)
+                    if segs[seg_i].get('command') and seg_i not in cmd_sent:
+                        cmd_sent.add(seg_i)
+                        for c in segs[seg_i]['command'].split(';'):
+                            command(c.strip())
             plan = PAIR_PLAN.get(a.scenario)
             seg_now = script_segment() if plan else -1
             if seg_now in (plan or {}) and seg_now not in seg_first:

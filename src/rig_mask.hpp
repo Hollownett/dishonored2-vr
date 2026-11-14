@@ -167,6 +167,16 @@ public:
     inline static std::atomic<TargetBind> target_bind{};inline static std::atomic<TargetRestore> target_restore{};
     static bool target_wanted() noexcept {return target_on.load(std::memory_order_relaxed) && tl_depth_ && (tl_rig_ || tl_held_);}
     static bool draw_is_held() noexcept {return tl_held_;}
+    static bool draw_depth() noexcept {return tl_depth_;}
+    // v1307 (user: a summoned copy's crossbow parts ghost; sims: with two crossbows the engine draws both weapons' identical upgrade parts as ONE
+    // instanced draw whose instance matrices come from its instance buffer, which ObjectMotion cannot read): a held mesh drawn instanced joins the
+    // held class in the mask. It has no rows to retarget, so it stays out of the rig target and does not void it. Outcome counted in held_marks.
+    static void mark_held_untargeted() noexcept {
+        if(tl_rig_ || tl_held_) return;
+        mark_held();
+        if(tl_held_) {tl_no_target_=true;tl_target_[0]=tl_target_[1]=false;instanced_held_.fetch_add(1,std::memory_order_relaxed);}
+    }
+    static std::uint64_t instanced_held() noexcept {return instanced_held_.load(std::memory_order_relaxed);}   // v1306 diagnostics: this one-view draw writes the scene depth the mask is made for
     static void mark_target(bool ok) noexcept {tl_target_[0]=tl_target_[1]=ok;} // false: no retarget for this render (counted at the replay)
     static void mark_target(bool ok0,bool ok1) noexcept {tl_target_[0]=ok0;tl_target_[1]=ok1;} // v1199: per slice (hypothesis eye)
     // FsrTaa's copy (immediate/job context of the render's TAA pass): the target of this scene depth copied into `out` (same size and format;
@@ -459,7 +469,7 @@ public:
             nested_=tl_scope_depth_++>0;
             if(nested_) {nested_scopes_.fetch_add(1,std::memory_order_relaxed);return;}
             tl_probe_display_=~0ull;
-            tl_rig_=false;tl_own_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_pass_=pass;tl_unmapped_c_=nullptr;tl_scoped_=false;
+            tl_rig_=false;tl_own_=false;tl_held_=false;tl_no_target_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_pass_=pass;tl_unmapped_c_=nullptr;tl_scoped_=false;
             if(!c || !enabled.load(std::memory_order_relaxed)) return;
             const std::uintptr_t one_view=view.load(std::memory_order_relaxed);
             if(!one_view) return;
@@ -483,7 +493,7 @@ public:
             if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets,targets_uav);
             c_=nullptr;
         }
-        ~Scope() {--tl_scope_depth_;if(nested_) return;restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;tl_unmapped_c_=nullptr;tl_scoped_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        ~Scope() {--tl_scope_depth_;if(nested_) return;restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_no_target_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;tl_unmapped_c_=nullptr;tl_scoped_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
             c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
@@ -525,6 +535,7 @@ private:
     inline static std::atomic<std::uint64_t> rig_draws_{},rig_draws_frame_{},rig_draws_last_{},replays_{},replays_frame_{},replays_last_{},view_draws_{},
         no_dsv_{},msaa_{},failures_{};
     inline static thread_local bool tl_rig_{};
+    inline static thread_local bool tl_no_target_{};inline static std::atomic<std::uint64_t> instanced_held_{};   // v1307
     // v1166: this draw's rig model (0, 1 arms, 2 body), its current palette view (t1, held), whether t0/t1 are that model's previous/current
     inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
     inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
@@ -1010,7 +1021,7 @@ private:
             if(drew && restore) restore(c);
             if(drew) {target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
             else target_misses_.fetch_add(1,std::memory_order_relaxed);
-        } else if(target_on.load(std::memory_order_relaxed)) {for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed);no_retarget_[tl_held_?1:0].fetch_add(1,std::memory_order_relaxed);no_retarget_frame_.fetch_add(1,std::memory_order_relaxed);} // a rig/held draw without its retarget (v1295: counted)
+        } else if(target_on.load(std::memory_order_relaxed) && !tl_no_target_) {for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed);no_retarget_[tl_held_?1:0].fetch_add(1,std::memory_order_relaxed);no_retarget_frame_.fetch_add(1,std::memory_order_relaxed);} // a rig/held draw without its retarget (v1295: counted)
         if(keep) {ID3D11UnorderedAccessView* no[2]{};om(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,nullptr,nullptr,uav_slot,2,no,nullptr);}
         else if(engine_uavs) { // its exact set, UAVs with their hidden counters kept (-1)
             std::array<UINT,D3D11_PS_CS_UAV_REGISTER_COUNT> counts;counts.fill(~0u);om(rtv_count,rtvs.data(),dsv,uav_first,uav_end-uav_first,uavs.data()+uav_first,counts.data());
@@ -1072,7 +1083,7 @@ private:
             if(drew && restore) restore(c);
             if(drew) {target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
             else target_misses_.fetch_add(1,std::memory_order_relaxed);
-        } else if(target_on.load(std::memory_order_relaxed)) {for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed);no_retarget_[tl_held_?1:0].fetch_add(1,std::memory_order_relaxed);no_retarget_frame_.fetch_add(1,std::memory_order_relaxed);} // a rig/held draw without its retarget (v1295: counted)
+        } else if(target_on.load(std::memory_order_relaxed) && !tl_no_target_) {for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed);no_retarget_[tl_held_?1:0].fetch_add(1,std::memory_order_relaxed);no_retarget_frame_.fetch_add(1,std::memory_order_relaxed);} // a rig/held draw without its retarget (v1295: counted)
         targets(c,rtv_count,rtvs.data(),dsv); // the engine's exact set again; the rig target is unbound
         c->PSSetShader(engine_ps,class_count?classes.data():nullptr,class_count);c->OMSetDepthStencilState(dss,ref);c->OMSetBlendState(blend,factor,mask);
         if(engine_ps) engine_ps->Release();

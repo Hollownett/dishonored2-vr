@@ -331,7 +331,7 @@ public:
             // v1295: placed one-view draws the held match missed (the v1291 class split) [all, of them replayed as held now], held draws' target rows
             // [placed, engine] (replayed slices), rig draws that left before their retarget [secondary pass, no cb2 shadow, no rows, no reflected VS layout]
             +",\"held_by_place\":["+std::to_string(alt_held_by_place_[0].load())+','+std::to_string(alt_held_by_place_[1].load())+"],\"held_target_rows\":["+std::to_string(alt_held_target_rows_[0].load())+','+std::to_string(alt_held_target_rows_[1].load())
-            +"],\"rig_no_retarget\":["+std::to_string(alt_rig_early_[0].load())+','+std::to_string(alt_rig_early_[1].load())+','+std::to_string(alt_rig_early_[2].load())+','+std::to_string(alt_rig_early_[3].load())+"]"
+            +"],\"depth_unread\":["+std::to_string(depth_unread_[0].load())+','+std::to_string(depth_unread_[1].load())+"],\"rig_no_retarget\":["+std::to_string(alt_rig_early_[0].load())+','+std::to_string(alt_rig_early_[1].load())+','+std::to_string(alt_rig_early_[2].load())+','+std::to_string(alt_rig_early_[3].load())+"]"
             +",\"view_mode\":\""+(alt_view_heuristic.load()?"heuristic":"certain")+"\",\"certainty\":{"+[] {std::string o; // v1199: per consumer [certain, fell back]
                 static constexpr const char* names[cert_consumers]{"rig_target","placement","previous_rows","held_mask"};
                 for(unsigned k=0;k<cert_consumers;++k) {o+=std::string(k?",":"")+'"'+names[k]+"\":["+std::to_string(alt_cert_[k][0].load())+','+std::to_string(alt_cert_[k][1].load())+','+std::to_string(alt_cert_[k][2].load())+']';
@@ -406,6 +406,13 @@ public:
     inline static std::atomic<bool> placed_history{true}; // v1218: placed draws' previous rows = their submitted previous (off: build/no-placed-history)
     inline static std::atomic<std::uint64_t> alt_place_placed_{},alt_place_own_prev_{},alt_place_no_prev_{},alt_place_no_view_{};
     inline static std::array<std::atomic<std::uint64_t>,2> alt_held_by_place_{};inline static std::array<std::atomic<std::uint64_t>,2> alt_held_target_rows_{};inline static std::array<std::atomic<std::uint64_t>,4> alt_rig_early_{}; // v1295
+    inline static std::array<std::atomic<std::uintptr_t>,64> unread_vs_{};inline static std::array<std::atomic<std::uint64_t>,64> unread_vs_hits_{};
+    static void note_unread_vs(const void* vs) noexcept {const auto k=reinterpret_cast<std::uintptr_t>(vs);if(!k) return;
+        for(unsigned i=0;i<64;++i) {std::uintptr_t v=unread_vs_[i].load(std::memory_order_relaxed);if(v==k || (!v && (unread_vs_[i].compare_exchange_strong(v,k) || v==k))) {unread_vs_hits_[i].fetch_add(1,std::memory_order_relaxed);return;}}}
+public:
+    static std::string unread_vs_json() {std::string o="[";for(unsigned i=0;i<64;++i) {if(!unread_vs_[i].load()) break;o+=(i?",":"")+std::string("[")+std::to_string(unread_vs_[i].load())+","+std::to_string(unread_vs_hits_[i].load())+"]";}return o+"]";}
+public:
+    inline static std::array<std::atomic<std::uint64_t>,2> depth_unread_{}; // v1306: non-rig scene-depth one-view draws the mod cannot read [no VS layout, no cb2 shadow]
     // v1194: where a one-view draw's view came from: 0 own newest write, 1 own older write of its bound b1, 2/3 another context's write of its
     // b1 (of the newest frame / older), 4 the newest view anywhere (the pre-v1193 fallback); and per source, what used it (view_use)
     inline static thread_local unsigned tl_view_src_{};
@@ -721,7 +728,25 @@ private:
             return false;
         });
         if(held) held_matches_.fetch_add(1,std::memory_order_relaxed);
+        else if(!output_.empty()) held_miss(vp,cur);   // v1305 diagnostics
         return held;
+    }
+    // v1305 (copy crossbow parts class 0 in both masks, sim c9): a near draw that missed every held frame but sits within 0.6 m of one: the
+    // nearest frame by origin, its index in the publish (order: weapons, their parts, copy read/live, copy parts), the row difference (the
+    // 0.004 test) and the origin distance. First 600 to artifacts/held-miss.jsonl.
+    static void held_miss(const weapon_draw::Mat& vp,const float* cur) noexcept {
+        static std::atomic<unsigned> n{};if(n.load(std::memory_order_relaxed)>=600) return;
+        try {
+            weapon_draw::Mat inv{};if(!weapon_draw::inverse_cached(vp,inv)) return;
+            const auto rows=weapon_draw::Place::model_rows(inv.data(),cur);
+            double best=1e9,diff=0;int gi=-1,fi=-1;unsigned count=0;
+            held_.read([&](const HeldSnap& h) {for(unsigned g=0;g<2;++g) {if(!g) count=h.g[0].n;for(unsigned i=0;i<h.g[g].n;++i) {const double d=weapon_draw::Place::origin_distance(rows,h.g[g].f[i]);
+                if(d<best) {best=d;gi=static_cast<int>(g);fi=static_cast<int>(i);double m=0;for(int r=0;r<3;++r) for(int c=0;c<3;++c) m=std::max(m,std::abs(rows[static_cast<std::size_t>(r*4+c)]-h.g[g].f[i][static_cast<std::size_t>(r*4+c)]));diff=m;}}}return true;});
+            if(!(best<.6)) return;
+            if(n.fetch_add(1,std::memory_order_relaxed)>=600) return;
+            static std::mutex m;std::lock_guard<std::mutex> l(m);std::ofstream o(output_/L"held-miss.jsonl",std::ios::app);
+            o<<"{\"g\":"<<gi<<",\"i\":"<<fi<<",\"n\":"<<count<<",\"mm\":"<<best*1000<<",\"row_diff\":"<<diff<<",\"w\":"<<cur[15]<<",\"scale\":["<<std::hypot(rows[0],std::hypot(rows[4],rows[8]))<<","<<std::hypot(rows[1],std::hypot(rows[5],rows[9]))<<"]}\n";
+        } catch(...) {}
     }
     // v1284 (plan B3): the rig target book's answers per draw thread, refreshed only when the book changed (a Setup), not under its lock per draw
     struct LatestOf {unsigned gen{};bool ok[2]{};rig_target::M4 e[2]{};float vp[2][16]{};};
@@ -1276,7 +1301,7 @@ private:
         const auto rig_early=[](unsigned why) noexcept {if(alternate() && RigMask::draw_is_rig() && RigMask::target_wanted()) alt_rig_early_[why].fetch_add(1,std::memory_order_relaxed);};
         if(secondary_job()) {rig_early(0);secondary_draws_.fetch_add(1,std::memory_order_relaxed);secondary_eye_draws_[borrowed_eye_.load(std::memory_order_relaxed)%3u].fetch_add(1,std::memory_order_relaxed);return false;}   // v1259: a secondary pass's draw: the engine's rows
         const Shadow* sh=s.cb[1]?&s.shadow(s.cb[1]):nullptr;
-        if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);rig_early(1);return false;}
+        if(!sh || sh->buffer!=s.cb[1]) {if(s.cb[1]) learn(s.cb[1],cb2_kind);count(no_shadow);rig_early(1);if(alternate() && RigMask::draw_depth() && !RigMask::draw_is_rig()) depth_unread_[1].fetch_add(1,std::memory_order_relaxed);return false;}
         // v1040: no previous rows and no weapon placement: the draw ends in no_rows below whatever the view says. Skip the view lookup,
         // the pass callback and the row gather (the b1 agree/untagged diagnostics no longer count these draws).
         const bool one_view_place=alt_weapon_place.load(std::memory_order_relaxed) && alternate() && mode_.load(std::memory_order_relaxed)>=1; // v1191
@@ -1441,7 +1466,7 @@ private:
                 }
                 if(r.side>=0) {
                     weapon_perf::placed_draw();
-                    alt_place_placed_.fetch_add(1,std::memory_order_relaxed);view_use(use_place);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
+                    alt_place_placed_.fetch_add(1,std::memory_order_relaxed);tl_placed_=true;view_use(use_place);(own_prev?alt_place_own_prev_:alt_place_no_prev_).fetch_add(1,std::memory_order_relaxed);
                     certainty(cert_placement,true);
                     // v1295: what the placement moves with the hand is held, in the mask and the rig target alike: the warp's class of a draw follows
                     // the placement, not a second match against other frames (sim v1291: placed bolt and mechanism parts were scenery in both masks
@@ -1650,10 +1675,17 @@ private:
         entry.ready.store(frame+1,std::memory_order_release);
         return &entry.views;
     }
+    inline static thread_local bool tl_unread_{};   // v1306 diagnostics: this draw wrote scene depth with no readable VS layout
+public:
+    static bool draw_unread() noexcept {return tl_unread_;}
+    inline static thread_local bool tl_placed_{};   // v1307: this draw was placed in a hand (a held thing's draw, any pass)
+    static bool draw_placed() noexcept {return tl_placed_;}
+private:
     static ContextState* before(ID3D11DeviceContext* c) noexcept {
+        tl_unread_=false;tl_placed_=false;
         if(!on()) return nullptr;
         ContextState* s=state(c);
-        if(!s || !s->layout) {if(s && alternate() && RigMask::draw_is_rig() && RigMask::target_wanted()) alt_rig_early_[3].fetch_add(1,std::memory_order_relaxed);return nullptr;}   // v1295: rig_no_retarget[3]
+        if(!s || !s->layout) {if(s && alternate() && RigMask::draw_is_rig() && RigMask::target_wanted()) alt_rig_early_[3].fetch_add(1,std::memory_order_relaxed);if(s && alternate() && RigMask::draw_depth() && !RigMask::draw_is_rig()) {depth_unread_[0].fetch_add(1,std::memory_order_relaxed);note_unread_vs(s->vs);tl_unread_=true;}return nullptr;}   // v1295: rig_no_retarget[3]
         const auto t=__rdtsc();
         const bool bound=prepare(c,*s);
         if(bound) set_cb_[s->type](c,2,1,&s->pool);

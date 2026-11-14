@@ -1687,6 +1687,30 @@ static std::atomic<std::uint64_t> item_shift_skipped{}; // v862: corrections ove
 // [taken, no stamp this frame], and how far the body model's root (+0x1860, the previous frame's until the attach job runs) was from it. build/legacy-weapon-root = v1301.
 // v1303 (copy crossbow parts ghost in performance mode, the native's do not): per physical hand [native, copy] the parts bound_children found
 // (last, max) and renders that found more than Side::max_extra (the rest were never placed nor held)
+static std::array<std::atomic<std::uint64_t>,8> held_instances{};
+// v1307: meshes (index count, first index, base vertex) a non-instanced one-view draw marked held lately; the same mesh drawn instanced is a
+// held thing's part batched with its twin (two crossbows' upgrade parts), see RigMask::mark_held_untargeted. Kept until a load or death reload.
+static std::array<std::atomic<std::uint64_t>,32> held_mesh_key{},held_mesh_seen{};static std::atomic<std::uint64_t> instanced_held_misses{};static bool legacy_instanced_held{};
+static std::uint64_t mesh_key(UINT count,UINT start,INT base) noexcept {return (std::uint64_t(count)<<40)^(std::uint64_t(start)<<12)^std::uint64_t(static_cast<std::uint32_t>(base))^1ull;}
+static void note_held_mesh(UINT count,UINT start,INT base,std::uint64_t now) noexcept {
+    const auto k=mesh_key(count,start,base);unsigned oldest=0;std::uint64_t t=~0ull;
+    for(unsigned i=0;i<held_mesh_key.size();++i) {if(held_mesh_key[i].load(std::memory_order_relaxed)==k) {held_mesh_seen[i].store(now,std::memory_order_relaxed);return;}
+        const auto s=held_mesh_seen[i].load(std::memory_order_relaxed);if(s<t) {t=s;oldest=i;}}
+    held_mesh_key[oldest].store(k,std::memory_order_relaxed);held_mesh_seen[oldest].store(now,std::memory_order_relaxed);   // ponytail: racy slot reuse, a diagnostic-grade cache
+}
+static bool held_mesh(UINT count,UINT start,INT base,std::uint64_t now) noexcept {
+    const auto k=mesh_key(count,start,base);
+    for(unsigned i=0;i<held_mesh_key.size();++i) if(held_mesh_key[i].load(std::memory_order_relaxed)==k) return now>=held_mesh_seen[i].load(std::memory_order_relaxed);   // kept until a load (forget_held_meshes)
+    return false;
+}
+// v1306 diagnostics: mesh index counts of held one-view depth draws (non-instanced) and of 2-instance scene-depth draws, with hits
+static std::array<std::atomic<std::uint32_t>,24> held_mesh_count{};static std::array<std::atomic<std::uint64_t>,24> held_mesh_hits{};static std::array<std::atomic<std::uint32_t>,24> nh_mesh_count{};static std::array<std::atomic<std::uint64_t>,24> nh_mesh_hits{};static std::array<std::atomic<std::uint32_t>,48> inst2_count{};static std::array<std::atomic<std::uint64_t>,48> inst2_hits{};
+static void note_mesh(std::atomic<std::uint32_t>* keys,std::atomic<std::uint64_t>* hits,unsigned n,UINT count) noexcept {
+    for(unsigned i=0;i<n;++i) {std::uint32_t k=keys[i].load(std::memory_order_relaxed);
+        if(k==count) {if(hits) hits[i].fetch_add(1,std::memory_order_relaxed);return;}
+        if(!k && keys[i].compare_exchange_strong(k,count)) {if(hits) hits[i].fetch_add(1,std::memory_order_relaxed);return;}
+        if(k==count) {if(hits) hits[i].fetch_add(1,std::memory_order_relaxed);return;}}
+}   // v1306: instanced one-view scene-depth draws by instance count 1..4+ [held x4, not held x4]
 static std::array<std::array<std::atomic<unsigned>,2>,2> weapon_kids_last{},weapon_kids_max{};static std::array<std::atomic<std::uint64_t>,2> weapon_kids_capped{};
 static std::atomic<std::uint64_t> item_root_now{},item_root_old{},item_root_lag_um_sum{},item_root_lag_um_max{};static bool legacy_weapon_root{};
 static d2vr::ArmFlicker arm_flicker;
@@ -1788,7 +1812,7 @@ static std::string weapon_draw_json() {
     text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"kids\":[";for(unsigned h=0;h<2;++h) text+=std::string(h?",":"")+"{\"native\":["+std::to_string(weapon_kids_last[h][0].load())+","+std::to_string(weapon_kids_max[h][0].load())+"],\"copy\":["+
-        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();   // v1303
+        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="],\"inst2\":[";for(unsigned i=0;i<48;++i) text+=(i?",":"")+std::string("[")+std::to_string(inst2_count[i].load())+","+std::to_string(inst2_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
     text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
@@ -1896,6 +1920,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     full_body.legacy_body_turn(fs::exists(root/L"build"/L"legacy-body-turn"));
     weapon_place_enabled=fs::exists(root/L"build"/L"weapon-image-place");   // v861: the solver's memory stays in the world on stick turns   // v861: build/legacy-tick-skin keeps each tick's arm and body upload as drawn
     legacy_weapon_root=fs::exists(root/L"build"/L"legacy-weapon-root");   // v1302
+    legacy_instanced_held=fs::exists(root/L"build"/L"legacy-instanced-held");   // v1307
     full_body.legacy_item_lag(fs::exists(root/L"build"/L"legacy-item-lag"));   // v835: attached items read the hand as the previous tick drew it   // v832: arms carried by the body model's yaw, not the camera heading's   // v830: arms from the publication's own (one locate older) sample
     const bool legacy_run_gate=fs::exists(root/L"build"/L"legacy-run-gate");d2vr::hand_servo_legacy_gate.store(legacy_run_gate);   // v613 item 6
     std::ofstream note(output/L"running-knobs.txt",std::ios::trunc);
@@ -3155,6 +3180,10 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     NativeNoteDraw note(context,count,1,start,base);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
+    if(d2vr::RigMask::draw_is_held()) note_mesh(held_mesh_count.data(),held_mesh_hits.data(),24,count);   // v1306 diagnostics
+    if((d2vr::RigMask::draw_is_held() || d2vr::ObjectMotion::draw_placed()) && !d2vr::RigMask::draw_is_rig()) note_held_mesh(count,start,base,frames.load(std::memory_order_relaxed));   // v1307
+    else if(d2vr::RigMask::draw_depth()) for(unsigned i=0;i<24;++i) if(held_mesh_count[i].load(std::memory_order_relaxed)==count) {note_mesh(nh_mesh_count.data(),nh_mesh_hits.data(),24,count);break;}   // a held mesh drawn NOT held
+    if(d2vr::ObjectMotion::draw_unread()) for(const UINT k:{13314u,7380u,30024u,4086u,7080u,96552u,1806u}) if(count==k) note_mesh(inst2_count.data(),inst2_hits.data(),48,count*10);   // weapon mesh unread (x10+0)
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
     rig_mask.after({0,count,1,start,base,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163: with every binding of the draw still in place
     cross_eye.after();
@@ -3166,6 +3195,11 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
+    if(instances>1 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig()) {   // v1307: a held mesh batched with its twin
+        if(held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) d2vr::RigMask::mark_held_untargeted();
+    }
+    if(d2vr::RigMask::draw_is_held() || d2vr::RigMask::draw_depth()) held_instances[(d2vr::RigMask::draw_is_held()?0:4)+std::min<UINT>(instances,4u)-1u].fetch_add(1,std::memory_order_relaxed);   // v1306 diagnostics
+    if(d2vr::RigMask::draw_depth()) for(const UINT k:{13314u,7380u,30024u,4086u,7080u,96552u}) if(count==k) note_mesh(inst2_count.data(),inst2_hits.data(),48,count*10+std::min<UINT>(instances,9u));   // mesh*10+instances
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
     rig_mask.after({1,count,instances,start,base,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
@@ -8734,7 +8768,7 @@ void prepare_head_view(void* view) noexcept {
         }
         // G2: an open exact-32 cutscene renders its view here too (render only: every side effect below stays on raw logic 2 / render_world_scene())
         if(!render_scene_frame()) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();cutscene_hands_live=false;
-            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();d2vr::NativeRangedFire::forget_owners();}   // v1284 (4.4): no instance's bolt across a load // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
+            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();d2vr::NativeRangedFire::forget_owners();for(auto& k:held_mesh_key) k.store(0,std::memory_order_relaxed);}   // v1284 (4.4): no instance's bolt across a load // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
             return;}
         // Ruling 15: the cutscene state is read ONCE per displayed frame (the mask can flip between reads); every decision below uses it
         static UINT64 cutscene_frame_of=~0ull;static bool cutscene_frame_latched{};
