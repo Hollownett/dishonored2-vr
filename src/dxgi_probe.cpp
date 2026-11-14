@@ -218,6 +218,7 @@ static HandChainTrace::V trace_v(const d2vr::Vec3& v) {return {v.x,v.y,v.z};}
 #include "native_call_trace.hpp"
 #include "native_sim_invulnerable.hpp"
 #include "held_walk_burst.hpp" // v1249 diagnostic
+#include "part_batch_tag.hpp" // v1318: held weapon parts never merged into instanced draws
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -1733,6 +1734,94 @@ static void note_mesh(std::atomic<std::uint32_t>* keys,std::atomic<std::uint64_t
         if(k==count) {if(hits) hits[i].fetch_add(1,std::memory_order_relaxed);return;}}
 }   // v1306: instanced one-view scene-depth draws by instance count 1..4+ [held x4, not held x4]
 static std::array<std::array<std::atomic<unsigned>,2>,2> weapon_kids_last{},weapon_kids_max{};static std::array<std::atomic<std::uint64_t>,2> weapon_kids_capped{};
+// v1318 (part_batch_tag.hpp): every model placed in a hand (a held weapon's parts, a held thing and its parts) gets one shader-parm entry
+// of its own so the engine never merges it into an instanced draw. The render thread (publisher) only names the entities (request_part_tags:
+// the entity and its id at +0xa8, deduplicated, at most 64 pending); the GAME thread (native_interaction_aim's service scope, through
+// d2vr::part_batch::game_service) re-checks each id and gives the entity's model the entry with the engine's own setter 0x343990.
+// Status weapon_draw.part_batch n: [entities served, alive, set (setter called), kept (already ours), no shared material parm, dead/failed],
+// the last parm id given and that model's surface count.
+static bool part_batch_on=true;
+static std::mutex part_batch_m;static std::vector<std::pair<std::uintptr_t,std::uint32_t>> part_batch_pending;
+static std::array<std::atomic<std::uint64_t>,6> part_batch_n{};static std::atomic<std::uint32_t> part_batch_last_id{},part_batch_last_surfaces{};
+static void request_part_tags(const std::uintptr_t* ents,unsigned n) noexcept {
+    if(!part_batch_on || !ents) return;
+    try {
+        std::lock_guard<std::mutex> l(part_batch_m);
+        for(unsigned k=0;k<n && k<32;++k) {
+            if(!ents[k]) continue;
+            std::uint32_t id{};if(!read_self(ents[k]+0xa8,&id,sizeof id)) continue;
+            bool have=false;for(const auto& p:part_batch_pending) if(p.first==ents[k]) {have=true;break;}
+            if(!have && part_batch_pending.size()<64) part_batch_pending.push_back({ents[k],id});
+        }
+    } catch(...) {}
+}
+// A parm block's (id, value) entries; false when unreadable or implausible.
+static bool read_parm_block(std::uintptr_t block,std::vector<d2vr::part_batch::Parm>& out) noexcept {
+    out.clear();std::uintptr_t vals{},ids{};std::uint32_t nv{},n{};
+    if(!read_self(block,&vals,8) || !read_self(block+8,&nv,4) || !read_self(block+0x10,&ids,8) || !read_self(block+0x18,&n,4)) return false;
+    nv&=0xffffffu;n&=0xffffffu;
+    if(n!=nv || n>256 || (n && (!vals || !ids))) return false;
+    try {out.resize(n);} catch(...) {return false;}
+    for(std::uint32_t i=0;i<n;++i) if(!read_self(ids+i*2ull,&out[i].id,2) || !read_self(vals+i*16ull,out[i].value.c,16)) return false;
+    return true;
+}
+static bool call_parm_setter(std::uintptr_t fn,std::uintptr_t block,std::uintptr_t parm,const float* v) noexcept {
+    __try {reinterpret_cast<void*(__fastcall*)(void*,void*,const float*)>(fn)(reinterpret_cast<void*>(block),reinterpret_cast<void*>(parm),v);return true;}
+    __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+static void part_batch_game_service() noexcept {   // game thread only (the engine's own parm writers run there)
+    static std::array<d2vr::part_batch::Entry,64> table{};static std::uint32_t counter{};static std::uint64_t now{};
+    static const bool code_ok=[] {   // the pinned build's setter prologue, parm_by_id (table at +0xc290) and the manager pointer's load
+        static const std::uint8_t setter[]={0x48,0x89,0x6c,0x24,0x18,0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x20,0x44,0x8b,0x59,0x18};
+        static const std::uint8_t by_id[]={0x48,0x63,0xc2,0x48,0x8b,0x84,0xc1,0x90,0xc2,0x00,0x00,0xc3};
+        static const std::uint8_t load[]={0x48,0x8b,0x0d,0xbf,0x08,0xfb,0x02};
+        std::uint8_t a[sizeof setter]{},b[sizeof by_id]{},c[sizeof load]{};
+        return image_base && read_self(image_base+d2vr::part_batch::setter,a,sizeof a) && !std::memcmp(a,setter,sizeof a) &&
+            read_self(image_base+0x310dd0,b,sizeof b) && !std::memcmp(b,by_id,sizeof b) && read_self(image_base+0x342c72,c,sizeof c) && !std::memcmp(c,load,sizeof c);
+    }();
+    std::vector<std::pair<std::uintptr_t,std::uint32_t>> work;
+    try {std::lock_guard<std::mutex> l(part_batch_m);work.swap(part_batch_pending);} catch(...) {return;}
+    if(work.empty()) return;
+    if(!code_ok) {part_batch_n[5].fetch_add(work.size(),std::memory_order_relaxed);return;}
+    ++now;
+    std::uintptr_t mgr{};if(!read_self(image_base+d2vr::part_batch::parm_table,&mgr,sizeof mgr) || !mgr) {part_batch_n[5].fetch_add(work.size(),std::memory_order_relaxed);return;}
+    std::vector<d2vr::part_batch::Parm> block;std::vector<std::vector<d2vr::part_batch::Parm>> surfaces;
+    try {
+    for(const auto& [ent,id]:work) {
+        part_batch_n[0].fetch_add(1,std::memory_order_relaxed);
+        std::uint32_t live{};std::uintptr_t model{};
+        if(!read_self(ent+0xa8,&live,sizeof live) || live!=id || !read_self(ent+0xf0,&model,sizeof model) || !model) {part_batch_n[5].fetch_add(1,std::memory_order_relaxed);continue;}
+        part_batch_n[1].fetch_add(1,std::memory_order_relaxed);
+        auto& e=d2vr::part_batch::entry(table,counter,model,now);
+        const std::uintptr_t b=model+d2vr::part_batch::block_offset;
+        if(e.none) {part_batch_n[4].fetch_add(1,std::memory_order_relaxed);continue;}
+        if(!read_parm_block(b,block)) {part_batch_n[5].fetch_add(1,std::memory_order_relaxed);continue;}
+        if(e.chosen) {   // ours still there with our bits: nothing to do
+            bool held=false;for(const auto& p:block) if(p.id==e.id) {held=!std::memcmp(p.value.c,e.written.c,16);break;}
+            if(held) {part_batch_n[3].fetch_add(1,std::memory_order_relaxed);continue;}
+        } else {
+            std::uintptr_t list{},data{};std::uint32_t count{};
+            if(!read_self(model+d2vr::part_batch::surfaces_offset,&list,8) || !list || !read_self(list,&data,8) || !read_self(list+8,&count,4)) {part_batch_n[5].fetch_add(1,std::memory_order_relaxed);continue;}
+            count&=0xffffffu;
+            if(!count || count>16 || !data) {e.none=true;part_batch_n[4].fetch_add(1,std::memory_order_relaxed);continue;}
+            surfaces.assign(count,{});bool ok=true;
+            for(std::uint32_t s=0;s<count && ok;++s) {std::uintptr_t mat{};ok=read_self(data+s*0x80ull,&mat,8) && mat && read_parm_block(mat+d2vr::part_batch::material_block,surfaces[s]);}
+            d2vr::part_batch::Parm chosen{};unsigned component=0;
+            if(!ok || d2vr::part_batch::choose(surfaces,chosen,component)<0) {e.none=true;part_batch_n[4].fetch_add(1,std::memory_order_relaxed);continue;}
+            for(const auto& p:block) if(p.id==chosen.id) {ok=false;break;}   // the model already overrides it: not ours to touch
+            if(!ok) {e.none=true;part_batch_n[4].fetch_add(1,std::memory_order_relaxed);continue;}
+            e.id=chosen.id;e.component=static_cast<std::uint8_t>(component);e.orig=chosen.value;e.written=d2vr::part_batch::tagged(chosen.value,component,e.tag);e.chosen=true;
+            part_batch_last_surfaces.store(count,std::memory_order_relaxed);
+        }
+        std::uintptr_t parm{};std::uint32_t pid{};
+        if(!read_self(mgr+0xc290+e.id*8ull,&parm,sizeof parm) || !parm || !read_self(parm+0x48,&pid,sizeof pid) || (pid&0xffffu)!=e.id) {e.none=true;part_batch_n[5].fetch_add(1,std::memory_order_relaxed);continue;}
+        float v[4]{};std::memcpy(v,e.written.c,16);
+        if(!call_parm_setter(image_base+d2vr::part_batch::setter,b,parm,v)) {e.none=true;part_batch_n[5].fetch_add(1,std::memory_order_relaxed);continue;}
+        part_batch_n[2].fetch_add(1,std::memory_order_relaxed);part_batch_last_id.store(e.id,std::memory_order_relaxed);
+    }
+    } catch(...) {}
+}
+static const bool part_batch_registered=[] {d2vr::part_batch::game_service.store(&part_batch_game_service,std::memory_order_release);return true;}();
 static std::atomic<std::uint64_t> item_root_now{},item_root_old{},item_root_lag_um_sum{},item_root_lag_um_max{};static bool legacy_weapon_root{};
 static d2vr::ArmFlicker arm_flicker;
 static std::string arm_flicker_json(); // status arm_flicker: tracked<->fallback transitions of the hand/sword palette
@@ -1833,7 +1922,8 @@ static std::string weapon_draw_json() {
     text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"kids\":[";for(unsigned h=0;h<2;++h) text+=std::string(h?",":"")+"{\"native\":["+std::to_string(weapon_kids_last[h][0].load())+","+std::to_string(weapon_kids_max[h][0].load())+"],\"copy\":["+
-        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"instanced_targeted\":"+std::to_string(d2vr::RigMask::instanced_targeted());text+=",\"instance_place\":"+d2vr::ObjectMotion::instance_json();text+=",\"instance_rows\":"+d2vr::weapon_draw::Place::inst_json();if(!diagnostics_off) {const std::string u=d2vr::weapon_draw::Place::take_unmatched_log();if(!u.empty()) {std::ofstream f(output_directory/L"instance-unmatched.txt",std::ios::app);f<<u;}}text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
+        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();{text+=",\"part_batch\":{\"on\":"+std::string(part_batch_on?"true":"false")+",\"n\":[";for(unsigned i=0;i<part_batch_n.size();++i) text+=(i?",":"")+std::to_string(part_batch_n[i].load());text+="],\"last_parm\":"+std::to_string(part_batch_last_id.load())+",\"last_surfaces\":"+std::to_string(part_batch_last_surfaces.load())+"}";}   // v1318
+        text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"instanced_targeted\":"+std::to_string(d2vr::RigMask::instanced_targeted());text+=",\"instance_place\":"+d2vr::ObjectMotion::instance_json();text+=",\"instance_rows\":"+d2vr::weapon_draw::Place::inst_json();if(!diagnostics_off) {const std::string u=d2vr::weapon_draw::Place::take_unmatched_log();if(!u.empty()) {std::ofstream f(output_directory/L"instance-unmatched.txt",std::ios::app);f<<u;}}text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
     text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
@@ -4132,6 +4222,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 std::array<d2vr::weapon_draw::Mat,32> kids{};std::array<std::uintptr_t,32> kid_ids{};unsigned n=0;   // v1303: all parts found, the first Side::max_extra staged (status weapon_draw.kids)
                 if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()),kid_ids.data());
                 else if(engine_side>=0 && engine_side<2) bound_children(native_ent[static_cast<unsigned>(engine_side)],live,kids.data(),n,static_cast<unsigned>(kids.size()),kid_ids.data());
+                request_part_tags(kid_ids.data(),n);   // v1318: each part drawn alone (a shader-parm entry of its own, set on the game thread), placed like the body
                 weapon_kids_last[hand][copy.valid?1:0].store(n,std::memory_order_relaxed);for(auto m=weapon_kids_max[hand][copy.valid?1:0].load();n>m && !weapon_kids_max[hand][copy.valid?1:0].compare_exchange_weak(m,n);) {}
                 if(n>d2vr::weapon_draw::Side::max_extra) {weapon_kids_capped[hand].fetch_add(1,std::memory_order_relaxed);n=d2vr::weapon_draw::Side::max_extra;}
                 d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n,provisional,kid_ids.data());hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;d2vr::held_walk_burst::note_place(hand,d2vr::held_walk_burst::weapon);   // v1300 diagnostics: 16 consecutive final frames of a held weapon while walking
@@ -4212,7 +4303,11 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
                 const auto f=d2vr::weapon_draw::model_of(raw[hand].data());
                 if(body && d2vr::weapon_draw::finite(*body) && d2vr::weapon_draw::distance(*body,f)<=.6) kids[n++]=*body;   // v1255: the body's own frame
-                bound_children(thing[hand],f,kids.data(),n,static_cast<unsigned>(kids.size()));
+                std::array<std::uintptr_t,d2vr::weapon_draw::Side::max_extra> kid_ids{};
+                bound_children(thing[hand],f,kids.data(),n,static_cast<unsigned>(kids.size()),kid_ids.data());
+                {std::array<std::uintptr_t,1+d2vr::weapon_draw::Side::max_extra> t{};unsigned tn=0;t[tn++]=thing[hand];   // v1318: the held thing and its parts drawn alone
+                 for(unsigned i=0;i<n;++i) if(kid_ids[i]) t[tn++]=kid_ids[i];
+                 request_part_tags(t.data(),tn);}
                 d2vr::weapon_draw::Place::stage(hand,kind,kids.data(),n);hand_kind[hand]=kind;
             };
             for(unsigned hand=0;hand<2;++hand) {
@@ -17925,6 +18020,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::RigMask::target_bind=&d2vr::ObjectMotion::target_bind; /* v1199: per slice */d2vr::RigMask::target_restore=&d2vr::ObjectMotion::target_restore;
         d2vr::RigMask::legacy_replay=fs::exists(root/L"build"/L"legacy-rig-replay"); // v1286: the v1285 render-target-switching rig/held replay (A/B)
         d2vr::RigMask::instanced_rig_check=!fs::exists(root/L"build"/L"legacy-instanced-rig"); // v1317: an instanced draw without a VS layout is not the rig
+        part_batch_on=!fs::exists(root/L"build"/L"legacy-part-batching"); // v1318: held weapon parts keep their own shader-parm block (never merged)
         alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191
         if(!rig_target_knob && !alt_weapon_place_knob) d2vr::rig_target::book().clear();
         d2vr::ObjectMotion::held_mask=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames

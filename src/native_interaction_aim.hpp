@@ -41,6 +41,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "native_held_object.hpp"
 #include "native_player_depth.hpp"
 #include "native_weapon_hands.hpp"
+#include "part_batch_tag.hpp"
 #include "native_quick_health.hpp"
 #include "native_ranged_fire.hpp"
 #include "native_gadget_drop.hpp"
@@ -1077,6 +1078,7 @@ class NativeInteractionAim {
             if(const auto arms=arm_show_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::show_arms(self->base_,self->read_,arms);} catch(...) {}}
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
+            if(self->logic_()==2) if(const auto tag=part_batch::game_service.load(std::memory_order_acquire)) tag();   // v1318: held parts' own shader-parm entry (game thread)
             if(self->logic_()==2 && NativeWeaponHands::dual_wield()) { // dual wield, two active hands (docs/dual-wield-two-hands-plan.md)
                 try {NativeRangedFire::service(self->base_,self->read_);} catch(...) {}
                 try {NativeGadgetDrop::service(self->base_,self->read_); // v783: a thrown gadget striking a guard stuns him (as a bottle)

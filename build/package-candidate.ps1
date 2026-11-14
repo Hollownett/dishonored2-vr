@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $rel  = 'C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags'   # release line: source of gitignored binaries (FSR4/OpenXR/dinput8 dlls)
-$note = 'Test candidate v1317 = v1316 + the crossbow upgrade rings stay on the weapon while the hand moves: a part''s place on the weapon is learned in motion (it was learned only at exact rest, which a tracked hand never is), instanced records are carried by their place on the hand taken at the fill, and an instanced draw without a shader layout no longer counts as the arm (it switched off the other eye''s exact silhouette in 19 % of frames). Lab + sim checked; not headset-tested.'
+$note = 'Test candidate v1318 = v1317 + weapon upgrade parts are drawn like the weapon body: with two identical weapons in hand (a dual-wield copy) the engine merged their identical parts (rings, mechanisms, bolt) into one instanced draw that the mod could only place indirectly, so the parts trailed; each held part (and each held thing) now gets a shader-parm entry of its own, set on the game thread with the engine''s own setter (its material''s own value, lowest bits tagged), so the engine draws every part alone and the mod places it like the body. Sim: pistol pair 12248 -> 0 merged part draws. build/legacy-part-batching = v1317. Not headset-tested.'
 $name = "d2vr_render_probe_arm_v$Version.dll"
 $dll  = Join-Path $repo "build\$name"
 if ($Version -notmatch '^\d+$') { throw "version must be digits" }
