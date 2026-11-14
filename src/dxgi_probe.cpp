@@ -1683,6 +1683,9 @@ void observe_taa_pass(void* ctx,int eye) {
 static d2vr::NativeAttachmentPose attachment_pose;
 static std::atomic<std::uint64_t> item_shift_um_sum{},item_shift_count{},item_shift_um_max{}; // v835: how far advance_attachment moved an item read from where the engine put it
 static std::atomic<std::uint64_t> item_shift_skipped{}; // v862: corrections over 0.25 m left as the engine placed them
+// v1302: the body root an attached item is carried to: this frame's (the player's stamped reference frame, held_rig_now sync, as held props since v1274)
+// [taken, no stamp this frame], and how far the body model's root (+0x1860, the previous frame's until the attach job runs) was from it. build/legacy-weapon-root = v1301.
+static std::atomic<std::uint64_t> item_root_now{},item_root_old{},item_root_lag_um_sum{},item_root_lag_um_max{};static bool legacy_weapon_root{};
 static d2vr::ArmFlicker arm_flicker;
 static std::string arm_flicker_json(); // status arm_flicker: tracked<->fallback transitions of the hand/sword palette
 static std::array<unsigned,2> weapon_live_types() noexcept; // v1106: the equipped item record's type per physical hand (defined below)
@@ -1793,7 +1796,8 @@ static std::string arm_flicker_json() {
     const auto c=attachment_pose.counters();
     auto text=arm_flicker.json(c.clears);
     text.pop_back();
-    text+=",\"publish\":{\"reads_same\":"+std::to_string(c.reads_same)+",\"reads_previous\":"+std::to_string(c.reads_previous)+",\"reads_older\":"+std::to_string(c.reads_older)+",\"advanced\":"+std::to_string(c.advanced)+",\"item_shift_mm\":["+std::to_string(item_shift_count.load()?item_shift_um_sum.load()/1000.0/item_shift_count.load():0.)+","+std::to_string(item_shift_um_max.load()/1000.0)+","+std::to_string(item_shift_count.load())+"],\"item_shift_skipped\":"+std::to_string(item_shift_skipped.load())+",\"grace_accepts\":"+std::to_string(c.grace_accepts)+",\"rejects_policy\":"+std::to_string(c.rejects_policy)+
+    text+=",\"publish\":{\"reads_same\":"+std::to_string(c.reads_same)+",\"reads_previous\":"+std::to_string(c.reads_previous)+",\"reads_older\":"+std::to_string(c.reads_older)+",\"advanced\":"+std::to_string(c.advanced)+",\"item_shift_mm\":["+std::to_string(item_shift_count.load()?item_shift_um_sum.load()/1000.0/item_shift_count.load():0.)+","+std::to_string(item_shift_um_max.load()/1000.0)+","+std::to_string(item_shift_count.load())+"],\"item_shift_skipped\":"+std::to_string(item_shift_skipped.load())+",\"item_root\":["+std::to_string(item_root_now.load())+","+std::to_string(item_root_old.load())+","+
+        std::to_string(item_root_now.load()?item_root_lag_um_sum.load()/1000.0/item_root_now.load():0.)+","+std::to_string(item_root_lag_um_max.load()/1000.0)+"]"+",\"grace_accepts\":"+std::to_string(c.grace_accepts)+",\"rejects_policy\":"+std::to_string(c.rejects_policy)+
         ",\"rejects_source\":"+std::to_string(c.rejects_source)+",\"rejects_other\":"+std::to_string(c.rejects_other)+",\"rebases\":"+std::to_string(attachment_pose.rebases())+"}"+
         ",\"image_skin\":{\"enabled\":"+(image_skin_enabled?"true":"false")+",\"hooked\":"+(skin_gpu_hooked?"true":"false")+",\"begins\":"+std::to_string(full_body.image_begins())+",\"writes\":["+std::to_string(image_skin_writes[0].load())+","+std::to_string(image_skin_writes[1].load())+","+std::to_string(image_skin_writes[2].load())+
         "],\"misses\":["+std::to_string(image_skin_misses[0].load())+","+std::to_string(image_skin_misses[1].load())+","+std::to_string(image_skin_misses[2].load())+"],\"busy\":"+std::to_string(image_skin_busy.load())+",\"rig_turns\":"+std::to_string(full_body.rig_turns())+
@@ -1886,6 +1890,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     full_body.legacy_hand_sample(fs::exists(root/L"build"/L"legacy-hand-sample") || image_skin_enabled);
     full_body.legacy_body_turn(fs::exists(root/L"build"/L"legacy-body-turn"));
     weapon_place_enabled=fs::exists(root/L"build"/L"weapon-image-place");   // v861: the solver's memory stays in the world on stick turns   // v861: build/legacy-tick-skin keeps each tick's arm and body upload as drawn
+    legacy_weapon_root=fs::exists(root/L"build"/L"legacy-weapon-root");   // v1302
     full_body.legacy_item_lag(fs::exists(root/L"build"/L"legacy-item-lag"));   // v835: attached items read the hand as the previous tick drew it   // v832: arms carried by the body model's yaw, not the camera heading's   // v830: arms from the publication's own (one locate older) sample
     const bool legacy_run_gate=fs::exists(root/L"build"/L"legacy-run-gate");d2vr::hand_servo_legacy_gate.store(legacy_run_gate);   // v613 item 6
     std::ofstream note(output/L"running-knobs.txt",std::ios::trunc);
@@ -4037,7 +4042,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 std::array<d2vr::weapon_draw::Mat,d2vr::weapon_draw::Side::max_extra> kids{};unsigned n=0;
                 if(copy.valid) bound_children(copy.entity,live,kids.data(),n,static_cast<unsigned>(kids.size()));
                 else if(engine_side>=0 && engine_side<2) bound_children(native_ent[static_cast<unsigned>(engine_side)],live,kids.data(),n,static_cast<unsigned>(kids.size()));
-                d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n,provisional);hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;
+                d2vr::weapon_draw::Place::stage(hand,d2vr::weapon_draw::Place::kind_weapon,kids.data(),n,provisional);hand_kind[hand]=d2vr::weapon_draw::Place::kind_weapon;d2vr::held_walk_burst::note_place(hand,d2vr::held_walk_burst::weapon);   // v1300 diagnostics: 16 consecutive final frames of a held weapon while walking
             };
             if(!is_bound) {   // no valid G yet (counted)
                 skip(candidate.attempted&&!candidate.valid?4u:3u);
@@ -8635,6 +8640,13 @@ static std::optional<d2vr::rig::Transform> advance_attachment(unsigned side,cons
         const auto binding=arm_binding_cache.load();if(!binding) return {};
         const auto body_model=d2vr::rig::value<std::uintptr_t>(read_self,binding->arms[0].player+0xf0);
         if(!body_model || !d2vr::rig::pointer(*body_model) || !read_self(*body_model+0x1860,root.data(),sizeof(root))) return {};
+        // v1302 (user: the weapon jumps in the hand while moving, jumping, climbing stairs): the body model's root is the previous frame's until the
+        // attach job runs, so the item was carried one frame of player motion short (the held-prop bug of v1274). Use this frame's stamped root.
+        if(d2vr::HeldCarry rig{};held_rig_now(rig,true) && rig.frame_ok && d2vr::finite(rig.frame_root)) {
+            const auto lag=static_cast<std::uint64_t>(d2vr::length(rig.frame_root-d2vr::Vec3{root[0],root[1],root[2]})*1e6);
+            ++item_root_now;item_root_lag_um_sum+=lag;for(auto m=item_root_lag_um_max.load();lag>m && !item_root_lag_um_max.compare_exchange_weak(m,lag);) {}
+            if(!legacy_weapon_root && lag<1000000) {root[0]=static_cast<float>(rig.frame_root.x);root[1]=static_cast<float>(rig.frame_root.y);root[2]=static_cast<float>(rig.frame_root.z);}
+        } else ++item_root_old;
         const auto camera=d2vr::native_player_camera(read_self,image_base,head_body_camera);if(!camera) return {};
         const auto move=full_body.item_advance(side,root,native_turning.head_follow_total(),camera->heading);if(!move) return {};
         // v861: the hand as the last image drew it: its own solve with the image skin on (the tick's upload is no longer what was drawn)

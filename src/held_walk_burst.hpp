@@ -27,8 +27,8 @@
 #include <vector>
 
 namespace d2vr::held_walk_burst {
-enum Kind:unsigned {prop,severed,use,kinds};
-inline const char* kind_name(unsigned k) noexcept {static const char* n[]={"prop","severed","use"};return k<kinds?n[k]:"?";}
+enum Kind:unsigned {prop,severed,use,weapon,kinds};   // v1300: + a held weapon (bolt/attachment ghosting after a copy is summoned)
+inline const char* kind_name(unsigned k) noexcept {static const char* n[]={"prop","severed","use","weapon"};return k<kinds?n[k]:"?";}
 
 // Pure trigger / state machine (times in ms). A hold is "alive" while a placement was noted within gap_ms.
 struct Machine {
@@ -52,7 +52,7 @@ struct Machine {
             const auto& x=hold[h];
             if(x.kind<0 || now>x.last+gap_ms || now-x.since<hold_ms) continue;
             const unsigned k=static_cast<unsigned>(x.kind);
-            const bool go=(bursts[k]==0 && speed>walk_mps) || (bursts[k]==1 && speed>run_mps);
+            const bool go=(bursts[k]==0 && speed>walk_mps) || (bursts[k]==1 && speed>run_mps) || (k==weapon && bursts[k]<4 && speed>walk_mps);   // v1300: four walking bursts for a weapon
             if(!go) continue;
             active=true;hand=h;kind=k;index=++bursts[k];captured=0;return true;
         }
