@@ -1732,10 +1732,13 @@ private:
         const HRESULT hr=map_[I](c,r,sub,type,flags,out);
         if(SUCCEEDED(hr) && type==D3D11_MAP_WRITE_DISCARD && out && out->pData && r && on())
             if(Learned* e=shadowed(r)) pending_[pending_next_++&3]={c,r,out->pData,e};
+        if(SUCCEEDED(hr) && (type==D3D11_MAP_WRITE_DISCARD || type==D3D11_MAP_WRITE_NO_OVERWRITE) && out && out->pData && r && instance_place.load(std::memory_order_relaxed) && alternate())
+            if(const UINT bytes=instance_buffer_bytes(r)) tl_inst_={c,r,out->pData,bytes};   // v1308
         return hr;
     }
     template<int I> static void STDMETHODCALLTYPE unmap_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub) {
         if(r) for(auto& p:pending_) if(p.resource==r && p.context==c) {p.resource=nullptr;written(c,r,p.data,*p.entry);break;}
+        if(r && tl_inst_.r==r && tl_inst_.c==c) {place_instances(tl_inst_.data,tl_inst_.bytes);tl_inst_={};}   // v1308: before the engine's data leaves
         unmap_[I](c,r,sub);
     }
     template<int I> static void STDMETHODCALLTYPE update_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub,const D3D11_BOX* box,const void* src,UINT rp,UINT dp) {
@@ -1747,6 +1750,46 @@ private:
         update1_[I](c,r,sub,box,src,rp,dp,flags);
     }
 
+    // v1308 (weapon_draw::Place::place_world): the engine's direct-instancing record buffer (ro_directinstancebuffer: dynamic structured SRV,
+    // 96-byte records = 6 float4 world rows, current then previous) is mapped each frame; a record that is a held thing's part is placed in the
+    // drawn hand before the Unmap. Recognised by its description (cached per buffer). build/no-instance-place: off.
+    inline static std::atomic<bool> instance_place{true};
+    struct InstMap {ID3D11DeviceContext* c{};ID3D11Resource* r{};void* data{};UINT bytes{};};
+    inline static thread_local InstMap tl_inst_{};
+    inline static std::array<std::atomic<std::uintptr_t>,256> inst_seen_{};inline static std::array<std::atomic<std::uint32_t>,256> inst_bytes_{};
+    inline static std::atomic<std::uint64_t> inst_maps_{},inst_records_{};inline static std::array<std::atomic<std::uint64_t>,2> inst_placed_{},inst_order_{};
+    static UINT instance_buffer_bytes(ID3D11Resource* r) noexcept {
+        const auto k=reinterpret_cast<std::uintptr_t>(r);const std::size_t i=(k>>4)*0x9e3779b97f4a7c15ull>>56;
+        if(inst_seen_[i].load(std::memory_order_acquire)==k) return inst_bytes_[i].load(std::memory_order_relaxed);
+        UINT bytes=0;D3D11_RESOURCE_DIMENSION dim{};r->GetType(&dim);
+        if(dim==D3D11_RESOURCE_DIMENSION_BUFFER) {D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(r)->GetDesc(&d);
+            if(d.StructureByteStride==96 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) && (d.BindFlags&D3D11_BIND_SHADER_RESOURCE) && d.Usage==D3D11_USAGE_DYNAMIC && d.ByteWidth<=96*4096) bytes=d.ByteWidth;}
+        inst_bytes_[i].store(bytes,std::memory_order_relaxed);inst_seen_[i].store(k,std::memory_order_release);   // ponytail: a released buffer's address reused by another buffer keeps the old answer
+        return bytes;
+    }
+    static void place_instances(void* data,UINT bytes) noexcept {
+        if(!data || !weapon_draw::Place::published()) return;
+        inst_maps_.fetch_add(1,std::memory_order_relaxed);
+        auto* f=static_cast<float*>(data);const UINT n=bytes/96;
+        for(UINT k=0;k<n;++k,f+=24) {
+            if(!std::isfinite(f[3]) || !std::isfinite(f[7]) || !std::isfinite(f[11])) continue;
+            for(unsigned order=0;order<2;++order) {   // current rows first (the shader's member order); the other half tried once, counted
+                float* cur=f+(order?12:0);float* prv=f+(order?0:12);
+                weapon_draw::Mat m=weapon_draw::identity(),p=weapon_draw::identity();
+                for(std::size_t i=0;i<12;++i) {m[i]=cur[i];p[i]=prv[i];}
+                const int side=weapon_draw::Place::place_world(m,p);
+                if(side<0) continue;
+                for(std::size_t i=0;i<12;++i) {cur[i]=static_cast<float>(m[i]);prv[i]=static_cast<float>(p[i]);}
+                inst_placed_[static_cast<unsigned>(side)].fetch_add(1,std::memory_order_relaxed);inst_order_[order].fetch_add(1,std::memory_order_relaxed);
+                break;
+            }
+        }
+        inst_records_.fetch_add(n,std::memory_order_relaxed);
+    }
+public:
+    static std::string instance_json() {return "{\"on\":"+std::string(instance_place.load()?"true":"false")+",\"maps\":"+std::to_string(inst_maps_.load())+",\"records\":"+std::to_string(inst_records_.load())+
+        ",\"placed\":["+std::to_string(inst_placed_[0].load())+","+std::to_string(inst_placed_[1].load())+"],\"order\":["+std::to_string(inst_order_[0].load())+","+std::to_string(inst_order_[1].load())+"]}";}
+private:
     static void poll() noexcept {
         ++poll_frames_;
         LARGE_INTEGER now{},frequency{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&frequency);
@@ -1769,6 +1812,7 @@ private:
         held_shadow_place.store(!std::filesystem::exists(knobs_/L"no-held-shadow-place",error),std::memory_order_relaxed); // v1238
         weapon_draw::Place::cull.store(!std::filesystem::exists(knobs_/L"no-weapon-near-cull",error),std::memory_order_relaxed); // v1284 (B1)
         weapon_draw::Place::child_rebase.store(!std::filesystem::exists(knobs_/L"legacy-child-place",error),std::memory_order_relaxed); // v1304
+        instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error),std::memory_order_relaxed); // v1308
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)

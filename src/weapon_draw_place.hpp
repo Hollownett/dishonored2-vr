@@ -1466,6 +1466,33 @@ public:
         return false;
     }
 
+    // v1308 (user: the copy crossbow's parts still ghost; sims v1306: with two identical crossbows the engine draws their upgrade parts with
+    // DIRECT INSTANCING - vertex shader `vertex` USEDIRECTINSTANCING: world rows modelMatrixX/Y/Z and previousModelMatrixX/Y/Z per record of
+    // ro_directinstancebuffer, a dynamic structured buffer (96-byte stride, 256 records) the CPU maps each frame; the view-projection comes from
+    // the view's cbuffer, so the world rows are eye-independent). A record whose world rows are a published held thing's frame (F, previous read,
+    // a part, an earlier read: the matching place_one_view uses) is placed like any of its draws: m = delta * m, and its previous rows with the
+    // previous frame's delta (the hand's motion), else the current delta. Job threads, at the record's Unmap. Returns the matched side, else -1.
+    static int place_world(Mat& m,Mat& p) noexcept {
+        const std::uint32_t frame=latest_frame();const Slot* slot=slot_of(frame);if(!slot) return -1;
+        Rows r{};for(std::size_t i=0;i<12;++i) r[i]=m[i];
+        const double tol=axes_tol.load(std::memory_order_relaxed);
+        int side=-1,hit=0;double best=-1;
+        for(unsigned s=0;s<2;++s) {const Side& w=slot->side[s];if(!w.valid || !w.bound) continue;
+            for(int h=0;h<frames_end(w);++h) {if(!has_frame(w,h)) continue;const Mat& f=frame_of(w,h);if(!same_orientation(r,f,tol)) continue;
+                const double d=origin_distance(r,f);if(d<=reach_of(w) && (best<0 || d<best)) {best=d;side=static_cast<int>(s);hit=h;}}}
+        if(side<0) return -1;
+        const Side& w=slot->side[static_cast<unsigned>(side)];
+        Mat delta=w.delta,unused{};
+        if(hit==1) delta=w.alt_delta;
+        else if(hit>1 && hit<hist0 && w.extra_rok[static_cast<std::size_t>(hit-2)]) delta=mul(w.bound_frame,w.extra_r[static_cast<std::size_t>(hit-2)]);
+        else if(hit>=hist0 && !rebase(w,hit,0,delta,unused)) return -1;
+        Mat prev_delta=delta;
+        if(const Slot* ps=slot_of(frame-1)) {const Side& pw=ps->side[static_cast<unsigned>(side)];if(pw.valid && pw.bound && distance(pw.model,w.model)<=alt_max_m) prev_delta=pw.delta;}
+        if(!still(*slot,frame)) return -1;
+        m=mul(delta,m);p=mul(prev_delta,p);
+        return side;
+    }
+
     // v1191 one-view frames (knob build/alt-weapon-place): place one draw of the render published last, in the one view that draws it.
     // vp = the draw's view-projection (its classified per-view write), prev_vp = this eye's previous render's (the seeded view+0x7590).
     // The part's model rows m = inverse(vp) * rows match a published side by orientation and reach (as place()); current = vp * delta * m

@@ -1691,6 +1691,27 @@ static std::array<std::atomic<std::uint64_t>,8> held_instances{};
 // v1307: meshes (index count, first index, base vertex) a non-instanced one-view draw marked held lately; the same mesh drawn instanced is a
 // held thing's part batched with its twin (two crossbows' upgrade parts), see RigMask::mark_held_untargeted. Kept until a load or death reload.
 static std::array<std::atomic<std::uint64_t>,32> held_mesh_key{},held_mesh_seen{};static std::atomic<std::uint64_t> instanced_held_misses{};static bool legacy_instanced_held{};
+// v1308 research: the VS shader resources an instanced held-mesh draw binds (the engine's ro_directinstancebuffer / ro_instancebuffer):
+// slot, buffer, ByteWidth, StructureByteStride, Usage, CPUAccessFlags, BindFlags, SRV FirstElement/NumElements; first 40 draws to
+// artifacts/instance-srvs.txt
+static std::atomic<unsigned> instance_srv_logged{};
+static void probe_instance_srvs(ID3D11DeviceContext* c,UINT count,UINT instances,UINT first) noexcept {
+    if(diagnostics_off || instance_srv_logged.fetch_add(1)>=40) return;
+    try {
+        std::array<ID3D11ShaderResourceView*,32> v{};c->VSGetShaderResources(0,32,v.data());
+        std::ostringstream o;o<<"draw count="<<count<<" instances="<<instances<<" first="<<first<<" frame="<<frames.load()<<" ctx_type="<<c->GetType()<<'\n';
+        for(unsigned i=0;i<32;++i) if(v[i]) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};v[i]->GetDesc(&sd);ID3D11Resource* r{};v[i]->GetResource(&r);
+            D3D11_RESOURCE_DIMENSION dim{};if(r) r->GetType(&dim);
+            o<<"  t"<<i<<" dim="<<sd.ViewDimension<<" fmt="<<sd.Format;
+            if(dim==D3D11_RESOURCE_DIMENSION_BUFFER) {D3D11_BUFFER_DESC bd{};static_cast<ID3D11Buffer*>(r)->GetDesc(&bd);
+                o<<" buf="<<r<<" bytes="<<bd.ByteWidth<<" stride="<<bd.StructureByteStride<<" usage="<<bd.Usage<<" cpu="<<bd.CPUAccessFlags<<" bind="<<bd.BindFlags<<" misc="<<bd.MiscFlags
+                 <<" first="<<sd.Buffer.FirstElement<<" n="<<sd.Buffer.NumElements;}
+            o<<'\n';if(r) r->Release();v[i]->Release();
+        }
+        std::ofstream f(output_directory/L"instance-srvs.txt",std::ios::app);f<<o.str();
+    } catch(...) {}
+}
 static std::uint64_t mesh_key(UINT count,UINT start,INT base) noexcept {return (std::uint64_t(count)<<40)^(std::uint64_t(start)<<12)^std::uint64_t(static_cast<std::uint32_t>(base))^1ull;}
 static void note_held_mesh(UINT count,UINT start,INT base,std::uint64_t now) noexcept {
     const auto k=mesh_key(count,start,base);unsigned oldest=0;std::uint64_t t=~0ull;
@@ -1812,7 +1833,7 @@ static std::string weapon_draw_json() {
     text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"kids\":[";for(unsigned h=0;h<2;++h) text+=std::string(h?",":"")+"{\"native\":["+std::to_string(weapon_kids_last[h][0].load())+","+std::to_string(weapon_kids_max[h][0].load())+"],\"copy\":["+
-        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="],\"inst2\":[";for(unsigned i=0;i<48;++i) text+=(i?",":"")+std::string("[")+std::to_string(inst2_count[i].load())+","+std::to_string(inst2_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
+        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="],\"inst2\":[";for(unsigned i=0;i<48;++i) text+=(i?",":"")+std::string("[")+std::to_string(inst2_count[i].load())+","+std::to_string(inst2_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"instance_place\":"+d2vr::ObjectMotion::instance_json();text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
     text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
@@ -3196,7 +3217,7 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     NativeNoteDraw note(context,count,instances,start,base,first);
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     if(instances>1 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig()) {   // v1307: a held mesh batched with its twin
-        if(held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) d2vr::RigMask::mark_held_untargeted();
+        if(held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {d2vr::RigMask::mark_held_untargeted();probe_instance_srvs(context,count,instances,first);}
     }
     if(d2vr::RigMask::draw_is_held() || d2vr::RigMask::draw_depth()) held_instances[(d2vr::RigMask::draw_is_held()?0:4)+std::min<UINT>(instances,4u)-1u].fetch_add(1,std::memory_order_relaxed);   // v1306 diagnostics
     if(d2vr::RigMask::draw_depth()) for(const UINT k:{13314u,7380u,30024u,4086u,7080u,96552u}) if(count==k) note_mesh(inst2_count.data(),inst2_hits.data(),48,count*10+std::min<UINT>(instances,9u));   // mesh*10+instances

@@ -394,6 +394,23 @@ static void v1304_lagged_kid_lab() {
     CHECK(placed==9 && worst_on<2e-4 && worst_off>1e-2);
 }
 
+// ---- v1308: a held weapon's part drawn with direct instancing: its record's world rows (the part's frame E) are placed at B * inverse(F) * E,
+// its previous rows with the previous frame's delta; a record of anything else is left alone
+static void v1308_instance_record_lab() {
+    Binder::clear();Place::clear();
+    const Mat l=rigid(rot(.3,.1,.2,.6),.05,.02,-.03),g=rigid(identity(),.02,0,0);
+    const std::uintptr_t kid=0x6161;
+    const auto f_at=[](int n) {return rigid(rot(0,0,1,.5+.03*n),-91.7+.03*n,-92.4+.01*n,4.9+.02*n);};
+    for(int n=0;n<3;++n) {const Mat f=f_at(n),e=mul(f,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1800u+static_cast<std::uint32_t>(n),f,true,mul(f,g),Mat{},false,Mat{},70+n);}
+    const Mat f=f_at(2),b=mul(f,g),e=mul(f,l),e_prev=mul(f_at(1),l);
+    Mat m=e,p=e_prev;const int side=Place::place_world(m,p);
+    const Mat want=mul(b,l),want_prev=mul(mul(f_at(1),g),l);
+    double err=0,err_prev=0;for(int i=0;i<12;++i) {err=std::max(err,std::abs(m[i]-want[i]));err_prev=std::max(err_prev,std::abs(p[i]-want_prev[i]));}
+    Mat other=rigid(rot(1,0,0,.9),-91.0,-92.0,4.9),op=other;const int none=Place::place_world(other,op);
+    std::printf("v1308 instance record: side %d, err %.2e, previous err %.2e, unrelated record side %d\n",side,err,err_prev,none);
+    CHECK(side==0 && err<1e-4 && err_prev<1e-4 && none<0);   // float frames (raw_of)
+}
+
 int main() {
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
     const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
@@ -748,6 +765,7 @@ int main() {
     v1284_cull_lab(part);
     v1284_own_prev_lab(part);
     v1304_lagged_kid_lab();
+    v1308_instance_record_lab();
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }
