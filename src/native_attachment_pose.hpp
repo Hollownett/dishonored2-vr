@@ -461,6 +461,7 @@ public:
         if(side>1 || !power_hand::valid_rot(rotation)) return false;
         std::lock_guard<std::mutex> lock(mutex_);cross_attachment_[side]=rotation;return true;
     }
+    power_hand::Rot3 cross_attachment(unsigned side) {if(side>1) return power_hand::identity_rot;std::lock_guard<std::mutex> lock(mutex_);return cross_attachment_[side];}   // v1319
     // Reads that returned the other hand, and cross reads that fell back to the arm's own palette (status arm_flicker / power_hand).
     std::uint64_t cross_substitutions() const {return cross_substitutions_.load();}
     std::uint64_t cross_skipped() const {return cross_skipped_.load();}

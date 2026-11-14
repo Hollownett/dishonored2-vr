@@ -286,6 +286,26 @@ inline bool candidate_from_read(const Mat& read,const Mat& engine,GripCandidate&
     out.identity=identity;out.source=source;out.space=space;out.serial=serial;out.frame=frame;
     return out.valid;
 }
+// v1319 (user, after v1318: "can the weapon be glued to the hands the same way, perfectly in sync"; v1317 headset: a native weapon in hand had
+// NO binding in 27 % / 14 % of renders - no writer note to learn G from - and was drawn at the engine's lagging pose): G from the engine's OWN
+// bind. Equip 0x61aed0 binds the weapon to its arm with 0x875e80(arm, weapon, tag = decl+0x78, origin NULL, axis NULL); 0x752900 resolves the
+// tag (0x879930) into the weapon's bind component (entity+0x358): master entity +0x3c8, joint u16 +0x3d0, the tag's local origin +0x3d4 (vec3)
+// and rotation +0x3e0 (quat x,y,z,w: the md6def weapon_attach_tag, identity on the left arm, (0,1,0,0) on the right; the Heart's (0,-.7071,-.7071,0)).
+// The engine composes the item at joint * [R(q) | o] (scaled by the model's scales); a crossed item rides the other hand through joint * C
+// (NativeAttachmentPose cross_joint_both: columns * C, C row-major). G relative to the drawn joint 59 = C * [R(q) | o] * diag(scales).
+inline bool engine_bind_g(const float q[4],const float o[3],const float s[3],const float* c,Mat& g) noexcept {
+    const double x=q[0],y=q[1],z=q[2],w=q[3],n=x*x+y*y+z*z+w*w;
+    if(!(std::abs(n-1.)<.01) || !std::isfinite(o[0]+o[1]+o[2]) || !(s[0]>0 && s[1]>0 && s[2]>0) || !std::isfinite(s[0]+s[1]+s[2])) return false;
+    const double r[3][3]={{1-2*(y*y+z*z),2*(x*y-z*w),2*(x*z+y*w)},{2*(x*y+z*w),1-2*(x*x+z*z),2*(y*z-x*w)},{2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)}};
+    double cm[3][3]={{1,0,0},{0,1,0},{0,0,1}};
+    if(c) for(int i=0;i<3;++i) for(int j=0;j<3;++j) cm[i][j]=c[i*3+j];
+    g=identity();
+    for(int i=0;i<3;++i) {
+        for(int j=0;j<3;++j) {double t=0;for(int k=0;k<3;++k) t+=cm[i][k]*r[k][j];g[static_cast<std::size_t>(i*4+j)]=t*s[j];}
+        double t=0;for(int k=0;k<3;++k) t+=cm[i][k]*o[k];g[static_cast<std::size_t>(i*4+3)]=t;
+    }
+    return finite(g);
+}
 // G = the exact local offset a copy service applied (already mirrored for the other hand).
 inline bool candidate_from_offset(const Mat& offset,GripCandidate& out,std::uintptr_t identity,unsigned source,
         std::uint64_t serial=0,std::uint64_t frame=0) noexcept {
