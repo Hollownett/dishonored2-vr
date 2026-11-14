@@ -1486,7 +1486,7 @@ public:
         for(unsigned s=0;s<2;++s) {const Side& w=slot->side[s];if(!w.valid || !w.bound) continue;
             for(int h=0;h<frames_end(w);++h) {if(!has_frame(w,h)) continue;const Mat& f=frame_of(w,h);if(!same_orientation(r,f,tol)) continue;
                 const double d=origin_distance(r,f);if(d<=reach_of(w) && (best<0 || d<best)) {best=d;side=static_cast<int>(s);hit=h;}}}
-        if(side<0) return -1;
+        if(side<0) {inst_unmatched(*slot,r);return -1;}
         const Side& w=slot->side[static_cast<unsigned>(side)];
         Mat delta=w.delta,unused{};
         if(hit==1) delta=w.alt_delta;
@@ -1512,9 +1512,31 @@ public:
         return side;
     }
     inline static std::array<std::atomic<std::uint64_t>,5> inst_tick_{};inline static std::array<std::atomic<std::uint64_t>,3> inst_prev_{};
+    // v1314 diagnostics: a record within 0.5 m of a published held frame that matched none: [count], and the nearest frame's row difference
+    // (bins < .01 .05 .2 1 >=1) and distance (< 5 cm, 15, 30, 50 cm); the first 40 rows to unmatched_log_ (read by the status writer's owner)
+    inline static std::atomic<std::uint64_t> inst_unmatched_{};inline static std::array<std::atomic<std::uint64_t>,5> inst_unmatched_diff_{},inst_unmatched_mm_{};
+    inline static std::mutex unmatched_m_;inline static std::string unmatched_log_;inline static unsigned unmatched_rows_{};
+    static void inst_unmatched(const Slot& slot,const Rows& r) noexcept {
+        double best=.5,diff=0;int side=-1,hb=-1;
+        for(unsigned s=0;s<2;++s) {const Side& w=slot.side[s];if(!w.valid || !w.bound) continue;
+            for(int h=0;h<frames_end(w);++h) if(has_frame(w,h)) {const double d=origin_distance(r,frame_of(w,h));if(d<best) {best=d;side=static_cast<int>(s);hb=h;
+                double m=0;const Mat& f=frame_of(w,h);for(int a=0;a<3;++a) for(int b=0;b<3;++b) m=std::max(m,std::abs(r[static_cast<std::size_t>(a*4+b)]-f[static_cast<std::size_t>(a*4+b)]));diff=m;}}}
+        if(side<0) return;
+        inst_unmatched_.fetch_add(1,std::memory_order_relaxed);
+        static constexpr double de[4]={.01,.05,.2,1},me[4]={.05,.15,.3,.5};unsigned a=0,b=0;while(a<4 && !(diff<de[a])) ++a;while(b<4 && !(best<me[b])) ++b;
+        inst_unmatched_diff_[a].fetch_add(1,std::memory_order_relaxed);inst_unmatched_mm_[b].fetch_add(1,std::memory_order_relaxed);
+        std::lock_guard<std::mutex> l(unmatched_m_);
+        if(unmatched_rows_<40) {++unmatched_rows_;char line[400];
+            std::snprintf(line,sizeof line,"side %d frame %d dist %.4f diff %.4f rows %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",side,hb,best,diff,
+                r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],r[8],r[9],r[10],r[11]);unmatched_log_+=line;}
+    }
+public:
+    static std::string take_unmatched_log() {std::lock_guard<std::mutex> l(unmatched_m_);std::string o;o.swap(unmatched_log_);return o;}
     static std::string inst_json() {
         std::string o="{\"part_vs_publish_mm\":[";for(unsigned i=0;i<5;++i) o+=(i?",":"")+std::to_string(inst_tick_[i].load());
-        o+="],\"previous\":[";for(unsigned i=0;i<3;++i) o+=(i?",":"")+std::to_string(inst_prev_[i].load());return o+"]}";
+        o+="],\"previous\":[";for(unsigned i=0;i<3;++i) o+=(i?",":"")+std::to_string(inst_prev_[i].load());
+        o+="],\"unmatched\":"+std::to_string(inst_unmatched_.load())+",\"unmatched_diff\":[";for(unsigned i=0;i<5;++i) o+=(i?",":"")+std::to_string(inst_unmatched_diff_[i].load());
+        o+="],\"unmatched_m\":[";for(unsigned i=0;i<5;++i) o+=(i?",":"")+std::to_string(inst_unmatched_mm_[i].load());return o+"]}";
     }
 
     // v1191 one-view frames (knob build/alt-weapon-place): place one draw of the render published last, in the one view that draws it.

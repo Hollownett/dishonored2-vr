@@ -33,6 +33,7 @@
 #include <new>
 #include <sstream>
 #include <string>
+#include <vector>
 #include "weapon_draw_place.hpp"
 #include "rig_mask.hpp"
 #include "skin_motion.hpp"
@@ -1770,7 +1771,9 @@ private:
     // v1310: per engine instance buffer, a mirror (same shape) holding only the records placed as held parts, the others zeroed (degenerate:
     // no pixel). RigMask binds it for the mask replay of an instanced held mesh (swap_instances), so world instances batched with a held part
     // (the bolt mesh with the world's bolts) stay out of the held class. build/no-instance-mirror: the v1309 whole-draw mark (twin only).
-    struct Mirror {ID3D11Resource* engine{};Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;UINT bytes{};bool held{};std::uint64_t used{};};
+    // v1315: + the held records (index, 24 floats each, as rewritten) and the rig target's two slice copies (instance_target_views)
+    struct Mirror {ID3D11Resource* engine{};Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;UINT bytes{};bool held{};std::uint64_t used{};
+        std::vector<UINT> index;std::vector<float> rows;std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>,2> slice;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2> slice_view;UINT slice_bytes{};};
     inline static std::array<Mirror,8> mirrors_{};inline static std::mutex mirror_m_;inline static std::uint64_t mirror_use_{};
     inline static std::atomic<bool> instance_mirror{true};inline static std::atomic<std::uint64_t> mirror_fills_{},mirror_failures_{};
     static void fill_mirror(ID3D11DeviceContext* c,ID3D11Resource* r,const void* data,UINT bytes,const std::uint8_t* held,bool any,Map map,Unmap unmap) noexcept {
@@ -1794,7 +1797,9 @@ private:
             D3D11_MAPPED_SUBRESOURCE out{};   // the original Map/Unmap (this context's kind): our own buffer never reaches the hooks
             if(FAILED(map(c,m->buffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&out)) || !out.pData) {m->held=false;mirror_failures_.fetch_add(1,std::memory_order_relaxed);return;}
             auto* dst=static_cast<std::uint8_t*>(out.pData);const auto* src=static_cast<const std::uint8_t*>(data);
-            for(UINT k=0;k<bytes/96;++k) {if(held[k]) std::memcpy(dst+k*96ull,src+k*96ull,96);else std::memset(dst+k*96ull,0,96);}
+            m->index.clear();m->rows.clear();
+            for(UINT k=0;k<bytes/96;++k) {if(held[k]) {std::memcpy(dst+k*96ull,src+k*96ull,96);m->index.push_back(k);const auto* f=reinterpret_cast<const float*>(src+k*96ull);m->rows.insert(m->rows.end(),f,f+24);}
+                else std::memset(dst+k*96ull,0,96);}
             unmap(c,m->buffer.Get(),0);
             m->held=true;mirror_fills_.fetch_add(1,std::memory_order_relaxed);
         } catch(...) {mirror_failures_.fetch_add(1,std::memory_order_relaxed);}
@@ -1808,6 +1813,50 @@ public:
         return nullptr;
     }
     static void forget_mirrors() noexcept {std::lock_guard<std::mutex> lock(mirror_m_);mirrors_={};}
+    // v1315 (user, v1313: with a summoned copy the crossbow's ring trails the weapon and catches up): an instanced held part had no rig target
+    // (class 251), so the rebuilt eye moved it by motion estimates while the weapon body landed on its exact target silhouette. Its view-
+    // projection sits in per-view constants the mod does not rewrite, so the retarget goes into its records: X_h = inverse(VP_h) * E_h * VP_h
+    // gives VP_h * X_h * M = E_h * VP_h * M, the rows target_dual makes for a cb2 draw. X_h is affine (both projections share the depth rows;
+    // checked). Per hypothesis slice h a copy of the mirror with the held records moved by X_h (the rest zeroed), written on the draw's own
+    // context right at the draw (E of the Setup this render runs under). views: AddRef'd. false: no target, the part stays class 251.
+    inline static std::atomic<bool> instance_target{true};
+    inline static std::array<std::atomic<std::uint64_t>,5> inst_target_{};   // [0] ok, [1] no Setup for a slice, [2] X not affine, [3] no mirror, [4] buffer or map failed
+    static bool instance_target_views(ID3D11DeviceContext* c,ID3D11Resource* r,ID3D11ShaderResourceView* (&views)[2]) noexcept {
+        views[0]=views[1]=nullptr;
+        if(!c || !r || !instance_target.load(std::memory_order_relaxed)) return false;
+        const unsigned t=c->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE?1u:0u;
+        if(!map_[t] || !unmap_[t]) {inst_target_[4].fetch_add(1,std::memory_order_relaxed);return false;}
+        const LatestOf& latest=latest_of_cached();
+        rig_target::M4 x[2]{};
+        for(unsigned h=0;h<2;++h) {
+            if(!latest.ok[h]) {inst_target_[1].fetch_add(1,std::memory_order_relaxed);return false;}
+            if(!rig_target::record_retarget(latest.e[h],latest.vp[h],x[h])) {inst_target_[2].fetch_add(1,std::memory_order_relaxed);return false;}
+        }
+        try {
+            std::lock_guard<std::mutex> lock(mirror_m_);
+            Mirror* m=nullptr;for(auto& e:mirrors_) if(e.engine==r) {m=&e;break;}
+            if(!m || !m->held || !m->buffer || m->index.empty()) {inst_target_[3].fetch_add(1,std::memory_order_relaxed);return false;}
+            if(m->slice_bytes!=m->bytes || !m->slice_view[0] || !m->slice_view[1]) {
+                m->slice={};m->slice_view={};m->slice_bytes=0;
+                D3D11_BUFFER_DESC d{};m->buffer->GetDesc(&d);ID3D11Device* device{};c->GetDevice(&device);if(!device) {inst_target_[4].fetch_add(1,std::memory_order_relaxed);return false;}
+                D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_UNKNOWN;v.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;v.Buffer.FirstElement=0;v.Buffer.NumElements=m->bytes/96;
+                bool ok=true;for(unsigned h=0;h<2 && ok;++h) ok=SUCCEEDED(device->CreateBuffer(&d,nullptr,&m->slice[h])) && SUCCEEDED(device->CreateShaderResourceView(m->slice[h].Get(),&v,&m->slice_view[h]));
+                device->Release();
+                if(!ok) {m->slice={};m->slice_view={};inst_target_[4].fetch_add(1,std::memory_order_relaxed);return false;}
+                m->slice_bytes=m->bytes;
+            }
+            for(unsigned h=0;h<2;++h) {
+                D3D11_MAPPED_SUBRESOURCE out{};   // the original Map (this context's kind): our own buffer never reaches the hooks
+                if(FAILED(map_[t](c,m->slice[h].Get(),0,D3D11_MAP_WRITE_DISCARD,0,&out)) || !out.pData) {inst_target_[4].fetch_add(1,std::memory_order_relaxed);return false;}
+                auto* dst=static_cast<std::uint8_t*>(out.pData);std::memset(dst,0,m->bytes);
+                for(std::size_t i=0;i<m->index.size();++i) rig_target::move_record(x[h],m->rows.data()+i*24,reinterpret_cast<float*>(dst+m->index[i]*96ull));
+                unmap_[t](c,m->slice[h].Get(),0);
+            }
+            for(unsigned h=0;h<2;++h) {views[h]=m->slice_view[h].Get();views[h]->AddRef();}
+            inst_target_[0].fetch_add(1,std::memory_order_relaxed);
+            return true;
+        } catch(...) {inst_target_[4].fetch_add(1,std::memory_order_relaxed);return false;}
+    }
     static bool mirror_on() noexcept {return instance_mirror.load(std::memory_order_relaxed);}
 private:
     static void place_instances(ID3D11DeviceContext* c,ID3D11Resource* r,void* data,UINT bytes,Map map,Unmap unmap) noexcept {
@@ -1835,7 +1884,7 @@ private:
     }
 public:
     static std::string instance_json() {return "{\"on\":"+std::string(instance_place.load()?"true":"false")+",\"mirror\":"+std::string(instance_mirror.load()?"true":"false")+",\"mirror_fills\":"+std::to_string(mirror_fills_.load())+",\"mirror_failures\":"+std::to_string(mirror_failures_.load())+",\"swaps\":"+std::to_string(RigMask::instance_swaps())+",\"maps\":"+std::to_string(inst_maps_.load())+",\"records\":"+std::to_string(inst_records_.load())+
-        ",\"placed\":["+std::to_string(inst_placed_[0].load())+","+std::to_string(inst_placed_[1].load())+"],\"order\":["+std::to_string(inst_order_[0].load())+","+std::to_string(inst_order_[1].load())+"]}";}
+        ",\"placed\":["+std::to_string(inst_placed_[0].load())+","+std::to_string(inst_placed_[1].load())+"],\"order\":["+std::to_string(inst_order_[0].load())+","+std::to_string(inst_order_[1].load())+"],\"target\":"+std::string(instance_target.load()?"true":"false")+",\"targets\":["+std::to_string(inst_target_[0].load())+","+std::to_string(inst_target_[1].load())+","+std::to_string(inst_target_[2].load())+","+std::to_string(inst_target_[3].load())+","+std::to_string(inst_target_[4].load())+"]}";}
 private:
     static void poll() noexcept {
         ++poll_frames_;
@@ -1861,6 +1910,7 @@ private:
         weapon_draw::Place::child_rebase.store(!std::filesystem::exists(knobs_/L"legacy-child-place",error),std::memory_order_relaxed); // v1304
         instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error),std::memory_order_relaxed); // v1308
         instance_mirror.store(!std::filesystem::exists(knobs_/L"no-instance-mirror",error),std::memory_order_relaxed); // v1310
+        instance_target.store(!std::filesystem::exists(knobs_/L"no-instance-target",error),std::memory_order_relaxed); // v1315
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)

@@ -3,6 +3,9 @@
 // shape): held part A, a WORLD instance W batched with them (the bolt mesh with the world's bolts), held part B. The mirror keeps A and B
 // and zeroes W. Checks: the mask keys hold class 3 (held, no rig target) over A and B and nothing over W; the engine's view is bound at t0
 // again after the replay; the draw voids no rig target (no_retarget unchanged); without the swap, W would be held too (the v1309 bug).
+// v1315: with per-slice retargeted copies (RigMask::target_instances; here A and B moved up by 0.4 NDC in slice 0, down in slice 1), the
+// mask holds A and B as class 2 (held, rig target) and the taken slice holds them, class 253, at the moved places only; the engine's view is
+// back at t0 and the target is valid (one draw, no miss).
 //   Build/run: build\tmp-check-run.cmd instance_mirror_check /DNOMINMAX
 #define NOMINMAX
 #include <windows.h>
@@ -32,10 +35,10 @@ static std::vector<std::uint32_t> keys_of(ID3D11Device* d,ID3D11DeviceContext* c
     c->Unmap(s.Get(),0);return out;
 }
 static std::uint64_t num(const std::string& j,const char* key) {const auto p=j.find(key);return p==std::string::npos?~0ull:std::strtoull(j.c_str()+p+std::strlen(key),nullptr,10);}
-struct Run {std::vector<std::uint32_t> keys;bool engine_view_back{};std::uint64_t no_retarget{};};
+struct Run {std::vector<std::uint32_t> keys;bool engine_view_back{};std::uint64_t no_retarget{};std::vector<float> slice;bool target_valid{};std::uint64_t target_draws{};};
 // one record: modelMatrixX/Y/Z (world rows; translation in .w) then the previous rows (unused by the depth replay)
 static void record(float* r,float x,float y,float z) {std::memset(r,0,96);r[0]=1;r[3]=x;r[5]=1;r[7]=y;r[10]=1;r[11]=z;std::memcpy(r+12,r,48);}
-static Run run(bool swap) {
+static Run run(bool swap,int target_slice=-1) {
     Run out;
     ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> c;
     if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,nullptr,&c))) {std::printf("FAIL WARP\n");++failures;return out;}
@@ -54,6 +57,8 @@ static Run run(bool swap) {
         CHECK(SUCCEEDED(dev->CreateBuffer(&bd,&init,&b)));D3D11_SHADER_RESOURCE_VIEW_DESC sv{};sv.Format=DXGI_FORMAT_UNKNOWN;sv.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;sv.Buffer.NumElements=3;
         CHECK(SUCCEEDED(dev->CreateShaderResourceView(b.Get(),&sv,&v)));};
     ComPtr<ID3D11Buffer> eb,mb;ComPtr<ID3D11ShaderResourceView> ev,mv;make(engine,eb,ev);make(mirror,mb,mv);
+    std::array<float,72> up=mirror,down=mirror;up[7]+=.4f;up[55]+=.4f;down[7]-=.4f;down[55]-=.4f;   // v1315: the slices' retargeted records
+    ComPtr<ID3D11Buffer> ub,db;ComPtr<ID3D11ShaderResourceView> uv,dv_;make(up,ub,uv);make(down,db,dv_);
     static const char vs_src[]="struct R{float4 x,y,z,px,py,pz;};StructuredBuffer<R> inst:register(t0);"
         "float4 main(uint i:SV_VertexID,uint n:SV_InstanceID):SV_Position{const float2 q[6]={float2(-1,-1),float2(1,-1),float2(-1,1),float2(1,-1),float2(1,1),float2(-1,1)};"
         "const R r=inst[n];const float4 l=float4(q[i]*.15,0,1);return float4(dot(l,r.x),dot(l,r.y),dot(l,r.z),1);}";
@@ -75,12 +80,22 @@ static Run run(bool swap) {
     {d2vr::RigMask::Scope scope(c.Get(),1);
      if(swap) d2vr::RigMask::swap_instances(0,mv.Get());
      d2vr::RigMask::mark_held_untargeted();
+     if(target_slice>=0) {ID3D11ShaderResourceView* const slices[2]{uv.Get(),dv_.Get()};d2vr::RigMask::target_instances(slices);}
      c->DrawInstanced(6,3,0,0);scope.after({3,6,3,0,0,0},draw,targets);}
     {ID3D11ShaderResourceView* now{};c->VSGetShaderResources(0,1,&now);out.engine_view_back=now==ev.Get();if(now) now->Release();}
     out.no_retarget=num(d2vr::RigMask::json(),"\"invalid_by_no_retarget\":")-num(before,"\"invalid_by_no_retarget\":");
     ComPtr<ID3D11ShaderResourceView> mask_srv;ComPtr<ID3D11RenderTargetView> mask_rtv;ComPtr<ID3D11UnorderedAccessView> mask_keys;
     if(!d2vr::RigMask::target(depth.Get(),mask_srv,mask_rtv,&mask_keys) || !mask_keys) {std::printf("FAIL no mask keys\n");++failures;return out;}
     ComPtr<ID3D11Resource> res;mask_keys->GetResource(&res);out.keys=keys_of(dev.Get(),c.Get(),res.Get());
+    if(target_slice>=0) {   // v1315: the slice as FsrTaa takes it (x depth, y class)
+        D3D11_TEXTURE2D_DESC td{};CHECK(d2vr::RigMask::target_desc(depth.Get(),td));
+        D3D11_TEXTURE2D_DESC od=td;od.BindFlags=D3D11_BIND_SHADER_RESOURCE|(td.BindFlags&D3D11_BIND_UNORDERED_ACCESS);ComPtr<ID3D11Texture2D> o;dev->CreateTexture2D(&od,nullptr,&o);
+        out.target_valid=d2vr::RigMask::take_target(c.Get(),depth.Get(),o.Get(),out.target_draws,0,0,static_cast<unsigned>(target_slice));
+        td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> s;dev->CreateTexture2D(&td,nullptr,&s);c->CopyResource(s.Get(),o.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};out.slice.assign(N*N,0.f);
+        if(SUCCEEDED(c->Map(s.Get(),0,D3D11_MAP_READ,0,&m))) {for(UINT y=0;y<N;++y) for(UINT x=0;x<N;++x) out.slice[y*N+x]=static_cast<const float*>(m.pData)[y*(m.RowPitch/4)+x*2+1];c->Unmap(s.Get(),0);}
+        else ++failures;
+    }
     d2vr::RigMask::reset();
     return out;
 }
@@ -95,6 +110,17 @@ int main() {
     CHECK(cls(at(s.keys,-.6f,0))==3 && cls(at(s.keys,.6f,0))==3 && cls(at(s.keys,0,0))==-1);
     CHECK(s.engine_view_back && s.no_retarget==0);
     CHECK(cls(at(w.keys,0,0))==3);   // the whole-draw mark held the world instance too
+    // v1315: the rig target for the instanced held parts
+    for(int k=0;k<2;++k) {
+        const Run t=run(true,k);const float dy=k?-.4f:.4f;
+        const auto in=[&](float x,float y) {const UINT px=static_cast<UINT>((x+1)*.5f*N),py=static_cast<UINT>((1-y)*.5f*N);return t.slice.empty()?0.f:t.slice[py*N+px];};
+        std::printf("target slice %d: mask A class %d, W class %d, B class %d; slice at A+dy %g, B+dy %g, A %g, W+dy %g; valid %s draws %llu; engine view back %s; voided %llu\n",k,
+            cls(at(t.keys,-.6f,0)),cls(at(t.keys,0,0)),cls(at(t.keys,.6f,0)),in(-.6f,dy),in(.6f,dy),in(-.6f,0),in(0,dy),t.target_valid?"yes":"NO",
+            static_cast<unsigned long long>(t.target_draws),t.engine_view_back?"yes":"NO",static_cast<unsigned long long>(t.no_retarget));
+        CHECK(cls(at(t.keys,-.6f,0))==2 && cls(at(t.keys,.6f,0))==2 && cls(at(t.keys,0,0))==-1);
+        CHECK(in(-.6f,dy)==253.f && in(.6f,dy)==253.f && in(-.6f,0)==0.f && in(.6f,0)==0.f && in(0,dy)==0.f);
+        CHECK(t.target_valid && t.target_draws==1 && t.engine_view_back && t.no_retarget==0);
+    }
     if(failures) {std::printf("instance_mirror_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: instance_mirror_check\n");
     return 0;

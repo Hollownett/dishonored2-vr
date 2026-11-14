@@ -56,6 +56,23 @@ inline bool retarget(const M4& vp_f,const M4& v_f,const M4& p_f,const WorldTrack
 inline void apply(const M4& e,const float* rows,float* out) {
     for(int i=0;i<4;++i) for(int j=0;j<4;++j) {double t=0;for(int k=0;k<4;++k) t+=e[i*4+k]*rows[k*4+j];out[i*4+j]=static_cast<float>(t);}
 }
+// v1315: an instanced draw's records (3x4 world rows; its view-projection VP sits in per-view constants) retargeted: X = inverse(VP) * E * VP,
+// so VP * X * M = E * VP * M. Affine when both projections share the depth rows; false when it is not (w would leave 1) or not finite.
+inline bool record_retarget(const M4& e,const float* vp,M4& x) {
+    const M4 v=widen(vp);M4 inv{};
+    if(!inverse(v,inv)) return false;
+    x=mul(mul(inv,e),v);
+    for(double d:x) if(!std::isfinite(d)) return false;
+    // w must stay 1: the rows keep no fourth row, and a w error scales into VP's translation column (hundreds of metres from the origin)
+    return std::abs(x[12])+std::abs(x[13])+std::abs(x[14])<1e-9 && std::abs(x[15]-1.0)<1e-6;
+}
+// one 96-byte record (current then previous 3x4 world rows) moved by x: both halves (a depth-only draw reads the current half)
+inline void move_record(const M4& x,const float* in,float* out) {
+    for(unsigned half=0;half<2;++half) for(int i=0;i<3;++i) for(int j=0;j<4;++j) {
+        double t=j==3?x[i*4+3]:0.0;for(int k=0;k<3;++k) t+=x[i*4+k]*in[half*12+k*4+j];
+        out[half*12+i*4+j]=static_cast<float>(t);
+    }
+}
 // Published at each one-view Setup (render thread), looked up by a draw's view-projection (exact: the classified per-view write's VP).
 class Book {
 public:

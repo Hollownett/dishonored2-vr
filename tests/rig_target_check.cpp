@@ -42,6 +42,25 @@ int main() {
     const M4 got=d2vr::rig_target::mul(e,vpa);double worst=0;
     for(int i=0;i<16;++i) worst=std::max(worst,std::abs(got[i]-vpb[i]));
     std::printf("math: max |E*VP_f - VP_t| %.3g\n",worst);CHECK(worst<1e-9);
+    // 1b (v1315). An instanced draw's record (3x4 world rows, VP in per-view constants) retargeted with X = inverse(VP) * E * VP: as the game,
+    // VP is float and E is made from it; the cameras stand 140 m from the world origin. Every corner of a 20 cm part must land where E * VP * M
+    // puts it (NDC); a target with other depth terms (X not affine) is refused.
+    {const auto fa=pose(120,-70.032,16.6,0.4+cant),fb=pose(120,-70.096,16.6,0.4-cant);
+     const M4 vf=view_of(fa),pf=proj(al_,ar,au,ad,0.3/N,-0.2/N);M4 vpf_d=d2vr::rig_target::mul(pf,vf);float vpf[16];for(int i=0;i<16;++i) vpf[i]=static_cast<float>(vpf_d[i]);
+     M4 ef{};CHECK(d2vr::rig_target::retarget(d2vr::rig_target::widen(vpf),vf,pf,fa,fb,bl,br,bu,bd,ef));
+     M4 x{};CHECK(d2vr::rig_target::record_retarget(ef,vpf,x));
+     // the part 0.45 m ahead of camera A, turned 30 degrees about up; previous half = the same rows 2 cm lower
+     const double yaw=0.4+cant+0.52,cy=std::cos(yaw),sy=std::sin(yaw);
+     float rec[24]={float(cy),float(-sy),0,float(120+0.45*std::cos(0.4+cant))+0.f, float(sy),float(cy),0,float(-70.032+0.45*std::sin(0.4+cant)), 0,0,1,16.5f};
+     std::memcpy(rec+12,rec,48);rec[23]-=0.02f;float moved[24]{};d2vr::rig_target::move_record(x,rec,moved);
+     const M4 want_m=d2vr::rig_target::mul(ef,d2vr::rig_target::widen(vpf));double worst_ndc=0;
+     for(int k=0;k<8;++k) {const double p[4]={(k&1)?.1:-.1,(k&2)?.1:-.1,(k&4)?.1:-.1,1};
+         double wp[4]{},mp[4]{};for(int i=0;i<3;++i) for(int j=0;j<4;++j) {wp[i]+=rec[i*4+j]*p[j];mp[i]+=moved[i*4+j]*p[j];}wp[3]=mp[3]=1;
+         double cw[4]{},cg[4]{};for(int i=0;i<4;++i) for(int j=0;j<4;++j) {cw[i]+=want_m[i*4+j]*wp[j];cg[i]+=double(vpf[i*4+j])*mp[j];}
+         for(int i=0;i<2;++i) worst_ndc=std::max(worst_ndc,std::abs(cw[i]/cw[3]-cg[i]/cg[3]));}
+     std::printf("record retarget: X bottom row %.2g %.2g %.2g %.2g, worst NDC %.3g\n",x[12],x[13],x[14],x[15]-1,worst_ndc);
+     CHECK(worst_ndc<1e-4);   // float rows 140 m from the origin step ~8 um: 1e-4 NDC is 0.1 px at 2496 px
+     M4 bad=ef;for(int j=0;j<4;++j) bad[8+j]*=1.5;CHECK(!d2vr::rig_target::record_retarget(bad,vpf,x));}   // other depth terms: w leaves 1
     for(const bool legacy:{false,true}) { // v1286: the UAV replay (default) and the v1285 replay (build/legacy-rig-replay)
     d2vr::RigMask::legacy_replay=legacy;std::printf("replay path: %s\n",legacy?"legacy":"uav");
     // WARP

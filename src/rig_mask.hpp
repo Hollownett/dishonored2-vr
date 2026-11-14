@@ -186,6 +186,14 @@ public:
         tl_swap_view_=view;tl_swap_slot_=slot;if(view) {view->AddRef();instance_swaps_.fetch_add(1,std::memory_order_relaxed);}
     }
     static std::uint64_t instance_swaps() noexcept {return instance_swaps_.load(std::memory_order_relaxed);}
+    // v1315: the instanced held mesh of this Scope HAS a rig target after all: per slice, a copy of its instance buffer whose held records are
+    // retargeted (ObjectMotion::instance_target_views), bound at the swap slot for the slice draws. The part is class 253 like any held draw.
+    static void target_instances(ID3D11ShaderResourceView* const (&views)[2]) noexcept {
+        if(!tl_held_ || !tl_swap_view_ || !views[0] || !views[1]) return;
+        for(unsigned k=0;k<2;++k) {if(tl_slice_view_[k]) tl_slice_view_[k]->Release();tl_slice_view_[k]=views[k];tl_slice_view_[k]->AddRef();}
+        tl_no_target_=false;tl_target_[0]=tl_target_[1]=true;instanced_targeted_.fetch_add(1,std::memory_order_relaxed);
+    }
+    static std::uint64_t instanced_targeted() noexcept {return instanced_targeted_.load(std::memory_order_relaxed);}
 private:
     struct SwapView {
         ID3D11DeviceContext* c{};ID3D11ShaderResourceView* engine{};bool on{};
@@ -195,7 +203,18 @@ private:
         }
         ~SwapView() {if(on) {c->VSSetShaderResources(tl_swap_slot_,1,&engine);if(engine) engine->Release();}}
     };
-    static void clear_swap() noexcept {if(tl_swap_view_) {tl_swap_view_->Release();tl_swap_view_=nullptr;}}
+    // v1315: the slice draws of an instanced held mesh bind its retargeted records (the engine's view restored after the last slice);
+    // any other draw binds ObjectMotion's retargeted rows (TargetBind)
+    struct SliceSwap {
+        ID3D11DeviceContext* c{};ID3D11ShaderResourceView* engine{};bool on{};
+        explicit SliceSwap(ID3D11DeviceContext* context) noexcept:c(context) {if(c && tl_slice_view_[0] && tl_slice_view_[1]) {c->VSGetShaderResources(tl_swap_slot_,1,&engine);on=true;}}
+        bool bind(unsigned k,TargetBind b,TargetRestore r) const noexcept {
+            if(on) {c->VSSetShaderResources(tl_swap_slot_,1,&tl_slice_view_[k]);return true;}
+            return b && r && b(c,k);
+        }
+        ~SliceSwap() {if(on) {c->VSSetShaderResources(tl_swap_slot_,1,&engine);if(engine) engine->Release();}}
+    };
+    static void clear_swap() noexcept {if(tl_swap_view_) {tl_swap_view_->Release();tl_swap_view_=nullptr;}for(auto*& v:tl_slice_view_) if(v) {v->Release();v=nullptr;}}
 public:   // v1306 diagnostics: this one-view draw writes the scene depth the mask is made for
     static void mark_target(bool ok) noexcept {tl_target_[0]=tl_target_[1]=ok;} // false: no retarget for this render (counted at the replay)
     static void mark_target(bool ok0,bool ok1) noexcept {tl_target_[0]=ok0;tl_target_[1]=ok1;} // v1199: per slice (hypothesis eye)
@@ -556,6 +575,7 @@ private:
         no_dsv_{},msaa_{},failures_{};
     inline static thread_local bool tl_rig_{};
     inline static thread_local bool tl_no_target_{};inline static std::atomic<std::uint64_t> instanced_held_{};   // v1307
+    inline static thread_local ID3D11ShaderResourceView* tl_slice_view_[2]{};   // v1315
     inline static thread_local ID3D11ShaderResourceView* tl_swap_view_{};inline static thread_local UINT tl_swap_slot_{};inline static std::atomic<std::uint64_t> instance_swaps_{},instanced_targeted_{};   // v1310
     // v1166: this draw's rig model (0, 1 arms, 2 body), its current palette view (t1, held), whether t0/t1 are that model's previous/current
     inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
@@ -1032,14 +1052,14 @@ private:
         // the slices: the same draw per hypothesis eye with its retargeted rows (v1199), depth off: InterlockedMax is the nearest-wins
         if(tl_target_[0] || tl_target_[1]) {
             const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);
-            bool drew=false;
+            bool drew=false;const SliceSwap slices(c);   // v1315
             for(unsigned k=0;k<2;++k) {
-                if(tl_target_[k] && bind && restore && bind(c,k)) {
+                if(tl_target_[k] && slices.bind(k,bind,restore)) {
                     if(!drew) c->OMSetDepthStencilState(off.Get(),0);
                     c->PSSetShader(slice_ps[k].Get(),nullptr,0);draw(c,a);drew=true;
                 } else {target_slice_misses_[k].fetch_add(1,std::memory_order_relaxed);target_misses_frame_[k].fetch_add(1,std::memory_order_relaxed);}
             }
-            if(drew && restore) restore(c);
+            if(drew && restore && !slices.on) restore(c);
             if(drew) {target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
             else target_misses_.fetch_add(1,std::memory_order_relaxed);
         } else if(target_on.load(std::memory_order_relaxed) && !tl_no_target_) {for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed);no_retarget_[tl_held_?1:0].fetch_add(1,std::memory_order_relaxed);no_retarget_frame_.fetch_add(1,std::memory_order_relaxed);} // a rig/held draw without its retarget (v1295: counted)
@@ -1093,15 +1113,15 @@ private:
         // v1190: the same draw in the stale eye's target camera (retargeted per-instance rows), nearest wins among the replayed draws
         if((tl_target_[0] || tl_target_[1]) && trg_rtv[0] && trg_rtv[1] && trg_dsv[0] && trg_dsv[1]) {
             const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);
-            bool drew=false;
+            bool drew=false;const SliceSwap slices(c);   // v1315
             for(unsigned k=0;k<2;++k) { // v1199: one replay per hypothesis slice
                 ID3D11RenderTargetView* t=trg_rtv[k].Get();
-                if(tl_target_[k] && bind && restore && bind(c,k)) {
+                if(tl_target_[k] && slices.bind(k,bind,restore)) {
                     targets(c,1,&t,trg_dsv[k].Get());c->PSSetShader(trg_ps.Get(),nullptr,0);c->OMSetDepthStencilState(nearest.Get(),0);
                     draw(c,a);drew=true;
                 } else {target_slice_misses_[k].fetch_add(1,std::memory_order_relaxed);target_misses_frame_[k].fetch_add(1,std::memory_order_relaxed);}
             }
-            if(drew && restore) restore(c);
+            if(drew && restore && !slices.on) restore(c);
             if(drew) {target_draws_.fetch_add(1,std::memory_order_relaxed);target_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
             else target_misses_.fetch_add(1,std::memory_order_relaxed);
         } else if(target_on.load(std::memory_order_relaxed) && !tl_no_target_) {for(auto& m:target_misses_frame_) m.fetch_add(1,std::memory_order_relaxed);no_retarget_[tl_held_?1:0].fetch_add(1,std::memory_order_relaxed);no_retarget_frame_.fetch_add(1,std::memory_order_relaxed);} // a rig/held draw without its retarget (v1295: counted)

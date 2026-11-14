@@ -1833,7 +1833,7 @@ static std::string weapon_draw_json() {
     text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"kids\":[";for(unsigned h=0;h<2;++h) text+=std::string(h?",":"")+"{\"native\":["+std::to_string(weapon_kids_last[h][0].load())+","+std::to_string(weapon_kids_max[h][0].load())+"],\"copy\":["+
-        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"instance_place\":"+d2vr::ObjectMotion::instance_json();text+=",\"instance_rows\":"+d2vr::weapon_draw::Place::inst_json();text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
+        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"instanced_targeted\":"+std::to_string(d2vr::RigMask::instanced_targeted());text+=",\"instance_place\":"+d2vr::ObjectMotion::instance_json();text+=",\"instance_rows\":"+d2vr::weapon_draw::Place::inst_json();if(!diagnostics_off) {const std::string u=d2vr::weapon_draw::Place::take_unmatched_log();if(!u.empty()) {std::ofstream f(output_directory/L"instance-unmatched.txt",std::ios::app);f<<u;}}text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
     text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
@@ -3222,13 +3222,21 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     // so any instance count and any company is safe. build/no-instance-mirror: the v1309 rule (twin weapons, 2 instances, whole draw).
     if(instances>=2 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig() && held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {
         if(d2vr::ObjectMotion::mirror_on()) {
-            std::array<ID3D11ShaderResourceView*,16> views{};context->VSGetShaderResources(0,16,views.data());bool found=false;
+            std::array<ID3D11ShaderResourceView*,16> views{};context->VSGetShaderResources(0,16,views.data());ID3D11Resource* found{};
             for(UINT i=0;i<views.size();++i) if(views[i]) {
                 if(!found) {ID3D11Resource* r{};views[i]->GetResource(&r);
-                    if(r) {if(ID3D11ShaderResourceView* mirror=d2vr::ObjectMotion::held_instance_view(r)) {d2vr::RigMask::swap_instances(i,mirror);mirror->Release();found=true;}r->Release();}}
+                    if(r) {if(ID3D11ShaderResourceView* mirror=d2vr::ObjectMotion::held_instance_view(r)) {d2vr::RigMask::swap_instances(i,mirror);mirror->Release();found=r;r->AddRef();}r->Release();}}
                 views[i]->Release();
             }
-            if(found) d2vr::RigMask::mark_held_untargeted();   // v1310: held in the mask, class 251 (no rig target: AFW lands it without, v1312)
+            if(found) {
+                d2vr::RigMask::mark_held_untargeted();   // v1310: held in the mask, class 251 (no rig target: AFW lands it without, v1312)
+                if(d2vr::RigMask::target_wanted()) {   // v1315: its records retargeted per slice: a rig target after all, class 253
+                    ID3D11ShaderResourceView* slices[2]{};
+                    if(d2vr::ObjectMotion::instance_target_views(context,found,slices)) d2vr::RigMask::target_instances(slices);
+                    for(auto* v:slices) if(v) v->Release();
+                }
+                found->Release();
+            }
         } else if(instances==2 && d2vr::weapon_draw::Place::twin_weapons()) d2vr::RigMask::mark_held_untargeted();
     }
     if(d2vr::RigMask::draw_is_held() || d2vr::RigMask::draw_depth()) held_instances[(d2vr::RigMask::draw_is_held()?0:4)+std::min<UINT>(instances,4u)-1u].fetch_add(1,std::memory_order_relaxed);   // v1306 diagnostics

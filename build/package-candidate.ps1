@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $rel  = 'C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags'   # release line: source of gitignored binaries (FSR4/OpenXR/dinput8 dlls)
-$note = 'Test candidate v1292: hound bodies held by hand like a prop; grip out of reach keeps the game Carry hold. Not simulated; not headset-tested.'
+$note = 'Test candidate v1315 = v1313 + a summoned copy crossbow''s instanced parts (ring, mechanism, bolt) get the rig target: their instance records are retargeted per eye, so the rebuilt eye lands them on their exact silhouette like the weapon body (they no longer trail the crossbow while moving). Lab + sim checked; not headset-tested.'
 $name = "d2vr_render_probe_arm_v$Version.dll"
 $dll  = Join-Path $repo "build\$name"
 if ($Version -notmatch '^\d+$') { throw "version must be digits" }
@@ -59,6 +59,8 @@ Copy-Item $exe "$repo\launcher\dist\DishonoredVRLauncher.exe" -Force
 $out = "$repo\launcher\dist\DishonoredVRLauncher.exe"
 Write-Host "EXE: $out  ($([math]::Round((Get-Item $out).Length/1MB,1)) MB)"
 Write-Host "EXE sha256: $((Get-FileHash $out -Algorithm SHA256).Hash.ToLower())"
+
+
 
 
 
