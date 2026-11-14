@@ -10,11 +10,25 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <type_traits>
+
+#define D2VR_WEAPON_CONTACT_V1301 1   // tests/weapon_contact_lab.cpp builds against this header and the v1298 one
 
 namespace d2vr {
 
+// v1301: what a blade cast hit, as the caller classifies it. contact_step holds planes only for world geometry (static world and static or
+// keyframed entities); an NPC or a loose dynamic body is a surface for one answer (v1288's memoryless response); the player's own body and an
+// item either hand holds are never surfaces for the blade (no plane, no news about what lies behind them).
+enum class BladeHit : std::uint8_t {world,npc,dynamic,self,held};
 // One world-query result. normal points out of the surface toward free space.
-struct CollisionHit {Vec3 point{},normal{};double fraction{};std::uintptr_t entity{};std::uint16_t material{0xffff};}; // material: physics material id (0xffff none)
+struct CollisionHit {Vec3 point{},normal{};double fraction{};std::uintptr_t entity{};std::uint16_t material{0xffff};BladeHit kind{BladeHit::world};}; // material: physics material id (0xffff none)
+// v1301: one completed blade cast (the strict query): the request id it was posted with, the segment the game thread actually swept and its
+// closest hit (none: clear). The query returns the latest completion; WeaponCollision folds each id once.
+struct BladeAnswer {std::uint64_t id{};Vec3 from{},to{};std::optional<CollisionHit> hit;};
+// v1301: what the caller knows about this frame's continuity (WeaponCollision::begin, before update): any change but a consecutive frame of the
+// same epoch, weapon and play space drops the side's planes and correction (ContactReset), so nothing glides in from a stale pose.
+struct ContactFrame {std::uint64_t frame{},epoch{},weapon{};double now{};Vec3 root{};double heading{};bool live{true};};
+enum class ContactReset : unsigned {epoch,equip,gap,teleport,turn,paused,jump,count};
 struct CollisionEvent {Vec3 point{},normal{};double speed{};std::uintptr_t entity{};bool blade{};unsigned side{};std::uint16_t material{0xffff};};
 struct CollisionHaptic {float amplitude{},seconds{};};
 struct CollisionConfig {
@@ -35,6 +49,16 @@ struct CollisionConfig {
     double follow_speed=1.5;      // m/s: the fastest the follower moves the drawn tip (legacy_step's release_speed)
     double guard_speed=2.;        // m/s: the fastest the slack guard moves the drawn tip beyond the follower (a far target - a new plane, a push - is a
                                   // quick glide, never a one-frame jump)
+    // v1301 (user after v1295-v1298: "the weapon sits unstable in the hands and sometimes jumps out of the hands"):
+    double max_turn=.61;          // rad (35 deg): the drawn blade's rotation from the controller's never exceeds this (the invariant, with max_push)
+    double max_push=.10;          // m: the drawn grip's push from the grip passed in (the hand clamp's) never exceeds this
+    double return_speed=3.;       // m/s: the follower's tip cap while it returns to the controller (nothing left to hold it off)
+    double settle=.001;           // m: returning, the correction (push + rotation x reach) this small is dropped: exact tracking again
+    double max_dt=1./30;          // s: the follower's step (and a plane's ageing) never takes more of a hitch than this
+    double jump=.35;              // m: a frame step of the grip or of the play space past this is a discontinuity (a teleport), not motion
+    double snap_turn=.2;          // rad: a heading step past this in one frame is a snap turn (hand_clamp.hpp's snap_turn_radians)
+    double gap_seconds=.25;       // s: a side not updated for this long (a cutscene, collision off) starts over (hand_clamp.hpp's gap_seconds; a
+                                  // skipped frame - tracking lost - is begin()'s frame counter; a hitch the update ran through keeps the side)
 };
 struct CollisionResult {
     Vec3 grip{};                  // clamped grip to render
@@ -87,6 +111,26 @@ inline bool align_weapon_blade(WorldTrackedPose& pose,Vec3 blade_direction,bool 
 // Cost: a mid-blade hit is a contact for up to three frames before the tip constraint holds it (legacy: one); the weapon reaches a far target
 // at 1.5-3.5 m/s instead of in one frame. build/legacy-weapon-contact restores legacy_step (set_legacy). The build/no-hand-clamp palm path
 // (update_with_palm) is always legacy_step.
+// v1301 (user after v1295-v1298, stereo and performance mode: "the weapon sits unstable in the hands and sometimes jumps out of the hands"; his
+// session: contact engaged 227 / 253 s, one-frame jumps 150 / 403 mm, turns 29 / 45 deg; lab tests/weapon_contact_lab.cpp with the game
+// thread's real answer cadence). v1289 read the blade query as "last frame's post, answered once": the game's lambda returned the slot's last
+// answer up to 100 ms old whatever segment it answered, and a scope that ran slower than the render frames (half rate: 19-65 reversals a second
+// on a flat wall held still, lab) folded one answer two or three times, judged a slid cast as the controller's and a stale hit as fresh;
+// alternating per FRAME, a game thread at half rate answered only one kind (only slid casts: nothing ever refuted a plane). A plane the blade
+// rested on never aged, so a plane whose surface had gone (a table's edge slid past, an NPC walked on, a teleport) held the weapon until a
+// controller answer refuted it; nothing reset at a snap turn, teleport, equip change, cutscene or tracking loss (the world-space correction
+// was applied to the new pose: lab 450-570 ms glides back), a hitch's dt (to 0.1 s) moved the tip up to 350 mm in a frame, and the correction
+// had no bound (lab free play 98 deg). Now:
+//  - strict answers: the query takes a request id (the low bit: slid) and returns the last completion with its id and swept segment; each id is
+//    folded once and judged against its own segment; a frame with nothing new is no news, never a clear cast. The kinds alternate per answer.
+//  - a plane ages from its last confirmation: a hit on it, or a controller answer whose hit lies before it along the cast (shadowed: still
+//    pressed past it). Nothing else keeps it; plane_seconds after the controller stops confirming it, it is gone.
+//  - hit classes (BladeHit): planes for world geometry only; an NPC or a dynamic body for one answer; the player and held items never.
+//  - begin(ContactFrame) before update: an epoch, weapon or play-space discontinuity, a gap, a pause drops the side (ContactReset counters).
+//  - the invariant: the drawn blade's rotation from the controller's <= max_turn and its grip push <= max_push, enforced on the target and on
+//    the follower (clamp_fires); returning, the follower moves at return_speed and drops a residue under `settle`; its step uses at most max_dt.
+// Cost: a press deeper than the bound allows leaves the blade partly inside (it never leaves the hand instead); a corner's second wall is found
+// one answer later at a slow game rate.
 struct WeaponContactStats {   // per hand since the probe started (status JSON weapon_collision.contact)
     std::uint64_t frames{};          // frames in contact (the response moved the weapon, or the contact/hold flag)
     std::uint64_t plane_changes{};   // in contact: the surface the response holds the weapon off changed (normal turned > 8 deg, appeared, went)
@@ -95,24 +139,53 @@ struct WeaponContactStats {   // per hand since the probe started (status JSON w
     double max_jump_m{},max_turn_deg{};  // in contact: the largest frame-to-frame change of the drawn tip's offset from the tip the controller's blade
                                          // has at the grip passed in (the hand clamp's), and of the blade's rotation from the controller's: what the
                                          // blade response moved, not the controller or the hand clamp
+    // v1301:
+    std::uint64_t armed_frames{};        // updates with a blade (contact share = frames / armed_frames)
+    std::uint64_t answers{},clear{};     // completed blade casts folded (each once); those that hit nothing
+    std::array<std::uint64_t,5> hits{};  // completed casts that hit, by BladeHit: world, npc, dynamic, self, held
+    double max_dev_m{},max_dev_deg{};    // the drawn weapon's largest deviation from the controller's at the grip passed in (tip distance; blade angle)
+    std::uint64_t clamp_fires{};         // frames the bound (max_turn, max_push) held the correction
+    std::array<std::uint64_t,static_cast<std::size_t>(ContactReset::count)> resets{};   // by ContactReset: epoch, equip, gap, teleport, turn, paused, jump
 };
 class WeaponCollision {
-    struct Plane {Vec3 point{},normal{};double age{};bool active{},refuted{},contested{};};
+    struct Plane {Vec3 point{},normal{};double age{};bool active{},refuted{},contested{},transient{};};
     static constexpr std::size_t plane_capacity=4;
     struct Side {Vec3 shift{},prev_grip{},prev_tip{};bool has_prev{},contact{};double since_hit=1e9,since_haptic=1e9;
         // contact_step
         std::array<Plane,plane_capacity> planes{};std::size_t plane_count{};
-        Vec3 cast_from{},cast_to{};bool has_cast{};                // the segment the next answer describes (posted this frame)
+        Vec3 cast_from{},cast_to{};bool has_cast{};                // a fixture query's (2 arguments): the segment its next answer describes
         Vec3 rot{},rot_rate{},push{},push_rate{};bool engaged{};   // the follower: drawn blade = rotate(controller's, rot), grip + push
         Vec3 target_rot{},target_push{};bool last_cast_slid{};    // last frame's target; whether the segment posted last frame was the slid blade
-        Vec3 last_dir{},last_tip{},last_grip{};bool has_last{};};   // last frame's drawn blade (its start, tip and axis)
-    struct Trace {Vec3 offset{},corr{},tip{},step{},normal{};bool contact{},has_normal{},has{};};   // stats bookkeeping (survives reset)
+        bool post_slid{};std::uint64_t folded{};                  // v1301: the kind to post (flips per answer); the newest request id folded
+        Vec3 last_dir{},last_tip{},last_grip{};bool has_last{};    // last frame's drawn blade (its start, tip and axis)
+        Vec3 last_tip_off{},last_push{};};   // v1301: last frame's drawn correction: its tip minus the controller's tip, its grip push
+    struct Trace {Vec3 offset{},corr{},tip{},step{},normal{};bool contact{},has_normal{},has{};};   // stats bookkeeping
+    struct Seen {ContactFrame f{};bool has{};};
     CollisionConfig cfg_;Side sides_[2];bool legacy_{};
-    WeaponContactStats stats_[2]{};Trace trace_[2]{};
+    WeaponContactStats stats_[2]{};Trace trace_[2]{};Seen seen_[2]{};std::uint64_t serial_[2]{};
     static Vec3 clamp_len(Vec3 v,double m) {const double l=length(v);return l>m&&l>0?v*(m/l):v;}
+    template<class Query> static constexpr bool strict_query=std::is_invocable_v<Query&,Vec3,Vec3,std::uint64_t>;
 public:
     explicit WeaponCollision(CollisionConfig c={}) : cfg_(c) {}
-    void reset(unsigned side) {if(side<2)sides_[side]=Side{};}
+    // Every request id posted before a reset is stale after it (serial_ never restarts).
+    void reset(unsigned side) {if(side<2) {sides_[side]=Side{};sides_[side].folded=(serial_[side]<<1)|1u;trace_[side]=Trace{};}}
+    void reset(unsigned side,ContactReset why) {if(side>1) return;++stats_[side].resets[static_cast<std::size_t>(why)];reset(side);}
+    // v1301: this frame's continuity, before update (the hand-clamp path; legacy_step keeps v1288's state). See ContactFrame.
+    void begin(unsigned side,const ContactFrame& f) {
+        if(side>1 || legacy_) return;
+        auto& k=seen_[side];
+        if(k.has) {
+            std::optional<ContactReset> why;
+            if(f.epoch!=k.f.epoch) why=ContactReset::epoch;
+            else if(f.weapon!=k.f.weapon) why=ContactReset::equip;
+            else if(f.frame!=k.f.frame+1 || !(f.now-k.f.now<=cfg_.gap_seconds)) why=ContactReset::gap;
+            else if(!f.live) {if(k.f.live) why=ContactReset::paused;else reset(side);}   // a world UI casts nothing: kept empty, counted once
+            else if(!(length(f.root-k.f.root)<=cfg_.jump)) why=ContactReset::teleport;
+            else if(!(std::abs(std::remainder(f.heading-k.f.heading,2*3.14159265358979323846))<=cfg_.snap_turn)) why=ContactReset::turn;
+            if(why) reset(side,*why);
+        }
+        k.f=f;k.has=true;
+    }
     bool in_contact(unsigned side) const {return side<2&&sides_[side].contact;}
     void set_legacy(bool on) {legacy_=on;}   // build/legacy-weapon-contact: legacy_step for the hand-clamp path too
     bool legacy() const {return legacy_;}
@@ -124,7 +197,9 @@ public:
     // Blade only since physical hands Task 5: the chest-anchored palm sweep is gone (the hand clamp sweeps from the previous drawn hand).
     // blade_offset: segment start relative to the grip (a pistol barrel sits above and behind the fist); blade_radius:
     // the weapon's half thickness, already used as the sweep radius by the query, so a thick barrel stops at its surface.
-    // query(Vec3 from,Vec3 to) -> std::optional<CollisionHit> (first solid along the segment).
+    // query(Vec3 from,Vec3 to) -> std::optional<CollisionHit> (first solid along the segment; a fixture: each call answers the segment of the
+    // call before), or v1301's strict query(Vec3 from,Vec3 to,std::uint64_t id) -> std::optional<BladeAnswer> (post with that id, return the
+    // latest completion; legacy_step reads its hit as v1288 read the slot's last hit).
     template<class Query> CollisionResult update(unsigned side,double dt,Vec3 grip,Vec3 dir,double blade_length,Query&& query,
                                                  Vec3 blade_offset={},double blade_radius=0) {
         return step(side,dt,nullptr,grip,dir,blade_length,query,blade_offset,blade_radius);
@@ -155,6 +230,8 @@ private:
         const Vec3 raw=dir*(1/length(dir));
         const Vec3 drawn=out.blade_dir && length(*out.blade_dir)>1e-9?*out.blade_dir*(1/length(*out.blade_dir)):raw;
         const Vec3 offset=(out.grip-grip)+(drawn-raw)*reach,corr=rotation_between(raw,drawn),tip=out.grip+blade_offset+drawn*reach;
+        if(reach>0) ++st.armed_frames;
+        st.max_dev_m=std::max(st.max_dev_m,length(offset));st.max_dev_deg=std::max(st.max_dev_deg,length(corr)*57.29577951308232);
         Vec3 step{};
         if(contact) {
             ++st.frames;st.seconds+=dt;if(sides_[side].engaged) st.damped_seconds+=dt;
@@ -211,7 +288,7 @@ private:
             }
         }
     }
-    struct Target {Vec3 push{},dir{};double cost{};};
+    struct Target {Vec3 push{},dir{};double cost{};bool within{true};};   // v1301 within: out of every plane after the bound
     // The constraint a plane puts on the blade: its tip (`at` metres along it) at least `off` off the plane (legacy_step's: 1 cm plus the weapon's
     // radius).
     struct Row {Vec3 n,p;double at,off;};
@@ -235,7 +312,10 @@ private:
         const auto cost=[&](Vec3 push,Vec3 dir) {
             const Vec3 grip=g0+push,tip=grip+dir*reach;
             double c=length(tip-raw_tip)+length(push);
-            if(s.has_last) c+=cfg_.stay_weight*(length(tip-s.last_tip)+length(grip-s.last_grip));
+            // v1301: the move from the last drawn CORRECTION, not from the last drawn world pose: carried by the rig (a jump, stairs: 2-10 cm a frame)
+            // or by a fast hand, the world-space term favoured the candidate nearest where the weapon was, behind the hand (it trailed, then jumped).
+            // A still controller: the same as v1289's term.
+            if(s.has_last) c+=cfg_.stay_weight*(length((tip-raw_tip)-s.last_tip_off)+length(push-s.last_push));
             return c;
         };
         const auto feasible=[&](Vec3 push,Vec3 dir,double tolerance) {
@@ -244,13 +324,23 @@ private:
         };
         if(feasible({},d0,1e-9)) return Target{{},d0,cost({},d0)};
         std::optional<Target> best;
+        const double cap=std::min(cfg_.max_shift,cfg_.max_push);
         const auto consider=[&](Vec3 push,Vec3 dir,double tolerance) {
             const double l=length(dir);
             if(!finite(push) || !finite(dir) || !(l>.5)) return;
             dir=dir*(1/l);
             if(!feasible(push,dir,tolerance)) return;
+            // v1301: scored as it will be drawn, within max_turn and max_push: of candidates past the bound (lab: a convex edge or a thin shelf
+            // slid across, 43-62 deg needed) the one nearest the drawn side wins, instead of the clamp of whichever is cheapest unclamped (9-20
+            // reversals a second as that flipped between sides).
+            // One the bound still keeps out of every plane beats any it leaves inside (lab wall: a 10 cm push that left the sword 83 mm deep
+            // was cheaper than the 32 deg turn that resolves it); among those it leaves inside, the motion and the stay term decide (a penalty
+            // on the depth left made two saturated candidates flip with the jitter: 18-20 reversals a second at a thin shelf).
+            push=clamp_len(push,cap);
+            if(const Vec3 rot=rotation_between(d0,dir);length(rot)>cfg_.max_turn) dir=rotated(d0,rot*(cfg_.max_turn/length(rot)));
+            const bool within=feasible(push,dir,std::max(tolerance,1e-4));
             const double c=cost(push,dir);
-            if(!best || c<best->cost) best=Target{push,dir,c};
+            if(!best || (within && !best->within) || (within==best->within && c<best->cost)) best=Target{push,dir,c,within};
         };
         // The straight-in share: each plane the controller's blade is past pushes the grip back by its depth times a share that falls smoothly
         // from 1 (blade along the normal) to 0 (|tangent| push_to and more).
@@ -260,7 +350,7 @@ private:
             if(!(depth>0)) continue;
             push=push+r[k].n*(depth*(1-smoothstep(cfg_.push_from,cfg_.push_to,length(d0-r[k].n*dot(d0,r[k].n)))));
         }
-        push=clamp_len(push,cfg_.max_shift);
+        push=clamp_len(push,cap);   // v1301: the rotations are found from a push the bound allows
         std::array<Vec3,plane_capacity> n{};std::array<double,plane_capacity> c{};
         for(std::size_t k=0;k<m;++k) {n[k]=r[k].n;c[k]=(r[k].off-dot(g0+push-r[k].p,r[k].n))/r[k].at;}
         const Vec3 last_dir=s.has_last?s.last_dir:d0;
@@ -270,14 +360,18 @@ private:
         for(int pass=0;pass<32;++pass) for(std::size_t k=0;k<m;++k) {const double g=gap(r[k],g0,x,d0);if(g<0) x=x-r[k].n*g;}
         const Vec3 full=clamp_len(x,cfg_.max_shift);
         consider(full,d0,1e-4);
-        return best?*best:Target{full,d0,cost(full,d0)};   // nothing keeps the blade out (planes in conflict, the push capped): the push as far as it goes
+        return best?*best:Target{clamp_len(full,cap),d0,cost(clamp_len(full,cap),d0),false};   // nothing keeps the blade out (planes in conflict, the push capped): the push as far as it goes
     }
     // A hit on a held surface (parallel normal, within 1 cm) refreshes it; else a new plane, in place of the oldest one the blade does not rest on
     // when full (else the oldest). Its index.
-    static std::size_t add_plane(Side& s,Vec3 point,Vec3 normal) {
+    static std::size_t add_plane(Side& s,Vec3 point,Vec3 normal,bool transient) {
         for(std::size_t i=0;i<s.plane_count;++i) {
             auto& q=s.planes[i];
-            if(dot(q.normal,normal)>.99 && std::abs(dot(point-q.point,q.normal))<.01) {q.point=point;q.normal=normal;q.age=0;return i;}
+            if(dot(q.normal,normal)>.99 && std::abs(dot(point-q.point,q.normal))<.01) {
+                // v1301: a re-hit moves a held world surface a third of the way (an edge's rounded normal turns a few degrees with every hit:
+                // through the push share's smoothstep that wobbled a crossbow's push +-10 mm at a shelf's edge, 7 reversals a second, lab)
+                const Vec3 n=transient?normal:q.normal*(2./3)+normal*(1./3);
+                q.point=transient?point:q.point+(point-q.point)*(1./3);q.normal=n*(1/length(n));q.age=0;q.transient=transient;return i;}
         }
         std::size_t slot=s.plane_count;
         if(slot>=plane_capacity) {
@@ -288,8 +382,34 @@ private:
                 if((a.active || a.contested)==(b.active || b.contested) && a.age>b.age) slot=i;
             }
         } else ++s.plane_count;
-        s.planes[slot]=Plane{point,normal,0,false,false,false};
+        s.planes[slot]=Plane{point,normal,0,false,false,false,transient};
         return slot;
+    }
+    // v1301: the side's blade answer for this frame. Strict: post with a fresh id (low bit: slid), fold the completion the query returns once (an id
+    // already folded, or one posted before a reset, is no news). A fixture's query (2 arguments) answers the segment posted by the call before.
+    template<class Query> std::optional<BladeAnswer> fetch(unsigned side,Query& query,Vec3 a,Vec3 b,bool slid,bool& answered_slid) {
+        auto& s=sides_[side];
+        if constexpr(strict_query<Query>) {
+            const std::uint64_t id=((++serial_[side])<<1)|(slid?1u:0u);
+            auto r=query(a,b,id);
+            if(!r || !(r->id>s.folded)) return std::nullopt;
+            s.folded=r->id;answered_slid=(r->id&1u)!=0;
+            return r;
+        } else {
+            std::optional<BladeAnswer> r;
+            const std::optional<CollisionHit> hit=query(a,b);
+            if(s.has_cast) {r=BladeAnswer{0,s.cast_from,s.cast_to,hit};answered_slid=s.last_cast_slid;}
+            s.cast_from=a;s.cast_to=b;s.has_cast=true;s.last_cast_slid=slid;
+            return r;
+        }
+    }
+    // legacy_step's hit (v1288's): the slot's last answer whatever it answers; the player's own body is no hit.
+    template<class Query> static std::optional<CollisionHit> latest_hit(Query& query,Vec3 a,Vec3 b) {
+        if constexpr(strict_query<Query>) {
+            const std::optional<BladeAnswer> r=query(a,b,std::uint64_t{0});
+            if(!r || !r->hit || r->hit->kind==BladeHit::self) return std::nullopt;
+            return r->hit;
+        } else return query(a,b);
     }
     template<class Keep> static void keep_planes(Side& s,Keep&& keep) {
         std::size_t kept=0;
@@ -299,27 +419,36 @@ private:
     template<class Query> CollisionResult contact_step(unsigned side,double dt,Vec3 grip,Vec3 dir,double blade_length,Query& query,Vec3 blade_offset,
                                                        double blade_radius,std::optional<Vec3>& normal) {
         CollisionResult out{};out.grip=grip;
-        auto& s=sides_[side];
+        // v1301: a grip that moved farther in one frame than a hand moves (a teleport or snap turn begin() was not told about) starts over.
+        if(sides_[side].has_prev && !(length(grip-sides_[side].prev_grip)<=cfg_.jump)) reset(side,ContactReset::jump);
+        auto& s=sides_[side];auto& st=stats_[side];
         const double reach=blade_length>0?blade_length:0.;
         const Vec3 d0=dir*(1/length(dir)),g0=grip+blade_offset,tip=g0+dir*blade_length;
+        const double step_dt=std::min(dt,cfg_.max_dt);   // v1301: the follower's step (a hitch's whole gap moved the tip up to 350 mm in a frame)
         // Events and haptics: legacy_step's rule (what the controller's blade meets).
         Vec3 vtip{};
         if(s.has_prev) vtip=(tip-s.prev_tip)*(1/dt);
         s.prev_grip=grip;s.prev_tip=tip;s.has_prev=true;
         s.since_hit+=dt;s.since_haptic+=dt;
-        std::optional<CollisionHit> hit,best;double speed=0;
-        // The cast posted this frame (its answer comes back next frame): the controller's blade; while the follower holds the blade off planes,
-        // every other one is the slid blade instead - last frame's target on this frame's controller - which meets the next surface along the
-        // drawn blade directly (a corner's second wall: the closest-hit cast along the controller's blade reports only the first; the hand clamp's
-        // slid sweeps, hand_clamp.hpp, do the same).
+        std::optional<CollisionHit> best;double speed=0;
+        // The cast posted this frame (its answer comes back later): the controller's blade; while the follower holds the blade off planes, every
+        // other one is the slid blade instead - last frame's target on this frame's controller - which meets the next surface along the drawn blade
+        // directly (a corner's second wall: the closest-hit cast along the controller's blade reports only the first; the hand clamp's slid sweeps,
+        // hand_clamp.hpp, do the same). v1301: the kind flips when an answer comes back, not every frame (a game thread at half the render rate
+        // answered only one of the two).
         Vec3 cast_a=g0,cast_b=tip;bool slid=false;
-        if(reach>0 && s.engaged && s.plane_count && !s.last_cast_slid && length(s.target_rot)+length(s.target_push)>0) {
+        if(reach>0 && s.engaged && s.plane_count && s.post_slid && length(s.target_rot)+length(s.target_push)>0) {
             cast_a=g0+s.target_push;cast_b=cast_a+rotated(d0,s.target_rot)*reach;slid=true;
         }
-        if(reach>0) {
-            hit=query(cast_a,cast_b);
-            if(hit) {const double pen=dot(hit->point-tip,hit->normal)+blade_radius;if(pen>0) {best=hit;speed=std::max(0.,-dot(vtip,hit->normal));}}
-        }
+        std::optional<BladeAnswer> answer;bool answer_slid=false;
+        if(reach>0) answer=fetch(side,query,cast_a,cast_b,slid,answer_slid);
+        // What the answer met. A filtered thing (the player, a held item) or an unusable hit says nothing about what lies past it: no news.
+        const std::optional<CollisionHit> hit=answer?answer->hit:std::nullopt;
+        const bool hit_ok=hit && finite(hit->point) && finite(hit->normal) && length(hit->normal)>.5;
+        const bool surface=hit_ok && (hit->kind==BladeHit::world || hit->kind==BladeHit::npc || hit->kind==BladeHit::dynamic);
+        const bool news=answer && (!hit || surface);
+        if(answer) {++st.answers;if(!hit) ++st.clear;else ++st.hits[std::min<std::size_t>(static_cast<std::size_t>(hit->kind),st.hits.size()-1)];}
+        if(surface) {const double pen=dot(hit->point-tip,hit->normal)+blade_radius;if(pen>0) {best=hit;speed=std::max(0.,-dot(vtip,hit->normal));}}
         if(best) {
             if(!s.contact) {
                 out.event=CollisionEvent{best->point,best->normal,speed,best->entity,true,side,best->material};
@@ -331,35 +460,41 @@ private:
             }
             s.contact=true;s.since_hit=0;
         } else if(s.since_hit>cfg_.hold_seconds) s.contact=false;
-        // Fold in the answer: it describes the segment posted last frame (s.cast_from -> s.cast_to).
+        // Fold in the answer: it describes its own segment (answer->from -> answer->to).
         std::optional<std::size_t> fresh;bool contest=false;
         if(!(reach>0)) {s.plane_count=0;s.has_cast=false;}
         else {
             const double rc=cast_radius(blade_radius);
-            for(std::size_t i=0;i<s.plane_count;++i) {auto& q=s.planes[i];q.refuted=q.contested=false;if(!q.active) q.age+=dt;}
-            const bool hit_ok=hit && finite(hit->point) && finite(hit->normal) && length(hit->normal)>.5;
-            const Vec3 hn=hit_ok?hit->normal*(1/length(hit->normal)):Vec3{};
-            // Only the controller's blade judges: a slid cast passes the planes it slides on by design, and where a thin face ends (a shelf's
-            // 2 cm front) its clear answer said nothing about the face and refuted it every other frame (lab: 40 reversals/s). It only adds.
-            if(s.has_cast && !s.last_cast_slid) {
-                const Vec3 span_vector=s.cast_to-s.cast_from;const double span=length(span_vector);
-                double at=1;
-                if(hit_ok) {
-                    if(const auto t=crossing(s.cast_from,s.cast_to,hit->point,hn,rc)) at=*t;
-                    else at=span>1e-9?std::clamp(dot(hit->point-s.cast_from,span_vector)/(span*span),0.,1.):0.;
+            // v1301: every plane ages from its last confirmation (v1289: one the blade rested on never aged - nothing but a controller answer could
+            // end it, and at a slow game rate none came).
+            for(std::size_t i=0;i<s.plane_count;++i) {auto& q=s.planes[i];q.refuted=q.contested=false;q.age+=step_dt;}   // a hitch does not age them all out at once
+            if(news) {
+                // An NPC's or a loose body's plane lives from one answer to the next (v1288's memoryless response): it moves.
+                keep_planes(s,[](const Plane& q) {return !q.transient;});
+                const Vec3 hn=surface?hit->normal*(1/length(hit->normal)):Vec3{};
+                // Only the controller's blade judges: a slid cast passes the planes it slides on by design, and where a thin face ends (a shelf's
+                // 2 cm front) its clear answer said nothing about the face and refuted it every other frame (lab: 40 reversals/s). It only adds.
+                if(!answer_slid) {
+                    const Vec3 span_vector=answer->to-answer->from;const double span=length(span_vector);
+                    double at=1;
+                    if(surface) {
+                        if(const auto t=crossing(answer->from,answer->to,hit->point,hn,rc)) at=*t;
+                        else at=span>1e-9?std::clamp(dot(hit->point-answer->from,span_vector)/(span*span),0.,1.):0.;
+                    }
+                    for(std::size_t i=0;i<s.plane_count;++i) {
+                        auto& q=s.planes[i];
+                        const auto t=crossing(answer->from,answer->to,q.point,q.normal,rc);
+                        if(!t) continue;                                  // the cast never reached its region: no news
+                        if(!surface) q.refuted=true;                      // a clear cast passed through it
+                        else if((at-*t)*span>.002) {if(q.active) {q.contested=true;contest=true;} else q.refuted=true;}   // passed through it before the hit
+                        else q.age=0;                                     // v1301: at or beyond the hit: the controller's blade is still pressed past it
+                    }
                 }
-                for(std::size_t i=0;i<s.plane_count;++i) {
-                    auto& q=s.planes[i];
-                    const auto t=crossing(s.cast_from,s.cast_to,q.point,q.normal,rc);
-                    if(!t) continue;                                  // the cast never reached its region: no news
-                    if(!hit_ok) q.refuted=true;                       // a clear cast passed through it
-                    else if((at-*t)*span>.002) {if(q.active) {q.contested=true;contest=true;} else q.refuted=true;}   // passed through it before the hit
-                }
-            }
-            keep_planes(s,[&](const Plane& q) {return !q.refuted && (q.age<=cfg_.plane_seconds || q.active || q.contested);});
-            if(hit_ok) fresh=add_plane(s,hit->point,hn);
-            if(fresh && s.planes[*fresh].contested) {s.planes[*fresh].contested=false;contest=false;for(std::size_t i=0;i<s.plane_count;++i) contest=contest || s.planes[i].contested;}
-            s.cast_from=cast_a;s.cast_to=cast_b;s.has_cast=true;s.last_cast_slid=slid;
+                keep_planes(s,[&](const Plane& q) {return !q.refuted && (q.age<=cfg_.plane_seconds || q.contested);});
+                if(surface) fresh=add_plane(s,hit->point,hn,hit->kind!=BladeHit::world);
+                if(fresh && s.planes[*fresh].contested) {s.planes[*fresh].contested=false;contest=false;for(std::size_t i=0;i<s.plane_count;++i) contest=contest || s.planes[i].contested;}
+            } else keep_planes(s,[&](const Plane& q) {return q.age<=cfg_.plane_seconds;});
+            if(answer) s.post_slid=!answer_slid;   // the next post is the other kind
         }
         // The target: every plane held but the contested ones; or, contested, the blade staying on what it rests on (that hit's surface dropped)
         // when that costs less (solve's cost: the weapon's move from the controller's plus stay_weight times its move from the last drawn).
@@ -381,17 +516,27 @@ private:
              const double depth=-gap(row(q,reach,blade_radius),g0,{},d0);
              if(use[i] && reach>0 && dot(g0-q.point,q.normal)>0 && depth>deepest) {deepest=depth;normal=q.normal;}}}
         // Follow: critically damped toward the target's correction, exact for this dt (x(t) = target + (c1 + c2 t) e^-wt).
-        const Vec3 rot_target=rotation_between(d0,target.dir),push_target=target.push;
+        // v1301: the invariant - the drawn blade's rotation from the controller's <= max_turn, its grip push <= max_push - holds on the target here
+        // and on the follower below (clamp_fires: the frames it held). A deeper press leaves the blade partly inside; the weapon stays in the hand.
+        Vec3 rot_target=rotation_between(d0,target.dir),push_target=target.push;bool bounded=false;
+        if(length(rot_target)>cfg_.max_turn) {rot_target=rot_target*(cfg_.max_turn/length(rot_target));bounded=true;}
+        if(length(push_target)>cfg_.max_push) {push_target=clamp_len(push_target,cfg_.max_push);bounded=true;}
         s.target_rot=rot_target;s.target_push=push_target;
         const bool settled_target=length(rot_target)==0 && length(push_target)==0;
-        if(s.engaged || !settled_target) {
-            const double w=1/cfg_.tau_seconds,e=std::exp(-w*dt);
-            const auto follow=[&](Vec3& x,Vec3& v,Vec3 goal) {const Vec3 c1=x-goal,c2=v+c1*w;x=goal+(c1+c2*dt)*e;v=(v-c2*(w*dt))*e;};
+        if(s.engaged && settled_target) {
+            // v1301: nothing holds the weapon off any more: straight back into the hand at return_speed, a residue under `settle` dropped (v1289's
+            // damped approach waited for 1e-6: its tail kept the weapon off the hand 0.3-0.6 s after the controller had left the surface).
+            const double offset=length(s.push)+length(s.rot)*reach,step=cfg_.return_speed*step_dt;
+            if(offset<=step || offset<cfg_.settle) {s.rot={};s.rot_rate={};s.push={};s.push_rate={};s.engaged=false;}
+            else {const double k=(offset-step)/offset;s.rot=s.rot*k;s.push=s.push*k;s.rot_rate={};s.push_rate={};}
+        } else if(!settled_target) {
+            const double w=1/cfg_.tau_seconds,e=std::exp(-w*step_dt);
+            const auto follow=[&](Vec3& x,Vec3& v,Vec3 goal) {const Vec3 c1=x-goal,c2=v+c1*w;x=goal+(c1+c2*step_dt)*e;v=(v-c2*(w*step_dt))*e;};
             const Vec3 rot_before=s.rot,push_before=s.push;
             follow(s.rot,s.rot_rate,rot_target);follow(s.push,s.push_rate,push_target);
             // The follower's tip moves at most follow_speed (a far target - a new surface, a push - is a steady glide, then the damped approach).
             if(reach>0 || length(s.push-push_before)>0) {
-                const double travel=length((s.push-push_before)+(rotated(d0,s.rot)-rotated(d0,rot_before))*reach),limit=cfg_.follow_speed*dt;
+                const double travel=length((s.push-push_before)+(rotated(d0,s.rot)-rotated(d0,rot_before))*reach),limit=cfg_.follow_speed*step_dt;
                 if(travel>limit) {const double k=limit/travel;s.rot=rot_before+(s.rot-rot_before)*k;s.push=push_before+(s.push-push_before)*k;s.rot_rate=s.rot_rate*k;s.push_rate=s.push_rate*k;}
             }
             s.engaged=true;
@@ -408,15 +553,15 @@ private:
                     if(depth(s.rot+(rot_target-s.rot)*mid,s.push+(push_target-s.push)*mid)>cfg_.slack) lo=mid;else hi=mid;}
                 // At most guard_speed of tip travel this frame (the rest next frame, from rest: no overshoot).
                 const auto tip_at=[&](double u) {return g0+s.push+(push_target-s.push)*u+rotated(d0,s.rot+(rot_target-s.rot)*u)*reach;};
-                const double travel=length(tip_at(hi)-tip_at(0)),limit=cfg_.guard_speed*dt;
+                const double travel=length(tip_at(hi)-tip_at(0)),limit=cfg_.guard_speed*step_dt;
                 if(travel>limit) hi*=limit/travel;
                 s.rot=s.rot+(rot_target-s.rot)*hi;s.push=s.push+(push_target-s.push)*hi;s.rot_rate={};s.push_rate={};
             }
             s.push=clamp_len(s.push,cfg_.max_shift);
-            if(settled_target && length(s.rot)<1e-6 && length(s.push)<1e-6 && length(s.rot_rate)<1e-4 && length(s.push_rate)<1e-4) {
-                s.rot={};s.rot_rate={};s.push={};s.push_rate={};s.engaged=false;
-            }
+            if(length(s.rot)>cfg_.max_turn) {s.rot=s.rot*(cfg_.max_turn/length(s.rot));bounded=true;}
+            if(length(s.push)>cfg_.max_push) {s.push=clamp_len(s.push,cfg_.max_push);bounded=true;}
         }
+        if(bounded) ++st.clamp_fires;
         const Vec3 drawn=s.engaged?rotated(d0,s.rot):d0;
         if(s.engaged) {
             out.shift=s.push;out.grip=grip+s.push;
@@ -424,11 +569,12 @@ private:
         }
         out.contact=s.contact || s.engaged;
         // The planes the blade rests on: the target's tip within contact_margin of their standoff (the target, not the damped pose, which lags it).
-        // They do not age; only a clear cast or a lost contest takes them.
+        // v1301: only the contest rule reads this (one the blade rests on is contested by a hit past it, not refuted); it ages like any other.
         const Vec3 drawn_tip=g0+(s.engaged?s.push:Vec3{})+drawn*reach;
         for(std::size_t i=0;i<s.plane_count;++i) {auto& q=s.planes[i];
             q.active=reach>0 && dot(g0-q.point,q.normal)>0 && gap(row(q,reach,blade_radius),g0,target.push,target.dir)<=cfg_.contact_margin;}
         s.last_dir=drawn;s.last_tip=drawn_tip;s.last_grip=g0+(s.engaged?s.push:Vec3{});s.has_last=true;
+        s.last_tip_off=drawn_tip-tip;s.last_push=s.engaged?s.push:Vec3{};
         return out;
     }
     template<class Query> CollisionResult legacy_step(unsigned side,double dt,const Vec3* anchor,Vec3 grip,Vec3 dir,double blade_length,Query& query,
@@ -443,7 +589,7 @@ private:
         s.since_hit+=dt;s.since_haptic+=dt;
         Vec3 target{};std::optional<CollisionHit> best;bool blade=false;double speed=0;
         // Palm (update_with_palm only): sweep anchor->grip; stop one radius off the surface.
-        if(anchor) if(const auto h=query(*anchor,grip)) {
+        if(anchor) if(const auto h=latest_hit(query,*anchor,grip)) {
             const double pen=dot(h->point-grip,h->normal)+cfg_.palm_radius;
             // Only a surface at the hand pushes it. A hit far up the sweep means the body anchor is inside geometry
             // (crouching under the real head height): pushing the hand then made the sword jump out of it.
@@ -452,7 +598,7 @@ private:
         // Blade: sweep from the (palm-corrected) grip to the tip; push out by tip penetration.
         if(blade_length>0) {
             const Vec3 g=grip+target+blade_offset,t=g+dir*blade_length;
-            if(const auto h=query(g,t)) {
+            if(const auto h=latest_hit(query,g,t)) {
                 const double pen=dot(h->point-t,h->normal)+blade_radius;
                 if(pen>0) {
                     best=h;blade=true;speed=std::max(0.,-dot(vtip,h->normal));

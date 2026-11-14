@@ -940,9 +940,9 @@ class NativeInteractionAim {
                         const auto cast=[&](const NativeCastExclusion* exclusion) {
                             const auto result=NativeWorldTrace::sphere_query_checked(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
                                 reinterpret_cast<NativeWorldTrace::Construct>(self->base_+NativeWorldTrace::sphere_ctor_rva),*world,seg.from,seg.to,seg.radius,
-                                slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,exclusion,clamp_slot(slot));
+                                slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,exclusion,clamp_slot(slot) || slot==1);
                             if(!result.complete)segments[side][slot].valid=false;
-                            return result.hit;   // only the clamp's slots are ranked by body class
+                            return result.hit;   // the clamp's slots are ranked by body class; v1301: the blade's slot 1 reads it too (WeaponCollision: a dynamic body is no plane)
                         };
                         if(seg.exclude) {
                             ++clamp_exclude_casts_;
