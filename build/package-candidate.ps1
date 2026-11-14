@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $rel  = 'C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags'   # release line: source of gitignored binaries (FSR4/OpenXR/dinput8 dlls)
-$note = 'Test candidate v1316 = v1315 + the instanced parts of two crossbows (ring, mechanism, bolt) are drawn at the same hand pose as the weapon body: the engine fills its instance buffer before the render publishes the new hand pose, so each record is now carried by its hand to the draw''s publish. Lab checked; status instance_place.fill_lag/redraws show it working; not headset-tested.'
+$note = 'Test candidate v1317 = v1316 + the crossbow upgrade rings stay on the weapon while the hand moves: a part''s place on the weapon is learned in motion (it was learned only at exact rest, which a tracked hand never is), instanced records are carried by their place on the hand taken at the fill, and an instanced draw without a shader layout no longer counts as the arm (it switched off the other eye''s exact silhouette in 19 % of frames). Lab + sim checked; not headset-tested.'
 $name = "d2vr_render_probe_arm_v$Version.dll"
 $dll  = Join-Path $repo "build\$name"
 if ($Version -notmatch '^\d+$') { throw "version must be digits" }

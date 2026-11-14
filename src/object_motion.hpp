@@ -1681,6 +1681,8 @@ public:
     static bool draw_unread() noexcept {return tl_unread_;}
     inline static thread_local bool tl_placed_{};   // v1307: this draw was placed in a hand (a held thing's draw, any pass)
     static bool draw_placed() noexcept {return tl_placed_;}
+    // v1317: the VS this context draws with has a reflected per-instance layout (ObjectMotion can read and retarget its rows); after DrawScope
+    static bool draw_has_layout(ID3D11DeviceContext* c) noexcept {const ContextState* s=state(c);return s && s->layout;}
 private:
     static ContextState* before(ID3D11DeviceContext* c) noexcept {
         tl_unread_=false;tl_placed_=false;
@@ -1777,11 +1779,13 @@ private:
         // v1316: the fill (every record, held ones placed), the held records as the fill placed them with their hand and current half, the
         // publish the fill placed them at and the publish `rows`/`data` now hold, and the copy the engine's draw reads when a newer publish came
         std::vector<std::uint8_t> data;std::vector<float> fill_rows;std::vector<std::uint8_t> side,order;std::uint32_t fill_frame{},rows_frame{};
+        std::vector<weapon_draw::Mat> local,model;std::vector<std::uint8_t> local_ok;   // v1317: each held record's place on its hand at the fill, and that hand's thing
         Microsoft::WRL::ComPtr<ID3D11Buffer> draw;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> draw_view;UINT draw_bytes{};};
     inline static std::array<Mirror,8> mirrors_{};inline static std::mutex mirror_m_;inline static std::uint64_t mirror_use_{};
     inline static std::atomic<bool> instance_mirror{true};inline static std::atomic<std::uint64_t> mirror_fills_{},mirror_failures_{};
     static void fill_mirror(ID3D11DeviceContext* c,ID3D11Resource* r,const void* data,UINT bytes,const std::uint8_t* held,bool any,Map map,Unmap unmap,
-                            const std::vector<std::uint8_t>& sides,const std::vector<std::uint8_t>& order,std::uint32_t frame) noexcept {
+                            const std::vector<std::uint8_t>& sides,const std::vector<std::uint8_t>& order,std::uint32_t frame,
+                            const std::vector<weapon_draw::Mat>& locals,const std::vector<weapon_draw::Mat>& models,const std::vector<std::uint8_t>& local_ok) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mirror_m_);
             Mirror* m=nullptr;for(auto& e:mirrors_) if(e.engine==r) {m=&e;break;}
@@ -1803,6 +1807,7 @@ private:
             if(FAILED(map(c,m->buffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&out)) || !out.pData) {m->held=false;mirror_failures_.fetch_add(1,std::memory_order_relaxed);return;}
             auto* dst=static_cast<std::uint8_t*>(out.pData);const auto* src=static_cast<const std::uint8_t*>(data);
             m->index.clear();m->rows.clear();m->side=sides;m->order=order;m->fill_frame=m->rows_frame=frame;   // v1316
+            m->local=locals;m->model=models;m->local_ok=local_ok;   // v1317
             m->data.assign(static_cast<const std::uint8_t*>(data),static_cast<const std::uint8_t*>(data)+bytes);
             for(UINT k=0;k<bytes/96;++k) {if(held[k]) {std::memcpy(dst+k*96ull,src+k*96ull,96);m->index.push_back(k);const auto* f=reinterpret_cast<const float*>(src+k*96ull);m->rows.insert(m->rows.end(),f,f+24);}
                 else std::memset(dst+k*96ull,0,96);}
@@ -1846,6 +1851,7 @@ public:
     // Place::latest_frame(), the body's rule), once per publish per fill; the mask mirror and the rig-target slices take the same rows.
     // AddRef'd; null when the fill's placement is current (or nothing to carry). build/legacy-instance-fill-place: v1315.
     inline static std::atomic<bool> instance_redraw{true};
+    inline static std::array<std::atomic<std::uint64_t>,5> inst_carry_fail_{};   // v1317: a record kept at its fill's placement: [publish gone, hand not bound, another thing, republished, no place at the fill]
     inline static std::array<std::atomic<std::uint64_t>,4> inst_lag_{},inst_redraw_{};   // lag: draws whose fill was placed at [0] this publish, [1] one before, [2] older, [3] newer; redraw: [0] copies, [1] records placed again, [2] kept (no match), [3] failures
     static ID3D11ShaderResourceView* current_instances(ID3D11DeviceContext* c,ID3D11Resource* r) noexcept {
         if(!c || !r || !instance_redraw.load(std::memory_order_relaxed)) return nullptr;
@@ -1855,16 +1861,18 @@ public:
         try {
             std::lock_guard<std::mutex> lock(mirror_m_);
             Mirror* m=nullptr;for(auto& e:mirrors_) if(e.engine==r) {m=&e;break;}
-            if(!m || !m->held || !m->buffer || m->index.empty() || m->data.size()<m->bytes || m->fill_rows.size()!=m->index.size()*24 || m->side.size()!=m->index.size()) return nullptr;
+            if(!m || !m->held || !m->buffer || m->index.empty() || m->data.size()<m->bytes || m->fill_rows.size()!=m->index.size()*24 || m->side.size()!=m->index.size() ||
+               m->local.size()!=m->index.size() || m->model.size()!=m->index.size() || m->local_ok.size()!=m->index.size()) return nullptr;
             const std::int64_t lag=static_cast<std::int64_t>(frame)-static_cast<std::int64_t>(m->fill_frame);
             inst_lag_[lag==0?0:lag==1?1:lag>1?2:3].fetch_add(1,std::memory_order_relaxed);
             if(lag==0) return nullptr;
             if(m->rows_frame!=frame) {   // every draw of this publish reads one placement
                 for(std::size_t i=0;i<m->index.size();++i) {
-                    const float* o=m->fill_rows.data()+i*24;const unsigned order=m->order[i];
+                    const unsigned order=m->order[i];
                     weapon_draw::Mat mm=weapon_draw::identity(),pp=weapon_draw::identity();
-                    for(std::size_t k=0;k<12;++k) {mm[k]=o[(order?12:0)+k];pp[k]=o[(order?0:12)+k];}
-                    if(!weapon_draw::Place::carry(m->side[i],m->fill_frame,frame,mm,pp)) {inst_redraw_[2].fetch_add(1,std::memory_order_relaxed);continue;}   // the fill's placement stays
+                    // v1317: the record's place on its hand taken at the fill (no look-up of the fill's publish, which may be gone by a late draw)
+                    const unsigned why=m->local_ok[i]?weapon_draw::Place::at_hand(m->side[i],frame,m->local[i],m->model[i],mm,pp):5u;
+                    if(why) {inst_carry_fail_[std::min(why,5u)-1].fetch_add(1,std::memory_order_relaxed);inst_redraw_[2].fetch_add(1,std::memory_order_relaxed);continue;}   // the fill's placement stays
                     float* row=m->rows.data()+i*24;
                     for(std::size_t k=0;k<12;++k) {row[(order?12:0)+k]=static_cast<float>(mm[k]);row[(order?0:12)+k]=static_cast<float>(pp[k]);}
                     std::memcpy(m->data.data()+m->index[i]*96ull,row,96);
@@ -1941,6 +1949,7 @@ private:
         inst_maps_.fetch_add(1,std::memory_order_relaxed);
         thread_local std::array<std::uint8_t,4096> held{};bool any=false;
         thread_local std::vector<std::uint8_t> sides,orders;sides.clear();orders.clear();   // v1316: per held record its hand and current half
+        thread_local std::vector<weapon_draw::Mat> locals,models;thread_local std::vector<std::uint8_t> local_ok;locals.clear();models.clear();local_ok.clear();   // v1317
         const std::uint32_t frame=weapon_draw::Place::latest_frame();   // v1316: one publish for the whole fill (recorded with it)
         const UINT n=std::min<UINT>(bytes/96,4096u);
         // v1316: the mapped memory (write-combined: slow to read) is read once; the records are placed in a copy, the held ones written back
@@ -1956,6 +1965,8 @@ private:
                 const int side=weapon_draw::Place::place_world(m,p,frame);
                 if(side<0) continue;
                 sides.push_back(static_cast<std::uint8_t>(side));orders.push_back(static_cast<std::uint8_t>(order));
+                {weapon_draw::Mat b{},model{},inv_b{};const bool ok=weapon_draw::Place::bound_of(frame,static_cast<unsigned>(side),b,model) && weapon_draw::inverse(b,inv_b);   // v1317
+                 locals.push_back(ok?weapon_draw::mul(inv_b,m):weapon_draw::identity());models.push_back(model);local_ok.push_back(ok?1:0);}
                 for(std::size_t i=0;i<12;++i) {cur[i]=static_cast<float>(m[i]);prv[i]=static_cast<float>(p[i]);}
                 std::memcpy(static_cast<std::uint8_t*>(data)+k*96ull,f,96);   // the engine's buffer gets the placed record
                 inst_placed_[static_cast<unsigned>(side)].fetch_add(1,std::memory_order_relaxed);inst_order_[order].fetch_add(1,std::memory_order_relaxed);
@@ -1964,12 +1975,13 @@ private:
             }
         }
         inst_records_.fetch_add(n,std::memory_order_relaxed);
-        if(instance_mirror.load(std::memory_order_relaxed)) fill_mirror(c,r,copy.data(),n*96,held.data(),any,map,unmap,sides,orders,frame);   // v1310 (the engine's rewritten records)
+        if(instance_mirror.load(std::memory_order_relaxed)) fill_mirror(c,r,copy.data(),n*96,held.data(),any,map,unmap,sides,orders,frame,locals,models,local_ok);   // v1310 (the engine's rewritten records)
     }
 public:
     static std::string instance_json() {return "{\"on\":"+std::string(instance_place.load()?"true":"false")+",\"mirror\":"+std::string(instance_mirror.load()?"true":"false")+",\"mirror_fills\":"+std::to_string(mirror_fills_.load())+",\"mirror_failures\":"+std::to_string(mirror_failures_.load())+",\"swaps\":"+std::to_string(RigMask::instance_swaps())+",\"maps\":"+std::to_string(inst_maps_.load())+",\"records\":"+std::to_string(inst_records_.load())+
         ",\"placed\":["+std::to_string(inst_placed_[0].load())+","+std::to_string(inst_placed_[1].load())+"],\"order\":["+std::to_string(inst_order_[0].load())+","+std::to_string(inst_order_[1].load())+"],\"target\":"+std::string(instance_target.load()?"true":"false")+",\"targets\":["+std::to_string(inst_target_[0].load())+","+std::to_string(inst_target_[1].load())+","+std::to_string(inst_target_[2].load())+","+std::to_string(inst_target_[3].load())+","+std::to_string(inst_target_[4].load())+"]"+
-        ",\"redraw\":"+std::string(instance_redraw.load()?"true":"false")+",\"fill_lag\":["+std::to_string(inst_lag_[0].load())+","+std::to_string(inst_lag_[1].load())+","+std::to_string(inst_lag_[2].load())+","+std::to_string(inst_lag_[3].load())+"],\"redraws\":["+std::to_string(inst_redraw_[0].load())+","+std::to_string(inst_redraw_[1].load())+","+std::to_string(inst_redraw_[2].load())+","+std::to_string(inst_redraw_[3].load())+"]}";}
+        ",\"redraw\":"+std::string(instance_redraw.load()?"true":"false")+",\"fill_lag\":["+std::to_string(inst_lag_[0].load())+","+std::to_string(inst_lag_[1].load())+","+std::to_string(inst_lag_[2].load())+","+std::to_string(inst_lag_[3].load())+"],\"redraws\":["+std::to_string(inst_redraw_[0].load())+","+std::to_string(inst_redraw_[1].load())+","+std::to_string(inst_redraw_[2].load())+","+std::to_string(inst_redraw_[3].load())+"]"+
+        ",\"kept_why\":["+std::to_string(inst_carry_fail_[0].load())+","+std::to_string(inst_carry_fail_[1].load())+","+std::to_string(inst_carry_fail_[2].load())+","+std::to_string(inst_carry_fail_[3].load())+","+std::to_string(inst_carry_fail_[4].load())+"]}";}
 private:
     static void poll() noexcept {
         ++poll_frames_;
@@ -1993,6 +2005,7 @@ private:
         held_shadow_place.store(!std::filesystem::exists(knobs_/L"no-held-shadow-place",error),std::memory_order_relaxed); // v1238
         weapon_draw::Place::cull.store(!std::filesystem::exists(knobs_/L"no-weapon-near-cull",error),std::memory_order_relaxed); // v1284 (B1)
         weapon_draw::Place::child_rebase.store(!std::filesystem::exists(knobs_/L"legacy-child-place",error),std::memory_order_relaxed); // v1304
+        weapon_draw::Place::kid_motion.store(!std::filesystem::exists(knobs_/L"legacy-kid-learn",error),std::memory_order_relaxed); // v1317
         instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error),std::memory_order_relaxed); // v1308
         instance_mirror.store(!std::filesystem::exists(knobs_/L"no-instance-mirror",error),std::memory_order_relaxed); // v1310
         instance_target.store(!std::filesystem::exists(knobs_/L"no-instance-target",error),std::memory_order_relaxed); // v1315

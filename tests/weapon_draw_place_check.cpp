@@ -394,6 +394,35 @@ static void v1304_lagged_kid_lab() {
     CHECK(placed==9 && worst_on<2e-4 && worst_off>1e-2);
 }
 
+// v1317: a tracked hand is never at rest (the sims' scripted hands are): the copy's part (moved by the engine from the previous F) and a
+// native's part (on this F) must find their place on the weapon while the hand moves with a changing step, and be drawn at B * L
+static void v1317_kid_motion_lab() {
+    const Mat l=rigid(rot(.3,.1,.2,.6),.05,.02,-.03),mesh=rigid(identity(),.01,0,.005),g=rigid(identity(),.02,0,0);
+    const auto f_at=[](int n) {const double t=n+.35*std::sin(.9*n);   // 1.5-4 cm a frame, the step never the same twice
+        return rigid(rot(0,0,1,.5+.02*t),-91.7+.03*t,-92.4+.01*t+.004*std::sin(1.7*n),4.9+.02*t);};
+    double worst[2][2]{};int placed[2][2]{};
+    for(int lagged=0;lagged<2;++lagged) for(int pass=0;pass<2;++pass) {
+        Binder::clear();Place::clear();Place::kid_motion.store(pass==0);
+        const std::uintptr_t kid=0x7171+static_cast<std::uintptr_t>(lagged*2+pass);
+        for(int n=0;n<14;++n) {
+            const Mat f=f_at(n),e=mul(lagged && n>0?f_at(n-1):f,l),b=mul(f,g);
+            const std::uint32_t frame=1900u+static_cast<std::uint32_t>(n+20*(lagged*2+pass));
+            Place::stage(0,Place::kind_weapon,&e,1,false,&kid);
+            publish_frame(frame,f,true,b,Mat{},false,Mat{},80+n);
+            if(n<4) continue;   // three publishes to learn
+            const Wp& w=frames_seen.at(frame);
+            const auto cur=floats(mul(w.vp[1],mul(e,mesh)));std::array<float,16> o{},q{};bool own=false;
+            const Result r=Place::place_one_view(w.vp[1],w.vp[1],cur.data(),o.data(),q.data(),own,nullptr,0);
+            if(r.side!=0) continue;
+            worst[lagged][pass]=std::max(worst[lagged][pass],worst_rows(o.data(),floats(mul(w.vp[1],mul(mul(b,l),mesh))).data()));++placed[lagged][pass];
+        }
+    }
+    Place::kid_motion.store(true);
+    std::printf("v1317 parts in motion: copy part (lagging) placed %d err %.2e (v1316 rule %.2e), native part placed %d err %.2e (v1316 %.2e); %s\n",
+        placed[1][0],worst[1][0],worst[1][1],placed[0][0],worst[0][0],worst[0][1],Place::kid_json().c_str());
+    CHECK(placed[1][0]==10 && placed[0][0]==10 && worst[1][0]<2e-4 && worst[0][0]<2e-4 && worst[1][1]>1e-2);
+}
+
 // ---- v1308: a held weapon's part drawn with direct instancing: its record's world rows (the part's frame E) are placed at B * inverse(F) * E,
 // its previous rows with the previous frame's delta; a record of anything else is left alone
 static void v1308_instance_record_lab() {
@@ -421,12 +450,20 @@ static void v1316_carry_lab() {
     for(int n=0;n<2;++n) {const Mat f=f_at(n),e=mul(f,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1800u+static_cast<std::uint32_t>(n),f,true,mul(f,g),Mat{},false,Mat{},70+n);}
     Mat m=mul(f_at(1),l),p=mul(f_at(0),l);const int side=Place::place_world(m,p,1801u);   // the fill, before 1802 is published
     {const Mat f=f_at(2),e=mul(f,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1802u,f,true,mul(f,g),Mat{},false,Mat{},72);}
-    const Mat at_fill=m;const bool carried=Place::carry(0,1801u,1802u,m,p);
+    const Mat at_fill=m;
+    // v1317: the record's place on its hand taken at the fill, drawn at the later publish (no look-up of the fill's publish)
+    Mat b_fill{},model_fill{},inv_b{};const bool have_b=Place::bound_of(1801u,0,b_fill,model_fill) && inverse(b_fill,inv_b);
+    Mat m_hand{},p_hand{};const unsigned why=have_b?Place::at_hand(0,1802u,mul(inv_b,at_fill),model_fill,m_hand,p_hand):9u;
+    const bool carried=Place::carry(0,1801u,1802u,m,p);
+    double hand_err=0;for(int i=0;i<12;++i) hand_err=std::max(hand_err,std::max(std::abs(m_hand[i]-m[i]),std::abs(p_hand[i]-p[i])));
+    std::printf("v1317 at_hand: why %u, |at_hand - carry| %.2e\n",why,hand_err);
+    CHECK(have_b && why==0 && hand_err<1e-9);
     const Mat want=mul(mul(f_at(2),g),l),want_prev=mul(mul(f_at(0),g),l);
     double err=0,err_prev=0,lag=0;for(int i=0;i<12;++i) {err=std::max(err,std::abs(m[i]-want[i]));err_prev=std::max(err_prev,std::abs(p[i]-want_prev[i]));}
     lag=std::hypot(at_fill[3]-want[3],std::hypot(at_fill[7]-want[7],at_fill[11]-want[11]));
     {const Mat other=rigid(rot(1,0,0,.9),-80.0,-90.0,4.9),e=mul(other,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1803u,other,true,mul(other,g),Mat{},false,Mat{},73);}
     Mat m2=at_fill,p2=at_fill;const bool other_thing=Place::carry(0,1801u,1803u,m2,p2);
+    {Mat m3{},p3{};CHECK(Place::at_hand(0,1803u,mul(inv_b,at_fill),model_fill,m3,p3)==3u);}   // v1317: another thing in that hand
     std::printf("v1316 carry: fill side %d, %.1f mm behind the body at the fill, carried %d err %.2e previous err %.2e, other thing carried %d\n",side,lag*1000,carried,err,err_prev,other_thing);
     CHECK(side==0 && lag>.01 && carried && err<1e-4 && err_prev<1e-4 && !other_thing);
 }
@@ -787,6 +824,7 @@ int main() {
     v1304_lagged_kid_lab();
     v1308_instance_record_lab();
     v1316_carry_lab();
+    v1317_kid_motion_lab();
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

@@ -973,12 +973,26 @@ public:
                     if(!kk) for(auto& c:kidk_[s]) if(!c.id) {c={};c.id=id;kk=&c;break;}
                     if(!kk) continue;
                     const Mat l0=mul(inverse_model,e);Mat l=l0;
-                    if(kk->ok && have_prior) {
+                    // v1317 (user, v1316 headset: the copy's upgrade rings trail the crossbow while it moves and catch up at rest): the place was
+                    // learned only at EXACT rest (weapon and part unchanged to 0.01 mm), which a tracked hand never is - the sims' scripted
+                    // hands are - so a copy's parts kept l0, one frame of the hand's motion behind. Learned in motion too: a part the engine
+                    // moved from the previous F keeps l1 (relative to that F) exactly constant from publish to publish while l0 changes with
+                    // every change of the hand's step (and the other way round for a part on this F); the constant one is the place.
+                    if(have_prior) {
                         const Mat l1=mul(inv_prior,e);
-                        const double d0=distance(l0,kk->k)+.1*frame_angle(l0,kk->k),d1=distance(l1,kk->k)+.1*frame_angle(l1,kk->k);
-                        if(d1+.0005<d0) {l=l1;kid_lagged_.fetch_add(1,std::memory_order_relaxed);} else kid_current_.fetch_add(1,std::memory_order_relaxed);
-                    }
-                    if(still_f && kk->have_e && distance(kk->e,e)<1e-5 && frame_angle(kk->e,e)<1e-5) {kk->k=l0;kk->ok=true;}   // weapon and part at rest: its place
+                        if(kk->have_l && kid_motion.load(std::memory_order_relaxed)) {
+                            const double c0=distance(l0,kk->l0)+.1*frame_angle(l0,kk->l0),c1=distance(l1,kk->l1)+.1*frame_angle(l1,kk->l1);
+                            const double hi=std::max(c0,c1),lo=std::min(c0,c1);
+                            if(hi>kid_learn_m && lo<.2*hi) {kk->k=c1<c0?l1:l0;kk->ok=true;kid_learn_[c1<c0?1:2].fetch_add(1,std::memory_order_relaxed);}
+                        }
+                        kk->l0=l0;kk->l1=l1;kk->have_l=true;
+                        if(kk->ok) {
+                            const double d0=distance(l0,kk->k)+.1*frame_angle(l0,kk->k),d1=distance(l1,kk->k)+.1*frame_angle(l1,kk->k);
+                            if(d1+.0005<d0) {l=l1;kid_lagged_.fetch_add(1,std::memory_order_relaxed);} else kid_current_.fetch_add(1,std::memory_order_relaxed);
+                        }
+                    } else kk->have_l=false;
+                    if(!kk->ok) kid_unlearned_.fetch_add(1,std::memory_order_relaxed);
+                    if(still_f && kk->have_e && distance(kk->e,e)<1e-5 && frame_angle(kk->e,e)<1e-5) {kk->k=l0;kk->ok=true;kid_learn_[0].fetch_add(1,std::memory_order_relaxed);}   // weapon and part at rest: its place
                     kk->e=e;kk->have_e=true;
                     out.extra_r[i]=mul(l,inv_e);out.extra_rok[i]=true;
                 }
@@ -1482,6 +1496,26 @@ public:
     // v1316: a record placed at publish `from` carried to publish `to` by its hand: m = B_to * inverse(B_from) * m (the part keeps its place on
     // the drawn hand, as the weapon body's draw-time placement puts it at B_to); the previous rows by place_world's rule at `to` (this eye's
     // previous drawn hand: two publishes back on one-view frames, else one). false: either publish gone, or that hand holds another thing.
+    // v1317: the drawn hand B of `side` at publish `frame` and the thing's model frame then (false: no such publish, or not bound)
+    static bool bound_of(std::uint32_t frame,unsigned side,Mat& b,Mat& model) noexcept {
+        const Slot* s=side<2?slot_of(frame):nullptr;if(!s) return false;
+        const Side& w=s->side[side];if(!w.valid || !w.bound) return false;
+        b=w.bound_frame;model=w.model;return still(*s,frame);
+    }
+    // v1317: a part at `local` on the drawn hand (inverse(B) * placed, taken at its fill) drawn at publish `to`: B_to * local, previous rows by
+    // place_world's rule. 0 = placed, else why not: 1 publish gone, 2 that hand not bound, 3 it holds another thing than `model`, 4 republished
+    static unsigned at_hand(unsigned side,std::uint32_t to,const Mat& local,const Mat& model,Mat& m,Mat& p) noexcept {
+        const Slot* b=side<2?slot_of(to):nullptr;if(!b) return 1;
+        const Side& wb=b->side[side];if(!wb.valid || !wb.bound) return 2;
+        if(distance(wb.model,model)>alt_max_m) return 3;
+        const Mat placed=mul(wb.bound_frame,local);Mat prev=placed;
+        for(const std::uint32_t back:{2u,1u}) if(const Slot* ps=to>back?slot_of(to-back):nullptr) {
+            const Side& pw=ps->side[side];
+            if(pw.valid && pw.bound && distance(pw.model,wb.model)<=alt_max_m) {prev=mul(pw.bound_frame,local);break;}
+        }
+        if(!still(*b,to)) return 4;
+        m=placed;p=prev;return 0;
+    }
     static bool carry(unsigned side,std::uint32_t from,std::uint32_t to,Mat& m,Mat& p) noexcept {
         const Slot* a=side<2?slot_of(from):nullptr;const Slot* b=side<2?slot_of(to):nullptr;if(!a || !b) return false;
         const Side& wa=a->side[side];const Side& wb=b->side[side];
@@ -1675,12 +1709,15 @@ private:
     inline static std::uint32_t last_frame_l_{};inline static Mat sev_first_{};inline static std::uint64_t sev_first_key_{},sev_pairs_{},sev_apart_{};inline static double sev_spread_um_{};
     struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};std::array<std::uintptr_t,Side::max_extra> extra_id{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};bool provisional{};};   // v1258: motion bucket, source poses
     inline static std::array<Staged,2> staged_{};
-    struct KidK {std::uintptr_t id{};Mat k{},e{};bool ok{},have_e{};};   // v1304 (publisher thread): a part's place on the weapon, learned at rest
+    struct KidK {std::uintptr_t id{};Mat k{},e{},l0{},l1{};bool ok{},have_e{},have_l{};};   // v1304 (publisher thread): a part's place on the weapon (v1317: + its two candidates last publish)
     inline static std::array<std::array<KidK,16>,2> kidk_{};inline static std::array<std::uintptr_t,2> kid_owner_{};
-    inline static std::atomic<std::uint64_t> kid_lagged_{},kid_current_{};
+    inline static std::atomic<std::uint64_t> kid_lagged_{},kid_current_{},kid_unlearned_{};inline static std::array<std::atomic<std::uint64_t>,3> kid_learn_{};   // v1317: learned [at rest, in motion lagged, in motion current]
+    static constexpr double kid_learn_m=1e-4;   // v1317: a step change under 0.1 mm teaches nothing (both candidates agree to a hair)
 public:
     inline static std::atomic<bool> child_rebase{true};   // v1304: off = build/legacy-child-place
-    static std::string kid_json() {return "{\"lagged\":"+std::to_string(kid_lagged_.load())+",\"current\":"+std::to_string(kid_current_.load())+"}";}
+    inline static std::atomic<bool> kid_motion{true};   // v1317: a part's place learned in motion too; off = build/legacy-kid-learn (v1316: at rest only)
+    static std::string kid_json() {return "{\"lagged\":"+std::to_string(kid_lagged_.load())+",\"current\":"+std::to_string(kid_current_.load())+",\"unlearned\":"+std::to_string(kid_unlearned_.load())+
+        ",\"learned\":["+std::to_string(kid_learn_[0].load())+","+std::to_string(kid_learn_[1].load())+","+std::to_string(kid_learn_[2].load())+"]}";}
 private:
     inline static std::array<std::atomic<unsigned>,2> kind_{},bits_{};
     inline static std::array<std::uint32_t,2> census_frame_{};

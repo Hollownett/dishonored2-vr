@@ -3220,6 +3220,7 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     // stand the hand's held layer down. v1310: the mask replay binds the held-only mirror of the draw's instance buffer (ObjectMotion::
     // held_instance_view: records not placed as held parts are zeroed, no pixel) and the pixels are class 251 (held, no target: no outline vote),
     // so any instance count and any company is safe. build/no-instance-mirror: the v1309 rule (twin weapons, 2 instances, whole draw).
+    if(d2vr::RigMask::draw_is_rig() && d2vr::RigMask::instanced_rig_check.load(std::memory_order_relaxed) && !d2vr::ObjectMotion::draw_has_layout(context)) d2vr::RigMask::not_rig();   // v1317
     // v1316: any pass's instanced draw of a held mesh reads its held records placed at the draw's publish (ObjectMotion::current_instances)
     ID3D11ShaderResourceView* current_records{};UINT current_slot{};
     if(!legacy_instanced_held && !d2vr::RigMask::draw_is_rig() && held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {
@@ -3231,7 +3232,7 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
             }
             if(found) {
                 current_records=d2vr::ObjectMotion::current_instances(context,found);current_slot=slot;
-                if(instances>=2 && !d2vr::RigMask::draw_is_held()) if(ID3D11ShaderResourceView* mirror=d2vr::ObjectMotion::held_instance_view(found,context)) {
+                if(!d2vr::RigMask::draw_is_held()) if(ID3D11ShaderResourceView* mirror=d2vr::ObjectMotion::held_instance_view(found,context)) {   // v1317: any instance count (the mirror keeps only held records)
                     d2vr::RigMask::swap_instances(slot,mirror);mirror->Release();
                     d2vr::RigMask::mark_held_untargeted();   // v1310: held in the mask, class 251 (no rig target: AFW lands it without, v1312)
                     if(d2vr::RigMask::target_wanted()) {   // v1315: its records retargeted per slice: a rig target after all, class 253
@@ -3267,6 +3268,7 @@ template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11Device
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
+    if(d2vr::RigMask::draw_is_rig() && d2vr::RigMask::instanced_rig_check.load(std::memory_order_relaxed) && !d2vr::ObjectMotion::draw_has_layout(context)) d2vr::RigMask::not_rig();   // v1317
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
     rig_mask.after({3,count,instances,start,0,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
@@ -17922,6 +17924,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         rig_target_knob=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob; // v1190
         d2vr::RigMask::target_bind=&d2vr::ObjectMotion::target_bind; /* v1199: per slice */d2vr::RigMask::target_restore=&d2vr::ObjectMotion::target_restore;
         d2vr::RigMask::legacy_replay=fs::exists(root/L"build"/L"legacy-rig-replay"); // v1286: the v1285 render-target-switching rig/held replay (A/B)
+        d2vr::RigMask::instanced_rig_check=!fs::exists(root/L"build"/L"legacy-instanced-rig"); // v1317: an instanced draw without a VS layout is not the rig
         alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191
         if(!rig_target_knob && !alt_weapon_place_knob) d2vr::rig_target::book().clear();
         d2vr::ObjectMotion::held_mask=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames

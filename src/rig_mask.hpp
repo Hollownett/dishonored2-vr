@@ -194,6 +194,13 @@ public:
         tl_no_target_=false;tl_target_[0]=tl_target_[1]=true;instanced_targeted_.fetch_add(1,std::memory_order_relaxed);
     }
     static std::uint64_t instanced_targeted() noexcept {return instanced_targeted_.load(std::memory_order_relaxed);}
+    // v1317 (user v1316 headset: 19 % of renders lost the rig target to a "rig" draw it could not retarget, DrawIndexedInstanced of a 108-index
+    // mesh, 1 instance; sim: a 174-index mesh with 7-10 instances): an instanced draw whose VS has no reflected layout was taken for a rig draw
+    // because an arm palette was still bound in t0..t7 from the draw before it. Such a draw is not the rig: it leaves the rig class (no mask
+    // replay, no target miss). build/legacy-instanced-rig: v1316.
+    inline static std::atomic<bool> instanced_rig_check{true};
+    static void not_rig() noexcept {if(tl_rig_) {tl_rig_=false;tl_prepass_=false;not_rig_.fetch_add(1,std::memory_order_relaxed);}}
+    static std::uint64_t not_rig_count() noexcept {return not_rig_.load(std::memory_order_relaxed);}
     // v1316 diagnostics (user v1315 session: 20 % of renders lost the rig target to rig draws ObjectMotion could not retarget, its VS without a
     // reflected layout): which draws those are - kind (0 indexed, 1 indexed instanced, 2 draw, 3 instanced), index count, instances, held
     struct NoRetarget {std::atomic<std::uint64_t> key{},n{};};
@@ -492,7 +499,7 @@ public:   // v1306 diagnostics: this one-view draw writes the scene depth the ma
          <<",\"fingerprint\":["<<fp_[0].load()<<','<<fp_[1].load()<<','<<fp_[2].load()<<','<<fp_[3].load()<<','<<static_cast<long long>(fp_first_diff_.load())<<']'
          <<",\"repeats\":"<<ring_repeats_.load()<<",\"late\":"<<ring_late_.load()<<",\"young\":"<<ring_young_.load()<<",\"run\":["<<ring_[0].run.load()<<','<<ring_[1].run.load()<<','<<ring_[2].run.load()<<"]}},\"buffers\":"<<published_buffers_.load()<<",\"rig_draws_last_present\":"<<rig_draws_last_.load()
          <<",\"held_draws\":"<<held_draws_.load()<<",\"held_marks\":["<<held_marks_[0].load()<<','<<held_marks_[1].load()<<','<<held_marks_[2].load()<<','<<held_marks_[3].load()<<','<<held_marks_[4].load()<<','<<held_marks_[5].load()<<']'<<",\"target\":{\"on\":"<<(target_on.load()?"true":"false")<<",\"draws\":"<<target_draws_.load()
-         <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"no_retarget\":["<<no_retarget_[0].load()<<','<<no_retarget_[1].load()<<"],\"invalid_by_no_retarget\":"<<invalid_no_retarget_.load()<<",\"no_retarget_draws\":"<<no_retarget_json()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
+         <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"no_retarget\":["<<no_retarget_[0].load()<<','<<no_retarget_[1].load()<<"],\"invalid_by_no_retarget\":"<<invalid_no_retarget_.load()<<",\"no_retarget_draws\":"<<no_retarget_json()<<",\"instanced_not_rig\":"<<not_rig_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load();
         // v1286: the replay path (uav: engine targets kept, UAV writes; legacy: the v1285 target switches, knob or device), the draws each way
         // took, the per-draw fallbacks by reason, and the per-render slice conversions (one per take; failures = out had no UAV / no shader)
@@ -591,6 +598,7 @@ private:
     inline static thread_local bool tl_rig_{};
     inline static thread_local bool tl_no_target_{};inline static std::atomic<std::uint64_t> instanced_held_{};   // v1307
     inline static thread_local ID3D11ShaderResourceView* tl_slice_view_[2]{};   // v1315
+    inline static std::atomic<std::uint64_t> not_rig_{};   // v1317
     inline static thread_local ID3D11ShaderResourceView* tl_swap_view_{};inline static thread_local UINT tl_swap_slot_{};inline static std::atomic<std::uint64_t> instance_swaps_{},instanced_targeted_{};   // v1310
     // v1166: this draw's rig model (0, 1 arms, 2 body), its current palette view (t1, held), whether t0/t1 are that model's previous/current
     inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
