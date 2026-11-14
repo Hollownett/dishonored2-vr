@@ -217,6 +217,7 @@ int main(int argc, char** argv) {
     // v1190 STALE_REPLAY_RIG_ORDER=0|1: inside the rig target, this eye's kept rig first (0) or the fresh eye's first (1)
     warp.afw2 = std::make_unique<Afw2Pass>(device.Get());
     if (const char* o = std::getenv("STALE_REPLAY_RIG_ORDER")) warp.afw2->rig_order = std::atoi(o);
+    if (const char* u = std::getenv("STALE_REPLAY_UNTARGETED")) Afw2Pass::untargeted_lands = std::atoi(u);   // v1312 A/B
     ComPtr<ID3D11PixelShader> shipped = pixel_of(warp), paths;
     {
         const std::string src = path_variant(shader_source("src/stale_eye_warp.hpp"));

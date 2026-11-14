@@ -1738,7 +1738,7 @@ private:
     }
     template<int I> static void STDMETHODCALLTYPE unmap_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub) {
         if(r) for(auto& p:pending_) if(p.resource==r && p.context==c) {p.resource=nullptr;written(c,r,p.data,*p.entry);break;}
-        if(r && tl_inst_.r==r && tl_inst_.c==c) {place_instances(tl_inst_.data,tl_inst_.bytes);tl_inst_={};}   // v1308: before the engine's data leaves
+        if(r && tl_inst_.r==r && tl_inst_.c==c) {place_instances(c,r,tl_inst_.data,tl_inst_.bytes,map_[I],unmap_[I]);tl_inst_={};}   // v1308: before the engine's data leaves
         unmap_[I](c,r,sub);
     }
     template<int I> static void STDMETHODCALLTYPE update_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub,const D3D11_BOX* box,const void* src,UINT rp,UINT dp) {
@@ -1767,10 +1767,55 @@ private:
         inst_bytes_[i].store(bytes,std::memory_order_relaxed);inst_seen_[i].store(k,std::memory_order_release);   // ponytail: a released buffer's address reused by another buffer keeps the old answer
         return bytes;
     }
-    static void place_instances(void* data,UINT bytes) noexcept {
+    // v1310: per engine instance buffer, a mirror (same shape) holding only the records placed as held parts, the others zeroed (degenerate:
+    // no pixel). RigMask binds it for the mask replay of an instanced held mesh (swap_instances), so world instances batched with a held part
+    // (the bolt mesh with the world's bolts) stay out of the held class. build/no-instance-mirror: the v1309 whole-draw mark (twin only).
+    struct Mirror {ID3D11Resource* engine{};Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;UINT bytes{};bool held{};std::uint64_t used{};};
+    inline static std::array<Mirror,8> mirrors_{};inline static std::mutex mirror_m_;inline static std::uint64_t mirror_use_{};
+    inline static std::atomic<bool> instance_mirror{true};inline static std::atomic<std::uint64_t> mirror_fills_{},mirror_failures_{};
+    static void fill_mirror(ID3D11DeviceContext* c,ID3D11Resource* r,const void* data,UINT bytes,const std::uint8_t* held,bool any,Map map,Unmap unmap) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mirror_m_);
+            Mirror* m=nullptr;for(auto& e:mirrors_) if(e.engine==r) {m=&e;break;}
+            if(!any) {if(m) m->held=false;return;}
+            if(!m) {Mirror* old=&mirrors_[0];for(auto& e:mirrors_) {if(!e.engine) {old=&e;break;}if(e.used<old->used) old=&e;}m=old;*m=Mirror{};m->engine=r;}
+            m->used=++mirror_use_;
+            if(!m->buffer || m->bytes!=bytes) {
+                m->buffer.Reset();m->view.Reset();m->bytes=0;
+                ID3D11Device* device{};c->GetDevice(&device);if(!device) {mirror_failures_.fetch_add(1,std::memory_order_relaxed);return;}
+                D3D11_BUFFER_DESC d{};d.ByteWidth=bytes;d.Usage=D3D11_USAGE_DYNAMIC;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+                d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;d.StructureByteStride=96;
+                D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_UNKNOWN;v.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;v.Buffer.FirstElement=0;v.Buffer.NumElements=bytes/96;
+                const bool ok=SUCCEEDED(device->CreateBuffer(&d,nullptr,&m->buffer)) && SUCCEEDED(device->CreateShaderResourceView(m->buffer.Get(),&v,&m->view));
+                device->Release();
+                if(!ok) {m->buffer.Reset();m->view.Reset();mirror_failures_.fetch_add(1,std::memory_order_relaxed);return;}
+                m->bytes=bytes;
+            }
+            D3D11_MAPPED_SUBRESOURCE out{};   // the original Map/Unmap (this context's kind): our own buffer never reaches the hooks
+            if(FAILED(map(c,m->buffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&out)) || !out.pData) {m->held=false;mirror_failures_.fetch_add(1,std::memory_order_relaxed);return;}
+            auto* dst=static_cast<std::uint8_t*>(out.pData);const auto* src=static_cast<const std::uint8_t*>(data);
+            for(UINT k=0;k<bytes/96;++k) {if(held[k]) std::memcpy(dst+k*96ull,src+k*96ull,96);else std::memset(dst+k*96ull,0,96);}
+            unmap(c,m->buffer.Get(),0);
+            m->held=true;mirror_fills_.fetch_add(1,std::memory_order_relaxed);
+        } catch(...) {mirror_failures_.fetch_add(1,std::memory_order_relaxed);}
+    }
+public:
+    // v1310: the held-only mirror of this engine instance buffer when its newest fill held a placed part (AddRef'd; the caller releases), else null
+    static ID3D11ShaderResourceView* held_instance_view(ID3D11Resource* r) noexcept {
+        if(!r || !instance_mirror.load(std::memory_order_relaxed)) return nullptr;
+        std::lock_guard<std::mutex> lock(mirror_m_);
+        for(auto& e:mirrors_) if(e.engine==r) {if(!e.held || !e.view) return nullptr;e.view->AddRef();return e.view.Get();}
+        return nullptr;
+    }
+    static void forget_mirrors() noexcept {std::lock_guard<std::mutex> lock(mirror_m_);mirrors_={};}
+    static bool mirror_on() noexcept {return instance_mirror.load(std::memory_order_relaxed);}
+private:
+    static void place_instances(ID3D11DeviceContext* c,ID3D11Resource* r,void* data,UINT bytes,Map map,Unmap unmap) noexcept {
         if(!data || !weapon_draw::Place::published()) return;
         inst_maps_.fetch_add(1,std::memory_order_relaxed);
-        auto* f=static_cast<float*>(data);const UINT n=bytes/96;
+        thread_local std::array<std::uint8_t,4096> held{};bool any=false;
+        auto* f=static_cast<float*>(data);const UINT n=std::min<UINT>(bytes/96,4096u);
+        for(UINT k=0;k<n;++k) held[k]=0;
         for(UINT k=0;k<n;++k,f+=24) {
             if(!std::isfinite(f[3]) || !std::isfinite(f[7]) || !std::isfinite(f[11])) continue;
             for(unsigned order=0;order<2;++order) {   // current rows first (the shader's member order); the other half tried once, counted
@@ -1781,13 +1826,15 @@ private:
                 if(side<0) continue;
                 for(std::size_t i=0;i<12;++i) {cur[i]=static_cast<float>(m[i]);prv[i]=static_cast<float>(p[i]);}
                 inst_placed_[static_cast<unsigned>(side)].fetch_add(1,std::memory_order_relaxed);inst_order_[order].fetch_add(1,std::memory_order_relaxed);
+                held[k]=1;any=true;
                 break;
             }
         }
         inst_records_.fetch_add(n,std::memory_order_relaxed);
+        if(instance_mirror.load(std::memory_order_relaxed)) fill_mirror(c,r,data,n*96,held.data(),any,map,unmap);   // v1310 (the engine's rewritten records)
     }
 public:
-    static std::string instance_json() {return "{\"on\":"+std::string(instance_place.load()?"true":"false")+",\"maps\":"+std::to_string(inst_maps_.load())+",\"records\":"+std::to_string(inst_records_.load())+
+    static std::string instance_json() {return "{\"on\":"+std::string(instance_place.load()?"true":"false")+",\"mirror\":"+std::string(instance_mirror.load()?"true":"false")+",\"mirror_fills\":"+std::to_string(mirror_fills_.load())+",\"mirror_failures\":"+std::to_string(mirror_failures_.load())+",\"swaps\":"+std::to_string(RigMask::instance_swaps())+",\"maps\":"+std::to_string(inst_maps_.load())+",\"records\":"+std::to_string(inst_records_.load())+
         ",\"placed\":["+std::to_string(inst_placed_[0].load())+","+std::to_string(inst_placed_[1].load())+"],\"order\":["+std::to_string(inst_order_[0].load())+","+std::to_string(inst_order_[1].load())+"]}";}
 private:
     static void poll() noexcept {
@@ -1813,6 +1860,7 @@ private:
         weapon_draw::Place::cull.store(!std::filesystem::exists(knobs_/L"no-weapon-near-cull",error),std::memory_order_relaxed); // v1284 (B1)
         weapon_draw::Place::child_rebase.store(!std::filesystem::exists(knobs_/L"legacy-child-place",error),std::memory_order_relaxed); // v1304
         instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error),std::memory_order_relaxed); // v1308
+        instance_mirror.store(!std::filesystem::exists(knobs_/L"no-instance-mirror",error),std::memory_order_relaxed); // v1310
         weapon_probe_on_.store(!output_.empty() && std::filesystem::exists(knobs_/L"weapon-draw-probe",error),std::memory_order_relaxed);   // v1046: diagnostics off (empty output_) = no probe text is collected
         b1_eye_on_.store(!std::filesystem::exists(knobs_/L"no-object-motion-b1-eye",error),std::memory_order_relaxed); // v950
         alt_view_heuristic.store(std::filesystem::exists(knobs_/L"alt-view-heuristic",error),std::memory_order_relaxed); // v1199: the v1197 rules (A/B)

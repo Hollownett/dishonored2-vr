@@ -72,7 +72,7 @@ inline constexpr char rig_mask_copy_source[]=
     "const bool inside=all(float2(i.xy)<k.zw);const float d=z.Load(int3(i.xy,0));const uint kq=rk[i.xy];rk[i.xy]=0;"
     "const float2 rq=kq?float2(asfloat(kq>>2),float(kq&3u)):r.Load(int3(i.xy,0));const float q=rq.x;"
     "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e,held=rig && rq.y>1.5,own=rig && !held && rq.y>0.5;"
-    "o[i.xy]=held?253:own?255:rig?254:0;"
+    "o[i.xy]=held?(rq.y>2.5?251:253):own?255:rig?254:0;"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
     "if(own) InterlockedAdd(g[2],1);"
     "const float2 m=mv.Load(int3(i.xy,0))*k.zw;const float b=k.z;const bool wild=rig && !held && !(dot(m,m)<=b*b);if(wild) {o[i.xy]=252;InterlockedAdd(g[3],1);}"
@@ -176,7 +176,27 @@ public:
         mark_held();
         if(tl_held_) {tl_no_target_=true;tl_target_[0]=tl_target_[1]=false;instanced_held_.fetch_add(1,std::memory_order_relaxed);}
     }
-    static std::uint64_t instanced_held() noexcept {return instanced_held_.load(std::memory_order_relaxed);}   // v1306 diagnostics: this one-view draw writes the scene depth the mask is made for
+    static std::uint64_t instanced_held() noexcept {return instanced_held_.load(std::memory_order_relaxed);}
+    // v1310 (user, v1309: the crossbow upgrades still ghost with two weapons; logs: the held parts' meshes are batched with WORLD instances of the
+    // same mesh, e.g. the bolt mesh drawn with 2, 3, 7 and 10 instances): the mask replay of such a draw binds, at the VS slot of the engine's
+    // direct-instancing buffer, a copy of it with every record that is not a held part zeroed (ObjectMotion::held_instance_view), so only the
+    // held instances leave pixels. Thread-local for the draw in this Scope; the view is AddRef'd here and released with the Scope.
+    static void swap_instances(UINT slot,ID3D11ShaderResourceView* view) noexcept {
+        if(tl_swap_view_) tl_swap_view_->Release();
+        tl_swap_view_=view;tl_swap_slot_=slot;if(view) {view->AddRef();instance_swaps_.fetch_add(1,std::memory_order_relaxed);}
+    }
+    static std::uint64_t instance_swaps() noexcept {return instance_swaps_.load(std::memory_order_relaxed);}
+private:
+    struct SwapView {
+        ID3D11DeviceContext* c{};ID3D11ShaderResourceView* engine{};bool on{};
+        explicit SwapView(ID3D11DeviceContext* context) noexcept:c(context) {
+            if(!c || !tl_swap_view_) return;
+            c->VSGetShaderResources(tl_swap_slot_,1,&engine);c->VSSetShaderResources(tl_swap_slot_,1,&tl_swap_view_);on=true;
+        }
+        ~SwapView() {if(on) {c->VSSetShaderResources(tl_swap_slot_,1,&engine);if(engine) engine->Release();}}
+    };
+    static void clear_swap() noexcept {if(tl_swap_view_) {tl_swap_view_->Release();tl_swap_view_=nullptr;}}
+public:   // v1306 diagnostics: this one-view draw writes the scene depth the mask is made for
     static void mark_target(bool ok) noexcept {tl_target_[0]=tl_target_[1]=ok;} // false: no retarget for this render (counted at the replay)
     static void mark_target(bool ok0,bool ok1) noexcept {tl_target_[0]=ok0;tl_target_[1]=ok1;} // v1199: per slice (hypothesis eye)
     // FsrTaa's copy (immediate/job context of the render's TAA pass): the target of this scene depth copied into `out` (same size and format;
@@ -469,7 +489,7 @@ public:
             nested_=tl_scope_depth_++>0;
             if(nested_) {nested_scopes_.fetch_add(1,std::memory_order_relaxed);return;}
             tl_probe_display_=~0ull;
-            tl_rig_=false;tl_own_=false;tl_held_=false;tl_no_target_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_pass_=pass;tl_unmapped_c_=nullptr;tl_scoped_=false;
+            tl_rig_=false;tl_own_=false;tl_held_=false;tl_no_target_=false;clear_swap();tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_pass_=pass;tl_unmapped_c_=nullptr;tl_scoped_=false;
             if(!c || !enabled.load(std::memory_order_relaxed)) return;
             const std::uintptr_t one_view=view.load(std::memory_order_relaxed);
             if(!one_view) return;
@@ -493,7 +513,7 @@ public:
             if(c_ && draw && targets && (tl_rig_ || tl_held_)) replay(c_,args,draw,targets,targets_uav);
             c_=nullptr;
         }
-        ~Scope() {--tl_scope_depth_;if(nested_) return;restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_no_target_=false;tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;tl_unmapped_c_=nullptr;tl_scoped_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
+        ~Scope() {--tl_scope_depth_;if(nested_) return;restore_t0();tl_held_view_.Reset();tl_rig_=false;tl_held_=false;tl_no_target_=false;clear_swap();tl_depth_=false;tl_target_[0]=tl_target_[1]=false;tl_prepass_=false;tl_unmapped_c_=nullptr;tl_scoped_=false;if(tl_current_) {tl_current_->Release();tl_current_=nullptr;}}
         void restore_t0() noexcept {
             if(!tl_saved_set_ || !c_) return;
             c_->VSSetShaderResources(tl_saved_slot_,1,&tl_saved_t0_);if(tl_saved_t0_) tl_saved_t0_->Release();
@@ -512,7 +532,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> mask_uav,key_uav;Microsoft::WRL::ComPtr<ID3D11Texture2D> keys;
         std::array<std::pair<ID3D11Resource*,Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>>,2> outs{};unsigned next_out{};};
     // v1286: per device, the UAV replay's shaders and states: mask PS by class (0 rig, 1 own, 2 held), slice PS [held][slice], the conversion
-    struct UavKit {std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,3> mask;std::array<std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,2>,2> slice;
+    struct UavKit {std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,4> mask;std::array<std::array<Microsoft::WRL::ComPtr<ID3D11PixelShader>,2>,2> slice;
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> convert;Microsoft::WRL::ComPtr<ID3D11Buffer> cb;Microsoft::WRL::ComPtr<ID3D11DepthStencilState> off;Microsoft::WRL::ComPtr<ID3D11BlendState> none;};
     inline static UavKit uav_{};inline static std::atomic<int> uav_state_{}; // 0 not tried for this device, 1 ready, 2 feature level/formats, 3 create failed
     static constexpr UINT uav_slot=6; // u6 keys, u7 mask: room for up to 6 engine RTVs
@@ -536,6 +556,7 @@ private:
         no_dsv_{},msaa_{},failures_{};
     inline static thread_local bool tl_rig_{};
     inline static thread_local bool tl_no_target_{};inline static std::atomic<std::uint64_t> instanced_held_{};   // v1307
+    inline static thread_local ID3D11ShaderResourceView* tl_swap_view_{};inline static thread_local UINT tl_swap_slot_{};inline static std::atomic<std::uint64_t> instance_swaps_{},instanced_targeted_{};   // v1310
     // v1166: this draw's rig model (0, 1 arms, 2 body), its current palette view (t1, held), whether t0/t1 are that model's previous/current
     inline static thread_local unsigned tl_model_{};inline static thread_local ID3D11ShaderResourceView* tl_current_{};inline static thread_local bool tl_prepass_{};
     inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
@@ -854,7 +875,7 @@ private:
         // (WARP does: tests/rig_replay_uav_check.cpp variant 2 lost 166 of 204 strap pixels to the body replayed after them). Under the
         // engine's reverse-Z GREATER/GREATER_EQUAL depth the draws passing EQUAL at a pixel come with growing z, so the max IS the last
         // writer in any order, and a later farther part's stray store loses. z in [0,1] leaves the top two bits free.
-        for(unsigned y=0;y<3;++y) { // the v1285 mask value (z, class) where the draw passes depth EQUAL; early depth: no write where it fails
+        for(unsigned y=0;y<4;++y) { // the v1285 mask value (z, class) where the draw passes depth EQUAL; early depth: no write where it fails (v1310: 3 = held, no rig target)
             std::snprintf(src,sizeof src,"RWTexture2D<uint> m:register(u%u);[earlydepthstencil] void main(float4 p:SV_Position){InterlockedMax(m[uint2(p.xy)],(asuint(p.z)<<2)|%uu);}",uav_slot+1,y);ps(k.mask[y]);}
         for(unsigned held=0;held<2;++held) for(unsigned s=0;s<2;++s) { // nearest wins: max of (depth bits << 1 | rig); z <= 0 never won the v1285 GREATER over its clear
             std::snprintf(src,sizeof src,"RWTexture2DArray<uint> s:register(u%u);void main(float4 p:SV_Position){if(p.z>0) InterlockedMax(s[uint3(uint2(p.xy),%u)],(asuint(p.z)<<1)|%uu);}",uav_slot,s,held?0u:1u);
@@ -982,7 +1003,7 @@ private:
                 if(device && device_!=device) new_device(device);
                 ready=device && uav_ready(device);
                 if(ready && dd.SampleDesc.Count==1 && dd.Width && prepare(device,depth,dd,created) && target_.keys) {
-                    mask_uav=target_.mask_uav;key_uav=target_.key_uav;ps=uav_.mask[tl_held_?2:tl_own_?1:0];slice_ps=uav_.slice[tl_held_?1:0];
+                    mask_uav=target_.mask_uav;key_uav=target_.key_uav;ps=uav_.mask[tl_held_?(tl_no_target_?3:2):tl_own_?1:0];slice_ps=uav_.slice[tl_held_?1:0];
                     equal=equal_;off=uav_.off;none=uav_.none;
                 }
             } catch(...) {}
@@ -1007,7 +1028,7 @@ private:
         if(keep) om(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,nullptr,nullptr,uav_slot,2,ours,nullptr); // the only OM change of the fast path
         else om(0,nullptr,dsv,uav_slot,2,ours,nullptr); // fallback: no engine RTV (no room, or its UAVs would be replaced), its DSV for the test
         c->PSSetShader(ps.Get(),nullptr,0);c->OMSetDepthStencilState(equal.Get(),0);c->OMSetBlendState(none.Get(),nullptr,0xffffffff);
-        draw(c,a);
+        {const SwapView swap(c);draw(c,a);}   // v1310: an instanced held mesh draws only its held instances into the mask
         // the slices: the same draw per hypothesis eye with its retargeted rows (v1199), depth off: InterlockedMax is the nearest-wins
         if(tl_target_[0] || tl_target_[1]) {
             const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);
@@ -1068,7 +1089,7 @@ private:
         ID3D11BlendState* blend{};float factor[4]{};UINT mask{};c->OMGetBlendState(&blend,factor,&mask);
         targets(c,1,&rig,dsv);
         c->PSSetShader(ps.Get(),nullptr,0);c->OMSetDepthStencilState(equal.Get(),0);c->OMSetBlendState(opaque.Get(),nullptr,0xffffffff);
-        draw(c,a);
+        {const SwapView swap(c);draw(c,a);}   // v1310
         // v1190: the same draw in the stale eye's target camera (retargeted per-instance rows), nearest wins among the replayed draws
         if((tl_target_[0] || tl_target_[1]) && trg_rtv[0] && trg_rtv[1] && trg_dsv[0] && trg_dsv[1]) {
             const auto bind=target_bind.load(std::memory_order_relaxed);const auto restore=target_restore.load(std::memory_order_relaxed);

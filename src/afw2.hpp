@@ -11,6 +11,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -136,6 +137,7 @@ public:
         context_->Unmap(st.Get(),0);return r;
     }
     int rig_order{},rig_debug{};                                // v1190: inside the rig target, 0 this eye's kept rig first, 1 the fresh eye's first (tools)
+    inline static std::atomic<int> untargeted_lands{1};        // v1312: class-251 held texels land without the rig target (build/no-untargeted-lands: 0)
     explicit Afw2Pass(ID3D11Device* device);
     // Holes left after the fill on the last pass (reads back and waits: tools and the lab only).
     std::uint32_t holes() {
@@ -188,7 +190,7 @@ cbuffer Afw : register(b0) {
     float4 display;    // output w, h, 1/w, 1/h
     float4 validRect;  // kept u, v max, fresh u, v max
     float4 fillStep;   // x step (texels), y last pass, z the camera's sideways step in texels per inverse metre, w the near-mover gate (px)
-    float4 rigMode;    // x the rig target (t15) is bound, y colour order inside it (0: this eye's kept rig first, 1: the fresh eye's first)
+    float4 rigMode;    // x the rig target (t15) is bound, y colour order inside it (0: this eye's kept rig first, 1: the fresh eye's first), w (v1312) class-251 held texels land without the target
 }
 Texture2D keptColour : register(t0); Texture2D<float> keptDepth : register(t1);
 Texture2D freshColour : register(t2); Texture2D<float> freshDepth : register(t3);
@@ -212,7 +214,7 @@ AppendStructuredBuffer<uint> tilesOut : register(u4);
 // v1197 cost: the crack writes landed into both fill buffers (no copy; it does not read it)
 RWStructuredBuffer<uint> landedOut0 : register(u0); StructuredBuffer<uint> tilesIn : register(t12);
 // motion flags (w)
-static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128,kHeld=256,kOwn=512;   // kOwn: a rig texel moved by its own rig motion
+static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128,kHeld=256,kOwn=512,kNoTarget=1024;   // kOwn: a rig texel moved by its own rig motion; kNoTarget (v1312): a held texel of class 251 (never in the rig target)
 // key low bits
 // v1209 cost: a texel's motion packed in 8 bytes (x, y, z as f16 metres: 0.1 mm at 20 cm; the flags in 16 bits)
 float4 MotionIn(uint at) {const uint2 m=motionPacked[at];return float4(f16tof32(m.x),f16tof32(m.x>>16),f16tof32(m.y),float(m.y>>16));}
@@ -426,6 +428,7 @@ bool OnFreshOutline(float3 p) {
         if((owner>=2?moving:any_moving) && (r==1 || r==-1)) InterlockedAdd(handVotes[owner*2+(r==1?0:1)],1);
         w|=uint(owner)<<5;                          // the owner (bits 5-6): Splat drops a moving hand its look-ups refute as a whole
         if(flags.x>0 && keptRig.Load(int3(i,0))<253.5/255) w|=kHeld;   // v1191: a held item (253) votes and stands down apart from the arm
+        if(flags.x>0 && rigMode.w>0 && abs(keptRig.Load(int3(i,0))-251.0/255)<0.5/255) w|=kNoTarget;   // v1312
         // v1190 outline votes: with the rig target, the rig's own outline moved by its motion must land on the target's outline (within 2
         // texels; 3 for a sword's thin blade): a flat hand confirms any wrong shift texel by texel, its outline does not (an exact silhouette, same grid, same tick)
         // v1206: without the target (or one TargetOn will ignore), the two motion sources are voted on against the fresh eye's rig outline
@@ -433,8 +436,11 @@ bool OnFreshOutline(float3 p) {
             if(KeptRigMoves(i)) InterlockedAdd(handVotes[44+owner*4+(OnFreshOutline(p+KeptStep(own.xyz,parts.y))?0:1)],1);
             InterlockedAdd(handVotes[46+owner*4+(OnFreshOutline(p+LayerStep(owner,p))?0:1)],1);
         }
-        if(rigMode.x>0 && KeptRigOutline(i,a)) {
-            const bool held=keptRig.Load(int3(i,0))<253.5/255;
+        // v1310: a held pixel of class 251 (a held part drawn with direct instancing: in the mask, never in the rig target) has no target outline
+        // to land on; its "off" votes made the whole held layer stand down (v1307/v1308 headset: the far half of every weapon ghosted). No vote.
+        const float krv=keptRig.Load(int3(i,0));
+        if(rigMode.x>0 && KeptRigOutline(i,a) && !(abs(krv-251.0/255)<0.5/255)) {
+            const bool held=krv<253.5/255;
             InterlockedAdd(handVotes[(held?18:10)+owner*2+(OnTargetOutline(p+d)?0:1)],1);
             // v1206: the same vote for each motion source on its own (the arm only): its own rig motion and its hand's rigid layer; Repair
             // keeps the one whose outline lands on the target's (room 14-16: the layer; street 4, an 87 mm swing: the rig motion)
@@ -604,7 +610,11 @@ bool Lands(uint key,int2 j) {float a;return !TargetOn() || !(key&kKeyRig) || Rig
 [numthreads(8,8,1)] void Splat(uint3 id : SV_DispatchThreadID) {
     if(any(id.xy>=uint2(grid.xy))) return;
     uint key;int2 lo,hi;
-    if(SplatOf(int2(id.xy),key,lo,hi)) for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) if(Lands(key,int2(x,y))) InterlockedMax(keysOut[Index(int2(x,y))],key);
+    // v1312 (sims v1310/v1311: the copy crossbow's instanced ring left the rebuilt eye): a held part drawn with direct instancing is in the
+    // mask (class 251) but never in the rig target (its view-projection sits in per-view constants the mod cannot retarget), so rule 3 dropped
+    // every one of its texels. It moves with its hand's held layer like the weapon body (placed in the drawn hand, v1308) and lands without it.
+    const bool untargeted=(uint(MotionIn(Index(int2(id.xy))).w)&kNoTarget)!=0;
+    if(SplatOf(int2(id.xy),key,lo,hi)) for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) if(untargeted || Lands(key,int2(x,y))) InterlockedMax(keysOut[Index(int2(x,y))],key);
 }
 // Origins: a moving texel whose key won a target texel leaves its own index there (the resolve takes its motion back off)
 [numthreads(8,8,1)] void Origins(uint3 id : SV_DispatchThreadID) {
@@ -828,7 +838,9 @@ uint2 DecideAt(int2 i,float2 uv) {
     // at the exact reprojection of (pixel, target depth) where its mask and depth agree (rigMode.y picks the order); (c) the nearest kept rig
     // texel of the target's rig within 2 texels, at this pixel's depth with its motion; last the fresh eye's sample there. Never background.
     float zr;
-    if(RigTargetAt(i,zr)) {
+    // v1312: a landed class-251 part nearer than the target's rig (in front of the weapon body) is itself, not the body behind it
+    const bool part_front=key!=0 && (key&kKeyRig) && (key&kKeyMoving) && !(landed&kFilled) && (uint(MotionIn(originsIn[at]).w)&kNoTarget)!=0;
+    if(RigTargetAt(i,zr) && !(part_front && z<zr-Tol(zr))) {
         const bool key_rig=key!=0 && (key&kKeyRig) && !(landed&kFilled);
         if(key_rig || key==0 || zr<z-Tol(zr)) {
             const float3 r=Ray(targetFov,uv);
@@ -1048,7 +1060,7 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     put(width,height,1./width,1./height);
     {const double u=1-std::clamp(L.border[0],0.,.25),v=1-std::clamp(L.border[1],0.,.25);put(u,v,u,v);}
     const std::size_t step_at=at;put(0,0,std::hypot(TK.t[0],TK.t[1])*kw/(std::tan(kf.right)-std::tan(kf.left)),mover_px);
-    put(rig_target && kept_rig && fresh_rig?1:0,rig_order,rig_debug,0);   // (the rig target needs the masks: its colour comes from rig texels)
+    put(rig_target && kept_rig && fresh_rig?1:0,rig_order,rig_debug,untargeted_lands.load(std::memory_order_relaxed));   // (the rig target needs the masks: its colour comes from rig texels)
     const auto upload=[&](double step,bool last) {c[step_at]=float(step);c[step_at+1]=last?1.f:0.f;context_->UpdateSubresource(constants_.Get(),0,nullptr,c.data(),0,0);};
     upload(0,false);
     ID3D11Buffer* cb=constants_.Get();context_->CSSetConstantBuffers(0,1,&cb);context_->PSSetConstantBuffers(0,1,&cb);

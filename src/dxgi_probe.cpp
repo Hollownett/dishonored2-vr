@@ -1725,7 +1725,7 @@ static bool held_mesh(UINT count,UINT start,INT base,std::uint64_t now) noexcept
     return false;
 }
 // v1306 diagnostics: mesh index counts of held one-view depth draws (non-instanced) and of 2-instance scene-depth draws, with hits
-static std::array<std::atomic<std::uint32_t>,24> held_mesh_count{};static std::array<std::atomic<std::uint64_t>,24> held_mesh_hits{};static std::array<std::atomic<std::uint32_t>,24> nh_mesh_count{};static std::array<std::atomic<std::uint64_t>,24> nh_mesh_hits{};static std::array<std::atomic<std::uint32_t>,48> inst2_count{};static std::array<std::atomic<std::uint64_t>,48> inst2_hits{};
+static std::array<std::atomic<std::uint32_t>,24> held_mesh_count{};static std::array<std::atomic<std::uint64_t>,24> held_mesh_hits{};static std::array<std::atomic<std::uint32_t>,24> nh_mesh_count{};static std::array<std::atomic<std::uint64_t>,24> nh_mesh_hits{};
 static void note_mesh(std::atomic<std::uint32_t>* keys,std::atomic<std::uint64_t>* hits,unsigned n,UINT count) noexcept {
     for(unsigned i=0;i<n;++i) {std::uint32_t k=keys[i].load(std::memory_order_relaxed);
         if(k==count) {if(hits) hits[i].fetch_add(1,std::memory_order_relaxed);return;}
@@ -1833,7 +1833,7 @@ static std::string weapon_draw_json() {
     text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"kids\":[";for(unsigned h=0;h<2;++h) text+=std::string(h?",":"")+"{\"native\":["+std::to_string(weapon_kids_last[h][0].load())+","+std::to_string(weapon_kids_max[h][0].load())+"],\"copy\":["+
-        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="],\"inst2\":[";for(unsigned i=0;i<48;++i) text+=(i?",":"")+std::string("[")+std::to_string(inst2_count[i].load())+","+std::to_string(inst2_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"instance_place\":"+d2vr::ObjectMotion::instance_json();text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
+        std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"near_miss\":"+d2vr::weapon_draw::Place::miss_json();text+=",\"held_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(held_mesh_count[i].load())+","+std::to_string(held_mesh_hits[i].load())+"]";text+="],\"unheld_mesh\":[";for(unsigned i=0;i<24;++i) text+=(i?",":"")+std::string("[")+std::to_string(nh_mesh_count[i].load())+","+std::to_string(nh_mesh_hits[i].load())+"]";text+="]";text+=",\"unread_vs\":"+d2vr::ObjectMotion::unread_vs_json();text+=",\"instanced_held\":"+std::to_string(d2vr::RigMask::instanced_held());text+=",\"instance_place\":"+d2vr::ObjectMotion::instance_json();text+=",\"held_instances\":[";for(unsigned i=0;i<8;++i) text+=(i?",":"")+std::to_string(held_instances[i].load());text+="]";   // v1303
     text+=",\"engine_dev_mm\":["+std::to_string(weapon_wobble[0][0].deviation_mm())+","+std::to_string(weapon_wobble[1][0].deviation_mm())+"],\"placed_dev_mm\":["+
         std::to_string(weapon_wobble[0][1].deviation_mm())+","+std::to_string(weapon_wobble[1][1].deviation_mm())+"]";
     text+=",\"held_engine_pose\":{\"on\":"+std::string(d2vr::HeldEnginePose::on?"true":"false")+",\"writes\":"+std::to_string(held_frame_writes.load())+",\"noops\":"+std::to_string(held_frame_noops.load())+
@@ -3204,7 +3204,6 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     if(d2vr::RigMask::draw_is_held()) note_mesh(held_mesh_count.data(),held_mesh_hits.data(),24,count);   // v1306 diagnostics
     if((d2vr::RigMask::draw_is_held() || d2vr::ObjectMotion::draw_placed()) && !d2vr::RigMask::draw_is_rig()) note_held_mesh(count,start,base,frames.load(std::memory_order_relaxed));   // v1307
     else if(d2vr::RigMask::draw_depth()) for(unsigned i=0;i<24;++i) if(held_mesh_count[i].load(std::memory_order_relaxed)==count) {note_mesh(nh_mesh_count.data(),nh_mesh_hits.data(),24,count);break;}   // a held mesh drawn NOT held
-    if(d2vr::ObjectMotion::draw_unread()) for(const UINT k:{13314u,7380u,30024u,4086u,7080u,96552u,1806u}) if(count==k) note_mesh(inst2_count.data(),inst2_hits.data(),48,count*10);   // weapon mesh unread (x10+0)
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
     rig_mask.after({0,count,1,start,base,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163: with every binding of the draw still in place
     cross_eye.after();
@@ -3218,12 +3217,21 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     // v1309 (user, v1308 headset: strong ghosting on the far half of EVERY weapon while walking, no copy out; status: 34 instanced draws a render
     // of world things whose mesh key matched a held mesh, with 3-4+ instances): those marks had no rig target, so their outline votes made AFW
-    // stand the hand's held layer down. Only a twin (both hands hold a published weapon) and exactly 2 instances.
-    if(instances==2 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig() && d2vr::weapon_draw::Place::twin_weapons()) {   // v1307
-        if(held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {d2vr::RigMask::mark_held_untargeted();probe_instance_srvs(context,count,instances,first);}
+    // stand the hand's held layer down. v1310: the mask replay binds the held-only mirror of the draw's instance buffer (ObjectMotion::
+    // held_instance_view: records not placed as held parts are zeroed, no pixel) and the pixels are class 251 (held, no target: no outline vote),
+    // so any instance count and any company is safe. build/no-instance-mirror: the v1309 rule (twin weapons, 2 instances, whole draw).
+    if(instances>=2 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig() && held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {
+        if(d2vr::ObjectMotion::mirror_on()) {
+            std::array<ID3D11ShaderResourceView*,16> views{};context->VSGetShaderResources(0,16,views.data());bool found=false;
+            for(UINT i=0;i<views.size();++i) if(views[i]) {
+                if(!found) {ID3D11Resource* r{};views[i]->GetResource(&r);
+                    if(r) {if(ID3D11ShaderResourceView* mirror=d2vr::ObjectMotion::held_instance_view(r)) {d2vr::RigMask::swap_instances(i,mirror);mirror->Release();found=true;}r->Release();}}
+                views[i]->Release();
+            }
+            if(found) d2vr::RigMask::mark_held_untargeted();   // v1310: held in the mask, class 251 (no rig target: AFW lands it without, v1312)
+        } else if(instances==2 && d2vr::weapon_draw::Place::twin_weapons()) d2vr::RigMask::mark_held_untargeted();
     }
     if(d2vr::RigMask::draw_is_held() || d2vr::RigMask::draw_depth()) held_instances[(d2vr::RigMask::draw_is_held()?0:4)+std::min<UINT>(instances,4u)-1u].fetch_add(1,std::memory_order_relaxed);   // v1306 diagnostics
-    if(d2vr::RigMask::draw_depth()) for(const UINT k:{13314u,7380u,30024u,4086u,7080u,96552u}) if(count==k) note_mesh(inst2_count.data(),inst2_hits.data(),48,count*10+std::min<UINT>(instances,9u));   // mesh*10+instances
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
     rig_mask.after({1,count,instances,start,base,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
@@ -8792,7 +8800,7 @@ void prepare_head_view(void* view) noexcept {
         }
         // G2: an open exact-32 cutscene renders its view here too (render only: every side effect below stays on raw logic 2 / render_world_scene())
         if(!render_scene_frame()) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();cutscene_hands_live=false;
-            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();d2vr::NativeRangedFire::forget_owners();for(auto& k:held_mesh_key) k.store(0,std::memory_order_relaxed);}   // v1284 (4.4): no instance's bolt across a load // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
+            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();d2vr::NativeRangedFire::forget_owners();for(auto& k:held_mesh_key) k.store(0,std::memory_order_relaxed);d2vr::ObjectMotion::forget_mirrors();}   // v1284 (4.4): no instance's bolt across a load // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
             return;}
         // Ruling 15: the cutscene state is read ONCE per displayed frame (the mask can flip between reads); every decision below uses it
         static UINT64 cutscene_frame_of=~0ull;static bool cutscene_frame_latched{};
@@ -17891,6 +17899,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         const bool alt_defaults=alt_eye_state.load()==1;
         d2vr::RigMask::motion=alt_defaults && stale_eye_rig_motion_knob; // v1171 rig motion vectors; v1198 default on, build/no-stale-eye-rig-motion: off (with the warp's rig rules)
         d2vr::SkinMotion::enabled=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-skin-motion"); // v1182
+        d2vr::Afw2Pass::untargeted_lands=fs::exists(root/L"build"/L"no-untargeted-lands")?0:1;   // v1312
         stale_afw2_knob=alt_defaults && !fs::exists(root/L"build"/L"no-afw2"); // v1184 AFW v2 warp path (src/afw2.hpp); v1216 default on in performance mode, build/no-afw2: off (build/afw2 = no-op)
         alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share"); // v1189
         rig_forensics_knob=fs::exists(root/L"build"/L"rig-forensics"); // v1216: GPU copies/read-backs every render, so never on with diagnostics alone
