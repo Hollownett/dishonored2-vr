@@ -410,6 +410,26 @@ static void v1308_instance_record_lab() {
     std::printf("v1308 instance record: side %d, err %.2e, previous err %.2e, unrelated record side %d\n",side,err,err_prev,none);
     CHECK(side==0 && err<1e-4 && err_prev<1e-4 && none<0);   // float frames (raw_of)
 }
+// v1316: the engine fills its instance buffer before the render's Begin publishes: a record placed at publish 1801 is carried by its hand to the
+// draw's publish 1802 and sits where the body's draw-time placement puts it (B_1802 * l), previous rows two publishes back (B_1800 * l); a
+// hand that holds another thing at the draw's publish keeps the fill's placement (false)
+static void v1316_carry_lab() {
+    Binder::clear();Place::clear();
+    const Mat l=rigid(rot(.3,.1,.2,.6),.05,.02,-.03),g=rigid(identity(),.02,0,0);
+    const std::uintptr_t kid=0x6161;
+    const auto f_at=[](int n) {return rigid(rot(0,0,1,.5+.03*n),-91.7+.03*n,-92.4+.01*n,4.9+.02*n);};
+    for(int n=0;n<2;++n) {const Mat f=f_at(n),e=mul(f,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1800u+static_cast<std::uint32_t>(n),f,true,mul(f,g),Mat{},false,Mat{},70+n);}
+    Mat m=mul(f_at(1),l),p=mul(f_at(0),l);const int side=Place::place_world(m,p,1801u);   // the fill, before 1802 is published
+    {const Mat f=f_at(2),e=mul(f,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1802u,f,true,mul(f,g),Mat{},false,Mat{},72);}
+    const Mat at_fill=m;const bool carried=Place::carry(0,1801u,1802u,m,p);
+    const Mat want=mul(mul(f_at(2),g),l),want_prev=mul(mul(f_at(0),g),l);
+    double err=0,err_prev=0,lag=0;for(int i=0;i<12;++i) {err=std::max(err,std::abs(m[i]-want[i]));err_prev=std::max(err_prev,std::abs(p[i]-want_prev[i]));}
+    lag=std::hypot(at_fill[3]-want[3],std::hypot(at_fill[7]-want[7],at_fill[11]-want[11]));
+    {const Mat other=rigid(rot(1,0,0,.9),-80.0,-90.0,4.9),e=mul(other,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1803u,other,true,mul(other,g),Mat{},false,Mat{},73);}
+    Mat m2=at_fill,p2=at_fill;const bool other_thing=Place::carry(0,1801u,1803u,m2,p2);
+    std::printf("v1316 carry: fill side %d, %.1f mm behind the body at the fill, carried %d err %.2e previous err %.2e, other thing carried %d\n",side,lag*1000,carried,err,err_prev,other_thing);
+    CHECK(side==0 && lag>.01 && carried && err<1e-4 && err_prev<1e-4 && !other_thing);
+}
 
 int main() {
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
@@ -766,6 +786,7 @@ int main() {
     v1284_own_prev_lab(part);
     v1304_lagged_kid_lab();
     v1308_instance_record_lab();
+    v1316_carry_lab();
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

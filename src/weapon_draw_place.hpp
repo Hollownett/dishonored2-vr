@@ -1478,8 +1478,26 @@ public:
         for(unsigned s=0;s<2;++s) if(!slot->side[s].valid || !slot->side[s].bound || kind_[s].load(std::memory_order_relaxed)!=kind_weapon) return false;
         return true;
     }
-    static int place_world(Mat& m,Mat& p) noexcept {
-        const std::uint32_t frame=latest_frame();const Slot* slot=slot_of(frame);if(!slot) return -1;
+    static int place_world(Mat& m,Mat& p) noexcept {return place_world(m,p,latest_frame());}
+    // v1316: a record placed at publish `from` carried to publish `to` by its hand: m = B_to * inverse(B_from) * m (the part keeps its place on
+    // the drawn hand, as the weapon body's draw-time placement puts it at B_to); the previous rows by place_world's rule at `to` (this eye's
+    // previous drawn hand: two publishes back on one-view frames, else one). false: either publish gone, or that hand holds another thing.
+    static bool carry(unsigned side,std::uint32_t from,std::uint32_t to,Mat& m,Mat& p) noexcept {
+        const Slot* a=side<2?slot_of(from):nullptr;const Slot* b=side<2?slot_of(to):nullptr;if(!a || !b) return false;
+        const Side& wa=a->side[side];const Side& wb=b->side[side];
+        if(!wa.valid || !wa.bound || !wb.valid || !wb.bound || distance(wa.model,wb.model)>alt_max_m) return false;
+        Mat inv_a{},inv_b{};if(!inverse(wa.bound_frame,inv_a) || !inverse(wb.bound_frame,inv_b)) return false;
+        const Mat placed=mul(wb.bound_frame,mul(inv_a,m));Mat prev=placed;
+        for(const std::uint32_t back:{2u,1u}) if(const Slot* ps=to>back?slot_of(to-back):nullptr) {
+            const Side& pw=ps->side[side];
+            if(pw.valid && pw.bound && distance(pw.model,wb.model)<=alt_max_m) {prev=mul(pw.bound_frame,mul(inv_b,placed));break;}
+        }
+        if(!still(*a,from) || !still(*b,to)) return false;
+        m=placed;p=prev;return true;
+    }
+    // v1316: at a given publish (ObjectMotion places a fill's records again at the publish its draws are placed with)
+    static int place_world(Mat& m,Mat& p,std::uint32_t frame) noexcept {
+        const Slot* slot=slot_of(frame);if(!slot) return -1;
         Rows r{};for(std::size_t i=0;i<12;++i) r[i]=m[i];
         const double tol=axes_tol.load(std::memory_order_relaxed);
         int side=-1,hit=0;double best=-1;

@@ -3220,27 +3220,35 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     // stand the hand's held layer down. v1310: the mask replay binds the held-only mirror of the draw's instance buffer (ObjectMotion::
     // held_instance_view: records not placed as held parts are zeroed, no pixel) and the pixels are class 251 (held, no target: no outline vote),
     // so any instance count and any company is safe. build/no-instance-mirror: the v1309 rule (twin weapons, 2 instances, whole draw).
-    if(instances>=2 && !legacy_instanced_held && !d2vr::RigMask::draw_is_held() && !d2vr::RigMask::draw_is_rig() && held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {
+    // v1316: any pass's instanced draw of a held mesh reads its held records placed at the draw's publish (ObjectMotion::current_instances)
+    ID3D11ShaderResourceView* current_records{};UINT current_slot{};
+    if(!legacy_instanced_held && !d2vr::RigMask::draw_is_rig() && held_mesh(count,start,base,frames.load(std::memory_order_relaxed))) {
         if(d2vr::ObjectMotion::mirror_on()) {
-            std::array<ID3D11ShaderResourceView*,16> views{};context->VSGetShaderResources(0,16,views.data());ID3D11Resource* found{};
+            std::array<ID3D11ShaderResourceView*,16> views{};context->VSGetShaderResources(0,16,views.data());ID3D11Resource* found{};UINT slot=0;
             for(UINT i=0;i<views.size();++i) if(views[i]) {
-                if(!found) {ID3D11Resource* r{};views[i]->GetResource(&r);
-                    if(r) {if(ID3D11ShaderResourceView* mirror=d2vr::ObjectMotion::held_instance_view(r)) {d2vr::RigMask::swap_instances(i,mirror);mirror->Release();found=r;r->AddRef();}r->Release();}}
+                if(!found) {ID3D11Resource* r{};views[i]->GetResource(&r);if(r) {if(d2vr::ObjectMotion::mirrored(r)) {found=r;slot=i;r->AddRef();}r->Release();}}
                 views[i]->Release();
             }
             if(found) {
-                d2vr::RigMask::mark_held_untargeted();   // v1310: held in the mask, class 251 (no rig target: AFW lands it without, v1312)
-                if(d2vr::RigMask::target_wanted()) {   // v1315: its records retargeted per slice: a rig target after all, class 253
-                    ID3D11ShaderResourceView* slices[2]{};
-                    if(d2vr::ObjectMotion::instance_target_views(context,found,slices)) d2vr::RigMask::target_instances(slices);
-                    for(auto* v:slices) if(v) v->Release();
+                current_records=d2vr::ObjectMotion::current_instances(context,found);current_slot=slot;
+                if(instances>=2 && !d2vr::RigMask::draw_is_held()) if(ID3D11ShaderResourceView* mirror=d2vr::ObjectMotion::held_instance_view(found,context)) {
+                    d2vr::RigMask::swap_instances(slot,mirror);mirror->Release();
+                    d2vr::RigMask::mark_held_untargeted();   // v1310: held in the mask, class 251 (no rig target: AFW lands it without, v1312)
+                    if(d2vr::RigMask::target_wanted()) {   // v1315: its records retargeted per slice: a rig target after all, class 253
+                        ID3D11ShaderResourceView* slices[2]{};
+                        if(d2vr::ObjectMotion::instance_target_views(context,found,slices)) d2vr::RigMask::target_instances(slices);
+                        for(auto* v:slices) if(v) v->Release();
+                    }
                 }
                 found->Release();
             }
-        } else if(instances==2 && d2vr::weapon_draw::Place::twin_weapons()) d2vr::RigMask::mark_held_untargeted();
+        } else if(instances==2 && !d2vr::RigMask::draw_is_held() && d2vr::weapon_draw::Place::twin_weapons()) d2vr::RigMask::mark_held_untargeted();
     }
     if(d2vr::RigMask::draw_is_held() || d2vr::RigMask::draw_depth()) held_instances[(d2vr::RigMask::draw_is_held()?0:4)+std::min<UINT>(instances,4u)-1u].fetch_add(1,std::memory_order_relaxed);   // v1306 diagnostics
+    ID3D11ShaderResourceView* engine_records{};
+    if(current_records) {context->VSGetShaderResources(current_slot,1,&engine_records);context->VSSetShaderResources(current_slot,1,&current_records);}   // v1316
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
+    if(current_records) {context->VSSetShaderResources(current_slot,1,&engine_records);if(engine_records) engine_records->Release();current_records->Release();}
     rig_mask.after({1,count,instances,start,base,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
     note.submitted();
