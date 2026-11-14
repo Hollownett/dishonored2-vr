@@ -1492,11 +1492,29 @@ public:
         if(hit==1) delta=w.alt_delta;
         else if(hit>1 && hit<hist0 && w.extra_rok[static_cast<std::size_t>(hit-2)]) delta=mul(w.bound_frame,w.extra_r[static_cast<std::size_t>(hit-2)]);
         else if(hit>=hist0 && !rebase(w,hit,0,delta,unused)) return -1;
-        Mat prev_delta=delta;
-        if(const Slot* ps=slot_of(frame-1)) {const Side& pw=ps->side[static_cast<unsigned>(side)];if(pw.valid && pw.bound && distance(pw.model,w.model)<=alt_max_m) prev_delta=pw.delta;}
+        // v1313 (user, v1312: the crossbow still ghosts in performance mode): the previous rows feed the motion vectors the upscaler and the warp
+        // read, against the render's previous view-projection = THIS EYE's previous render (the seeded view+0x7590, two engine frames back on
+        // one-view frames, the v1191/C5 rule every other placed draw uses). v1308 took the previous frame's delta (the other eye's render) applied
+        // to the engine's previous rows: one frame of hand motion short, a trail on the rings and mechanism. Now the part's place on the hand
+        // (inverse(B) * placed now) carried by this eye's previous drawn hand: prev = B_prev * inverse(B) * placed.
+        const Mat placed=mul(delta,m);Mat inverse_b{};
+        Mat prev_placed=placed;const bool have_inverse=inverse(w.bound_frame,inverse_b);
+        unsigned prev_kind=2;
+        for(const std::uint32_t back:{2u,1u}) if(const Slot* ps=have_inverse && frame>back?slot_of(frame-back):nullptr) {
+            const Side& pw=ps->side[static_cast<unsigned>(side)];
+            if(pw.valid && pw.bound && distance(pw.model,w.model)<=alt_max_m) {prev_placed=mul(pw.bound_frame,mul(inverse_b,placed));prev_kind=back==2?0u:1u;break;}
+        }
         if(!still(*slot,frame)) return -1;
-        m=mul(delta,m);p=mul(prev_delta,p);
+        // diagnostics: does the record carry this publish's tick? (a part's record equals its published frame exactly when it does)
+        if(hit>1 && hit<hist0) {const double gap=origin_distance(r,frame_of(w,hit));inst_tick_[gap<1e-4?0:gap<1e-3?1:gap<1e-2?2:gap<3e-2?3:4].fetch_add(1,std::memory_order_relaxed);}
+        inst_prev_[prev_kind].fetch_add(1,std::memory_order_relaxed);
+        m=placed;p=prev_placed;
         return side;
+    }
+    inline static std::array<std::atomic<std::uint64_t>,5> inst_tick_{};inline static std::array<std::atomic<std::uint64_t>,3> inst_prev_{};
+    static std::string inst_json() {
+        std::string o="{\"part_vs_publish_mm\":[";for(unsigned i=0;i<5;++i) o+=(i?",":"")+std::to_string(inst_tick_[i].load());
+        o+="],\"previous\":[";for(unsigned i=0;i<3;++i) o+=(i?",":"")+std::to_string(inst_prev_[i].load());return o+"]}";
     }
 
     // v1191 one-view frames (knob build/alt-weapon-place): place one draw of the render published last, in the one view that draws it.

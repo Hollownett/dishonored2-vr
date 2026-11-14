@@ -404,7 +404,7 @@ static void v1308_instance_record_lab() {
     for(int n=0;n<3;++n) {const Mat f=f_at(n),e=mul(f,l);Place::stage(0,Place::kind_weapon,&e,1,false,&kid);publish_frame(1800u+static_cast<std::uint32_t>(n),f,true,mul(f,g),Mat{},false,Mat{},70+n);}
     const Mat f=f_at(2),b=mul(f,g),e=mul(f,l),e_prev=mul(f_at(1),l);
     Mat m=e,p=e_prev;const int side=Place::place_world(m,p);
-    const Mat want=mul(b,l),want_prev=mul(mul(f_at(1),g),l);
+    const Mat want=mul(b,l),want_prev=mul(mul(f_at(0),g),l);   // v1313: this eye's previous render = two publishes back
     double err=0,err_prev=0;for(int i=0;i<12;++i) {err=std::max(err,std::abs(m[i]-want[i]));err_prev=std::max(err_prev,std::abs(p[i]-want_prev[i]));}
     Mat other=rigid(rot(1,0,0,.9),-91.0,-92.0,4.9),op=other;const int none=Place::place_world(other,op);
     std::printf("v1308 instance record: side %d, err %.2e, previous err %.2e, unrelated record side %d\n",side,err,err_prev,none);
