@@ -818,12 +818,6 @@ public:
         for(const auto& c:side_[side]) if(c.active && c.key==key) return true;
         return false;
     }
-    static unsigned settled_ls(unsigned side,Mat* out,unsigned max) noexcept {   // v1342: every settled L relative to the thing (any key)
-        if(side>1) return 0;
-        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
-        unsigned n=0;for(const auto& c:side_[side]) if(n<max && c.active && c.settled_ok && c.ref==0) out[n++]=c.settled;
-        return n;
-    }
     static bool settled_l(unsigned side,std::uint64_t key,Mat& out) noexcept {   // v1258 source probe: the first settled L of this key relative to the thing
         if(side>1) return false;
         weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
@@ -1269,13 +1263,7 @@ public:
         const bool pass_eye_ok=pass_eye==0 || pass_eye==1;
         if(cull.load(std::memory_order_relaxed)) {   // v1284 (B1): near no published frame in any eye it may belong to: no product, no match
             bool any=false;
-            for(unsigned e=0;e<2 && !any;++e) if(!pass_eye_ok || static_cast<int>(e)==pass_eye) {
-                any=in_any(slot->sph,slot->nsph,views.vp[e],cur);
-                // v1342: a draw the engine composed with this eye's PREVIOUS view (the stale-view match below) is near the thing only through that
-                // view: sims v1342 (carried bottle, stereo) culled 1324 such draws here before the match could see them, so the thing was left at the
-                // game's pose whenever the camera moved (unplaced in 95 % of walking renders, 99 % running)
-                if(!any && pass_eye_ok && stale_view_match.load(std::memory_order_relaxed)) for(unsigned s=0;s<2 && !any;++s) if(views.prev_ok[s][e]) any=in_any(slot->sph,slot->nsph,views.prev_vp[s][e],cur);
-            }
+            for(unsigned e=0;e<2 && !any;++e) if(!pass_eye_ok || static_cast<int>(e)==pass_eye) any=in_any(slot->sph,slot->nsph,views.vp[e],cur);
             if(!any) return result;
         }
         Rows cur_model[2]{};
@@ -1317,28 +1305,11 @@ public:
             for(unsigned s=0;s<2 && candidate<0;++s) {
                 const Side& w=slot->side[s];
                 if(!w.valid || !w.bound || !w.rigid || !views.prev_ok[s][e]) continue;
+                Mat l{};if(!RigidLocal::settled_l(s,draw_key,l)) continue;
                 const Rows pm=model_rows(views.prev_inv[s][e].data(),cur);
-                if(origin_distance(pm,w.model)>reach_of(w)) continue;   // nowhere near the thing through that view either
-                // v1342 (sims: of the stale draws that reached this match, 1488 had no settled L for their draw key - the pass whose draws the engine
-                // composes with the stale view never matches through the current view, so it never teaches L - 936 of them exactly F (L = identity),
-                // and 864 missed F * L by the thing's motion since the read): L = this key's settled L, the thing's own frame (identity: a mesh
-                // drawn at the model frame), or any settled L of the thing; F = the latest read, the previous one or an earlier one (never a child).
-                // Still only an exact match (2 mm, 0.2 deg). Status stale_view_match.how = [key L, identity, other L, earlier read].
-                std::array<Mat,10> ls{};unsigned nl=0;bool key_l=false;
-                if(Mat l{};RigidLocal::settled_l(s,draw_key,l)) {ls[nl++]=l;key_l=true;}
-                ls[nl++]=identity();
-                nl+=RigidLocal::settled_ls(s,ls.data()+nl,static_cast<unsigned>(ls.size())-nl);
-                const Mat got=full(pm);
-                for(unsigned k=0;k<nl && candidate<0;++k) for(int h=0;h<frames_end(w) && candidate<0;++h) {
-                    if((h>1 && h<hist0) || !has_frame(w,h)) continue;
-                    const Mat& fh=frame_of(w,h);const Mat& lk=ls[k];   // the origin of F * L first (the arm draws near the thing fail here, no product)
-                    const double ox=fh[0]*lk[3]+fh[1]*lk[7]+fh[2]*lk[11]+fh[3]-got[3],oy=fh[4]*lk[3]+fh[5]*lk[7]+fh[6]*lk[11]+fh[7]-got[7],oz=fh[8]*lk[3]+fh[9]*lk[7]+fh[10]*lk[11]+fh[11]-got[11];
-                    if(ox*ox+oy*oy+oz*oz>.002*.002) continue;
-                    const Mat want=mul(fh,lk);
-                    if(!(distance(got,want)<=.002 && frame_angle(got,want)<=.0035)) continue;
-                    candidate=static_cast<int>(s);hit[s]=h;cur_model[e]=pm;stale_view_matches_.fetch_add(1,std::memory_order_relaxed);
-                    stale_how_[h?3:k==0 && key_l?0:k==(key_l?1u:0u)?1:2].fetch_add(1,std::memory_order_relaxed);
-                }
+                const Mat got=full(pm),want=mul(w.model,l);
+                if(!(distance(got,want)<=.002 && frame_angle(got,want)<=.0035)) continue;
+                candidate=static_cast<int>(s);hit[s]=0;cur_model[e]=pm;stale_view_matches_.fetch_add(1,std::memory_order_relaxed);
             }
         }
         bool predicted=false;Mat predicted_x{},predicted_l{};
@@ -1791,7 +1762,6 @@ public:
     inline static std::atomic<bool> kid_motion{true};   // v1317: a part's place learned in motion too; off = build/legacy-kid-learn (v1316: at rest only)
     inline static std::atomic<bool> stale_view_match{true};   // v1320: a held thing's draw composed with the eye's previous view; off = build/no-stale-view-match
     inline static std::atomic<std::uint64_t> stale_view_matches_{};
-    inline static std::array<std::atomic<std::uint64_t>,4> stale_how_{};   // v1342: stale-view matches by [this key's L, identity, another settled L, an earlier read]
     static std::string kid_json() {return "{\"lagged\":"+std::to_string(kid_lagged_.load())+",\"current\":"+std::to_string(kid_current_.load())+",\"unlearned\":"+std::to_string(kid_unlearned_.load())+
         ",\"learned\":["+std::to_string(kid_learn_[0].load())+","+std::to_string(kid_learn_[1].load())+","+std::to_string(kid_learn_[2].load())+"]}";}
 private:
