@@ -41,15 +41,12 @@ inline void route(const In& in,fullbody::Tracking& t) {
     const auto copy_gun=[&](unsigned s) {return !holds(s) && arm::is_gun(extra_of(s));};
     t.slot1_gun=fresh && in.dual_wield && in.left_gun && !holds(rh); // the driver keeps its calm clip (v771)
     t.slot1_type=t.slot1_gun?static_cast<unsigned>(in.slot1_type):0u;
-    // v1104: a copy hand takes the native arm's clip only when the native gun is the SAME component type; a crossbow
-    // copy beside a native pistol must never play the pistol clip (the user's round-4 report). Type-mismatched (or no
-    // native gun) copy hands use the per-type kept/sampled clip instead (Tracking::gun_clip).
-    for(unsigned s=0;s<2;++s) if(fresh && in.dual_wield && copy_gun(s)) {
-        const unsigned type=extra_type(s);
-        if(t.slot1_gun && type && type==t.slot1_type) {t.mirror_native[s]=(s==1);t.gun_clip[s]=false;}
-        else {t.mirror_native[s]=false;t.gun_clip[s]=true;}
-        t.hand_empty[s]=false;
-    }
+    // v1370 (user, headset v1360: "the crossbow held with the pistol's grip ... then it kept blinking, as if it tried to change its pose in the hand"):
+    // a copy hand is posed by the kept clip of its own type (FullBodyDriver gun_clip), always. v1104 gave a copy of the native gun's type the native
+    // arm's live clip, which is the OTHER hand's gun: its hold latched whatever that arm played when it started (an equip, the frames after a wheel)
+    // and never followed it while the player walked (the S5 crossbow copy with spread fingers in the run's burst frames); and the copy switched
+    // clips, and keys, with the other hand's gun type and with every one-frame miss of the gun read, each switch a new hold.
+    for(unsigned s=0;s<2;++s) if(in.dual_wield && copy_gun(s)) {t.mirror_native[s]=false;t.gun_clip[s]=true;t.hand_empty[s]=false;}
     // v1033 (user, headset v1032: the hand that put a body on the shoulder went slack with straight fingers and came back
     // only when the body was put down): a body the game carries takes no hand of the player's. The carry's arm clip must not
     // drive either hand's fingers (body::Inputs::hand_empty gates the procedural fingers in body_ik's finger_mode), so both
@@ -72,7 +69,9 @@ inline void route(const In& in,fullbody::Tracking& t) {
      for(const char c:in.equip_name) {h^=static_cast<unsigned char>(c);h*=1099511628211ull;}
      const std::uint64_t sword_key=0x53574f5244ull,slot_key=in.equip_name.empty() || in.equip_name=="Empty"?0:h;
      t.item_key[1]=(arm_cross&1u)?slot_key:sword_key;t.item_key[0]=(arm_cross&2u)?sword_key:slot_key;}   // per arm: the cross says which item rides it
-    // a copy hand remembers the copy's hold, not the slot-1 item's (v771)
-    for(unsigned s=0;s<2;++s) if(t.gun_clip[s] || (t.mirror_native[s] && arm::is_gun(extra_of(s)))) t.item_key[s]=0x434f505900ull|static_cast<unsigned>(extra_of(s));
+    // a copy hand remembers the copy's hold, not the slot-1 item's (v771). v1370: whenever it holds the copy, not only while routed to a clip: the
+    // left hand's copy of the native gun's type had the SWORD key (the cross bit), shared by a pistol copy and a crossbow copy, and every change of
+    // the route changed the key and so restarted the hold (v1360).
+    for(unsigned s=0;s<2;++s) if(copy_gun(s)) t.item_key[s]=0x434f505900ull|static_cast<unsigned>(extra_of(s));
 }
 } // namespace d2vr::hand_route

@@ -190,7 +190,7 @@ struct Diagnostic {
     Vec3 plant[2]{},swing_from[2]{},swing_to[2]{};double phase[2]{},owned[4]{},palm_residual[2]{};
     ArmGate arm_gate[2]{ArmGate::no_solution,ArmGate::no_solution};
     // v1104: per hand, the held item's component type and where its authored grip clip came from (0 none, 1 captured live this
-    // session, 2 sampled: the first live frame or the baked engine idle clip for that type, 3 procedural fallback).
+    // session, 2 sampled: the baked engine idle clip for that type, 3 procedural fallback).
     int weapon_type[2]{};int clip_source[2]{};std::uint64_t clip_fallbacks[2]{};
     double scale=1,arm_scale=1,arm_scale_side[2]{1,1},torso_scale=1,configured_palm_span{};std::optional<AvatarCalibrationResult> fit;
     // Per side, the last visible arm solve's reach in the world (current root): reach_clamp a grip against it so the hand
@@ -453,7 +453,7 @@ public:
     }
     Xf attachment_target(unsigned side,const Xf& grip) const {std::lock_guard<std::mutex> lock(mutex_);return hand_target(side&1u,grip);}   // the attachment joint a grip asks for (frame-order trace)
     void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();image_valid_=false;image_held_ok_=false;have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;have_xr_latest_=false;have_heading_last_=have_heading_at_publish_=have_heading_solved_=false;
-        have_native_arm_[0]=have_native_arm_[1]=false;native_={};for(auto& c:gun_clip_) c.clear();for(auto& c:gun_clip_first_) c.clear();legacy_gun_clip_.clear();gun_clip_have_last_=false;gun_clip_calm_=0;gun_clip_type_=0;clip_fallbacks_={};last_={};solved_track_={};diag_={};solver_.reset();}
+        have_native_arm_[0]=have_native_arm_[1]=false;native_={};for(auto& c:gun_clip_) c.clear();legacy_gun_clip_.clear();gun_clip_have_last_=false;gun_clip_calm_=0;gun_clip_type_=0;clip_fallbacks_={};last_={};solved_track_={};diag_={};solver_.reset();}
     void clear_calibration() {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!fit_) return;
@@ -622,10 +622,10 @@ private:
     std::uint64_t revision_{},solved_revision_{},solves_{},failures_{};
     std::array<std::array<std::uint64_t,4>,2> finger_modes_{};std::array<std::array<std::uint64_t,2>,2> finger_inputs_{};
     body::NativePose native_{};bool have_native_body_{},have_native_arm_[2]{};std::array<std::vector<Xf>,2> mirrored_arm_{}; // mirror_native
-    // v1104: the authored gun clip PER COMPONENT TYPE (1 pistol, 2 crossbow). gun_clip_ = the calm captured clip; gun_clip_first_ =
-    // the first live frame of that type (a sampled clip, used until a calm one exists); baked_ = the engine's own idle clip for the
-    // type from src/weapon_grip_clips.hpp. A hand never takes another type's clip.
-    std::array<std::vector<Xf>,3> gun_clip_{},gun_clip_first_{};std::vector<Xf> legacy_gun_clip_{};Xf gun_clip_last_{};double gun_clip_calm_{};bool gun_clip_have_last_{};unsigned gun_clip_type_{};
+    // v1104: the authored gun clip PER COMPONENT TYPE (1 pistol, 2 crossbow). gun_clip_ = the calm captured clip; baked_ = the engine's own idle
+    // clip for the type from src/weapon_grip_clips.hpp. A hand never takes another type's clip. v1370: no first live frame (gun_clip_first_): it
+    // was taken on the frame the slot changed, from an arm still playing the previous item (the run's crossbow copy held with Blink's open hand).
+    std::array<std::vector<Xf>,3> gun_clip_{};std::vector<Xf> legacy_gun_clip_{};Xf gun_clip_last_{};double gun_clip_calm_{};bool gun_clip_have_last_{};unsigned gun_clip_type_{};
     std::array<std::uint64_t,2> clip_fallbacks_{};bool legacy_single_clip_{};
     Frame body_frame_{};
     double back_=.08,head_scale_=.02,eye_speed_{};
@@ -760,7 +760,7 @@ private:
     body::Output image_out_{};bool image_valid_{},image_held_ok_{};std::uint64_t image_fit_{},image_begins_{},image_frame_{};
     ImageCarry image_carry_{};bool image_carry_ok_{};   // v1258
     // v1104: the baked engine idle clip per type (model space, unscaled), built once. clip_for_type_locked picks the best authored
-    // clip for a type: the calm captured one, then the first live frame, then the engine's own idle clip; never another type's.
+    // clip for a type: the calm captured one (v1370: a grip of that type), then the engine's own idle clip; never another type's.
     static const std::vector<Xf>& baked_clip(unsigned type) {
         static const std::array<std::vector<Xf>,3> table=[]{
             std::array<std::vector<Xf>,3> t{};
@@ -773,11 +773,24 @@ private:
         }();
         return table[type<3?type:0];
     }
+    // v1370: a calm left-arm clip is kept as type T's grip only when it is one: its socket (the attachment in the wrist frame) lies nearer T's own
+    // idle socket (the engine's clips: pistol and crossbow 63 mm apart) than the other gun type's, turned less than 45 deg from it. A calm stretch of
+    // anything else while T is in slot 1 (the arm still in the previous gun's idle after an instant equip, a power's or a wheel's open hand) is not
+    // T's grip; the baked idle stands in until a real one is seen. Relative, so another avatar's own clips pass.
+    bool grip_of_type(const std::vector<Xf>& a,unsigned type) const {
+        const auto& sk=solver_.skeleton(1);const int wr=sk.find("left_wrist_jnt"),at=sk.find("left_hand_attachment_jnt");
+        if(type<1 || type>2 || wr<0 || at<0 || a.size()!=69) return false;
+        const auto& own=baked_clip(type);const auto& other=baked_clip(3-type);
+        if(own.size()!=69 || other.size()!=69) return false;
+        const auto socket=[&](const std::vector<Xf>& c) {return body::mul(body::inverse(c[static_cast<std::size_t>(wr)]),c[static_cast<std::size_t>(at)]);};
+        const auto s=socket(a),o=socket(own),x=socket(other);
+        const double turn=2*std::acos(std::min(1.,std::abs(s.q.x*o.q.x+s.q.y*o.q.y+s.q.z*o.q.z+s.q.w*o.q.w)));
+        return length(s.p-o.p)<length(s.p-x.p) && turn<45*body::kPi/180;
+    }
     const std::vector<Xf>* clip_for_type_locked(unsigned type) const {
         if(legacy_single_clip_) return legacy_gun_clip_.size()==69?&legacy_gun_clip_:nullptr;
         if(type<1 || type>2) return nullptr;
         if(gun_clip_[type].size()==69) return &gun_clip_[type];
-        if(gun_clip_first_[type].size()==69) return &gun_clip_first_[type];
         const auto& baked=baked_clip(type);
         return baked.size()==69?&baked:nullptr;
     }
@@ -816,20 +829,19 @@ private:
         }
         // v771/v1104: the left arm's native gun clip from its last calm stretch (the attachment turning under 20 deg/s against its parent
         // for 0.25 s; equip, fire and reload clips are not calm), kept PER COMPONENT TYPE so a crossbow copy can never take the pistol's
-        // grip (the user's round-4 report). The first live frame of a type is kept too: a sampled clip of the right type, used until a
-        // calm one exists; the engine's own idle clip (weapon_grip_clips.hpp) covers a type whose arm was never seen.
+        // grip (the user's round-4 report); v1370: and only when that stretch is a grip of the type (grip_of_type). The engine's own idle
+        // clip (weapon_grip_clips.hpp) covers a type whose arm was never seen calm in its grip.
         if(track_.slot1_gun && have_native_arm_[0] && native_.arm[0].size()==69) {
             const auto& sk=solver_.skeleton(1);const int at=sk.find("left_hand_attachment_jnt");
             const unsigned type=track_.slot1_type;
             if(type>=1 && type<=2 && at>0 && static_cast<std::size_t>(at)<sk.parent.size() && sk.parent[static_cast<std::size_t>(at)]>=0) {
                 if(gun_clip_type_!=type) {gun_clip_type_=type;gun_clip_have_last_=false;gun_clip_calm_=0;}
                 const auto& a=native_.arm[0];
-                if(gun_clip_first_[type].size()!=69) gun_clip_first_[type]=a;   // sampled: the engine's live pose of this type, first sight
                 const auto local=body::mul(body::inverse(a[static_cast<std::size_t>(sk.parent[static_cast<std::size_t>(at)])]),a[static_cast<std::size_t>(at)]);
                 const auto& q=gun_clip_last_.q;const double turn=2*std::acos(std::min(1.,std::abs(local.q.x*q.x+local.q.y*q.y+local.q.z*q.z+local.q.w*q.w)));
                 const bool calm=gun_clip_have_last_ && dt>1e-4 && turn/dt<20*3.14159265358979323846/180;
                 gun_clip_calm_=calm?gun_clip_calm_+dt:0;gun_clip_last_=local;gun_clip_have_last_=true;
-                if(gun_clip_calm_>=.25) {gun_clip_[type]=a;legacy_gun_clip_=a;}
+                if(gun_clip_calm_>=.25) {legacy_gun_clip_=a;if(grip_of_type(a,type)) gun_clip_[type]=a;}   // v1370: only a grip of this type
             }
         } else gun_clip_have_last_=false;
         for(unsigned i=0;i<2;++i) {
@@ -854,7 +866,7 @@ private:
                 const auto* clip=clip_for_type_locked(track_.weapon_type[i]);
                 if(clip) {
                     const unsigned t=track_.weapon_type[i]<3?track_.weapon_type[i]:0u;
-                    source=gun_clip_[t].size()==69?1u:2u;   // captured this session / sampled (first live frame or the baked idle clip)
+                    source=gun_clip_[t].size()==69?1u:2u;   // captured this session / the engine's baked idle clip
                     if(i==0) {in.native_arm[0]=clip;in.native_mirrored[0]=false;}
                     else {auto& m=mirrored_arm_[1];m.resize(69);m[0]=(*clip)[0];
                         for(unsigned j=1;j<69;++j) m[j]=to_xf(power_hand::mirror_joint(to_transform((*clip)[j])));

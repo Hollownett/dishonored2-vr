@@ -272,9 +272,16 @@ int main() {
         assert(length(mirrored.p-want.p)<2e-3 && angle(mirrored.q,want.q)<.02); // the left's bent finger, mirrored, on the right hand
         assert(angle(own.q,want.q)>.5);                                       // without the flag the right keeps its own flat finger
     }
+    // v1370: the engine's own idle clip of a gun type as a left-arm palette (weapon_grip_clips.hpp). A calm clip is kept as a type's grip only
+    // when it is one (FullBodyDriver grip_of_type), so the kept-clip cases below play real grips with a bent finger, not the bind pose.
+    const auto engine_idle=[](unsigned type) {
+        std::array<Transform,69> a{};const auto* k=grip_clips::sampled(type);assert(k);
+        for(unsigned j=0;j<69;++j) a[j]=to_transform(Xf{normalized(Quaternion{(*k)[j].q[0],(*k)[j].q[1],(*k)[j].q[2],(*k)[j].q[3]}),Vec3{(*k)[j].p[0],(*k)[j].p[1],(*k)[j].p[2]}});
+        return a;
+    };
     {   // v771 dual wield (user, headset v770: a right-hand pistol copy lost its hold when the left took a grenade): the left arm's calm gun clip is
         // kept while slot 1 holds a gun; a copy held when no arm plays a gun clip is posed by it (mirrored on the right).
-        auto bent=native_arm;const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
+        auto bent=native_arm;bent[0]=engine_idle(grip_clips::type_pistol);const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt"));
         const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt"));
         {auto& bent_joint=bent[0][li];const double c=std::cos(.9),s=std::sin(.9);
          for(unsigned k=0;k<3;++k) {const float a1=bent_joint.f[4+k],a2=bent_joint.f[8+k];bent_joint.f[4+k]=static_cast<float>(c*a1+s*a2);bent_joint.f[8+k]=static_cast<float>(-s*a1+c*a2);}}
@@ -291,14 +298,15 @@ int main() {
         const auto want=body::mul(body::inverse(to_xf(power_hand::mirror_joint(bent[0][lw]))),to_xf(power_hand::mirror_joint(bent[0][li])));
         const auto angle=[](const Quaternion& a,const Quaternion& b) {return 2*std::acos(std::min(1.,std::abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)));};
         const auto kept=right_index(true),own=right_index(false);
+        std::cout<<"v771 kept clip: index "<<angle(kept.q,want.q)<<" rad off the kept bent finger; without it "<<angle(own.q,want.q)<<" rad"<<std::endl;
         assert(angle(kept.q,want.q)<.02); // the kept gun clip's bent finger, mirrored, on the right hand
-        assert(angle(own.q,want.q)>.5);                                 // without it the right keeps its own flat finger
+        assert(angle(own.q,want.q)>.2);   // without it the right keeps its own flat finger (v1370: .30 rad from the pistol idle's bent index; the bind's was > .5)
     }
     {   // v1104 (user: "all guns should have animated grip ... currently I can see a pistol grip on a crossbow and vice versa"): the kept
         // gun clip is keyed by the held item's COMPONENT TYPE. Capture a pistol clip (bent index) and a crossbow clip (bent ring) from the
         // left arm; a right-hand copy of each type takes its own clip, never the other's. A type never captured uses the engine's own baked
         // idle clip for THAT type (sampled); a type with neither source falls back to the procedural grip with its count.
-        std::array<std::array<Transform,69>,2> pistol{native_arm[0],native_arm[1]},crossbow{native_arm[0],native_arm[1]};
+        std::array<std::array<Transform,69>,2> pistol{engine_idle(grip_clips::type_pistol),native_arm[1]},crossbow{engine_idle(grip_clips::type_crossbow),native_arm[1]};
         const auto li=static_cast<unsigned>(left.find("left_index_03_jnt")),lw=static_cast<unsigned>(left.find("left_wrist_jnt")),lr=static_cast<unsigned>(left.find("left_ring_03_jnt"));
         const auto ri=static_cast<unsigned>(right.find("right_index_03_jnt")),rw=static_cast<unsigned>(right.find("right_wrist_jnt")),rr=static_cast<unsigned>(right.find("right_ring_03_jnt"));
         const auto bend=[](Transform& joint,double degrees) {
