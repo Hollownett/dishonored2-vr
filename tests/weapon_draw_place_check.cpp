@@ -136,6 +136,53 @@ static Result draw_held(std::uint32_t frame,const Mat& m,unsigned e,const Mat* w
     }
     return r;
 }
+// v1342 (user, v1341 stereo: carried bottles and junk "jump, shrink and grow", with or without the Timepiece; sims v1342 with a game-carried
+// bottle: unplaced in 95 % of walking renders, the stale-view draws culled before the match (1324), no settled L for their draw key (1488) or
+// off F * L by the motion since the read (864)). Four cases, each 40 renders, 3 in 4 draws from render 12 composed with the eye's PREVIOUS view;
+// the current-view draws (key 0x1239) teach L. Every stale draw must be placed at B * part (0.2 mm):
+//   jump      - the camera jumps 1.5 m between renders: the stale draw is near the thing only through the previous view (the cull)
+//   own key   - the stale pass has its own draw key (0x2342, never seen through the current view) and the mesh sits at the model frame (identity)
+//   own key+L - the same with the mesh at an offset: L from the other key
+//   old read  - own key, the hand moving 1 m/s and the stale draw composed from the PREVIOUS read as well as the previous view
+static void v1342_stale_view_lab(const Mat& part) {
+    const Mat hold=rigid(rot(1,0,0,.2),.03,-.02,.01),start=rigid(rot(0,0,1,.4),-91.7,-92.4,4.9);
+    struct Case {const char* name;double jump,v;std::uint64_t key;bool identity_mesh,old_read;};
+    const Case cases[]={{"jump",1.5,0,0x1239,false,false},{"own key",0,0,0x2342,true,false},{"own key+L",0,0,0x2342,false,false},{"old read",0,1.,0x2342,false,true}};
+    std::uint32_t frame=56000;
+    for(const Case& c:cases) {
+        Place::clear();frame+=100;int placed=0,draws=0;double worst=0;
+        const Mat mesh=c.identity_mesh?identity():part;
+        for(int n=0;n<40;++n,++frame) {
+            const Mat f=held_pose(n*tick_s,c.v,0,start),b=mul(f,hold),f_prev=held_pose((n-1)*tick_s,c.v,0,start);
+            Wp w;for(unsigned e=0;e<2;++e) {Mat pose=eye_pose(n*6,e);pose[3]+=(n&1)?c.jump:0.;w.vp[e]=vp_of(pose,n*6);w.inv[e]=inv(w.vp[e]);}
+            frames_seen[frame]=w;
+            const auto raw=raw_of(f);std::array<const float*,2> rp{raw.data(),nullptr};std::array<const Mat*,2> bp{&b,nullptr};
+            Place::stage(0,Place::kind_prop);Place::publish_bound(frame,rp,bp,{.5,0.},{0xd000+static_cast<std::uintptr_t>(&c-cases),0},n*tick_s);
+            if(n<3) continue;
+            const bool stale=n>=12 && n%4!=0;
+            for(unsigned e=0;e<2;++e) {
+                std::array<float,16> o{},q{};
+                if(!stale) {const auto cur=floats(mul(w.vp[e],mul(f,mesh)));Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,0x1239);continue;}
+                const Wp& before=frames_seen.at(frame-1);
+                const auto cur=floats(mul(before.vp[e],mul(c.old_read?f_prev:f,mesh)));
+                const Result r=Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,c.key);
+                ++draws;if(r.side!=0) continue;++placed;
+                const auto got=Place::model_rows(w.inv[e].data(),o.data());const Mat want=mul(b,mesh);for(std::size_t i=0;i<12;++i) worst=std::max(worst,std::abs(got[i]-want[i]));
+            }
+        }
+        std::printf("v1342 stale-view %-9s: placed %2d / %2d, worst %.3f mm\n",c.name,placed,draws,worst*1000);
+        CHECK(placed==draws && worst<2e-4);
+    }
+    { // v1342 cost: an arm-like near draw 20 cm from the held thing, matching nothing, through the stale-view block (settled L's and reads present)
+        const Mat arm=rigid(rot(0,1,0,.9),-91.55,-92.3,4.95);const Wp& w=frames_seen.at(frame-1);const auto cur=floats(mul(w.vp[0],arm));std::array<float,16> o{},q{};
+        const auto t0=std::chrono::steady_clock::now();int hits=0;
+        for(int i=0;i<200000;++i) hits+=Place::place(frame-1,provider,cur.data(),nullptr,o.data(),q.data(),-1,0,nullptr,0x3456).side>=0;
+        const double ns=std::chrono::duration<double,std::nano>(std::chrono::steady_clock::now()-t0).count()/200000;
+        std::printf("v1342 cost: a near unmatched draw through the stale-view block %.0f ns (placed %d)\n",ns,hits);CHECK(hits==0);
+    }
+    std::printf("v1342 stale-view matches by [key L, identity, other L, earlier read]: %llu %llu %llu %llu\n",
+        static_cast<unsigned long long>(Place::stale_how_[0].load()),static_cast<unsigned long long>(Place::stale_how_[1].load()),static_cast<unsigned long long>(Place::stale_how_[2].load()),static_cast<unsigned long long>(Place::stale_how_[3].load()));
+}
 // v1320: a held thing's draw the engine composed with this eye's PREVIOUS view-projection (the head turning) is matched through that view
 // and placed at B * part under the current one; with the match off it is not placed (it stayed at the game's pose)
 static void v1320_stale_view_lab(const Mat& part) {
@@ -874,6 +921,7 @@ int main() {
 
     v1239_lab(part);
     v1320_stale_view_lab(part);
+    v1342_stale_view_lab(part);
     v1284_note_carry_lab();
     v1284_cross_recall_lab();
     v1284_cull_lab(part);

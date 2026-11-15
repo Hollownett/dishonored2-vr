@@ -135,6 +135,7 @@ int main() {
         RigidLocal::clear();
         const auto noisy=[&](const Mat& l) {Mat n=mul(axis_angle(.6,.48,.64,(uni()-.5)*2e-5*0.017453292519943295),l);n[3]+=(uni()-.5)*2e-6;n[7]+=(uni()-.5)*2e-6;n[11]+=(uni()-.5)*2e-6;return n;};
         Mat l_part=l_true;l_part[3]+=.005;
+        d2vr::weapon_perf::on=true;   // v1342: since v1284 (B6) the pass-pair census runs only with the weapon-perf diagnostics on (the lab predates it)
         const auto [pairs0,spread0]=RigidLocal::pass_counts();
         unsigned differing=0,raw_differing=0,part_far=0;double part_err=0;
         for(std::uint32_t n=0;n<60;++n) {
@@ -166,6 +167,7 @@ int main() {
         CHECK(raw_differing>0);   // the noise alone would have split the passes
         CHECK(spread1==spread0 && pairs1-pairs0>=120);
         CHECK(part_far==120 && part_err<1e-5);
+        d2vr::weapon_perf::on=false;
     }
     if(failures) {std::printf("rigid_local_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: rigid_local_check (consensus settle, early candidate, steady mismatch not followed, genuine change, reset, 30/60/85%% mismatch, both eyes, full side recycles, child frames, one bitwise L across passes)\n");
