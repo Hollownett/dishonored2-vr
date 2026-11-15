@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <mutex>
 #include <string_view>
 
 namespace d2vr::held_copy {
@@ -119,6 +120,27 @@ inline GripConstant grip_constant(Kind k) noexcept {
     case Kind::crossbow: return {{{.0324,-.0379,-.0243},{Vec3{.5909,.0170,-.8065},Vec3{-.0587,.9980,-.0220},Vec3{.8046,.0603,.5908}}},0};
     default: return {{{0,0,0},{Vec3{1,0,0},Vec3{0,1,0},Vec3{0,0,1}}},0};
     }
+}
+// v1371 (user, headset v1380: "when I first choose the crossbow into the hand where Blink was, the hand takes the pistol grip"): the grip of each
+// gun kind in the LEFT hand as the full-body solver poses that hand with the kind's clip (FullBodyDriver::copy_grip), in the hand's grip frame.
+// The render thread publishes it every frame; the copy service reads it for a copy whose def and kind no native weapon has been measured for.
+class SolverGrips {
+public:
+    static void set(Kind k,const Pose& p) noexcept {if(static_cast<unsigned>(k)<4 && valid(p)) {std::lock_guard<std::mutex> l(m_);g_[static_cast<unsigned>(k)]={p,true};}}
+    static bool get(Kind k,Pose& p) noexcept {std::lock_guard<std::mutex> l(m_);const auto& e=g_[static_cast<unsigned>(k)&3u];if(!e.have) return false;p=e.pose;return true;}
+    static void clear() noexcept {std::lock_guard<std::mutex> l(m_);g_={};}
+private:
+    struct Entry {Pose pose{};bool have{};};
+    inline static std::mutex m_{};inline static std::array<Entry,4> g_{};
+};
+// The grip a copy of kind k shown at `side` takes when no native weapon of its def or kind has been measured (NativeWeaponHands::grip_offset;
+// the measurement needs 12 calm samples 20 ms apart of the native weapon riding its hand): the solver's grip of the kind (left hand, mirrored
+// for the right as a measured grip is), else the kind's constant. v1371: the constant first (v767, another hand frame) sat 25.7 mm / 16.3 deg
+// off the crossbow's live grip and 36.3 mm / 7.7 deg off the pistol's (the v1380 run's own measurements, which the solver's grips match within
+// 0.6 mm): a gun taken over a power became the hand's copy before its native twin was ever measured, and sat away from the fingers.
+inline Pose unmeasured_grip(Kind k,unsigned side,bool& mirrored) noexcept {
+    if(Pose p{};SolverGrips::get(k,p)) {mirrored=side!=0;return p;}
+    const auto c=grip_constant(k);mirrored=side!=c.side;return c.offset;
 }
 // v773: a measured hold of a gun is plausible when its barrel (row 0) lies within 45 degrees of the kind's constant (mirrored for the other
 // side). Other kinds have no constant to compare with: always plausible.

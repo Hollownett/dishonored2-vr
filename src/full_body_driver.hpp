@@ -590,6 +590,21 @@ public:
     // v1104: per type; the baked engine idle clip counts as a sampled source too.
     bool gun_clip_ready() const {std::lock_guard<std::mutex> lock(mutex_);return clip_for_type_locked(track_.slot1_type)!=nullptr;}
     bool gun_clip_ready(unsigned type) const {std::lock_guard<std::mutex> lock(mutex_);return clip_for_type_locked(type)!=nullptr;}
+    // v1371: where a gun of `type` sits in the LEFT hand as the solver poses it with the type's clip (clip_for_type: the kept clip, else the
+    // engine's idle), in the frame of that hand's controller grip (Tracking::grip): the frame NativeWeaponHands measures a native gun's grip in
+    // (the left slot's gun frame is joint 59, identity tag) and places a copy with, mirrored for the right hand as it mirrors a measured grip.
+    // The solver's own chain: the grip's attachment target (grip_to_attachment), the wrist at the bind relation to it, the clip's attachment
+    // from the wrist (translations at the solver's scale). Empty when the type has no clip.
+    std::optional<Xf> copy_grip(unsigned type) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto* clip=clip_for_type_locked(type);
+        const auto& s=solver_.skeleton(1);const int wr=s.find("left_wrist_jnt"),at=s.find("left_hand_attachment_jnt");
+        if(!clip || clip->size()!=69 || wr<0 || at<0) return std::nullopt;
+        const auto w=static_cast<std::size_t>(wr),a=static_cast<std::size_t>(at);
+        auto bind_attach=body::mul(body::inverse(s.bind[w]),s.bind[a]);bind_attach.p=bind_attach.p*solver_.scale();
+        auto socket=body::mul(body::inverse((*clip)[w]),(*clip)[a]);socket.p=socket.p*solver_.scale();
+        return body::mul(grip_to_attachment_[0],body::mul(body::inverse(bind_attach),socket));
+    }
     // v1104 off switch (build/legacy-single-gun-clip): the old single kept clip, whatever type was held when it was captured.
     void legacy_single_gun_clip(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_single_clip_=on;}
     // v1104: per hand the held item's type and the authored clip's source (Diagnostic::clip_source: 0 none, 1 captured, 2 sampled, 3 fallback).

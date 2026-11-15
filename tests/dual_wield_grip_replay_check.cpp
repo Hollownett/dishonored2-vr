@@ -14,6 +14,7 @@
 //   pose and then walking (never calm), R3 the game's arm still in the pistol idle for 0.5 s after an instant crossbow equip.
 #define NOMINMAX
 #include "../src/hand_route.hpp"
+#include "../src/held_copy.hpp"
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -235,6 +236,73 @@ int main() {
         }
         std::printf("R3 the arm lagging an instant equip: left crossbow copy grip off its own by %.1f mm %.1f deg\n",worst_mm,worst_deg);
         expect(worst_mm<3 && worst_deg<2,"R3: a crossbow copy never takes the pistol's grip from an arm that lagged the equip");
+    }
+    // ---- v1371 (user, headset v1380: "when I first choose the crossbow into the hand where Blink was, the hand takes the pistol grip") --------
+    // The v1380 run (artifacts/headset-v1380-20261115T2336): Blink in the left hand; the left wheel chose the crossbow (142119890): equipped over
+    // the power, then the arrival made it the left hand's COPY and equipped Blink again on the right arm (copy_restore); the same for the pistol
+    // (142129109). Each of those native guns was bound for ONE left-weapon receipt (receipts come every ~109 ms while a gun is bound), so the
+    // copy service never measured it (12 calm samples 20 ms apart): the copy took the unmeasured grip of its kind, which the hand the solver
+    // posed with that kind's clip must hold. A copy is drawn at hand grip * grip (weapon_draw_place space_grip), the fingers at the clip.
+    {
+        using held_copy::Kind;
+        const auto pose_of=[](const Xf& x) {return held_copy::Pose{x.p,{rotated(x.q,{1,0,0}),rotated(x.q,{0,1,0}),rotated(x.q,{0,0,1})}};};
+        const int at=left.find("left_hand_attachment_jnt");
+        const auto frame_error=[](const held_copy::Pose& a,const Xf& b,double& mm,double& deg) {
+            mm=1000*length(a.position-b.p);deg=0;
+            for(unsigned k=0;k<3;++k) {const Vec3 e{k==0?1.:0.,k==1?1.:0.,k==2?1.:0.};
+                deg=std::max(deg,std::acos(std::clamp(dot(a.basis[k],rotated(b.q,e)),-1.,1.))*180/body::kPi);}
+        };
+        // (1) the solver's grip of a type (FullBodyDriver::copy_grip) is where that type's native gun sits in the left hand, in the grip frame the
+        // copy service measures a native gun in: the solved attachment joint 59 (the left slot's gun frame, identity tag)
+        for(unsigned type=1;type<=2;++type) {
+            Driver d;d.tune(0,1);std::uint32_t tick=1000;const Slot slot=type==1?Slot::pistol:Slot::crossbow;
+            for(int n=0;n<120;++n) (void)frame(d,{pack_of(1,0,H::none,H::none),slot,true,1,&idle_of(slot)},tick+=11);
+            const auto r=d.arm(0,idle_of(slot),identity);const auto derived=d.copy_grip(type);
+            if(!r || !derived) {expect(false,"v1371: the solver's grip of type "+std::to_string(type));continue;}
+            double mm,deg;frame_error(pose_of(*derived),body::mul(body::inverse(base.grip[0]),to_xf((*r)[static_cast<unsigned>(at)])),mm,deg);
+            std::printf("v1371 solver grip of type %u against its native gun in the left hand: %.2f mm %.2f deg\n",type,mm,deg);
+            expect(mm<1 && deg<.5,"v1371: the solver's grip of type "+std::to_string(type)+" is where its native gun sits in that hand");
+        }
+        // (2) the run: Blink in the left hand, then each gun taken over it as the left hand's copy before any native gun of its kind was measured
+        for(const Kind kind:{Kind::crossbow,Kind::pistol}) {
+            const unsigned type=kind==Kind::pistol?1u:2u;const Slot slot=type==1?Slot::pistol:Slot::crossbow;const H held=type==1?H::pistol:H::crossbow;
+            Driver d;d.tune(0,1);std::uint32_t tick=5000;held_copy::SolverGrips::clear();
+            const unsigned blink_left=pack_of(1,0,H::none,H::none),copy_left=pack_of(0,1,held,H::none);
+            for(int n=0;n<90;++n) (void)frame(d,{blink_left,Slot::power,true,0,&open_hand},tick+=11);   // Blink in the left hand
+            held_copy::OffsetFilter measure;   // the copy service measuring the native gun while it rides the left hand, one sample per 20 ms
+            for(int n=0;n<18;++n) {   // 0.2 s: one receipt
+                (void)frame(d,{blink_left,slot,true,1,n==0?&open_hand:&idle_of(slot)},tick+=11);
+                if(n%2==0) if(const auto r=d.arm(0,idle_of(slot),identity)) measure.add(pose_of(body::mul(body::inverse(base.grip[0]),to_xf((*r)[static_cast<unsigned>(at)]))));
+            }
+            expect(!measure.ready(),"v1371: a gun bound for one receipt is never measured");
+            double worst_mm=0,worst_deg=0;
+            for(int n=0;n<180;++n) {   // 2 s: the copy in the left hand, Blink on the right arm
+                (void)frame(d,{copy_left,Slot::power,true,0,&open_hand},tick+=11);
+                for(unsigned t=1;t<=2;++t) if(const auto g=d.copy_grip(t)) held_copy::SolverGrips::set(t==1?Kind::pistol:Kind::crossbow,pose_of(*g));   // as dxgi_probe, every frame
+                bool mirrored{};const auto offset=held_copy::unmeasured_grip(kind,0,mirrored);   // the copy service, nothing measured
+                held_copy::Pose copy{};const auto r=d.arm(0,open_hand,identity);
+                if(!r || !held_copy::place(pose_of(base.grip[0]),offset,mirrored,copy)) {expect(false,"v1371: the copy is placed");break;}
+                if(n>=45) {double mm,deg;frame_error(copy,to_xf((*r)[static_cast<unsigned>(at)]),mm,deg);worst_mm=std::max(worst_mm,mm);worst_deg=std::max(worst_deg,deg);}
+            }
+            std::printf("v1371 first %s copy over Blink: drawn %.1f mm %.1f deg from where the hand holds it\n",type==1?"pistol":"crossbow",worst_mm,worst_deg);
+            expect(worst_mm<2 && worst_deg<1,std::string("v1371: the first ")+(type==1?"pistol":"crossbow")+" copy over Blink sits where the hand holds it");
+        }
+        // The run's own numbers (status dual_wield.guns.held.kinds, measured on the right hand, here as seen on the left): the grips the copy
+        // service measured once a native gun of each kind rode a hand, against this rig's solver grips and the constants (report only: the
+        // rig's scale is not the user's fit).
+        {
+            const auto measured=[](double x,double y,double z,Vec3 b0,Vec3 b1,Vec3 b2) {return held_copy::mirror(held_copy::Pose{{x,y,z},{b0,b1,b2}});};
+            const held_copy::Pose run[2]={measured(.0052,.0304,.0013,{.5051,-.0976,-.8576},{-.0338,.9906,-.1326},{.8624,.096,.497}),
+                                          measured(.0491,.0381,-.0438,{.3691,-.1296,-.9203},{-.0062,.9899,-.1419},{.9294,.0581,.3645})};
+            Driver d;d.tune(0,1);std::uint32_t tick=1000;
+            for(int n=0;n<5;++n) (void)frame(d,{pack_of(1,0,H::none,H::none),Slot::power,true,0,&open_hand},tick+=11);
+            for(unsigned type=1;type<=2;++type) {
+                const auto g=d.copy_grip(type);const auto c=held_copy::grip_constant(type==1?Kind::pistol:Kind::crossbow);if(!g) continue;
+                const auto& m=run[type-1];const auto mx=from_basis(m.position,m.basis[0],m.basis[1],m.basis[2]);
+                double mm,deg,cmm,cdeg;frame_error(pose_of(*g),mx,mm,deg);frame_error(c.offset,mx,cmm,cdeg);
+                std::printf("v1371 %s: the run's measured grip vs this rig's solver grip %.1f mm %.1f deg, vs the constant %.1f mm %.1f deg\n",type==1?"pistol":"crossbow",mm,deg,cmm,cdeg);
+            }
+        }
     }
     if(failures) {std::cerr<<failures<<" failure(s)\n";return 1;}
     std::puts("dual wield grip replay check ok");return 0;

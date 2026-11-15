@@ -1659,7 +1659,7 @@ private:
                     offset=src->offset.value;mirrored=side!=src->side;return true;
                 }
         if(const auto& k=kind_offset_[static_cast<unsigned>(held_copy::kind_of(def))&3u];k.have) {offset=k.offset;mirrored=side!=k.side;return true;}
-        const auto c=held_copy::grip_constant(held_copy::kind_of(def));offset=c.offset;mirrored=side!=c.side;return false;
+        offset=held_copy::unmeasured_grip(held_copy::kind_of(def),side,mirrored);return false;
     }
     template<class Read> static void held_hide(std::uintptr_t base,Read& read,unsigned side) {
         auto& h=held_[side];
