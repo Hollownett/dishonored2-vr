@@ -176,6 +176,14 @@ int main() {
     // v1140: a held prop is placed with weapons opt-out (weapon_mode 0); neither = no placement; object-motion-mode 0 still wins.
     CHECK(d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(0,true),1) && !d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(0,false),1) &&
           d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(1,false),1) && !d2vr::ObjectMotion::weapon_draw_on(d2vr::ObjectMotion::placing_mode(0,true),0));
+    // v1322: the held shadow placement takes draws of non-eye passes only. Performance mode's eye render has pass_eye -1 too (no paired eye
+    // views): a draw named by content there is the eye render's (one-view placement), not a shadow map's.
+    {using d2vr::ObjectMotion;const std::uintptr_t v=0x1000;
+     CHECK(ObjectMotion::other_view_pass(false,true,3,-1,v) && ObjectMotion::other_view_pass(false,false,3,-1,v));   // paired: a light view
+     CHECK(!ObjectMotion::other_view_pass(false,true,3,0,v) && !ObjectMotion::other_view_pass(true,false,3,1,v));    // an eye view's pass
+     CHECK(!ObjectMotion::other_view_pass(true,true,3,-1,v));                                                         // performance: the eye render
+     CHECK(ObjectMotion::other_view_pass(true,false,3,-1,v));                                                         // performance: a shadow map
+     CHECK(!ObjectMotion::other_view_pass(false,false,-1,-1,v) && !ObjectMotion::other_view_pass(false,false,3,-1,0));}
     // v1101: the publisher's frame and per-hand counters (the weapon lab drives place() itself).
     {
         static const float frame[15]={0,0,0, 1,0,0, 0,1,0, 0,0,1, 1,1,1};

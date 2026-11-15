@@ -157,12 +157,12 @@ public:
         context_->Unmap(st.Get(),0);return r;
     }
     // The look-up votes of the last pass per owner (1 head's rig, 2 left, 3 right): confirmed, refuted (reads back and waits: tools only).
-    std::array<std::uint32_t,8> votes() {
-        std::array<std::uint32_t,8> v{};if(!votes_.b) return v;
+    std::array<std::uint32_t,60> votes() {
+        std::array<std::uint32_t,60> v{};if(!votes_.b) return v;
         D3D11_BUFFER_DESC d{};votes_.b->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         Ptr<ID3D11Buffer> st;checked(device_->CreateBuffer(&d,nullptr,&st),"votes read-back");context_->CopyResource(st.Get(),votes_.b.Get());
         D3D11_MAPPED_SUBRESOURCE m{};checked(context_->Map(st.Get(),0,D3D11_MAP_READ,0,&m),"votes read");
-        for(int i=0;i<8;++i) v[i]=static_cast<const std::uint32_t*>(m.pData)[i];
+        for(int i=0;i<60;++i) v[i]=static_cast<const std::uint32_t*>(m.pData)[i];
         context_->Unmap(st.Get(),0);return v;
     }
     // kept / fresh: _SRGB read views of the eye images (display size); depth, motion and rig views at render size (motion / rig null: off).

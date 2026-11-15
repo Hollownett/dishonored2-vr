@@ -452,6 +452,14 @@ public:
     static bool held_wanted() noexcept {return installed_ && mode_.load(std::memory_order_relaxed)>=1;}
     static void set_held_placing(bool on) noexcept {held_placing_.store(on,std::memory_order_relaxed);}
     static int placing_mode(int weapon_mode,bool held) noexcept {return weapon_mode>=1 || held?1:0;}
+    // v1322: a draw of a pass whose view is not an eye view (a shadow map: v1238's held shadow placement). Performance mode never notes its
+    // one-view render as an eye view (eye_views_ are the paired eyes), so there every pass has pass_eye < 0; a draw named by content
+    // (have_content: this render's receipt) is the eye render's and belongs to the one-view placement, which also hands the rig target its
+    // placed rows. (v1320 made placing_mode() 1 by default, and from then on this block took every held draw of the eye render: the rig
+    // target kept the engine's pose and the rebuilt eye drew the weapon there - sims v1321: held_target_rows [0, 48574], one-view placed 0.)
+    static bool other_view_pass(bool alt,bool have_content,int pass,int pass_eye,std::uintptr_t pass_view) noexcept {
+        return pass>=0 && pass_eye<0 && pass_view && !(alt && have_content);
+    }
     static int placing_mode() noexcept {return placing_mode(weapon_mode_.load(std::memory_order_relaxed),held_placing_.load(std::memory_order_relaxed));}
     // v1101: the render pass a draw hook runs in. `view` is the pass job's view (item+0x70, src/render_pass_map.hpp): one of the eye
     // views for every pass that renders that eye (the exact eye, no cache certificate), a light/other view for a pass that does not.
@@ -1356,7 +1364,7 @@ private:
         // change of speed. A pass whose view is not an eye view has its own view-projection at view+0x7510 (as the eye views); a draw of it that
         // matches a held thing's frame there (axes within 0.004, as every placement) is placed with the same B * L. A wrong or unreadable VP matches
         // nothing and changes nothing. Current rows only (a shadow pass writes no motion). build/no-held-shadow-place: off.
-        if(near_draw && pass>=0 && pass_eye<0 && pass_view && read_ && held_shadow_place.load(std::memory_order_relaxed) && mode_.load(std::memory_order_relaxed)>=1 &&
+        if(near_draw && other_view_pass(alt,have_content,pass,pass_eye,pass_view) && read_ && held_shadow_place.load(std::memory_order_relaxed) && mode_.load(std::memory_order_relaxed)>=1 &&
            placing_mode()==1 && !RigMask::draw_is_rig()) {
             const weapon_perf::Timer perf_timer(weapon_perf::b_held_shadow);   // v1283 (A1)
             float lvp[16];
