@@ -1868,6 +1868,7 @@ static std::atomic<std::uint64_t> weapon_place_writes{},weapon_place_skips{};
 static bool weapon_note_carry=true;
 // v1284 (plan C2): an unbound weapon is published at its engine frame (B = F) for placement; build/no-weapon-provisional: v1283 (engine rows stay).
 static bool weapon_provisional=true;
+static bool legacy_hand_weapon_first=false;static std::array<std::atomic<std::uint64_t>,2> weapon_draw_yielded{};   // v1361: renders a hand's weapon yielded the hand to a held thing
 static std::array<std::atomic<std::uint64_t>,2> weapon_draw_provisional{};static std::array<std::atomic<bool>,2> weapon_draw_provisional_now{};
 // v930 (weapon_draw_place.hpp; default on, opt-out build/no-weapon-draw-place): a held weapon is placed in the hand each render draws, at its draw.
 // Per hand: renders published / skipped, and the scatter (RMS about the mean, metres) of the weapon origin in the drawn hand's frame as the
@@ -1934,6 +1935,7 @@ static std::string weapon_draw_json() {
     text+=",\"binder_why\":"+d2vr::weapon_draw::BindWhy::json();   // v1283 (plan A3)
     text+=",\"near_cost\":"+d2vr::weapon_perf::json(d2vr::weapon_draw::Place::published());   // v1283 (plan A1)
     text+=",\"provisional\":["+std::to_string(weapon_draw_provisional[0].load())+","+std::to_string(weapon_draw_provisional[1].load())+"],\"note_carry\":"+(weapon_note_carry?"true":"false");   // v1284 (C2, C1)
+    text+=",\"yielded\":["+std::to_string(weapon_draw_yielded[0].load())+","+std::to_string(weapon_draw_yielded[1].load())+"]";   // v1361: renders a hand's weapon yielded the hand to the prop its grab holds
     text+=",\"weapon_type_live\":["+std::to_string(types[0])+","+std::to_string(types[1])+"]";
     text+=",\"kids\":[";for(unsigned h=0;h<2;++h) text+=std::string(h?",":"")+"{\"native\":["+std::to_string(weapon_kids_last[h][0].load())+","+std::to_string(weapon_kids_max[h][0].load())+"],\"copy\":["+
         std::to_string(weapon_kids_last[h][1].load())+","+std::to_string(weapon_kids_max[h][1].load())+"],\"capped\":"+std::to_string(weapon_kids_capped[h].load())+"}";text+="]";text+=",\"kid_place\":"+d2vr::weapon_draw::Place::kid_json();text+=",\"engine_bind\":"+engine_bind_json();   // v1319
@@ -2040,6 +2042,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     full_body.legacy_root_yaw(fs::exists(root/L"build"/L"legacy-root-yaw-carry"));
     arm_slip_fix=!fs::exists(root/L"build"/L"no-arm-slip-fix");   // v1247: the image palette in the Setup's rig frame (off = v1246)
     weapon_note_carry=!fs::exists(root/L"build"/L"no-weapon-note-carry");weapon_provisional=!fs::exists(root/L"build"/L"no-weapon-provisional");   // v1284 (C1, C2)
+    legacy_hand_weapon_first=fs::exists(root/L"build"/L"legacy-hand-weapon-first");   // v1361: a hand's weapon took its slot whatever it held (v1360)
     image_skin_enabled=!fs::exists(root/L"build"/L"legacy-tick-skin");   // v861: build/legacy-tick-skin keeps each tick's arm and body upload as drawn
     // v862: with the image skin the drawn arms are the image's own sample; the v830 newer-sample refresh would move a solve an upload made before
     // the render began onto the next locate, so it is off then (it only served the tick's drawn upload).
@@ -4184,6 +4187,9 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 const unsigned keep=d(g1)<d(g0)?1u:0u;
                 suppress[keep^1u]=true;
             }}
+        // v1361: the prop each hand's grab holds (weapon_draw::hand_takes_weapon): such a hand publishes the prop below, its weapon yields the hand
+        std::array<std::uintptr_t,2> grabbed{};
+        if(physical_grab_requested && !no_held_draw_place) for(unsigned hand=0;hand<2;++hand) if(native_grab.holding(hand)) if(const auto h=native_grab.held(hand); h && h->bone<0) grabbed[hand]=h->entity;
         // v1106 (round 6): rigid binding. The per-frame writer pair and gate are gone from the placement path. Each physical hand's
         // binder learns G once from the writer's own composition (native: inverse(read)*F; copy: the exact offset the service applied),
         // keeps it while the weapon/hand/grip stay the same, and provides B = H_image * G for every render. A hand without a valid G
@@ -4191,6 +4197,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
         for(unsigned hand=0;weapons && hand<2;++hand) {
             const auto skip=[&](unsigned why) {++weapon_draw_skipped[hand];++weapon_draw_skip_reason[hand][why];weapon_draw_last_skip[hand].store(static_cast<int>(why),std::memory_order_relaxed);};
             weapon_draw_provisional_now[hand].store(false,std::memory_order_relaxed);
+            if(!d2vr::weapon_draw::hand_takes_weapon(grabbed[hand],legacy_hand_weapon_first)) {d2vr::weapon_draw::Binder::idle(hand);++weapon_draw_yielded[hand];continue;}
             if(suppress[hand]) {skip(5);continue;}
             const auto copy=d2vr::NativeWeaponHands::copy_draw(hand);
             const bool live_models[2]={models[0]!=0,models[1]!=0};
@@ -4344,8 +4351,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
         // off F), so a prop whose mesh sits off its frame was never placed. The 9 axes must still agree within 0.004.
         std::array<double,2> reach{};
         if(!no_held_draw_place) {
-            std::array<std::uintptr_t,2> thing{};
-            if(physical_grab_requested) for(unsigned hand=0;hand<2;++hand) if(native_grab.holding(hand)) if(const auto h=native_grab.held(hand); h && h->bone<0) thing[hand]=h->entity;
+            std::array<std::uintptr_t,2> thing=grabbed;
             {std::lock_guard<std::mutex> l(hand_state_mutex);const unsigned s=held_entity_side&1u;if(held_entity && !thing[s]) thing[s]=held_entity;}
             if(thing[0] && thing[0]==thing[1]) thing={};   // ponytail: a two-handed hold stays at the game's frame; bind to one hand if it jitters
             const double t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();

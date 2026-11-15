@@ -261,6 +261,12 @@ private:
     }
 };
 
+// v1361 (headset v1360: a prop held in the LEFT hand was never placed - 742 renders, drawn at the grab motor's goal instead of the drawn hand - while
+// the native left gun hung holstered on another joint and was published for that hand provisionally, which took the hand's slot): a hand whose grab
+// holds a prop publishes the prop; its weapon yields the hand (the grab's hand is the prop's: manual equip treats a gun hand that holds a prop as
+// occupied). grabbed = the prop the grab holds in this hand (0: none). weapon_first = build/legacy-hand-weapon-first (v1360: the weapon first).
+inline bool hand_takes_weapon(std::uintptr_t grabbed,bool weapon_first=false) noexcept {return weapon_first || !grabbed;}
+
 // The two frames a held weapon can be composed from. Native and crossed items are bound to the engine's hand ATTACHMENT joint 59;
 // a copy is teleported from the controller GRIP (the authored arm socket moves the attachment relative to the grip, and the copy's
 // offset was measured in the grip frame). G is always in world axes; only the hand frame it is relative to changes.
@@ -779,10 +785,19 @@ public:
         weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);remember(side,key,frame,m);
     }
     // Publish time (render boundary): the last render's samples into each cluster's consensus; a changed held thing resets the side.
+    // v1361 (headset v1360: a prop passed from hand to hand and regrabbed; the engine composes ~81 % of its draws with the eye's previous view, which
+    // only a settled L places): L is the mesh's place in the THING's frame, the same in either hand, so the thing's clusters are kept when its hold
+    // ends and a hold of it in either hand within keep_folds folds (~3 s) starts with them (v1360: ~0.3 s of those draws at the engine's pose).
     static void fold(unsigned side,std::uintptr_t id) noexcept {
         if(side>1) return;
         weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
-        if(id!=id_[side]) {if(id_[side]) ++resets_;id_[side]=id;side_[side]={};others_[side]={};render_l_[side]={};return;}
+        ++folds_;
+        if(id!=id_[side]) {
+            if(id_[side]) {++resets_;keep(side);}
+            id_[side]=id;side_[side]={};others_[side]={};render_l_[side]={};
+            if(id) take(side,id);
+            return;
+        }
         const unsigned path=path_[side].load(std::memory_order_relaxed);
         for(auto& c:side_[side]) {
             if(!c.active) continue;
@@ -810,7 +825,7 @@ public:
             else if(const Cand* t2=c.top()) c.anchor=t2->value;
         }
     }
-    static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};others_={};render_l_={};placed_frame_=0;placed_n_=0;}
+    static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};others_={};render_l_={};placed_frame_=0;placed_n_=0;kept_={};}
     // v1258 one-pose census: a draw with the vertex shader + cb2 size of a part this hold has placed (any pose, any render)
     static bool has_key(unsigned side,std::uint64_t key) noexcept {
         if(side>1) return false;
@@ -834,7 +849,8 @@ public:
             +",\"unsettled_why\":["+std::to_string(unsettled_why_[0])+","+std::to_string(unsettled_why_[1])+"],\"evictions\":"+std::to_string(evictions_) // v1237: [no cluster, too few hits]
             +",\"active_max\":"+std::to_string(active_max_)+",\"far_uses\":"+std::to_string(far_uses_)
             +",\"render_disagree\":"+std::to_string(render_disagree_)+",\"render_disagree_mm\":"+std::to_string(render_disagree_mm_)
-            +",\"pass_pairs\":"+std::to_string(pass_pairs_)+",\"pass_spread_renders\":"+std::to_string(pass_spread_renders_);   // v1241: agreeing draws of one render compared / renders where they differed
+            +",\"pass_pairs\":"+std::to_string(pass_pairs_)+",\"pass_spread_renders\":"+std::to_string(pass_spread_renders_)   // v1241: agreeing draws of one render compared / renders where they differed
+            +",\"kept_takes\":"+std::to_string(kept_takes_);   // v1361: holds that started with the thing's clusters from its last hold
         static constexpr const char* path_names[paths]={"unknown","physical","use","bind","severed"};
         o+=",\"in_step\":{";   // per publisher path: samples [agreeing with the settled L, not] = read and draw in step / out of step
         for(unsigned p=0;p<paths;++p) o+=std::string(p?",":"")+"\""+path_names[p]+"\":["+std::to_string(step_seen_[p][0])+","+std::to_string(step_seen_[p][1])+"]";
@@ -913,6 +929,22 @@ private:
         unsigned i=0;while(i+1<bins && !(mm<=edge[i])) ++i;++h[i];
         if(mm*1000.>static_cast<double>(max_um)) max_um=static_cast<std::uint64_t>(mm*1000.);
         if(deg*1000.>static_cast<double>(max_mdeg)) max_mdeg=static_cast<std::uint64_t>(deg*1000.);
+    }
+    // v1361 (mutex_ held): a thing's clusters when its hold ends, and a new hold's start from them: the other side's while it still holds the thing this
+    // publish (a hand-to-hand pass to side 0: side 1 folds after it), else the kept ones. Samples of the last render are not carried (pending dropped).
+    static constexpr std::uint64_t keep_folds=540;   // two folds a render: ~3 s at 90 Hz
+    struct Kept {std::uintptr_t id{};std::uint64_t at{};std::array<Cluster,clusters> c{};};
+    inline static std::array<Kept,2> kept_{};inline static std::uint64_t folds_{},kept_takes_{};
+    static void keep(unsigned side) noexcept {
+        Kept* k=&kept_[0];
+        for(auto& e:kept_) {if(e.id==id_[side]) {k=&e;break;}if(e.at<k->at) k=&e;}
+        k->id=id_[side];k->at=folds_;k->c=side_[side];for(auto& c:k->c) c.pending_frame=0;
+    }
+    static void take(unsigned side,std::uintptr_t id) noexcept {
+        const std::array<Cluster,clusters>* from=id_[side^1u]==id?&side_[side^1u]:nullptr;
+        if(!from) for(auto& e:kept_) if(e.id==id && folds_-e.at<=keep_folds) {from=&e.c;e.id=0;break;}
+        if(!from) return;
+        side_[side]=*from;for(auto& c:side_[side]) c.pending_frame=0;++kept_takes_;
     }
     inline static std::mutex mutex_;
     inline static std::array<std::array<Cluster,clusters>,2> side_{};

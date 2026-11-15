@@ -524,6 +524,75 @@ static void v1316_carry_lab() {
     CHECK(side==0 && lag>.01 && carried && err<1e-4 && err_prev<1e-4 && !other_thing);
 }
 
+// ---- v1361 (headset v1360, stereo, one grabbed prop): native-physical-grab.csv - hand 1 holds it, lets go and regrabs 0.4 s later, then passes it
+// 1 -> 0 -> 1 -> 0 -> 1 without a gap. Status: the engine composed most of its draws with the eye's PREVIOUS view-projection (stale_view_match placed
+// 7436 of the 9176 placed draws), which only a settled L places; a render is stale or current in both eyes and both passes (depth placed = colour
+// placed = 4588, eye_split 0). Here 4 renders in 5 are stale, the head turns 1.5 deg a render (no stale draw decodes onto F through the current view),
+// F = the drawn hold one render back (the engine is given the drawn hold), B = this render's hand * the hold.
+static Mat prop_hand(unsigned side,int t) {return rigid(rot(.2,.3,1,.4+.006*t+side),-91.75+.0035*t,-92.45+.12*side,4.9+.01*std::sin(t*.2));}   // 0.3 m/s, 30 deg/s
+static void publish_side(std::uint32_t frame,int side,const Mat& f,const Mat& b,std::uintptr_t id,int view_t,unsigned kind,double reach) {
+    Wp w;for(unsigned e=0;e<2;++e) {w.vp[e]=vp_of(eye_pose(view_t,e),view_t);w.inv[e]=inv(w.vp[e]);}
+    frames_seen[frame]=w;
+    std::array<float,15> raw{};std::array<const float*,2> rp{};std::array<const Mat*,2> bp{};std::array<double,2> r{};std::array<std::uintptr_t,2> ids{};
+    if(side>=0) {const auto s=static_cast<unsigned>(side);raw=raw_of(f);rp[s]=raw.data();bp[s]=&b;r[s]=reach;ids[s]=id;Place::stage(s,kind);}
+    Place::publish_bound(frame,rp,bp,r,ids,view_t*tick_s);
+}
+// The prop's two passes in both eyes, composed with this render's view or the previous one: [depth placed, colour placed] per eye; err vs VP * B * part.
+static void draw_prop(std::uint32_t frame,bool stale,const Mat& f,const Mat& b,const Mat& part,std::array<std::array<bool,2>,2>& placed,double& err) {
+    const Wp& w=frames_seen.at(frame);const Wp& c=frames_seen.at(stale?frame-1:frame);
+    for(unsigned e=0;e<2;++e) for(unsigned k=0;k<2;++k) {
+        const auto cur=floats(mul(c.vp[e],mul(f,part)));std::array<float,16> o{},q{};
+        const Result r=Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,k?0x1361cull:0x1361dull);
+        placed[e][k]=r.side>=0;
+        if(r.side>=0) err=std::max(err,worst_rows(o.data(),floats(mul(w.vp[e],mul(b,part))).data()));
+    }
+}
+static void v1361_hand_pass_lab(const Mat& part) {
+    struct Hold {int side,renders,gap;};
+    const Hold holds[]={{1,60,0},{1,40,38},{0,30,0},{1,30,0},{0,40,0},{1,40,0}};
+    const Mat hold=rigid(rot(1,0,0,.3),.05,-.02,.03);const std::uintptr_t prop=0x25bfc1e4e90;
+    Place::clear();
+    std::uint32_t frame=37000;int t=0;long stale_draws=0,stale_unplaced=0,first_hold_unplaced=0,splits=0;double err=0;Mat b_prev{};
+    for(const Hold& h:holds) {
+        for(int g=0;g<h.gap;++g,++frame,++t) publish_side(frame,-1,Mat{},Mat{},0,3*t,0,0);   // nothing held
+        for(int n=0;n<h.renders;++n,++frame,++t) {
+            const Mat b=mul(prop_hand(static_cast<unsigned>(h.side),t),hold),f=n?b_prev:b;b_prev=b;
+            publish_side(frame,h.side,f,b,prop,3*t,Place::kind_prop,.5);   // the head turns 1.5 deg a render
+            const bool stale=t%5!=0;
+            std::array<std::array<bool,2>,2> placed{};draw_prop(frame,stale,f,b,part,placed,err);
+            for(unsigned e=0;e<2;++e) {
+                splits+=placed[e][0]!=placed[e][1];   // a depth pass placed and its colour pass not (or the other way): the colour fails the depth test
+                if(!stale || !n) continue;   // a hold's first render has no previous view of its own yet
+                for(unsigned k=0;k<2;++k) {if(&h==holds) {first_hold_unplaced+=!placed[e][k];continue;}++stale_draws;stale_unplaced+=!placed[e][k];}
+            }
+        }
+    }
+    std::printf("v1361 prop passed hand to hand: stale draws after a regrab/pass unplaced %ld of %ld (first hold of the thing, L unknown: %ld), depth/colour splits %ld, worst %.2e; %s\n",
+        stale_unplaced,stale_draws,first_hold_unplaced,splits,err,RigidLocal::json().c_str());
+    CHECK(stale_draws>0 && stale_unplaced==0 && splits==0 && err<2e-4);
+}
+// v1361: the LEFT hand of the same session - the native left gun hung holstered on another joint (hidden, no draws; engine_bind refused 'other joint'
+// 4435) and was published for hand 0 provisionally at its own frame (provisional [3827, 614]) while the grab held the prop there (742 renders).
+// v1360 rule (the weapon first): the hand published the gun, the prop's draws matched nothing and stayed at the engine's pose (held_exact_placed [0, 2434]).
+static void v1361_left_hand_lab(const Mat& part) {
+    const Mat hold=rigid(rot(1,0,0,.3),.05,-.02,.03),gun=rigid(rot(0,1,0,1.2),-91.7,-92.3,4.3);   // the holster on the hip, 0.6 m below the hand
+    const std::uintptr_t prop=0x25bfc1e4e90,gun_model=0x2594a0b0;long placed[2]{},draws[2]{};double err=0;
+    for(int legacy=1;legacy>=0;--legacy) {
+        Place::clear();std::uint32_t frame=38000+static_cast<std::uint32_t>(legacy)*1000;Mat b_prev{};
+        for(int n=0;n<80;++n,++frame) {
+            const Mat b=mul(prop_hand(0,n),hold),f=n?b_prev:b;b_prev=b;
+            if(hand_takes_weapon(prop,legacy!=0)) publish_side(frame,0,gun,gun,gun_model,3*n,Place::kind_weapon,0);
+            else publish_side(frame,0,f,b,prop,3*n,Place::kind_prop,.5);
+            std::array<std::array<bool,2>,2> p{};draw_prop(frame,n%5!=0,f,b,part,p,err);
+            if(n<12) continue;   // the thing's first hold: L settles from the current-view renders 0, 5 and 10
+            for(const auto& e:p) for(const bool k:e) {++draws[legacy];placed[legacy]+=k;}
+        }
+    }
+    std::printf("v1361 prop in the hand with a holstered gun: v1360 rule (weapon first) placed %ld of %ld, v1361 placed %ld of %ld, worst %.2e\n",placed[1],draws[1],placed[0],draws[0],err);
+    CHECK(placed[1]==0 && placed[0]==draws[0] && draws[0]>0 && err<2e-4);
+    CHECK(!hand_takes_weapon(prop) && hand_takes_weapon(0) && hand_takes_weapon(prop,true));
+}
+
 int main() {
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
     const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
@@ -883,6 +952,8 @@ int main() {
     v1316_carry_lab();
     v1317_kid_motion_lab();
     v1320_paired_kid_lab();
+    v1361_hand_pass_lab(part);
+    v1361_left_hand_lab(part);
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }
