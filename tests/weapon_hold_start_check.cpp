@@ -111,6 +111,50 @@ int main() {
         d=drawn(sol.solve(inputs(&draw[0],false,0x1234,false)));
         expect(angle_between(d.socket.q,held.socket.q)>20*deg,"another item's hold does not start from the sword's grip");
     }
+    {   // v1360 (user, v1342: "when I hold the pistol the fingers are not on its trigger, they are where the crossbow's trigger would be; the
+        // hand is stuck in one state"): a hand whose item changes with no empty frame between (the right hand holding the crossed slot-1 gun,
+        // a dual-wield copy hand: neither has a socket token) takes the new item's own hold at once. It must never keep the previous item's
+        // socket and fingers until the new clip has been steady for 0.25 s (for good with a clip that never is), nor record them as the new
+        // item's remembered grip.
+        const std::uint64_t first_item=0x434f505902ull,second_item=0x434f505901ull;   // copy keys: crossbow, pistol
+        const auto other=clip(40*deg,30*deg);   // the second item's clip: another socket and other finger turns than the idle
+        const auto rocking=[&](int f) {return clip((40+4*std::sin(2*kPi*3*f/90.))*deg,30*deg);};   // the same, rocking 75 deg/s: never steady
+        const int index2=right.find("right_index_02_jnt");
+        const auto finger=[&](const Output& out) {const auto& a=out.arm[1];return mul(inverse(a[right.parent[index2]]),a[index2]).q;};
+        BodySolver ref(body,left,right,{eye_height,span});Output own;   // the reference: a hand that only ever held the second item
+        for(int f=0;f<60;++f) own=ref.solve(inputs(&other,false,second_item,false));
+        const auto own_grip=drawn(own);const auto own_finger=finger(own);
+        {   // a steady second clip: its grip from the first frame of the change
+            BodySolver sol(body,left,right,{eye_height,span});Output out;
+            for(int f=0;f<60;++f) out=sol.solve(inputs(&idle,false,first_item,false));
+            expect(angle_between(drawn(out).socket.q,own_grip.socket.q)>20*deg,"the two items' grips differ");
+            double worst_deg=0,worst_m=0,worst_finger=0;
+            for(int f=0;f<30;++f) {
+                out=sol.solve(inputs(&other,false,second_item,false));const auto d=drawn(out);
+                worst_deg=std::max(worst_deg,angle_between(d.socket.q,own_grip.socket.q)/deg);worst_m=std::max(worst_m,length(d.socket.p-own_grip.socket.p));
+                worst_finger=std::max(worst_finger,angle_between(finger(out),own_finger)/deg);
+            }
+            std::printf("item change, steady clip: socket off the new item's by at most %.2f deg %.1f mm, index finger %.2f deg\n",worst_deg,worst_m*1000,worst_finger);
+            expect(worst_deg<1 && worst_m<.002 && worst_finger<1,"an item change takes the new item's socket and fingers at once");
+        }
+        {   // a second clip that is never steady
+            BodySolver sol(body,left,right,{eye_height,span});Output out;
+            for(int f=0;f<60;++f) out=sol.solve(inputs(&idle,false,first_item,false));
+            double last_deg=0;
+            for(int f=0;f<180;++f) {const auto now=rocking(f);out=sol.solve(inputs(&now,false,second_item,false));last_deg=angle_between(drawn(out).socket.q,own_grip.socket.q)/deg;}
+            std::printf("item change, never-steady clip: socket off the new item's by %.2f deg after 2 s\n",last_deg);
+            expect(last_deg<6,"an item change never keeps the previous item's grip while the new clip is not steady");
+        }
+        {   // change, holster before the new hold is steady, draw the new item again: no remembered grip taken from the previous item
+            BodySolver sol(body,left,right,{eye_height,span});Output out;
+            for(int f=0;f<60;++f) out=sol.solve(inputs(&idle,false,first_item,false));
+            const auto first_grip=drawn(out);
+            for(int f=0;f<10;++f) sol.solve(inputs(&other,false,second_item,false));
+            for(int f=0;f<30;++f) sol.solve(inputs(&idle,true,second_item,false));
+            const auto d=drawn(sol.solve(inputs(&idle,true,second_item,true)));
+            expect(!(d.finger_mode==3 && angle_between(d.socket.q,first_grip.socket.q)<1*deg),"the new item's draw never starts from the previous item's grip");
+        }
+    }
     if(failures) {std::cerr<<failures<<" failure(s)\n";return 1;}
     std::puts("weapon hold start check ok");return 0;
 }

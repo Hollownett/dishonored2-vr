@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $rel  = 'C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags'   # release line: source of gitignored binaries (FSR4/OpenXR/dinput8 dlls)
-$note = 'Test candidate v1343 = v1341 + stereo: a bottle, magnifying glass or other junk carried with the game Use stays steady in the hand, as in release v1297. The game already draws a carried thing at the drawn hand; since v1320 the mod also re-placed most (not all) of its draws, so it flipped between the exact hold and the game pose (jumping, shrinking, growing), and the v1342 attempt made it vanish in most frames. Stereo now leaves a carried thing entirely to the game (performance mode unchanged); build/stereo-use-place = v1341. v1342 is reverted. Sim on the user bottle save: steady in every captured frame, both eyes, like v1297. Not headset-tested.'
+$note = 'Test candidate v1360 = v1343 (stereo: a thing carried with the game Use stays steady in the hand) + the hand takes the grip of the weapon it now holds. The arm solver latched the grip of a held weapon (where the weapon sits in the hand, the finger pose) and restarted it only when the socket of the native left gun changed; the right hand (the gun moved to the right hand) and the dual-wield copy hands have no such socket, so after a switch (crossbow to pistol) they kept the crossbow grip until the pistol clip had been still for 0.25 s, for good with a clip that never is, and stored it as the remembered pistol grip. Now any change of the held item starts a new hold. Lab: socket and fingers of the new item from the first frame (was 40 / 30 deg off), also with a never-still clip (was 40 deg off for good), no remembered grip taken from the previous item. Not simulated; not headset-tested.'
 $name = "d2vr_render_probe_arm_v$Version.dll"
 $dll  = Join-Path $repo "build\$name"
 if ($Version -notmatch '^\d+$') { throw "version must be digits" }
@@ -46,7 +46,7 @@ if (-not (Test-Path $exe)) { throw "no exe produced" }
 # Embed check: load the pre-bundle managed assembly (resources stored raw) and hash the DLL resource.
 $asm = Get-ChildItem "$s\launcher\obj" -Recurse -Filter DishonoredVRLauncher.dll | Where-Object { $_.FullName -match 'Release' -and $_.FullName -notmatch 'ref' } | Select-Object -First 1
 if (-not $asm) { throw "built assembly not found" }
-$a = [Reflection.Assembly]::LoadFile($asm.FullName)
+$a = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($asm.FullName))   # LoadFile refuses a .claude\worktrees path ("network location")
 $st = $a.GetManifestResourceStream("home/build/$name"); if (-not $st) { throw "DLL resource missing in assembly" }
 $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($st)).Replace('-','').ToLower()
 if ($h -ne $sha) { throw "embedded DLL sha $h != $sha" }

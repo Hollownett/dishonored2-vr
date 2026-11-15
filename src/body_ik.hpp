@@ -205,6 +205,7 @@ class BodySolver {
         Xf hold{},hold_prev{};
         Vec3 wrap{}; // wrap centre of the native curled fingers in the attachment's parent frame, followed like hold
         std::uint64_t socket_token{};
+        std::uint64_t hold_key{};   // v1360: the item (Inputs::item_key) the current hold is of; 0 = no hold or an unknown item
         bool has_pole{},has_roll{},has_hold{},sneak_flip{},hold_calibrated{};
         bool weapon_grip{};   // v1102: procedural grip for a weapon hand with no authored weapon clip
         int finger_mode{};
@@ -351,7 +352,7 @@ public:
     void reset_hold(int i) {arm_state_[i].has_hold=false;}
     void reset() {
         chest_={};feet_valid_=false;has_eye_=false;walk_=0;walk_on_=false;velocity_={};last_native_={};
-        for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;arm_state_[i].reach={};}
+        for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;arm_state_[i].hold_key=0;arm_state_[i].reach={};}
         for(auto& p:progress_) p=0;
         for(auto& p:path_) p.clear();
     }
@@ -934,14 +935,20 @@ private:
         state.weapon_grip=in.weapon_grip[i];
         const bool procedural=!native || (in.weapon_incoming[i]?!remembered:in.hand_empty[i]) || in.weapon_grip[i];
         if(state.socket_token!=in.native_socket_token[i]) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.socket_token=in.native_socket_token[i];}
+        // v1360 (user, v1342: the pistol held with the crossbow's fingers, "the hand is stuck in one state"): another item in the hand starts a
+        // new hold, as a new socket token does. Only the native left gun has a token, so the right hand (the crossed slot-1 gun) and the copy
+        // hands kept the previous item's socket and fingers until the new clip had been steady for 0.25 s - for good with one that never is - and
+        // stored them as the new item's remembered grip. An unknown item (key 0) never ends a hold.
+        if(in.item_key[i] && state.hold_key && in.item_key[i]!=state.hold_key) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;}
         const bool native_socket=native && (!procedural || in.native_socket_token[i]);
         state.finger_mode=procedural?(in.has_finger[i] && !in.weapon_grip[i]?1:2):3;
         // Held item: the native attachment local is rotated by authored attack/block/equip clips, so
         // the socket keeps the last steady value (<20 deg/s, <5 cm/s for 0.25 s) and the player owns the grip.
         bool fresh_hold=false;
         state.hold_native_deg=state.hold_native_m=0;
-        if(!native_socket) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.has_fingers=false;}
+        if(!native_socket) {state.has_hold=false;state.hold_calibrated=false;state.reverse_weight=0;state.sneak_flip=false;state.has_fingers=false;state.hold_key=0;}
         else {
+            if(in.item_key[i]) state.hold_key=in.item_key[i];
             const auto native_local=[&](std::size_t j) {auto l=mul(inverse((*native)[s.parent[j]]),(*native)[j]);l.p=l.p*scale_;return l;};
             auto n=mul(inverse((*native)[s.parent[attach_[i]]]),(*native)[attach_[i]]);n.p=n.p*scale_;
             // Sneak stance holds the sword reversed: attachment Y along -wrist Z in every sword sneak clip,
