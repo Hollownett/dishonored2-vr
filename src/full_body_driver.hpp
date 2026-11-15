@@ -595,11 +595,11 @@ public:
     // v1104: per hand the held item's type and the authored clip's source (Diagnostic::clip_source: 0 none, 1 captured, 2 sampled, 3 fallback).
     std::array<int,2> clip_sources() const {std::lock_guard<std::mutex> lock(mutex_);return {diag_.clip_source[0],diag_.clip_source[1]};}
     // Held-item grip per hand (status JSON full_body.grip): attachment joint in the drawn-fist frame (metres), wrap centre's distance from the hilt line, reverse flip applied.
-    struct GripState {std::array<double,3> attach_in_fist{};double hilt_miss{},reverse_weight{},blade_axis_gap_deg{},hold_native_deg{},hold_native_m{};bool reversed{},has_hold{};int finger_mode{};};
+    struct GripState {std::array<double,3> attach_in_fist{};double hilt_miss{},reverse_weight{},blade_axis_gap_deg{},hold_native_deg{},hold_native_m{};bool reversed{},has_hold{};int finger_mode{};std::uint64_t hold_starts{};};
     std::array<GripState,2> grip_state() const {
         std::lock_guard<std::mutex> lock(mutex_);std::array<GripState,2> out{};
         for(unsigned i=0;i<2;++i) {for(unsigned j=0;j<3;++j) out[i].attach_in_fist[j]=out_.fist_attach[i][j];out[i].hilt_miss=out_.hilt_miss[i];out[i].reversed=out_.grip_reversed[i];out[i].reverse_weight=out_.reverse_weight[i];out[i].blade_axis_gap_deg=out_.blade_axis_gap_deg[i];
-            out[i].hold_native_deg=out_.hold_native_deg[i];out[i].hold_native_m=out_.hold_native_m[i];out[i].has_hold=out_.has_hold[i];out[i].finger_mode=out_.finger_mode[i];}
+            out[i].hold_native_deg=out_.hold_native_deg[i];out[i].hold_native_m=out_.hold_native_m[i];out[i].has_hold=out_.has_hold[i];out[i].finger_mode=out_.finger_mode[i];out[i].hold_starts=out_.hold_starts[i];}
         return out;
     }
     // Degrees the last solve turned each thumb joint by (CMC, MCP, IP), per hand.

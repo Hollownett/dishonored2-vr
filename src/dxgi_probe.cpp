@@ -176,6 +176,7 @@ static HandChainTrace::V trace_v(const d2vr::Vec3& v) {return {v.x,v.y,v.z};}
 #include "wheel_avatar.hpp"
 #include "body_renderer.hpp"
 #include "full_body_driver.hpp"
+#include "hand_route.hpp"
 #include "frame_order_trace.hpp"
 #include "weapon_image_place.hpp"
 #include "arm_flicker.hpp"
@@ -11145,60 +11146,14 @@ void prepare_head_view(void* view) noexcept {
                     // hand state's freshness: it names the item that is equipped, which is what the per-type clip and the status need.
                     const auto live_types=slot1_type?std::array<unsigned,2>{}:weapon_live_types();
                     t.weapon_type_fresh=fresh || slot1_type || live_types[0] || live_types[1];
-                    for(unsigned side=0;side<2;++side) t.hand_empty[side]=fresh && ((hand_empty_bits>>side)&1u);
                     const bool carrying_a_body=fresh && hand_carrying_bits!=0 && !hand_holding_object;   // v1033: a carried body is not a hand of the player's
-                    if(fresh && left_power) t.hand_empty[0]=true; // a power holds nothing: the player's fingers, not its authored pose
-                    // dual wield, crossed, per arm (the arm-joint cross bits). v763 (user, headset v762: "the right hand holds every weapon exactly as the left
-                    // does, the left the sword as the right"): an arm holding the other arm's item is posed by that arm's own native clip mirrored onto it
-                    // (FullBodyDriver mirror_native); the item rides it through the attachment cross (y180, exact for a mirrored hold).
-                    const unsigned arm_cross=arm_cross_now();
-                    if(fresh && (arm_cross&1u)) {const bool left_item=!(hand_empty_bits&1u) && !left_power;t.mirror_native[1]=left_item;t.hand_empty[1]=!left_item;}   // the slot-1 item on the right arm
-                    if(fresh && (arm_cross&2u)) {const bool sword=!(hand_empty_bits&2u);t.mirror_native[0]=sword;t.hand_empty[0]=!sword;}                              // the sword on the left arm
-                    // v783 (user, headset v791: "with a bottle the pistol in the other hand is drawn wrong"): a native held object fills ONE hand
-                    // (hand_hold_side); the other keeps its weapon's routing. Before dual wield the game holstered everything, so both hands were freed.
+                    const unsigned pack=arm_pack.load(std::memory_order_relaxed);   // v1370: one plan for the whole routing (each accessor loaded it again)
+                    if(!slot1_type) slot1_type=static_cast<int>(live_types[d2vr::arm::slot1_arm_of(pack)]);
+                    {d2vr::hand_route::In r{};r.pack=pack;r.fresh=fresh;r.dual_wield=dual_wield_enabled;r.empty_bits=hand_empty_bits;r.weapon_bits=hand_weapon_bits;
+                     r.left_power=left_power;r.left_gun=left_gun_model.load()!=0;r.holding_object=hand_holding_object;r.hold_side=hand_hold_side;r.carrying_body=carrying_a_body;
+                     r.slot1_type=slot1_type;r.equip_name=std::string_view(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));
+                     d2vr::hand_route::route(r,t);}   // hand_route.hpp: the clip each hand is posed by, its weapon type and its item key
                     const auto holds=[&](unsigned s) {return hand_holding_object && (hand_hold_side&1u)==s;};
-                    const auto extra_of=[&](unsigned s) {return arm_copy_now(s);};
-                    const auto extra_type=[&](unsigned s) {const auto e=extra_of(s);
-                        return e==d2vr::arm::Held::pistol||e==d2vr::arm::Held::guard_pistol?1u:e==d2vr::arm::Held::crossbow?2u:0u;};
-                    {const auto copy_gun=[&](unsigned s) {return !holds(s) && d2vr::arm::is_gun(extra_of(s));};
-                     const unsigned rh_=slot1_arm_now();
-                     if(!slot1_type) slot1_type=static_cast<int>(live_types[rh_]);
-                     t.slot1_gun=fresh && dual_wield_enabled && left_gun_model.load() && !holds(rh_); // the driver keeps its calm clip (v771)
-                     t.slot1_type=t.slot1_gun?static_cast<unsigned>(slot1_type):0u;
-                     // v1104: a copy hand takes the native arm's clip only when the native gun is the SAME component type; a crossbow
-                     // copy beside a native pistol must never play the pistol clip (the user's round-4 report). Type-mismatched (or no
-                     // native gun) copy hands use the per-type kept/sampled clip instead (Tracking::gun_clip).
-                     for(unsigned s=0;s<2;++s) if(fresh && dual_wield_enabled && copy_gun(s)) {
-                         const unsigned type=extra_type(s);
-                         if(t.slot1_gun && type && type==t.slot1_type) {t.mirror_native[s]=(s==1);t.gun_clip[s]=false;}
-                         else {t.mirror_native[s]=false;t.gun_clip[s]=true;}
-                         t.hand_empty[s]=false;
-                     }}
-                     // v1033 (user, headset v1032: the hand that put a body on the shoulder went slack with straight fingers and came back
-                     // only when the body was put down): a body the game carries takes no hand of the player's. The carry's arm clip must not
-                     // drive either hand's fingers (body::Inputs::hand_empty gates the procedural fingers in body_ik's finger_mode), so both
-                     // hands keep the player's grip and finger IK while a body is carried; the slots are empty and the sword is already
-                     // cleared for a body carry (hand_weapon_bits 0).
-                     // v1038: the left slot's gun keeps its own routing (the native-left hand = the non-melee hand); the carrying hand is the one cleared.
-                     {const unsigned gun_hand=slot1_arm_now();const bool gun_kept=(hand_weapon_bits&1u)!=0;
-                      if(carrying_a_body) for(unsigned s=0;s<2;++s) if(!(gun_kept && s==gun_hand)) {t.hand_empty[s]=true;t.mirror_native[s]=false;t.gun_clip[s]=false;}}
-                    // v1104/v1106: the type of the item each physical hand holds. A mod-owned copy's type is known from the loadout even
-                    // when the native hand snapshot is stale (`fresh` false), so it no longer reports 0 in a menu/load status; the native
-                    // gun hand takes the control-tick latch or the publisher's live item-record read.
-                    {const unsigned mh_=sword_arm_now(),rh_=slot1_arm_now();
-                     for(unsigned s=0;s<2;++s) {
-                         if(dual_wield_enabled && !holds(s) && d2vr::arm::is_gun(extra_of(s))) t.weapon_type[s]=extra_type(s);
-                         else if(s==rh_ && left_gun_model.load()) t.weapon_type[s]=static_cast<unsigned>(slot1_type);
-                         else if(s==mh_ && fresh && !(hand_empty_bits&(1u<<s))) t.weapon_type[s]=3; // the sword/other authored item
-                         else t.weapon_type[s]=0;
-                     }}
-                    // Which item each hand holds, for the remembered grip (body::Inputs::item_key): the sword's hand holds the sword.
-                    {const std::string_view n(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));std::uint64_t h=1469598103934665603ull;
-                     for(const char c:n) {h^=static_cast<unsigned char>(c);h*=1099511628211ull;}
-                     const std::uint64_t sword_key=0x53574f5244ull,slot_key=n.empty() || n=="Empty"?0:h;
-                     t.item_key[1]=(arm_cross&1u)?slot_key:sword_key;t.item_key[0]=(arm_cross&2u)?sword_key:slot_key;}   // per arm: the cross says which item rides it
-                    {// a copy hand remembers the copy's hold, not the slot-1 item's (v771)
-                     for(unsigned s=0;s<2;++s) if(t.gun_clip[s] || (t.mirror_native[s] && d2vr::arm::is_gun(arm_copy_now(s)))) t.item_key[s]=0x434f505900ull|static_cast<unsigned>(arm_copy_now(s));}
                     {const unsigned mh_=sword_arm_now(); // v771 (headset v770: the left sword through an open palm): the left hand's
                      // draw too (dual wield), posed by the right arm's clip mirrored and starting from the remembered grip (body_ik shares it, mirrored)
                      if(fresh && t.hand_empty[mh_] && !holds(mh_) && GetTickCount64()<sword_incoming_until.load()) {t.weapon_incoming[mh_]=true;t.hand_empty[mh_]=false;if(mh_==0) t.mirror_native[0]=true;}}
@@ -12388,7 +12343,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"arm_uploads\":" << full_body_arm_uploads.load() << ",\"visible\":" << full_body_visible.load()
         << ",\"material_failures\":" << full_body_material_failures.load() << ",\"material_reasons\":[" << full_body_material_reasons[0].load() << ',' << full_body_material_reasons[1].load() << ',' << full_body_material_reasons[2].load() << ',' << full_body_material_reasons[3].load() << ',' << full_body_material_reasons[4].load() << ',' << full_body_material_reasons[5].load() << ',' << full_body_material_reasons[6].load() << ',' << full_body_material_reasons[7].load() << ']' << ",\"solves\":" << full_body.solves()
         << ",\"finger_modes\":" << [&]{std::ostringstream o;const auto m=full_body.finger_modes();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<m[i][0]<<','<<m[i][1]<<','<<m[i][2]<<','<<m[i][3]<<']';}o<<']';return o.str();}()
-        << ",\"grip\":" << [&]{std::ostringstream o;const auto g=full_body.grip_state();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<"{\"reverse\":"<<(g[i].reversed?"true":"false")<<",\"reverse_weight\":"<<g[i].reverse_weight<<",\"attach_in_fist\":["<<g[i].attach_in_fist[0]<<','<<g[i].attach_in_fist[1]<<','<<g[i].attach_in_fist[2]<<"],\"hilt_miss_m\":"<<g[i].hilt_miss<<'}';}o<<']';return o.str();}() << ",\"blade_axis_gap_deg\":" << [&]{const auto g=full_body.grip_state();std::ostringstream o;o<<'['<<g[0].blade_axis_gap_deg<<','<<g[1].blade_axis_gap_deg<<']';return o.str();}()
+        << ",\"grip\":" << [&]{std::ostringstream o;const auto g=full_body.grip_state();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<"{\"reverse\":"<<(g[i].reversed?"true":"false")<<",\"reverse_weight\":"<<g[i].reverse_weight<<",\"attach_in_fist\":["<<g[i].attach_in_fist[0]<<','<<g[i].attach_in_fist[1]<<','<<g[i].attach_in_fist[2]<<"],\"hilt_miss_m\":"<<g[i].hilt_miss<<",\"hold_starts\":"<<g[i].hold_starts<<'}';}o<<']';return o.str();}() << ",\"blade_axis_gap_deg\":" << [&]{const auto g=full_body.grip_state();std::ostringstream o;o<<'['<<g[0].blade_axis_gap_deg<<','<<g[1].blade_axis_gap_deg<<']';return o.str();}()
         << ",\"finger_inputs\":" << [&]{std::ostringstream o;const auto m=full_body.finger_inputs();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<m[i][0]<<','<<m[i][1]<<']';}o<<']';return o.str();}()
         << ",\"solver_failures\":" << full_body.failures() << ",\"owned\":[" << full_body.owned(0) << ',' << full_body.owned(1)
         << ',' << full_body.owned(2) << ',' << full_body.owned(3) << "],\"root_gap_m\":" << full_body.diagnostic().root_gap_m << ",\"root_gap_valid\":" << (full_body.diagnostic().root_gap_valid?"true":"false") << ",\"root_gap_publishes\":" << full_body.diagnostic().root_gap_publishes
