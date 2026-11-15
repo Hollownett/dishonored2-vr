@@ -604,6 +604,51 @@ static void v1361_left_hand_lab(const Mat& part) {
     CHECK(!two[0] && !two[1] && !own[0] && !right[0] && right[1]==prop);
 }
 
+// ---- v1363 (headset v1380, stereo: a grabbed prop "flickers while standing still", fine while walking). Status at rest: 177 of 1393 renders with no
+// draw of the prop placed; in 163 of them a draw decodes onto the thing through this eye's PREVIOUS view but misses the exact certificate (2 mm,
+// 0.2 deg) against the latest read F * L; the held burst (held-burst-prop-1, the player stopping) shows the whole prop 2 mm off the hand in both
+// eyes for one render (frame 12). The stale-view match compared only with the latest read and only with the draw key's own settled L. Standing:
+// the head turns 0.6 deg a render (no stale draw decodes onto a read through the current view), the hand turns the prop over (0.15 m/s,
+// 43 deg/s); 4 renders in 5 composed with the previous view, every other one of those from the previous read (the pose before the latest read),
+// and every third stale render draws the depth pass with a shader variant whose key never settled an L (no current-view render teaches it).
+// A resting twin of the same mesh 9 cm away must never be placed; a depth pass placed without its colour pass (or the other way) is a split -
+// the colour fails the depth test and the prop vanishes in that eye.
+static Mat stand_hand(int t) {return rigid(mul(rot(1,.3,.2,.0075*t),rot(.2,.3,1,.4)),-91.75+.0017*t,-92.45,4.9+.01*std::sin(t*.3));}   // turned over about a level axis
+static void v1363_rest_lab(const Mat& part) {
+    const Mat hold=rigid(rot(1,0,0,.3),.05,-.02,.03);const std::uintptr_t prop=0x25bfc1e4e90;
+    const Mat twin=mul(rigid(mul(rot(0,1,0,.05),rot(.2,.3,1,.4)),-91.75,-92.36,4.9),hold);   // the same mesh resting 9 cm beside the prop's start, tilted 3 deg (beyond the v1239 prediction's gate)
+    const auto vp_at=[](int n,unsigned e) {return vp_of(eye_pose(n*12/10,e),n*12/10);};   // 0.6 deg a render on average
+    Place::clear();
+    std::uint32_t frame=39000;Mat b_prev{},f_prev{};long renders=0,flicker=0,draws=0,unplaced=0,splits=0,twin_placed=0;double err=0;
+    for(int n=0;n<90;++n,++frame) {
+        const Mat b=mul(stand_hand(n),hold),f=n?b_prev:b,f_prior=n?f_prev:f;b_prev=b;f_prev=f;   // F = the drawn hold one render back (the engine is given it)
+        Wp w;for(unsigned e=0;e<2;++e) {w.vp[e]=vp_at(n,e);w.inv[e]=inv(w.vp[e]);}frames_seen[frame]=w;
+        std::array<float,15> raw=raw_of(f);std::array<const float*,2> rp{nullptr,raw.data()};std::array<const Mat*,2> bp{nullptr,&b};
+        Place::stage(1,Place::kind_prop);Place::publish_bound(frame,rp,bp,{0.,.5},{0,prop},n*tick_s);
+        const bool stale=n%5!=0,prior=stale && n%2==0 && n>1,variant=stale && n%3==0;
+        Wp composed;for(unsigned e=0;e<2;++e) composed.vp[e]=vp_at(stale?n-1:n,e);   // the view the engine composed with
+        const Mat m=mul(prior?f_prior:f,part);bool any_unplaced=false;
+        for(unsigned e=0;e<2;++e) {
+            {const auto c=floats(mul(composed.vp[e],mul(twin,part)));std::array<float,16> o{},q{};   // the twin first, as the scene draws it
+             twin_placed+=Place::place(frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,0x1363dull).side>=0;}
+            bool placed[2]{};
+            for(unsigned k=0;k<2;++k) {
+                const auto c=floats(mul(composed.vp[e],m));std::array<float,16> o{},q{};
+                const std::uint64_t key=k?0x1363cull:variant?0x1363eull:0x1363dull;
+                const Result r=Place::place(frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,key);
+                placed[k]=r.side==1;
+                if(placed[k] && n>=16) err=std::max(err,worst_rows(o.data(),floats(mul(w.vp[e],mul(b,part))).data()));   // after the first renders (L settling)
+                if(n>=16) {++draws;unplaced+=!placed[k];any_unplaced=any_unplaced || !placed[k];}
+            }
+            if(n>=16) splits+=placed[0]!=placed[1];
+        }
+        if(n>=16) {++renders;flicker+=any_unplaced;}
+    }
+    std::printf("v1363 standing, head turning, prop turned over in the hand: renders with the prop (partly) at the game's pose %ld of %ld, draws unplaced %ld of %ld, "
+        "depth/colour splits %ld, resting twin placed %ld, worst %.2e\n",flicker,renders,unplaced,draws,splits,twin_placed,err);
+    CHECK(renders>0 && flicker==0 && unplaced==0 && splits==0 && twin_placed==0 && err<2e-4);
+}
+
 int main() {
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
     const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
@@ -965,6 +1010,7 @@ int main() {
     v1320_paired_kid_lab();
     v1361_hand_pass_lab(part);
     v1361_left_hand_lab(part);
+    v1363_rest_lab(part);
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

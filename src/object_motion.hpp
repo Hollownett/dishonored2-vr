@@ -1999,6 +1999,7 @@ private:
         weapon_draw::Place::child_rebase.store(!std::filesystem::exists(knobs_/L"legacy-child-place",error),std::memory_order_relaxed); // v1304
         weapon_draw::Place::kid_motion.store(!std::filesystem::exists(knobs_/L"legacy-kid-learn",error),std::memory_order_relaxed); // v1317
         weapon_draw::Place::stale_view_match.store(!std::filesystem::exists(knobs_/L"no-stale-view-match",error),std::memory_order_relaxed); // v1320
+        weapon_draw::Place::stale_view_history.store(!std::filesystem::exists(knobs_/L"no-stale-view-history",error),std::memory_order_relaxed); // v1363
         // v1308; v1320: only with build/legacy-part-batching - since v1318 a held part is never instanced (sims: 256 records read from the mapped
         // buffer and matched every frame, 0 placed), so the record scan is pure cost
         instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error) && std::filesystem::exists(knobs_/L"legacy-part-batching",error),std::memory_order_relaxed);
@@ -2046,6 +2047,12 @@ private:
             static unsigned refused_written{};std::string lines;const unsigned n=weapon_draw::Place::refused_lines(refused_written,lines);
             if(!lines.empty()) {std::ofstream refused(output_/L"weapon-refused.jsonl",std::ios::app|std::ios::binary);refused<<lines;}
             refused_written=n;
+        }
+        if(const std::string trace=weapon_draw::Place::take_trace();!trace.empty()) {   // v1363: a held thing's draws (weapon_draw_place.hpp Place::trace)
+            static bool header{};std::ofstream csv(output_/L"held-draw-trace.csv",header?std::ios::app|std::ios::binary:std::ios::trunc|std::ios::binary);
+            if(!header) {csv<<"placed,frame,us_after_publish,eye,side,key,own_l,stage,predicted,age,cur_F_mm,cur_F_deg,cur_prior_mm,cur_prior_deg,cur_given_mm,cur_given_deg,cur_body_mm,cur_body_deg,"
+                "prev_F_mm,prev_F_deg,prev_prior_mm,prev_prior_deg,prev_given_mm,prev_given_deg,prev_body_mm,prev_body_deg\n";header=true;}
+            csv<<trace;
         }
         std::ofstream json(output_/L"object-motion.json",std::ios::trunc);
         json<<"{\"mode\":"<<mode<<",\"installed\":"<<(installed_?"true":"false")<<",\"proxy_layouts\":"<<(layout_?"true":"false")

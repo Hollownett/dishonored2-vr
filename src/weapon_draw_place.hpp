@@ -847,6 +847,12 @@ public:
         for(const auto& c:side_[side]) if(c.active && c.settled_ok && c.key==key && c.ref==0) {out=c.settled;return true;}
         return false;
     }
+    static unsigned settled_ls(unsigned side,Mat* out,unsigned max) noexcept {   // v1363: every settled L relative to the thing (any key), at most max
+        if(side>1) return 0;
+        weapon_perf::Counted<std::mutex> lock(mutex_,weapon_perf::l_rigid);
+        unsigned n=0;for(const auto& c:side_[side]) if(n<max && c.active && c.settled_ok && c.ref==0) out[n++]=c.settled;
+        return n;
+    }
     static std::uint64_t settles() noexcept {std::lock_guard<std::mutex> lock(mutex_);return settles_;}
     static std::pair<std::uint64_t,std::uint64_t> pass_counts() noexcept {std::lock_guard<std::mutex> lock(mutex_);return {pass_pairs_,pass_spread_renders_};}   // v1241
     static std::string json() {
@@ -1097,6 +1103,7 @@ public:
         }
         staged_={};
         latest_frame_.store(frame,std::memory_order_release);
+        if(weapon_perf::enabled()) publish_us_.store(now_us(),std::memory_order_relaxed);   // v1363 trace
         slot.ready.store(frame+1,std::memory_order_release);
         published_.fetch_add(1,std::memory_order_relaxed);
     }
@@ -1342,16 +1349,39 @@ public:
         // matches no read through the current view is matched through this eye's previous render's view - only as exactly F * L (2 mm, 0.2 deg)
         // with the thing's settled L for this draw (a camera turn can make another pose look like a read through the wrong view) - and placed
         // with the current view.
+        // v1363 (headset v1380, stereo: a grabbed prop "flickers while standing still"; at rest 177 of 1393 renders unplaced, in 163 of them a draw
+        // decodes onto the thing through this eye's previous view but misses F * L - the burst frame 12 shows the whole prop 2 mm off the hand for
+        // one render): the exact match also against the thing's previous and earlier reads (the engine composes a stale draw from the pose it had,
+        // which the latest read may already have moved past - the v1342 sims measured 864 such draws), and, for a draw key with no settled L of its
+        // own, with the thing's settled Ls (a shader or LOD variant of the same mesh draws it at the same place on the thing). Still exact only
+        // (2 mm, 0.2 deg); never a child's frame. A draw certified with the thing's L is placed with that L (bitwise the other pass's), not with a
+        // sample of its own unsettled key. build/no-stale-view-history = v1380 (the latest read and the key's own L only).
+        bool certified=false;Mat certified_l{};
         if(candidate<0 && pass_eye_ok && stale_view_match.load(std::memory_order_relaxed)) {
             const unsigned e=static_cast<unsigned>(pass_eye);
+            const bool wide=stale_view_history.load(std::memory_order_relaxed);
             for(unsigned s=0;s<2 && candidate<0;++s) {
                 const Side& w=slot->side[s];
                 if(!w.valid || !w.bound || !w.rigid || !views.prev_ok[s][e]) continue;
-                Mat l{};if(!RigidLocal::settled_l(s,draw_key,l)) continue;
-                const Rows pm=model_rows(views.prev_inv[s][e].data(),cur);
-                const Mat got=full(pm),want=mul(w.model,l);
-                if(!(distance(got,want)<=.002 && frame_angle(got,want)<=.0035)) continue;
-                candidate=static_cast<int>(s);hit[s]=0;cur_model[e]=pm;stale_view_matches_.fetch_add(1,std::memory_order_relaxed);
+                std::array<Mat,8> ls{};unsigned nl=0;bool own=false;
+                if(Mat l{};RigidLocal::settled_l(s,draw_key,l)) {ls[nl++]=l;own=true;}
+                else if(wide) nl=RigidLocal::settled_ls(s,ls.data(),static_cast<unsigned>(ls.size()));
+                if(!nl) continue;
+                const Rows pm=model_rows(views.prev_inv[s][e].data(),cur);const Mat got=full(pm);
+                for(int h=0;h<frames_end(w) && candidate<0;++h) {
+                    if(!has_frame(w,h) || (h>1 && h<hist0) || (h && !wide)) continue;
+                    const Mat& fh=frame_of(w,h);
+                    for(unsigned li=0;li<nl && candidate<0;++li) {
+                        const Mat& lk=ls[li];   // the origin of F_h * L first: a near draw of anything else fails here, before the product
+                        const double ox=fh[0]*lk[3]+fh[1]*lk[7]+fh[2]*lk[11]+fh[3]-got[3],oy=fh[4]*lk[3]+fh[5]*lk[7]+fh[6]*lk[11]+fh[7]-got[7],oz=fh[8]*lk[3]+fh[9]*lk[7]+fh[10]*lk[11]+fh[11]-got[11];
+                        if(ox*ox+oy*oy+oz*oz>.002*.002) continue;
+                        const Mat want=mul(fh,lk);
+                        if(!(distance(got,want)<=.002 && frame_angle(got,want)<=.0035)) continue;
+                        candidate=static_cast<int>(s);hit[s]=h;cur_model[e]=pm;stale_view_matches_.fetch_add(1,std::memory_order_relaxed);
+                        stale_how_[h?(own?1u:3u):(own?0u:2u)].fetch_add(1,std::memory_order_relaxed);
+                        if(!own) {certified=true;certified_l=lk;}
+                    }
+                }
             }
         }
         bool predicted=false;Mat predicted_x{},predicted_l{};
@@ -1406,7 +1436,8 @@ public:
         const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:use_kid?kid_delta:w.delta;
         const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:use_hist?hist_prev:use_kid?kid_prev:w.prev_eye[static_cast<unsigned>(eye)];
         Mat l=predicted_l;const unsigned lref=predicted?static_cast<unsigned>(h):l_ref(h);
-        const bool rigid=predicted || rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,m,h,l);
+        if(certified) l=certified_l;   // v1363
+        const bool rigid=predicted || certified || rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,m,h,l);
         const Mat x=predicted?predicted_x:rigid?mul(matched,l):m;   // v1223: F_used * settled L (else M); v1239: predicted = F * L
         note_l(matched,x,frame);   // v1240 severed diagnostic (L relative to the matched frame)
         const Mat now=rigid?rigid_now(w,vp,lref,l):mul(mul(vp,delta),x);   // v1241: a held part: one product for every pass and match kind
@@ -1428,13 +1459,51 @@ public:
     template<class Get>
     static Result place(std::uint32_t frame,Get&& get_views,const float* cur,const float* prev,float* cur_out,float* prev_out,int tag_eye,int pass_eye,float* still_out,std::uint64_t draw_key,bool census_near) noexcept {
         Result r=place(frame,get_views,cur,prev,cur_out,prev_out,tag_eye,pass_eye,still_out,draw_key);
-        if(r.side>=0 || !census_near || r.stage==no_views || !(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return r;
+        if(!census_near || r.stage==no_views || !(cur[15]>0.01f && cur[15]<near_w.load(std::memory_order_relaxed))) return r;
         const Slot* slot=slot_of(frame);if(!slot) return r;
         const Views* v=get_views(frame,slot->side[0].valid?slot->side[0].prev_frame:0,slot->side[1].valid?slot->side[1].prev_frame:0);
         const unsigned e=pass_eye==0 || pass_eye==1?static_cast<unsigned>(pass_eye):tag_eye==1?1u:0u;
+        if(v && v->ok[e]) trace(*slot,*v,e,cur,draw_key,frame,r);   // v1363 diagnostics
+        if(r.side>=0) return r;
         if(v && v->ok[e]) {const Rows m=model_rows(v->inv[e].data(),cur);near_of(*slot,m,r);refusal_probe(*slot,m);source_probe(*slot,full(m),draw_key);decode_probe(*slot,*v,cur,e);}
         return r;
     }
+    // v1363 diagnostics (diagnostics on: the census path): a held thing's draws for artifacts/held-draw-trace.csv - every unplaced draw that decodes near
+    // the thing (the first 3000 a session) and 1 placed draw in 32. Through this eye's current view and this side's previous render's view, the
+    // draw's model against F * L, the previous read * L, the pose the engine was last given * L and the physics body * L (L: the draw key's
+    // settled L, else the thing's first, else identity), as mm/deg (-1: not available); and microseconds since the publish it was matched against.
+    inline static std::mutex trace_m_;inline static std::string trace_;inline static unsigned trace_unplaced_{},trace_placed_{};inline static std::atomic<std::int64_t> publish_us_{};
+    static std::int64_t now_us() noexcept {return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+    static void trace(const Slot& slot,const Views& v,unsigned e,const float* cur,std::uint64_t key,std::uint32_t frame,const Result& r) noexcept {
+        const bool placed=r.side>=0;
+        if(placed && !slot.side[static_cast<unsigned>(r.side)].rigid) return;   // weapons: not traced
+        {std::lock_guard<std::mutex> lock(trace_m_);if(placed?(++trace_placed_%32u)!=1u:trace_unplaced_>=3000u) return;}
+        if(!placed && !in_any(slot.sph,slot.nsph,v.vp[e],cur)) return;   // near nothing published
+        for(unsigned s=0;s<2;++s) {
+            const Side& w=slot.side[s];if(!w.valid || !w.bound || !w.rigid || (placed && r.side!=static_cast<int>(s))) continue;
+            Mat l=identity();const bool own=RigidLocal::settled_l(s,key,l);if(!own) RigidLocal::settled_ls(s,&l,1);
+            const Mat cm=full(model_rows(v.inv[e].data(),cur));
+            const bool prev_ok=v.prev_ok[s][e];const Mat pm=prev_ok?full(model_rows(v.prev_inv[s][e].data(),cur)):Mat{};
+            bool near_thing=false;
+            const auto res=[&](const Mat& got,const Mat* f,char* out,std::size_t n) {   // "mm,deg" of got against f * L
+                if(!f || (*f)[15]!=1.) {std::snprintf(out,n,"-1,-1");return;}
+                const Mat want=mul(*f,l);const double mm=distance(got,want)*1000.,deg=frame_angle(got,want)*57.29577951308232;
+                if(mm<=300. && deg<=11.) near_thing=true;
+                std::snprintf(out,n,"%.2f,%.3f",mm,deg);};
+            const Mat* fs[4]={&w.model,w.alt?&w.alt_model:nullptr,w.nsrc>0?&w.src[0]:nullptr,w.nsrc>1?&w.src[1]:nullptr};
+            char a[4][32]{},b[4][32]{};
+            for(unsigned i=0;i<4;++i) {res(cm,fs[i],a[i],sizeof a[i]);if(prev_ok) res(pm,fs[i],b[i],sizeof b[i]);else std::snprintf(b[i],sizeof b[i],"-1,-1");}
+            if(!placed && !near_thing) continue;   // another object: no decode within 30 cm and 11 deg of the thing
+            char line[400];
+            std::snprintf(line,sizeof line,"%c,%u,%lld,%u,%u,%016llx,%d,%u,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s\n",placed?'p':'u',frame,static_cast<long long>(now_us()-publish_us_.load(std::memory_order_relaxed)),
+                e,s,static_cast<unsigned long long>(key),own?1:0,static_cast<unsigned>(r.stage),r.predicted?1:0,placed?r.age:-1,a[0],a[1],a[2],a[3],b[0],b[1],b[2],b[3]);
+            std::lock_guard<std::mutex> lock(trace_m_);
+            if(!placed) {if(trace_unplaced_>=3000u) return;++trace_unplaced_;}
+            if(trace_.size()<(4u<<20)) trace_+=line;
+        }
+    }
+public:
+    static std::string take_trace() {std::lock_guard<std::mutex> lock(trace_m_);std::string o;o.swap(trace_);return o;}
     // v1283 (plan A4): a draw within a published WEAPON side's reach that no frame placed: its nearest frame by axes (F, the previous read, a child,
     // an earlier read). Per render and side the smallest angle is kept; a render that ends unplaced with draws refused (census bit 8 without bit 1)
     // adds it to held_census.weapon.refused and, the first 64, to artifacts/weapon-refused.jsonl. Diagnostics only (weapon_perf::enabled).
@@ -1804,6 +1873,9 @@ public:
     inline static std::atomic<bool> kid_motion{true};   // v1317: a part's place learned in motion too; off = build/legacy-kid-learn (v1316: at rest only)
     inline static std::atomic<bool> stale_view_match{true};   // v1320: a held thing's draw composed with the eye's previous view; off = build/no-stale-view-match
     inline static std::atomic<std::uint64_t> stale_view_matches_{};
+    inline static std::atomic<bool> stale_view_history{true};   // v1363: earlier reads and the thing's other settled Ls too; off = build/no-stale-view-history
+    inline static std::array<std::atomic<std::uint64_t>,4> stale_how_{};   // v1363: [latest read + own L, earlier read + own L, latest + the thing's L, earlier + the thing's L]
+    static std::string stale_how_json() {std::string o="[";for(unsigned i=0;i<stale_how_.size();++i) o+=(i?",":"")+std::to_string(stale_how_[i].load());return o+"]";}
     static std::string kid_json() {return "{\"lagged\":"+std::to_string(kid_lagged_.load())+",\"current\":"+std::to_string(kid_current_.load())+",\"unlearned\":"+std::to_string(kid_unlearned_.load())+
         ",\"learned\":["+std::to_string(kid_learn_[0].load())+","+std::to_string(kid_learn_[1].load())+","+std::to_string(kid_learn_[2].load())+"]}";}
 private:
