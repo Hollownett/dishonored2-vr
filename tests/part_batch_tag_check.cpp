@@ -24,6 +24,15 @@ int main() {
     CHECK(choose({{parm(9,.5f,0,0,0)},{parm(12,1,1,1,1)}},out,comp)==-1);   // nothing in both
     CHECK(choose({{parm(3,0,0,0,0)}},out,comp)==-1);                          // only zeros
     CHECK(choose({},out,comp)==-1);
+    // v1320: no parm with the same bits on every surface (the tranquilizer bolt's 4 materials): one present on every surface, surface 0's value
+    CHECK(choose({{parm(9,0,.5f,0,0),parm(4,1,0,0,0)},{parm(9,0,.25f,0,0)},{parm(2,1,1,1,1),parm(9,0,.75f,0,0)}},out,comp)==9 && comp==1 && out.value.c[1]==bits(.5f));
+    CHECK(choose({{parm(9,0,.5f,0,0),parm(12,1,1,1,1)},{parm(9,0,.25f,0,0),parm(12,1,1,1,1)}},out,comp)==12);   // the same bits still win
+    // v1320: an address that now draws another shape is a new entry, remembering the parm it had written
+    {std::array<Entry,4> r{};std::uint32_t c=0;
+     Entry& a=entry(r,c,0x300,1,0xa,0xb,2);a.chosen=true;a.id=653;a.written=parm(653,0,1,0,0).value;const std::uint32_t first=a.tag;
+     CHECK(&entry(r,c,0x300,2,0xa,0xb,2)==&a && a.chosen && !a.stale);   // the same shape: kept
+     Entry& b=entry(r,c,0x300,3,0xc,0xb,3);
+     CHECK(&b==&a && !b.chosen && b.stale && b.stale_id==653 && b.stale_written.c[1]==bits(1.f) && b.tag!=first && b.asset==0xc && b.nsurfaces==3);}
     // the tag: one component, low bits only
     const Vec4 v=parm(12,1,.75f,-2,123).value;
     double worst=0;

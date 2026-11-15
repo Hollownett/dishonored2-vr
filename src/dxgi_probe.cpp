@@ -1738,11 +1738,12 @@ static std::array<std::array<std::atomic<unsigned>,2>,2> weapon_kids_last{},weap
 // of its own so the engine never merges it into an instanced draw. The render thread (publisher) only names the entities (request_part_tags:
 // the entity and its id at +0xa8, deduplicated, at most 64 pending); the GAME thread (native_interaction_aim's service scope, through
 // d2vr::part_batch::game_service) re-checks each id and gives the entity's model the entry with the engine's own setter 0x343990.
-// Status weapon_draw.part_batch n: [entities served, alive, set (setter called), kept (already ours), no shared material parm, dead/failed],
+// Status weapon_draw.part_batch n: [entities served, alive, set (setter called), kept (already ours), no shared material parm, dead/failed, stale reset],
 // the last parm id given and that model's surface count.
 static bool part_batch_on=true;
 static std::mutex part_batch_m;static std::vector<std::pair<std::uintptr_t,std::uint32_t>> part_batch_pending;
-static std::array<std::atomic<std::uint64_t>,6> part_batch_n{};static std::atomic<std::uint32_t> part_batch_last_id{},part_batch_last_surfaces{};
+static std::array<std::atomic<std::uint64_t>,7> part_batch_n{};   // v1320: + [6] stale tags set back to the parm default
+static std::atomic<std::uint32_t> part_batch_last_id{},part_batch_last_surfaces{};
 static std::string engine_bind_json();   // v1319 (defined beside engine_bind_of)
 static void request_part_tags(const std::uintptr_t* ents,unsigned n) noexcept {
     if(!part_batch_on || !ents) return;
@@ -1793,8 +1794,19 @@ static void part_batch_game_service() noexcept {   // game thread only (the engi
         std::uint32_t live{};std::uintptr_t model{};
         if(!read_self(ent+0xa8,&live,sizeof live) || live!=id || !read_self(ent+0xf0,&model,sizeof model) || !model) {part_batch_n[5].fetch_add(1,std::memory_order_relaxed);continue;}
         part_batch_n[1].fetch_add(1,std::memory_order_relaxed);
-        auto& e=d2vr::part_batch::entry(table,counter,model,now);
+        std::uintptr_t asset{},shape_list{};std::uint32_t shape_count{};   // v1320: what the model draws now (part_batch_tag.hpp Entry)
+        read_self(model+0x1bb0,&asset,sizeof asset);
+        if(read_self(model+d2vr::part_batch::surfaces_offset,&shape_list,sizeof shape_list) && shape_list) {read_self(shape_list+8,&shape_count,sizeof shape_count);shape_count&=0xffffffu;}
+        auto& e=d2vr::part_batch::entry(table,counter,model,now,asset,shape_list,shape_count);
         const std::uintptr_t b=model+d2vr::part_batch::block_offset;
+        if(e.stale) {   // v1320: the parm this address was given for its previous shape, back to its default if the block still holds our bits
+            e.stale=false;std::uintptr_t sp{};std::uint32_t spid{};float def[4]{};
+            if(read_parm_block(b,block)) for(const auto& p:block) if(p.id==e.stale_id && !std::memcmp(p.value.c,e.stale_written.c,16)) {
+                if(read_self(mgr+0xc290+e.stale_id*8ull,&sp,sizeof sp) && sp && read_self(sp+0x48,&spid,sizeof spid) && (spid&0xffffu)==e.stale_id && read_self(sp+0x50,def,sizeof def) &&
+                   call_parm_setter(image_base+d2vr::part_batch::setter,b,sp,def)) part_batch_n[6].fetch_add(1,std::memory_order_relaxed);
+                break;
+            }
+        }
         if(e.none) {part_batch_n[4].fetch_add(1,std::memory_order_relaxed);continue;}
         if(!read_parm_block(b,block)) {part_batch_n[5].fetch_add(1,std::memory_order_relaxed);continue;}
         if(e.chosen) {   // ours still there with our bits: nothing to do

@@ -35,28 +35,46 @@ struct Vec4 {std::uint32_t c[4]{};};
 struct Parm {std::uint16_t id{};Vec4 value{};};
 inline bool normal_float(std::uint32_t b) noexcept {const std::uint32_t e=(b>>23)&0xffu;return e!=0 && e!=0xffu;}
 // The parm to give a model: present in EVERY surface's material with the same bits (so the model's value is the material's for each
-// surface), with a normal component to tag. -1: none.
+// surface), with a normal component to tag. v1320: else one present in every surface's material whatever its values (the material wins
+// every lookup, so no surface reads the model's value either; sim: the tranquilizer bolt's 4 materials share no parm bit for bit and the
+// part stayed untagged, batched with its twin and drawn at the game's pose). -1: none.
 inline int choose(const std::vector<std::vector<Parm>>& surfaces,Parm& out,unsigned& component) noexcept {
     if(surfaces.empty()) return -1;
-    for(const Parm& p:surfaces[0]) {
-        bool everywhere=true;
-        for(std::size_t s=1;s<surfaces.size() && everywhere;++s) {
-            bool found=false;
-            for(const Parm& q:surfaces[s]) if(q.id==p.id) {found=std::memcmp(q.value.c,p.value.c,16)==0;break;}
-            everywhere=found;
+    for(const bool same_bits:{true,false})
+        for(const Parm& p:surfaces[0]) {
+            bool everywhere=true;
+            for(std::size_t s=1;s<surfaces.size() && everywhere;++s) {
+                bool found=false;
+                for(const Parm& q:surfaces[s]) if(q.id==p.id) {found=!same_bits || std::memcmp(q.value.c,p.value.c,16)==0;break;}
+                everywhere=found;
+            }
+            if(!everywhere) continue;
+            for(unsigned c=0;c<4;++c) if(normal_float(p.value.c[c])) {out=p;component=c;return p.id;}
         }
-        if(!everywhere) continue;
-        for(unsigned c=0;c<4;++c) if(normal_float(p.value.c[c])) {out=p;component=c;return p.id;}
-    }
     return -1;
 }
 inline Vec4 tagged(const Vec4& v,unsigned component,std::uint32_t tag) noexcept {Vec4 t=v;t.c[component&3u]^=tag;return t;}
 // Per model: the parm it was given, the bits written and its tag (from a counter; a model not in the table reuses the oldest entry).
-struct Entry {std::uintptr_t model{};std::uint16_t id{};std::uint8_t component{};bool chosen{},none{};Vec4 orig{},written{};std::uint32_t tag{};std::uint64_t used{};};
-template<std::size_t N> Entry& entry(std::array<Entry,N>& t,std::uint32_t& counter,std::uintptr_t model,std::uint64_t now) noexcept {
-    Entry* old=&t[0];
-    for(auto& e:t) {if(e.model==model) {e.used=now;return e;} if(e.used<old->used) old=&e;}
+// v1320: an entry is the model's address AND what it draws (asset +0x1bb0, surface list +0x1c00 and count): a freed model's address is
+// reused by the next one (sim: an incendiary bolt kept the tranquilizer's parm choice, writing a parm one of its materials lacks), so a
+// changed shape is a new entry.
+// A renewed entry remembers the parm it had written (stale_id/stale_written): if the block still holds exactly those bits the service sets
+// that parm back to its default, so a surface whose material lacks it reads what it read before any tag.
+struct Entry {std::uintptr_t model{},asset{},surfaces{};std::uint32_t nsurfaces{};std::uint16_t id{};std::uint8_t component{};bool chosen{},none{};Vec4 orig{},written{};std::uint32_t tag{};std::uint64_t used{};
+    bool stale{};std::uint16_t stale_id{};Vec4 stale_written{};};
+template<std::size_t N> Entry& entry(std::array<Entry,N>& t,std::uint32_t& counter,std::uintptr_t model,std::uint64_t now,std::uintptr_t asset=0,std::uintptr_t surfaces=0,std::uint32_t nsurfaces=0) noexcept {
+    Entry* old=&t[0];bool renew=false;
+    for(auto& e:t) {
+        if(e.model==model) {
+            if(e.asset==asset && e.surfaces==surfaces && e.nsurfaces==nsurfaces) {e.used=now;return e;}
+            old=&e;renew=true;break;   // the same address now draws another shape: renew it in place
+        }
+        if(e.used<old->used) old=&e;
+    }
+    const bool had=renew && old->chosen;const std::uint16_t had_id=old->id;const Vec4 had_bits=old->written;
     counter=counter%max_tag+1;
-    *old=Entry{};old->model=model;old->tag=counter;old->used=now;return *old;
+    *old=Entry{};old->model=model;old->asset=asset;old->surfaces=surfaces;old->nsurfaces=nsurfaces;old->tag=counter;old->used=now;
+    if(had) {old->stale=true;old->stale_id=had_id;old->stale_written=had_bits;}
+    return *old;
 }
 }
