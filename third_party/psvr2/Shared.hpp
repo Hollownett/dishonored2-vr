@@ -16,8 +16,8 @@ struct alignas(8) Shared {
 };
 static_assert(offsetof(Shared, desired) == 8);
 inline std::uint32_t tick() { return static_cast<std::uint32_t>(GetTickCount64()); }
-inline void publish(Shared* shared, Profile profile, unsigned hand = 0) {
-    InterlockedExchange64(&shared->desired, static_cast<LONG64>(pack(tick(), profile, hand)));
+inline void publish(Shared* shared, Profile left, Profile right) {
+    InterlockedExchange64(&shared->desired, static_cast<LONG64>(pack(tick(), left, right)));
 }
 inline void status(Shared* shared, Status value, int result = 0) {
     InterlockedExchange(&shared->result, result);

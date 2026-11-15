@@ -6850,11 +6850,11 @@ static std::string run_test_command(const std::string& line) {
         return std::string("elision-wide ")+what+" (toggles "+std::to_string(elision_ab.toggles())+")";
     }
     if(verb=="vrmenu") {if(game_xr) game_xr->open_vr_menu();return std::string("vrmenu: page 1 requested; renderer live ")+std::to_string(game_xr?game_xr->renderer_live():-1);}
-    if(verb=="psvr2") { // PSVR2 left adaptive trigger: psvr2 [on|off|status]
+    if(verb=="psvr2") { // PSVR2 adaptive triggers (both hands): psvr2 [on|off|status]
         std::string v;in>>v;auto& p=d2vr::psvr2::runtime();
         if(v=="on") p.enabled=true;else if(v=="off") {p.enabled=false;p.stop();}
         std::ostringstream o;o<<"psvr2 enabled "<<p.enabled.load()<<" runtime \""<<(game_xr?game_xr->xr_runtime_name:std::string())<<"\" system \""<<(game_xr?game_xr->xr_system_name:std::string())
-            <<"\" helper "<<p.helper_running()<<" status "<<p.status()<<" profile "<<static_cast<unsigned>(p.last())<<" (0 off 1 pistol 2 power 3 crossbow) changes "<<p.profile_changes.load();
+            <<"\" helper "<<p.helper_running()<<" status "<<p.status()<<" left "<<d2vr::psvr2::name(p.last()[0])<<" right "<<d2vr::psvr2::name(p.last()[1])<<" changes "<<p.profile_changes.load();
         return o.str();
     }
     if(verb=="afw") { // AFW renderer: afw [on|off|status] | afw tune <threshold|jitter|gap|reset> <value>
@@ -14749,11 +14749,26 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             game_xr->stale_eye_warp_enabled=stale_eye_warp_knob;game_xr->stale_eye_parallax_enabled=stale_eye_parallax_knob;game_xr->stale_near_range=stale_near_range;game_xr->locate_periods=legacy_locate_horizon?1:2;game_xr->gpu_queue_limit=!legacy_gpu_queue;game_xr->steady_pacing=!legacy_pacing;game_xr->pacer_miss_lock=pacer_miss_lock;game_xr->median_horizon=!legacy_display_horizon;
                             game_xr->performance_mode(alternate_on() && game_xr->renderer_live()!=0);
                             game_xr->afw_status(d2vr::afw::runtime().problem());
-                            { // PSVR2 adaptive triggers: left hand only, gameplay with the panel closed and the session focused
-                                std::string left_equip;{std::lock_guard<std::mutex> l(hand_state_mutex);left_equip.assign(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));}
+                            { // PSVR2 adaptive triggers, per hand: gameplay with the panel closed and the session focused
+                                std::string slot1_equip;unsigned weapon_bits{};
+                                {std::lock_guard<std::mutex> l(hand_state_mutex);slot1_equip.assign(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));weapon_bits=hand_weapon_bits;}
+                                using P=d2vr::psvr2::Profile;using H=d2vr::arm::Held;
+                                const auto of_held=[](H h) {return h==H::pistol || h==H::guard_pistol?P::Gun:h==H::crossbow?P::Crossbow:h==H::power?P::Power:P::Off;};
+                                // The engine's slot-1 item (equip pose name): the crossbow, the pistol ("Gun"), or a power (not the Timepiece, "Timeshift").
+                                const std::string_view n(slot1_equip);
+                                const P slot1=d2vr::contains_nocase(n,"crossbow")?P::Crossbow:d2vr::is_gun_equip_name(n)?P::Gun:
+                                    d2vr::is_power_equip_name(n) && !d2vr::contains_nocase(n,"timeshift")?P::Power:P::Off;
+                                // Either hand may hold any of them (dual wield): a hand's own mod-owned copy first, else the slot-1 item in the arm that carries it.
+                                const unsigned pk=arm_pack.load(std::memory_order_relaxed);std::array<P,2> items{};
+                                for(unsigned h=0;h<2;++h) {
+                                    const P copy=of_held(d2vr::arm::copy_of(pk,h));
+                                    items[h]=copy!=P::Off?copy:(h==d2vr::arm::slot1_arm_of(pk) && (weapon_bits&1u)?slot1:P::Off);
+                                }
                                 const bool play=gameplay && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->controller_input.active && !game_xr->settings_open();
                                 wchar_t exe[MAX_PATH]{};static const auto game_dir=(GetModuleFileNameW(nullptr,exe,MAX_PATH),std::filesystem::path(exe).parent_path());
-                                d2vr::psvr2::runtime().update(game_xr->xr_runtime_name,game_xr->xr_system_name,play,left_equip,game_xr->controller_input.left_trigger,game_dir);
+                                static bool psvr2_log_set=false;if(!psvr2_log_set) {psvr2_log_set=true;d2vr::psvr2::runtime().log_to(output_directory.always()/L"psvr2.log");}
+                                d2vr::psvr2::runtime().update(game_xr->xr_runtime_name,game_xr->xr_system_name,play,items,
+                                    {game_xr->controller_input.left_trigger,game_xr->controller_input.right_trigger},game_dir);
                             }
                             if(game_xr->afw_capture_dir.empty()) game_xr->afw_capture_dir=output_directory.always().wstring();
                             if(game_xr->afw_plugin_path.empty()) { // AFW renderer: PDAFWPlugin.dll is the user's own copy, next to Dishonored2.exe

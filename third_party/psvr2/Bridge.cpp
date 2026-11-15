@@ -38,14 +38,15 @@ struct Backend {
             return Status::ExportMissing;
         return Status::Ready;
     }
-    int off() {
-        const auto command = makeCommand(Profile::Off);
-        return set(VRControllerType::Left, command);
+    // Protocol v2: each controller has its own profile (either hand can hold a gun, the crossbow or a power).
+    int applyHand(VRControllerType hand, Profile profile) {
+        const auto command = makeCommand(profile);
+        return set(hand, command);
     }
-    int apply(Desired desired) {
-        if (desired.profile == Profile::Off) return off();
-        const auto command = makeCommand(desired.profile);
-        return set(VRControllerType::Left, command);
+    int off() {
+        const int left = applyHand(VRControllerType::Left, Profile::Off);
+        const int right = applyHand(VRControllerType::Right, Profile::Off);
+        return left != 0 ? left : right;
     }
     ~Backend() {
         if (initialized) { off(); deinit(); }
@@ -76,7 +77,7 @@ int wmain(int argc, wchar_t** argv) {
     HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, argv[1]);
     if (!parent || !mapping) return 2;
     auto shared = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Shared)));
-    if (!shared || shared->magicValue != magic || shared->version != 1) return 2;
+    if (!shared || shared->magicValue != magic || shared->version != protocolVersion) return 2;
     int exitCode = 0;
     {
         Backend backend;
@@ -104,10 +105,10 @@ int wmain(int argc, wchar_t** argv) {
             auto desired = decode(word, tick(), focused(pidValue));
             if (word == activationWord) desired = {};
             if (!havePrevious || desired != previous) {
+                // Only the controller whose profile changed is re-sent (after a reconnection both are).
                 int applied = 0;
-                if (!havePrevious || desired.hand != previous.hand || desired.profile == Profile::Off)
-                    applied = backend.off();
-                if (applied == 0 && desired.profile != Profile::Off) applied = backend.apply(desired);
+                if (!havePrevious || desired.left != previous.left) applied = backend.applyHand(VRControllerType::Left, desired.left);
+                if (applied == 0 && (!havePrevious || desired.right != previous.right)) applied = backend.applyHand(VRControllerType::Right, desired.right);
                 if (applied != 0) {
                     status(shared, Status::CommandFailed, applied);
                     exitCode = 5; break; // fail closed; user explicitly reconnects
