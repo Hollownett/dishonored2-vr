@@ -11240,6 +11240,10 @@ void prepare_head_view(void* view) noexcept {
                 std::optional<NativeNoteTargets> note_targets;
                 try {note_targets=native_note_targets(t,head_origin,anchor,hand_centre);}catch(...) {}
                 full_body.publish(t,note_targets?d2vr::body::Ownership{}:native_ownership);
+                // v1371: each gun type's grip in the hand the solver poses with that type's clip, for a copy of a type no native gun was measured for yet
+                for(unsigned type=1;type<=2;++type) if(const auto g=full_body.copy_grip(type))
+                    d2vr::held_copy::SolverGrips::set(type==1?d2vr::held_copy::Kind::pistol:d2vr::held_copy::Kind::crossbow,
+                        {g->p,{d2vr::rotated(g->q,{1,0,0}),d2vr::rotated(g->q,{0,1,0}),d2vr::rotated(g->q,{0,0,1})}});
                 if(note_targets)try {publish_native_note_skin(*note_targets);}catch(const std::exception& e) {note_recoverable(e.what());}
                 if(!note_targets && dual_wield_enabled && game_logic_mask()==256 && game_xr->wheel_eye_ready()) try {publish_wheel_hand_skin(head_origin,anchor,hand_centre);} catch(...) {++wheel_hand_counts[4];} // (head view: noexcept)
                 {   // Task 9: the player's horizontal velocity from the anchor root over 0.2 s (the hand body's feedforward and the visible hand's moving flag); G1a: one trace row per displayed frame
