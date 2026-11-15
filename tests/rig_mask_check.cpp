@@ -21,8 +21,8 @@
 #pragma comment(lib,"d3d11.lib")
 #pragma comment(lib,"d3dcompiler.lib")
 using Microsoft::WRL::ComPtr;
-static int failures=0;
-#define CHECK(x) do {if(!(x)) {std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#x);++failures;}} while(0)
+static int failures=0;static bool quiet=false;   // v1327: the v1326 control run expects failures and prints none
+#define CHECK(x) do {if(!(x)) {if(!quiet) std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#x);++failures;}} while(0)
 constexpr UINT N=64;
 
 template<class T> static ComPtr<ID3DBlob> compile(const char* src,const char* target) {
@@ -41,15 +41,20 @@ static std::vector<std::uint8_t> read_back(ID3D11Device* d,ID3D11DeviceContext* 
     for(UINT y=0;y<N;++y) std::memcpy(&out[y*N*bpp],static_cast<const char*>(m.pData)+y*m.RowPitch,N*bpp);
     c->Unmap(s.Get(),0);return out;
 }
-static void run(bool d24,int mode) {
+// v1327: foreign = how many times the held mesh (mode 3) or the rig (modes 0-2) is drawn again on a second, half-size depth buffer between its
+// scene draw and the take (a special bolt's part in another pass); mode 3 draws its scene draw again between them. publish = FsrTaa names its
+// scene depth (RigMask::scene_depth): then the other depth is never replayed, the target is never re-made and every key survives the take.
+static void run(bool d24,int mode,int foreign=0,bool publish=true) {
     ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> c;
     if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,nullptr,&c))) {std::printf("FAIL WARP\n");++failures;return;}
-    d2vr::RigMask::reset();std::setvbuf(stdout,nullptr,_IONBF,0);
+    d2vr::RigMask::reset();std::setvbuf(stdout,nullptr,_IONBF,0);const auto other0=d2vr::RigMask::other_depth_.load(),lost0=d2vr::RigMask::lost_events_.load(),remade0=d2vr::RigMask::recreated_.load();
     // scene depth (typeless, like the game's), two engine colour targets
     D3D11_TEXTURE2D_DESC t{};t.Width=t.Height=N;t.MipLevels=t.ArraySize=1;t.SampleDesc.Count=1;t.Format=d24?DXGI_FORMAT_R24G8_TYPELESS:DXGI_FORMAT_R32_TYPELESS;
     t.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D> depth;dev->CreateTexture2D(&t,nullptr,&depth);
     D3D11_DEPTH_STENCIL_VIEW_DESC dv{};dv.Format=d24?DXGI_FORMAT_D24_UNORM_S8_UINT:DXGI_FORMAT_D32_FLOAT;dv.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
     ComPtr<ID3D11DepthStencilView> dsv;CHECK(SUCCEEDED(dev->CreateDepthStencilView(depth.Get(),&dv,&dsv)));
+    if(publish) d2vr::RigMask::scene_depth(depth.Get());   // v1327: what FsrTaa takes
+    D3D11_TEXTURE2D_DESC t2=t;t2.Width=t2.Height=N/2;ComPtr<ID3D11Texture2D> depth2;dev->CreateTexture2D(&t2,nullptr,&depth2);ComPtr<ID3D11DepthStencilView> dsv2;CHECK(SUCCEEDED(dev->CreateDepthStencilView(depth2.Get(),&dv,&dsv2)));
     const DXGI_FORMAT read_format=d24?DXGI_FORMAT_R24_UNORM_X8_TYPELESS:DXGI_FORMAT_R32_FLOAT;
     D3D11_SHADER_RESOURCE_VIEW_DESC sv{};sv.Format=read_format;sv.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sv.Texture2D.MipLevels=1;
     ComPtr<ID3D11ShaderResourceView> depth_srv;CHECK(SUCCEEDED(dev->CreateShaderResourceView(depth.Get(),&sv,&depth_srv)));
@@ -153,6 +158,22 @@ static void run(bool d24,int mode) {
     const float far_world[8]{-1,-1,1,1,.1f,0,0,0},rig_rect[8]{-.8f,-.6f,.4f,.6f,0,0,0,0},near_world[8]{0,-1,1,1,.9f,0,0,0};
     engine_draw(vw.Get(),other_view.Get(),far_world);
     engine_draw(vs.Get(),mode==3?other_view.Get():rig_view.Get(),rig_rect,true);
+    if(foreign) { // v1327: the held mesh / the rig again in a half-size depth-only pass, `foreign` times
+        const auto foreign_rig=[&] { // a rig draw (the rig's palette at t0) on the other depth: never the rig class there, never replayed
+            c->UpdateSubresource(cb.Get(),0,nullptr,rig_rect,0,0);c->VSSetShader(vs.Get(),nullptr,0);ID3D11ShaderResourceView* pair[2]{rig_view.Get(),nullptr};c->VSSetShaderResources(0,2,pair);
+            d2vr::RigMask::Scope scope(c.Get(),1);if(publish) CHECK(!d2vr::RigMask::draw_is_rig() && !d2vr::RigMask::draw_depth());
+            c->Draw(6,0);scope.after({2,6,1,0,0,0},draw,targets);};
+        const D3D11_VIEWPORT half{0,0,float(N/2),float(N/2),0,1};
+        for(int k=0;k<foreign;++k) {
+            c->RSSetViewports(1,&half);c->OMSetRenderTargets(0,nullptr,dsv2.Get());
+            if(!k) c->ClearDepthStencilView(dsv2.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0.f,0);
+            if(mode==3) engine_draw(vs.Get(),other_view.Get(),rig_rect,true);else foreign_rig();
+            c->RSSetViewports(1,&vp);c->OMSetRenderTargets(2,engine_rtvs,dsv.Get());
+            if(mode==3 && k+1<foreign) engine_draw(vs.Get(),other_view.Get(),rig_rect,true);   // the scene draw again: the same key, replayed
+        }
+        if(publish) {CHECK(d2vr::RigMask::other_depth_.load()==other0+foreign);CHECK(d2vr::RigMask::lost_events_.load()==lost0);CHECK(d2vr::RigMask::recreated_.load()==remade0);}
+        else {CHECK(d2vr::RigMask::lost_events_.load()>lost0);quiet=true;}   // v1326: the target was re-made for the other depth and the keys dropped
+    }
     if(ring) {CHECK(restored);CHECK(bound_x==(mode==1?6e-3f:0.f));std::printf("mode %d: t0 during the draw holds x=%g (ring P = frame 6: 0.006; current: 0)\n",mode,bound_x);}
     { // the engine's state after the replay is its own
         ID3D11RenderTargetView* r[8]{};ID3D11DepthStencilView* d{};c->OMGetRenderTargets(8,r,&d);
@@ -165,8 +186,8 @@ static void run(bool d24,int mode) {
     engine_draw(vw.Get(),other_view.Get(),near_world);
     // the copy/compare
     ComPtr<ID3D11ShaderResourceView> rig_srv;ComPtr<ID3D11RenderTargetView> rig_rtv;ComPtr<ID3D11UnorderedAccessView> rig_keys; // v1288: the UAV replay's mask keys (u2)
-    CHECK(d2vr::RigMask::take_view_draws()==3);
-    if(!d2vr::RigMask::target(depth.Get(),rig_srv,rig_rtv,&rig_keys)) {std::printf("FAIL no rig target\n");++failures;return;}
+    CHECK(d2vr::RigMask::take_view_draws()==3u+static_cast<unsigned>(foreign)+(mode==3 && foreign?static_cast<unsigned>(foreign-1):0u));
+    if(!d2vr::RigMask::target(depth.Get(),rig_srv,rig_rtv,&rig_keys)) {if(!quiet) std::printf("FAIL no rig target\n");++failures;return;}
     D3D11_TEXTURE2D_DESC mt=t;mt.Format=DXGI_FORMAT_R8_TYPELESS;mt.BindFlags=D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE;ComPtr<ID3D11Texture2D> mask;dev->CreateTexture2D(&mt,nullptr,&mask);
     D3D11_UNORDERED_ACCESS_VIEW_DESC mu{};mu.Format=DXGI_FORMAT_R8_UINT;mu.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2D;ComPtr<ID3D11UnorderedAccessView> mask_uav;dev->CreateUnorderedAccessView(mask.Get(),&mu,&mask_uav);
     D3D11_BUFFER_DESC nb{};nb.ByteWidth=16;nb.BindFlags=D3D11_BIND_UNORDERED_ACCESS;nb.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;ComPtr<ID3D11Buffer> counts;dev->CreateBuffer(&nb,nullptr,&counts);
@@ -218,7 +239,15 @@ static void run(bool d24,int mode) {
 }
 int main() {
     for(const bool legacy:{false,true}) { // v1288: the UAV replay (mask keys, u2 of the copy) and the v1285 replay
-        d2vr::RigMask::legacy_replay=legacy;for(int mode=0;mode<4;++mode) {run(true,mode);run(false,mode);}}
+        d2vr::RigMask::legacy_replay=legacy;for(int mode=0;mode<4;++mode) {run(true,mode);run(false,mode);}
+        for(int mode=0;mode<4;++mode) for(const int n:{1,3}) {run(true,mode,n);run(false,mode,n);}}   // v1327: draws on another depth between the scene draws and the take
+    { // v1327 control: the same without the scene depth published (v1326) loses the held keys - the case the sims found
+        d2vr::RigMask::legacy_replay=false;const int before=failures;const auto lost=d2vr::RigMask::lost_events_.load();
+        run(false,3,1,false);quiet=false;bool reproduced=d2vr::RigMask::lost_events_.load()>lost && failures>before;
+        const auto lost_rig=d2vr::RigMask::lost_events_.load();const int before_rig=failures;run(true,0,1,false);quiet=false;   // the rig's keys too
+        reproduced=reproduced && d2vr::RigMask::lost_events_.load()>lost_rig && failures>before_rig;failures=before;CHECK(reproduced);
+        std::printf("v1326 control (no scene depth named): held and rig keys %s\n",reproduced?"lost, as the sims found":"NOT lost - the control does not reproduce the bug");
+    }
     d2vr::RigMask::legacy_replay=false;
     if(failures) {std::printf("rig_mask_check: %d failure(s)\n",failures);return 1;}
     std::printf("PASS: rig_mask_check (replay through RigMask::Scope, SV_Position-only PS on a VS with SV_Position second, engine state restored, copy/compare)\n");

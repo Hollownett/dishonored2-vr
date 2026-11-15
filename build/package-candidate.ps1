@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $rel  = 'C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags'   # release line: source of gitignored binaries (FSR4/OpenXR/dinput8 dlls)
-$note = 'Test candidate v1319 = v1318 (weapon upgrade parts drawn and placed like the weapon body: no more merged instanced part draws) + the weapon is glued to the drawn hand by the engine''s own bind: a native weapon''s place on joint 59 is read from its bind component (the equip''s tag, origin and rotation), so it sits in the hand from its first frame with no learning (v1317 headset: 27 % / 14 % of renders had no binding and drew the weapon at the game''s lagging pose; sims: the weapon''s offset from the drawn hand varies 0.0 mm, was 6 mm). build/engine-bind-gaps = only where nothing is learned, build/no-engine-bind = v1318. Not headset-tested.'
+$note = 'Test candidate v1327 = v1325 + performance mode keeps every part of a held weapon in the eye masks: a special bolt (sleep / incendiary / howling) makes the game draw held parts into two more depth passes (another full-size depth and a half-size one); each such draw re-made the rig mask target mid-render and dropped every mask key replayed before it, so the crossbow parts drawn first were warped as scenery and left behind while walking (the doubling). The mask now replays only on the scene depth the upscaler takes. Lab rig_mask_check extended (held and rig draws on another depth, 1 and 3 alternations, D24/D32, both replay paths; the v1326 control loses the keys). Not sim-verified after the fix, not headset-tested.'
 $name = "d2vr_render_probe_arm_v$Version.dll"
 $dll  = Join-Path $repo "build\$name"
 if ($Version -notmatch '^\d+$') { throw "version must be digits" }

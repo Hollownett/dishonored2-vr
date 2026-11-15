@@ -18146,6 +18146,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         rig_forensics_knob=fs::exists(root/L"build"/L"rig-forensics"); // v1216: GPU copies/read-backs every render, so never on with diagnostics alone
         rig_target_knob=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-rig-target");d2vr::RigMask::target_on=rig_target_knob; // v1190
         d2vr::RigMask::target_bind=&d2vr::ObjectMotion::target_bind; /* v1199: per slice */d2vr::RigMask::target_restore=&d2vr::ObjectMotion::target_restore;
+        d2vr::RigMask::key_debug=fs::exists(root/L"build"/L"rig-key-debug");   // v1327 diagnostics: mask keys present but off the scene depth (248/249)
         d2vr::RigMask::legacy_replay=fs::exists(root/L"build"/L"legacy-rig-replay"); // v1286: the v1285 render-target-switching rig/held replay (A/B)
         d2vr::RigMask::instanced_rig_check=!fs::exists(root/L"build"/L"legacy-instanced-rig"); // v1317: an instanced draw without a VS layout is not the rig
         part_batch_on=!fs::exists(root/L"build"/L"legacy-part-batching"); // v1318: held weapon parts keep their own shader-parm block (never merged)

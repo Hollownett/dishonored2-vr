@@ -73,6 +73,7 @@ inline constexpr char rig_mask_copy_source[]=
     "const float2 rq=kq?float2(asfloat(kq>>2),float(kq&3u)):r.Load(int3(i.xy,0));const float q=rq.x;"
     "const float e=k.x+k.y*d,a=abs(q-d);const bool rig=inside && d>0 && q>0 && a<=e,held=rig && rq.y>1.5,own=rig && !held && rq.y>0.5;"
     "o[i.xy]=held?(rq.y>2.5?251:253):own?255:rig?254:0;"
+    "\n#ifdef D2VR_KEY_DEBUG\nif(!rig && inside && d>0 && q>0) o[i.xy]=d>q?249:248;\n#endif\n"
     "if(rig) InterlockedAdd(g[0],1);else if(inside && d>0 && q>0 && a<=64*e) InterlockedAdd(g[1],1);"
     "if(own) InterlockedAdd(g[2],1);"
     "const float2 m=mv.Load(int3(i.xy,0))*k.zw;const float b=k.z;const bool wild=rig && !held && !(dot(m,m)<=b*b);if(wild) {o[i.xy]=252;InterlockedAdd(g[3],1);}"
@@ -127,6 +128,18 @@ public:
     // v1286: OMSetRenderTargetsAndUnorderedAccessViews, past the hooks (null: the context's own method, for the WARP checks)
     using TargetsUavFn=void(*)(ID3D11DeviceContext*,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*) noexcept;
     inline static std::atomic<bool> legacy_replay{false}; // v1286: dxgi_probe at start-up, build/legacy-rig-replay (the v1285 RTV replay)
+    // v1327 diagnostics (build/rig-key-debug): the copy marks a pixel whose mask key is present but differs from the scene depth 249 (scene
+    // nearer) / 248 (scene farther), so the dumps tell a key overwritten later from a replay whose EQUAL test failed (no key: 0)
+    inline static std::atomic<bool> key_debug{false};
+    // v1327 (user, v1325 performance mode: the whole crossbow doubles, only with sleep / incendiary / howling bolts; sims v1327: 4658 of 6636 mask
+    // target re-creations dropped keys not yet taken, 6415 replays): the mask target is ONE texture set keyed by the depth it was made for, and
+    // held draws were replayed on three depths - the scene depth, another full-size depth and a half-size one. Each switch re-made the target,
+    // so every key replayed before it in that render was lost: the parts drawn first (a special bolt's mechanism and ring pieces) had no mask,
+    // went through the warp as scenery and were left behind while the hand moved. FsrTaa now names the scene depth it takes (scene_depth); a
+    // one-view draw on any other depth is not replayed (status other_depth), so the target is only re-made on a resolution change.
+    // Status recreated, lost [events, replays], take_miss (a take found the target made for another depth).
+    static void scene_depth(ID3D11Resource* depth) noexcept {scene_depth_.store(depth,std::memory_order_relaxed);}
+    inline static std::atomic<std::uint64_t> recreated_{},since_take_{},lost_events_{},lost_replays_{},take_miss_{},other_depth_{};
     static void publish(const std::array<std::uintptr_t,buffer_slots>& buffers) noexcept {
         unsigned n=0;
         for(unsigned i=0;i<buffer_slots;++i) {buffers_[i].store(buffers[i],std::memory_order_relaxed);n+=buffers[i]!=0;}
@@ -474,12 +487,13 @@ public:   // v1306 diagnostics: this one-view draw writes the scene depth the ma
     static bool target(ID3D11Resource* depth,Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srv,Microsoft::WRL::ComPtr<ID3D11RenderTargetView>& rtv,
                        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>* keys=nullptr) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(!depth || target_.depth!=depth || !(target_.srv || (target_.mask_uav && keys))) return false;
+        if(!depth || target_.depth!=depth || !(target_.srv || (target_.mask_uav && keys))) {if(depth && target_.depth && target_.depth!=depth) take_miss_.fetch_add(1,std::memory_order_relaxed);return false;}
+        since_take_.store(0,std::memory_order_relaxed);   // v1327: the keys replayed so far are taken
         srv=target_.srv;rtv=target_.rtv;if(keys) *keys=target_.mask_uav;return true;
     }
     static void reset() noexcept {std::lock_guard<std::mutex> lock(mutex_);
         for(auto& r:ring_) {r.ready.store(false);r.clear();r.device=nullptr;r.bytes=0;}
-        target_={};ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;uav_={};uav_state_=0;}
+        target_={};scene_depth_.store(nullptr,std::memory_order_relaxed);ps_.Reset();ps_own_.Reset();ps_held_.Reset();equal_.Reset();blend_.Reset();device_=nullptr;made_=make_failed_=false;uav_={};uav_state_=0;}
     static std::string json() {
         std::ostringstream o;
         // v1168: t0..t3 per digit: 0 none, 1 this model's wrapper 0, 2 its wrapper 1, 3 another rig model's, 4 a non-rig resource
@@ -501,6 +515,7 @@ public:   // v1306 diagnostics: this one-view draw writes the scene depth the ma
          <<",\"held_draws\":"<<held_draws_.load()<<",\"held_marks\":["<<held_marks_[0].load()<<','<<held_marks_[1].load()<<','<<held_marks_[2].load()<<','<<held_marks_[3].load()<<','<<held_marks_[4].load()<<','<<held_marks_[5].load()<<']'<<",\"target\":{\"on\":"<<(target_on.load()?"true":"false")<<",\"draws\":"<<target_draws_.load()
          <<",\"misses\":"<<target_misses_.load()<<",\"slice_misses\":["<<target_slice_misses_[0].load()<<','<<target_slice_misses_[1].load()<<"],\"zero_draw_renders\":{\"lent\":"<<target_lent_.load()<<",\"empty\":"<<target_empty_.load()<<'}'<<",\"valid_renders\":"<<target_valid_.load()<<",\"invalid_renders\":"<<target_invalid_.load()<<",\"no_retarget\":["<<no_retarget_[0].load()<<','<<no_retarget_[1].load()<<"],\"invalid_by_no_retarget\":"<<invalid_no_retarget_.load()<<",\"no_retarget_draws\":"<<no_retarget_json()<<",\"instanced_not_rig\":"<<not_rig_.load()<<",\"draws_last_render\":"<<target_draws_last_.load()<<'}'<<",\"rig_draws\":"<<rig_draws_.load()<<",\"replays_last_present\":"<<replays_last_.load()<<",\"replays\":"<<replays_.load()
          <<",\"skipped\":{\"no_depth_view\":"<<no_dsv_.load()<<",\"msaa\":"<<msaa_.load()<<"},\"failures\":"<<failures_.load();
+        o<<",\"recreated\":"<<recreated_.load()<<",\"lost\":["<<lost_events_.load()<<","<<lost_replays_.load()<<"],\"take_miss\":"<<take_miss_.load()<<",\"other_depth\":"<<other_depth_.load();   // v1327
         // v1286: the replay path (uav: engine targets kept, UAV writes; legacy: the v1285 target switches, knob or device), the draws each way
         // took, the per-draw fallbacks by reason, and the per-render slice conversions (one per take; failures = out had no UAV / no shader)
         o<<",\"replay_path\":\""<<(legacy_replay.load() || (uav_state_.load()>1)?"legacy":"uav")<<"\",\"uav_replays\":"<<uav_replays_.load()<<",\"replay_fallbacks\":{\"no_slot\":"<<fallbacks_[0].load()
@@ -543,6 +558,7 @@ public:   // v1306 diagnostics: this one-view draw writes the scene depth the ma
             const int writes=writes_depth(bound);
             if(bound) bound->Release(); // the cache keeps its own reference
             if(writes<=0) return;
+            if(!on_scene_depth(c)) {other_depth_.fetch_add(1,std::memory_order_relaxed);return;}   // v1327: another depth (never the target's)
             tl_rig_=is_rig(c);tl_depth_=true;c_=c; // v1183: every depth-writing one-view draw may be replayed (rig, or held when ObjectMotion marks it)
             if(tl_rig_) {rig_draws_.fetch_add(1,std::memory_order_relaxed);rig_draws_frame_.fetch_add(1,std::memory_order_relaxed);}
         }
@@ -590,6 +606,16 @@ private:
     static constexpr unsigned slots=1024;
     inline static std::array<Entry,slots> table_{};inline static std::atomic<int> default_writes_{1}; // a null state is the default: depth written
     inline static std::mutex mutex_;inline static Target target_{};
+    inline static std::atomic<ID3D11Resource*> scene_depth_{};   // v1327: FsrTaa's selected scene depth (identity only; FsrTaa holds it); null: not chosen yet
+    // v1327: the draw bound to `c` writes the scene depth FsrTaa takes (true before FsrTaa has chosen one: the v1326 behaviour)
+    static bool on_scene_depth(ID3D11DeviceContext* c) noexcept {
+        ID3D11Resource* const scene=scene_depth_.load(std::memory_order_relaxed);
+        if(!scene) return true;
+        ID3D11DepthStencilView* dsv{};c->OMGetRenderTargets(0,nullptr,&dsv);
+        ID3D11Resource* depth{};if(dsv) {dsv->GetResource(&depth);dsv->Release();}
+        if(depth) depth->Release();
+        return depth==scene;
+    }
     inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_,ps_own_,ps_held_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> equal_;
     inline static Microsoft::WRL::ComPtr<ID3D11BlendState> blend_;inline static bool made_{},make_failed_{};inline static ID3D11Device* device_{}; // identity: whose objects these are
     inline static std::array<std::atomic<std::uintptr_t>,buffer_slots> buffers_{};inline static std::atomic<unsigned> published_buffers_{};
@@ -787,7 +813,7 @@ private:
         ID3D11DepthStencilView* dsv{};c->OMGetRenderTargets(0,nullptr,&dsv);
         ID3D11Resource* depth{};if(dsv) {dsv->GetResource(&depth);dsv->Release();}
         bool same=false;
-        if(depth) {std::lock_guard<std::mutex> lock(mutex_);same=target_.depth==depth;}
+        if(depth) {ID3D11Resource* const scene=scene_depth_.load(std::memory_order_relaxed);if(scene) same=depth==scene;else {std::lock_guard<std::mutex> lock(mutex_);same=target_.depth==depth;}}   // v1327: the scene depth FsrTaa takes
         if(depth) depth->Release();
         return same?1:3;
     }
@@ -971,6 +997,7 @@ private:
         if(!made_) return false;
         const bool want_uav=!legacy_replay.load(std::memory_order_relaxed) && uav_state_.load(std::memory_order_relaxed)==1; // v1286
         if(target_.depth==depth && target_.w==dd.Width && target_.h==dd.Height && (target_.rtv || target_.mask_uav) && static_cast<bool>(target_.keys)==want_uav) return true;
+        if(target_.depth) {recreated_.fetch_add(1,std::memory_order_relaxed);const auto lost=since_take_.exchange(0,std::memory_order_relaxed);if(lost) {lost_events_.fetch_add(1,std::memory_order_relaxed);lost_replays_.fetch_add(lost,std::memory_order_relaxed);}}   // v1327
         target_={};
         D3D11_TEXTURE2D_DESC t{};t.Width=dd.Width;t.Height=dd.Height;t.MipLevels=t.ArraySize=1;t.Format=DXGI_FORMAT_R32G32_FLOAT;t.SampleDesc.Count=1;
         t.Usage=D3D11_USAGE_DEFAULT;t.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
@@ -1097,7 +1124,7 @@ private:
         if(dss) dss->Release();
         if(blend) blend->Release();
         release_targets();
-        replays_.fetch_add(1,std::memory_order_relaxed);replays_frame_.fetch_add(1,std::memory_order_relaxed);uav_replays_.fetch_add(1,std::memory_order_relaxed);
+        replays_.fetch_add(1,std::memory_order_relaxed);replays_frame_.fetch_add(1,std::memory_order_relaxed);uav_replays_.fetch_add(1,std::memory_order_relaxed);since_take_.fetch_add(1,std::memory_order_relaxed);
         return true;
     }
     static void replay_legacy(ID3D11DeviceContext* c,const DrawArgs& a,DrawFn draw,TargetsFn targets) noexcept { // the v1285 replay (v1286 name)

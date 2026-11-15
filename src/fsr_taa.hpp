@@ -749,6 +749,7 @@ public:
             ID3D11ShaderResourceView* view{};
             if(FAILED(device->CreateShaderResourceView(best.resource,&sd,&view))) {++create_failures;return;}
             depth_view_.adopt(view);depth_resource_.reset(best.resource);
+            RigMask::scene_depth(best.resource); // v1327: the only depth the rig mask replays on
             depth_srv_format_=best.srv; // v1163
             if(temporal_eye::diagnostic_capture_enabled.load(std::memory_order_relaxed)) {selected_clear_=best.clear;dlss_depth_selection_generation=++depth_selection_generation_;}
         }
@@ -804,7 +805,8 @@ public:
                     if(!rig_cb_.p) {D3D11_BUFFER_DESC kd{};kd.ByteWidth=16;kd.Usage=D3D11_USAGE_DEFAULT;kd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ID3D11Buffer* kb{};if(SUCCEEDED(device->CreateBuffer(&kd,nullptr,&kb))) rig_cb_.adopt(kb);}
                     if(!rig_copy_.p) { // v1163: the rig mask copy/compare (rig_mask.hpp)
                         ID3DBlob* code{};ID3D11ComputeShader* cs{};
-                        if(SUCCEEDED(D3DCompile(rig_mask_copy_source,sizeof rig_mask_copy_source-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr))) {
+                        const D3D_SHADER_MACRO key_debug[2]{{"D2VR_KEY_DEBUG","1"},{nullptr,nullptr}};   // v1327 diagnostics (RigMask::key_debug)
+                        if(SUCCEEDED(D3DCompile(rig_mask_copy_source,sizeof rig_mask_copy_source-1,nullptr,RigMask::key_debug.load(std::memory_order_relaxed)?key_debug:nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,nullptr))) {
                             if(SUCCEEDED(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs))) rig_copy_.adopt(cs);
                             code->Release();
                         }
