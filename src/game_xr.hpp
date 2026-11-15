@@ -118,6 +118,7 @@ class GameXr {
         context_->Unmap(staging.Get(),0);
         std::ofstream meta(afw_capture_dir+L"\\"+name+L".json",std::ios::trunc);meta<<"{\"width\":"<<d.Width<<",\"height\":"<<d.Height<<",\"format\":"<<d.Format<<"}"<<std::endl;
     }
+    bool settings_gpu_image_{}; // the settings quad copies settings_texture_ (ImGui) instead of settings_pixels_ (GDI)
     std::unique_ptr<VrMenuImgui> imgui_menu_;bool imgui_menu_failed_{},y_hold_settings_pending_{};unsigned undrawable_run_{};
     std::unique_ptr<DesktopMirror> settings_compositor_;
     std::vector<unsigned char> settings_pixels_;XrSwapchain settings_chain_{};std::vector<XrSwapchainImageD3D11KHR> settings_images_;
@@ -631,7 +632,7 @@ private:
             imgui_menu_->render(settings_,effective_scale_,width_,height_,pointer,settings_.gameplay_panel_open()); // tabs: page 1 of the combined menu
             context_->CopyResource(settings_texture_.Get(),imgui_menu_->texture());
             ++settings_pixel_generation_; // redrawn every frame while open (the pointer dot moves)
-            ++imgui_menu_frames;
+            ++imgui_menu_frames;settings_gpu_image_=true;
             if(observe_settings && imgui_menu_frames%30==1) { // diagnostics only: a CPU copy for the settings-panel capture
                 Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
                 D3D11_TEXTURE2D_DESC d{};settings_texture_->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
@@ -648,6 +649,7 @@ private:
             }
             return;
         } catch(const std::exception&) {imgui_menu_failed_=true;imgui_menu_.reset();}
+        settings_gpu_image_=false; // GDI panel: CPU pixels
         {auto next=settings_panel_image(settings_,effective_scale_,width_,height_,pointer);
          if(next!=settings_pixels_) {settings_pixels_=std::move(next);++settings_pixel_generation_;}}
         const auto& pixels=settings_pixels_;
@@ -677,7 +679,7 @@ private:
         if(settings_images_.empty()) throw std::runtime_error("XR settings panel has no images");
     }
     std::optional<XrCompositionLayerQuad> settings_layer() {
-        if(!settings_chain_ || settings_pixels_.size()!=640u*560u*4u || !views_valid_) return {}; // chain is created between frames
+        if(!settings_chain_ || (!settings_gpu_image_ && settings_pixels_.size()!=640u*560u*4u) || !views_valid_) return {}; // chain is created between frames
         OverlayKey overlay_key;
         if(overlay_needs_image(OverlayKind::settings,settings_chain_,settings_overlay_content(settings_pixel_generation_),0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
@@ -686,7 +688,9 @@ private:
         const auto ready=xrWaitSwapchainImage(settings_chain_,&wait);
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         if(XR_FAILED(ready) || ready==XR_TIMEOUT_EXPIRED) {xrReleaseSwapchainImage(settings_chain_,&release);checked(ready,"Wait settings panel");throw std::runtime_error("Settings panel wait timed out");}
-        context_->UpdateSubresource(settings_images_.at(index).texture,0,nullptr,settings_pixels_.data(),640*4,0);
+        // ImGui panel: the image exists only on the GPU (settings_texture_, same 640x560 SRGB format); the GDI panel uploads its CPU pixels.
+        if(settings_gpu_image_) context_->CopyResource(settings_images_.at(index).texture,settings_texture_.Get());
+        else context_->UpdateSubresource(settings_images_.at(index).texture,0,nullptr,settings_pixels_.data(),640*4,0);
         checked(xrReleaseSwapchainImage(settings_chain_,&release),"Release settings panel");
         overlay_rendered(OverlayKind::settings,overlay_key);
         }
