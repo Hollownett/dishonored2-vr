@@ -189,6 +189,7 @@ struct Output {
     int finger_mode[2]{};
     // Diagnostic per hand: has_hold, and how far the drawn item-hold local is from this frame's native attachment local (degrees, metres).
     bool has_hold[2]{};double hold_native_deg[2]{},hold_native_m[2]{};
+    std::uint64_t hold_starts[2]{}; // v1370 diagnostic: how many holds each hand has started (a socket token, an item change, a hand that was empty)
     double thumb_applied[2][3]{}; // degrees each thumb joint was turned by this solve (what finger_local applied of the contact's turn)
     std::vector<Xf> raw_arm[2];
     bool raw_hand_reached[2]{};
@@ -206,6 +207,7 @@ class BodySolver {
         Vec3 wrap{}; // wrap centre of the native curled fingers in the attachment's parent frame, followed like hold
         std::uint64_t socket_token{};
         std::uint64_t hold_key{};   // v1360: the item (Inputs::item_key) the current hold is of; 0 = no hold or an unknown item
+        std::uint64_t hold_starts{};   // v1370 diagnostic (Output::hold_starts)
         bool has_pole{},has_roll{},has_hold{},sneak_flip{},hold_calibrated{};
         bool weapon_grip{};   // v1102: procedural grip for a weapon hand with no authored weapon clip
         int finger_mode{};
@@ -593,7 +595,7 @@ public:
                 }out.sneak_flip[i]=arm_state_[i].sneak_flip;
             }
             out.finger_mode[i]=arm_state_[i].finger_mode;
-            out.has_hold[i]=arm_state_[i].has_hold;out.hold_native_deg[i]=arm_state_[i].hold_native_deg;out.hold_native_m[i]=arm_state_[i].hold_native_m;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
+            out.has_hold[i]=arm_state_[i].has_hold;out.hold_starts[i]=arm_state_[i].hold_starts;out.hold_native_deg[i]=arm_state_[i].hold_native_deg;out.hold_native_m[i]=arm_state_[i].hold_native_m;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
             const auto& na=native && source->arm[i].size()==out.arm[i].size()?source->arm[i]:std::vector<Xf>{};
             if(!na.empty() && (weight(2+i)>0 || weight(4+i)>0)) {
                 const auto& a=sk_[1+i];
@@ -969,7 +971,7 @@ private:
                     state.hold=n;state.wrap=wrap;state.fingers.assign(s.local.size(),Xf{});
                     for(std::size_t j=0;j<s.local.size();++j) if(s.parent[j]>=0) state.fingers[j]=native_local(j);
                 }
-                state.hold_prev=n;state.hold_steady=0;state.has_hold=true;state.hold_calibrated=false;fresh_hold=true;
+                state.hold_prev=n;state.hold_steady=0;state.has_hold=true;state.hold_calibrated=false;fresh_hold=true;++state.hold_starts;
                 state.has_fingers=state.fingers.size()==s.local.size();
             }
             else if(dt>0) {
