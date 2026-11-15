@@ -223,6 +223,8 @@ public:
     void effective_temporal_aa(int mode) noexcept {effective_temporal_aa_=mode;}
     int effective_temporal_aa() const noexcept {return effective_temporal_aa_.value_or(temporal_aa_);}
     bool performance_mode_replaces_aa() const noexcept {return performance_mode_ && temporal_aa_>=1 && effective_temporal_aa()==0;}
+    // v1323: performance mode runs Off / SMAA / Game TAA as FSR 3 Native (alternate_effective_temporal)
+    bool performance_mode_uses_fsr() const noexcept {return performance_mode_ && temporal_aa_<2 && effective_temporal_aa()==2;}
     int hud_percent() const noexcept {return hud_percent_;}
     bool controls_hint() const noexcept {return controls_hint_;}
     TurnControl::Config turning() const noexcept {return turning_;}

@@ -81,7 +81,7 @@ public sealed class Prefs
     }
 
     /// <summary>Performance mode alternates eyes while retaining the selected AA behind per-eye ownership checks.</summary>
-    public const string PerformanceModeAaNote = "Performance mode is on: it draws one eye per frame and uses your selected AA when per-eye ownership checks pass.";
+    public const string PerformanceModeAaNote = "Performance mode is on: it draws one eye per frame and rebuilds the other from FSR/DLSS depth and motion, so Off, SMAA and Game TAA run as FSR 3 Native there; FSR, DLSS and the in-game upscaler scale work as selected.";
     public static string AaHelpFor(string help, bool performanceMode) => performanceMode ? PerformanceModeAaNote + " " + help : help;
 
     /// <summary>v963: SMAA is shown as its own AA choice (9). The saved file stays version 10: mode 0 + Edge AA on is SMAA,

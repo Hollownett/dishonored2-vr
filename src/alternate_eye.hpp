@@ -171,7 +171,12 @@ private:
 
 // One-view rendering needs qualified per-eye native history, previous matrices/position and jitter before Game TAA is allowed.
 // Upscalers additionally honor the performance-mode AA feature switch. Native ownership is required in every temporal mode.
+// v1323 (user, v1322 headset: performance mode with AA Off or SMAA "strains the eyes, does not feel like stereo", with FSR it is smooth): the
+// rebuilt eye takes its per-eye depth, rig masks and motion from the FSR/DLSS pipeline (FsrTaa::eye_depth / eye_motion are empty without
+// it), so without one the warp ran rotation only (no parallax, hands a frame behind in every other image). With the upscalers allowed, Off,
+// SMAA and Game TAA run as FSR 3 Native (full resolution) in performance mode; normal mode keeps the selected mode.
 inline int alternate_effective_temporal(bool alternate_on, int requested,bool native_taa=false,bool upscalers=false) noexcept {
+    if(alternate_on && native_taa && upscalers && requested<2) return 2;
     return alternate_on ? (native_taa && (requested==1 || upscalers)?requested:0) : requested;
 }
 // Spatial AA follows the effective mode. A saved FSR choice may temporarily fall back to spatial AA.

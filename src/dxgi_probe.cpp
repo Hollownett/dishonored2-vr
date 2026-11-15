@@ -6481,6 +6481,7 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
 static std::uintptr_t find_cvar(const std::string& name) noexcept; // defined below; the startup preset uses it
 static std::string engine_cvars_applied;
 static bool shadow_slicing_cvars=false; // v1159/v1160 meta: a slicing cvar was applied as 1 (apply_engine_cvars)
+static std::array<std::uintptr_t,2> slicing_cvar{};   // v1323: r_shadowParallelPartialSliceUpdate, r_shadowParallelPartialDynaUpdate (the lens slicing guard)
 static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
     try {
         // v1109: with no file, the engine's own sun-cascade time slicing (slice 0 every frame, far slices in turn, no dynamic
@@ -6496,6 +6497,7 @@ static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
         const auto slicing=[](const std::string& name) {return name=="r_shadowParallelPartialSliceUpdate" || name=="r_shadowParallelPartialDynaUpdate";};
         const auto write=[&](const std::string& name,int value,const char* why) {
             const auto at=find_cvar(name);
+            if(name=="r_shadowParallelPartialSliceUpdate") slicing_cvar[0]=at;else if(name=="r_shadowParallelPartialDynaUpdate") slicing_cvar[1]=at;   // v1323
             const float f=static_cast<float>(value);SIZE_T written{};
             if(at && WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x28),&value,4,&written) && written==4 &&
                WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x2c),&f,4,&written) && written==4)
@@ -6513,6 +6515,8 @@ static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
             write(name,value,"");
         }
         if(no_slicing) {write("r_shadowParallelPartialSliceUpdate",0,"(alternate)");write("r_shadowParallelPartialDynaUpdate",0,"(alternate)");}
+        if(!slicing_cvar[0]) slicing_cvar[0]=find_cvar("r_shadowParallelPartialSliceUpdate");   // v1323: the lens slicing guard (a file without them)
+        if(!slicing_cvar[1]) slicing_cvar[1]=find_cvar("r_shadowParallelPartialDynaUpdate");
         if(engine_cvars_applied.empty()) engine_cvars_applied="none";
     } catch(...) {engine_cvars_applied="failed";}
 }static std::uintptr_t find_cvar(const std::string& name) noexcept {
@@ -7339,7 +7343,33 @@ static bool lens_reference_camera(std::array<float,3>& p,std::array<float,9>& b)
     for(float v:b) if(!std::isfinite(v)) return false;
     return true;
 }
+// v1323 (user, v1322 stereo: the Timepiece image "has a lot of shadow bugs", fine before 2026-11-15, i.e. while the user's build/engine-cvars
+// had the slicing off): the lens renders its own shadow PREPARE into the cascade maps the eye views share (v1257), so with time-sliced sun
+// cascades (v1109 default) a far slice holds whichever view refreshed it last - the lens's in the eyes, an eye's in the lens - as v1160 found
+// for performance mode's two cameras. While the lens is in use both slicing cvars are 0 (every view refreshes every cascade); 2 s after its
+// last pass they get back the values they had. build/lens-shadow-slicing keeps the slicing (A/B). Status timepiece.slicing.
+static bool lens_shadow_slicing=false;
+static struct {std::atomic<bool> forced{};int saved[2]{};std::atomic<UINT64> last{},forces{};} lens_slicing;
+static void lens_slicing_set(const int* v) noexcept {
+    for(unsigned i=0;i<2;++i) if(const auto at=slicing_cvar[i]) {
+        const float f=static_cast<float>(v[i]);SIZE_T w{};
+        WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x28),&v[i],4,&w);WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x2c),&f,4,&w);
+    }
+}
+static void lens_slicing_force() noexcept {   // render thread, every lens pass
+    lens_slicing.last=frames.load(std::memory_order_relaxed);
+    if(lens_shadow_slicing || lens_slicing.forced.load() || !slicing_cvar[0] || !slicing_cvar[1]) return;
+    int now[2]{};
+    for(unsigned i=0;i<2;++i) if(!read_self(slicing_cvar[i]+0x28,&now[i],4)) return;
+    if(!now[0] && !now[1]) return;   // full refreshes already (performance mode, a file with 0)
+    lens_slicing.saved[0]=now[0];lens_slicing.saved[1]=now[1];
+    const int zero[2]{};lens_slicing_set(zero);lens_slicing.forced=true;++lens_slicing.forces;
+}
+static void lens_slicing_poll() noexcept {   // Present thread, every frame
+    if(lens_slicing.forced.load() && frames.load(std::memory_order_relaxed)-lens_slicing.last.load()>180) {lens_slicing_set(lens_slicing.saved);lens_slicing.forced=false;}
+}
 static bool lens_pass(void* renderer,void* entry,std::uintptr_t view,int pass_eye,bool between) noexcept {
+    lens_slicing_force();   // v1323
     lens_pass_eye=pass_eye;lens_between=between;lens_began=false;lens_pass_camera={};lens_shadow_open=false;lens_grid_same=false;
     lens_eye_grid_ok=read_grid(d2vr::PostTonemapPass::eye_views[pass_eye==1?1:0].load(),lens_eye_grid);   // v1265: the eye that composites this image, before the pass
     lens_view=view;lens_active=true;
@@ -7469,6 +7499,8 @@ static std::string lens_status_json() {
     std::ostringstream o;o.precision(6);
     const auto list=[&](const auto& a) {std::string s="[";for(std::size_t i=0;i<a.size();++i) s+=(i?",":"")+std::to_string(a[i].load());return s+"]";};
     o<<"{\"guard\":"<<(lens_guard_enabled?"true":"false")<<",\"state\":"<<lens_stats.state.load()<<",\"lens_frames\":"<<lens_stats.frames.load()
+     <<",\"slicing\":{\"keep\":"<<(lens_shadow_slicing?"true":"false")<<",\"forced\":"<<(lens_slicing.forced.load()?"true":"false")<<",\"forces\":"<<lens_slicing.forces.load()   // v1323
+     <<",\"cvars\":"<<(slicing_cvar[0] && slicing_cvar[1]?"true":"false")<<'}'
      <<",\"begins_eye0_eye1_lens_null_other\":"<<list(lens_stats.begins)<<",\"borrowed_eye0_eye1_other\":"<<list(lens_stats.borrowed)
      <<",\"lens_setups\":"<<lens_stats.setups.load()<<",\"camera_follow_own_none\":["<<lens_stats.camera_follow.load()<<','<<lens_stats.camera_own.load()<<','<<lens_stats.camera_none.load()<<']'
      <<",\"camera_centre_pair\":"<<"["<<lens_stats.camera_centre.load()<<','<<lens_stats.camera_pair.load()<<"]"<<",\"lens_eye0_camera\":"<<(lens_eye0_camera?"true":"false")   // v1256
@@ -14700,6 +14732,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             // the canted density was lost as well. Apply it once, in gameplay, where a size change is expected (the load).
                             static bool engine_cvars_done{}; // v987: one application, on the first gameplay frame
                             if(!engine_cvars_done && gameplay) {engine_cvars_done=true;apply_engine_cvars(output_directory.always().parent_path());}
+                            lens_slicing_poll();   // v1323: the Timepiece's slicing guard gives the cvars back after the lens
                             if(optical_density_requested && !optical_density_applied && gameplay && game_xr->tracking_views() &&
                                game_xr->state==XR_SESSION_STATE_FOCUSED) {
                                 const auto scaled=game_xr->scaled_output_size(requested_resolution_multiplier,true);
@@ -17579,6 +17612,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             lens_eye0_camera=fs::exists(root/L"build"/L"lens-eye0-camera");   // v1256: the v1246 eye-0 lens camera (default: the head's centre)
             lens_mono=fs::exists(root/L"build"/L"lens-mono");lens_shared_shadows=fs::exists(root/L"build"/L"lens-shared-shadows");   // v1257: v1256 camera / v1256 shadows
             lens_isolated=!fs::exists(root/L"build"/L"no-lens-isolation");   // v1259: build/no-lens-isolation = v1257
+            lens_shadow_slicing=fs::exists(root/L"build"/L"lens-shadow-slicing");   // v1323: keep sun-cascade time slicing while the lens is in use
             lens_no_follow_latch=fs::exists(root/L"build"/L"no-lens-follow-latch");   // v1291
             lens_follow_prepared=fs::exists(root/L"build"/L"lens-follow-prepared");   // v1269: the v1264 follows test
             lens_stamp_mode=fs::exists(root/L"build"/L"no-lens-stamp")?d2vr::secondary_view::StampMode::off:   // v1269: v1264 (no stamp on a lens pass)

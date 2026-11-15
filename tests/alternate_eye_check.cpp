@@ -223,7 +223,7 @@ static void temporal_aa_requires_verified_alternate_history() {
         CHECK(alternate_effective_temporal(true, requested, true) == (requested == 1 ? 1 : 0));
         CHECK(alternate_effective_temporal(true, requested) == 0);          // TAA / FSR 3 / FSR 4 all become the SMAA row
         CHECK(alternate_effective_temporal(false, requested) == requested);  // every other mode keeps what was asked
-        CHECK(alternate_effective_temporal(true, requested, true, true) == requested);
+        CHECK(alternate_effective_temporal(true, requested, true, true) == (requested < 2 ? 2 : requested));   // v1323: Off/SMAA/TAA -> FSR 3 Native
         CHECK(alternate_effective_temporal(true, requested, false, true) == 0); // opt-in never bypasses native ownership
         CHECK(alternate_smaa_applies(true, requested) == (requested == 0));   // v963: SMAA is its own method, never on a temporal mode
         CHECK(alternate_smaa_applies(false, requested) == (requested == 0));

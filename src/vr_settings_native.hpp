@@ -85,6 +85,7 @@ inline std::vector<NativeOptionsPage::Row> rows(const VrSettings& s) {
     if(s.upscaler() && s.upscale_custom_percent()) {const auto at=static_cast<std::size_t>(temporal_shown(s));if(at<aa_modes.size()) aa_modes[at]=custom_label(s);}
     std::string aa_help="Smooths shimmering edges. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. SMAA runs on its own with no temporal AA. Upscaler scale (next row) applies only to the FSR and DLSS entries and picking one resets it to that preset.";
     if(s.performance_mode_replaces_aa()) aa_help+=" The selected temporal mode is unavailable; spatial edge AA is used when enabled.";
+    if(s.performance_mode_uses_fsr()) aa_help+=" In performance mode Off, SMAA and Game TAA run as FSR 3 Native: the second eye is rebuilt from its per-eye depth and motion.";
     if(s.dlss_available()) aa_help+=" DLAA and DLSS Quality use NVIDIA DLSS.";
     r[temporal]={K::stepper,"Anti-aliasing",aa_help,0,0,1,temporal_shown(s),2,aa_modes};
     r[edge_aa]={K::slider,"Upscaler scale","What the upscaler renders before it reconstructs the full-size image, as a percent of the Resolution above: 100% is native, 77% is Quality, 67% is Balanced. Lower runs faster but softer. Applies only to the FSR and DLSS modes of Anti-aliasing (greyed out otherwise). Moving it makes the Anti-aliasing entry Custom; picking a preset entry there resets it. DLSS accepts only the range NVIDIA supports.",

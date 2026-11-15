@@ -127,7 +127,8 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
     struct Row {std::wstring name,value;double slider;std::wstring help;};
     const auto split=[&](const std::wstring& all,double slider,const wchar_t* help) {
         const auto at=all.find(L": ");return Row{all.substr(0,at),at==std::wstring::npos?L"":all.substr(at+2),slider,help};};
-    const auto aa_row=[](Row r,bool performance) {
+    const auto aa_row=[](Row r,bool performance,bool performance_fsr) {
+        if(performance_fsr) {r.value+=L" (perf mode: FSR 3 Native)";r.help=L"Performance mode rebuilds the second eye from FSR's per-eye depth and motion, so Off, SMAA and Game TAA run as FSR 3 Native there. Normal mode keeps your selection.";return r;}   // v1323
         if(!performance) return r;
         const auto at=r.value.find(L" (");if(at!=std::wstring::npos) r.value.resize(at);
         r.value+=L" (spatial fallback)";
@@ -145,7 +146,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         {L"Resolution",scale.str(),(settings.requested()-.5)/1.5,L"Sets how many pixels each eye renders. Higher is sharper but slower; the mod caps it to what the GPU can hold. Now "+size.str()+L"."},
         aa_row(split(settings.temporal_aa_text(),-1,settings.dlss_available()?
             L"Smooths shimmering edges over time. Game TAA is the original; FSR Native and DLAA use full resolution; Quality and Balanced upscale. DLAA/DLSS Quality use NVIDIA DLSS. Off leaves Edge AA (SMAA) on its own.":
-            L"Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. Off leaves Edge AA (SMAA) on its own."),settings.performance_mode_replaces_aa()),
+            L"Smooths shimmering edges over time. Game TAA is the original; FSR Native uses full resolution; Quality and Balanced upscale. Off leaves Edge AA (SMAA) on its own."),settings.performance_mode_replaces_aa(),settings.performance_mode_uses_fsr()),
         {L"Edge anti-aliasing",settings.antialiasing()?L"SMAA":L"Native only",-1,L"SMAA Ultra at a 0.03 edge threshold smooths edges on its own when Anti-aliasing is Off. The SSAA 125% preset is supersampling and does not use SMAA. Skipped in a temporal mode."},
         split(settings.mirror_text(),-1,L"Chooses what the desktop monitor mirrors: both eyes side by side, one eye alone, or off (the fastest). It does not change the headset image."),
         split(settings.sharpness_text(),settings.sharpness(),L"Contrast sharpening applied after anti-aliasing. Raise it if the image looks soft, lower it if edges crawl."),
