@@ -157,6 +157,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
         split(settings.scripted_recenter_text(),-1,L"Re-aims the view at scripted moments so you keep facing the action. Off leaves it where it was."),
         split(settings.cutscene_mode_text(),-1,L"VR comfort limits camera motion; VR full follows the camera exactly; Theater uses a flat screen."),
         {L"Calibrate avatar",L"",-1,L"Measure shoulders, then arm reach. Enter chest width separately in Measurements. Recenter re-aligns the view to where you face now."},
+        split(settings.renderer_text(),-1,L"Native stereo renders both eyes. Alternate eye renders one eye per frame and re-projects the other. AFW (alternate frame warping) rebuilds the other eye (needs PDAFWPlugin.dll and an FSR/DLSS mode)."),
         {L"Back to game menu",L"",-1,L"Test unlock (left): 100 runes for every power, infinite coins and every Black Market item. Back (right) closes this menu."}}};
     const auto strip=[](std::wstring v) {const auto at=v.find(L" (");return at==std::wstring::npos?v:v.substr(0,at);};
     const int selected=static_cast<int>(settings.selected());
@@ -289,7 +290,7 @@ inline std::vector<unsigned char> settings_panel_image(const VrSettings& setting
                 text(L"Recenter view",324,top,616,bot,17,label);
                 continue;
             }
-            if(i==12) {   // test unlock (left) and close (right)
+            if(i==13) {   // test unlock (left) and close (right)
                 text(L"Test: unlock all",24,top,316,bot,17,label);
                 line(320,top+5,320,bot-5,.8,sel?rgb(120,124,130):rgb(56,58,72));
                 text(r.name,324,top,616,bot,17,label);continue;

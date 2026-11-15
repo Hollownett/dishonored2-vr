@@ -182,3 +182,20 @@ NGX failure the session falls back to FSR 3.
 Publication, trademark-use and notification obligations under the SDK license
 and its RTX supplement remain release prerequisites reviewed separately; this
 notice does not itself grant shipping approval.
+
+## Dear ImGui 1.92.8 (VR settings panel)
+
+`third_party/imgui` holds the core and DX11 backend of [Dear ImGui](https://github.com/ocornut/imgui) v1.92.8
+(commit 8936b58fe26e8c3da834b8f60b06511d537b4c63), MIT, Copyright (c) 2014-2026 Omar Cornut. The license is in
+`third_party/imgui/LICENSE.txt`. Used by `src/vr_menu_imgui.hpp` to draw the VR settings panel.
+
+## PSVR2Toolkit (PSVR2 adaptive trigger bridge)
+
+`third_party/psvr2` holds the out-of-process trigger bridge (`Bridge.cpp`, built as `DVR_psvr2\dvr_psvr2_bridge.exe`) and
+trigger-effect definitions (`pad_trigger_effect.h`) from [PSVR2Toolkit](https://github.com/BnuuySolutions/PSVR2Toolkit) by
+Bnuuy Solutions, MIT (`third_party/psvr2/PSVR2Toolkit-LICENSE`). Used by `src/psvr2_triggers.hpp`.
+
+## AFW (alternate frame warping) backend
+
+`src/afw_puredark.hpp` calls PureDark's frame-warp plugin (`PDAFWPlugin.dll`) at run time. The plugin is the user's own copy and is
+not distributed; only the subset of its public interface the mod calls is declared, field for field.

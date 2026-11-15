@@ -190,10 +190,10 @@ int main() {
         require(!menu.update(in,false,true,PanelPointer{.15,rowv(0)}).resolution,"Held trigger repeated click");
         {   // Back row: left half requests the test unlock and keeps the menu open; right half closes.
             VrSettings unlock;ControllerInput c{};c.active=true;unlock.update(c,false,true);c.y=true;unlock.update(c,false,true);c.y=false;unlock.update(c,false,true);
-            c.right_trigger=1;const auto request=unlock.update(c,false,true,PanelPointer{.25,rowv(12)});
+            c.right_trigger=1;const auto request=unlock.update(c,false,true,PanelPointer{.25,rowv(13)});
             require(request.test_unlock && unlock.open(),"Test unlock click did not request the unlock");
             c.right_trigger=0;unlock.update(c,false,true);c.right_trigger=1;
-            const auto close=unlock.update(c,false,true,PanelPointer{.75,rowv(12)});
+            const auto close=unlock.update(c,false,true,PanelPointer{.75,rowv(13)});
             require(!close.test_unlock && !unlock.open(),"Back half did not close settings");
         }
         in.right_trigger=0;menu.update(in,false,true);in.right_trigger=1;
@@ -534,6 +534,10 @@ int main() {
             VrPreferences measured=*saved;measured.player_measurements={1.72,.43,.47,{.55,.62}};
             {auto fsr4=measured;fsr4.temporal_aa=5;save_preferences(preference_file,fsr4); // FSR 4 saved from the menu loads back
              require(load_preferences(preference_file)->temporal_aa==5,"FSR 4 preference did not round trip");}
+            for(int renderer=0;renderer<=2;++renderer) { // version 12 must write the renderer row it reads back
+                auto chosen=measured;chosen.renderer=renderer;save_preferences(preference_file,chosen);
+                require(load_preferences(preference_file)->renderer==renderer,"Renderer preference did not round trip");
+            }
             {   // DLSS modes: version 8 round-trips 7/8; version 7 files never carried them; 9 is out of range.
                 auto dlss=measured;dlss.temporal_aa=7;save_preferences(preference_file,dlss);
                 require(load_preferences(preference_file)->temporal_aa==7,"DLAA preference did not round trip");

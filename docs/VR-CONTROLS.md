@@ -5,7 +5,7 @@ Grip is the side button under your middle finger, trigger the one under your ind
 <!-- vr-page:body|Body -->
 
 ## Where things are
-- **Right temple** — squeeze the right grip to open this guide.
+- **Right temple** — squeeze the right grip to open the VR menu (settings, then this guide).
 - **Over either shoulder** — squeeze that hand's grip to draw the sword; release there to sheathe.
 - **Back of either wrist** — turn it toward your face to read health and mana.
 - **Left temple** — squeeze either grip to open the journal.

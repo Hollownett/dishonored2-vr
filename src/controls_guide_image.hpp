@@ -73,7 +73,8 @@ inline std::vector<GuideItem> parse_controls_guide(const std::string& markdown,u
 }
 struct GuideLayout {int bullets{},drawn{};bool overflow{},out_of_bounds{};std::vector<std::size_t> drawn_bullet_indices;};
 inline std::vector<std::uint8_t> controls_guide_image(const std::string& markdown,unsigned width=1920,unsigned height=1200,
-    GuideLayout* layout=nullptr,unsigned page=0,bool emily=false,bool use_art=true) {
+    GuideLayout* layout=nullptr,unsigned page=0,bool emily=false,bool use_art=true,bool settings_tab=false) {
+    // settings_tab: the guide is pages 2..4 of the combined VR menu (page 1 is VR Settings, vr_menu_imgui.hpp): a leading tab and n / 4.
     constexpr int w=1920,h=1200;page=std::min(page,unsigned(guide_page_count-1));if(!width || !height) throw std::runtime_error("Cannot allocate VR controls bitmap");
     struct Bitmap {HDC dc{};HBITMAP bitmap{};HGDIOBJ previous{};void* bits{};
         Bitmap() {dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=w;info.bmiHeader.biHeight=-h;
@@ -121,14 +122,16 @@ inline std::vector<std::uint8_t> controls_guide_image(const std::string& markdow
     const auto items=parse_controls_guide(markdown);std::wstring page_name=guide_page_names[page];
     for(const auto& item:items) if(item.kind==GuideItem::page && item.page_index==page) page_name=item.text;
     for(const auto& item:items) if(item.kind==GuideItem::title) {caps(item.text,64,36,1120,80,title_font.f,white,4);break;}
-    const std::wstring label=page_name+L"   "+std::to_wstring(page+1)+L" / "+std::to_wstring(guide_page_count);caps(label,1200,54,656,48,label_font.f,muted,0,DT_RIGHT); // spaced capitals mis-measure under DT_RIGHT
+    const unsigned shown=page+(settings_tab?2u:1u),total=guide_page_count+(settings_tab?1u:0u);
+    const std::wstring label=page_name+L"   "+std::to_wstring(shown)+L" / "+std::to_wstring(total);caps(label,1200,54,656,48,label_font.f,muted,0,DT_RIGHT); // spaced capitals mis-measure under DT_RIGHT
     for(const auto& item:items) if(item.kind==GuideItem::intro) {const int used=flow({{&item.text,body_font.f,muted}},64,116,1792,200,true);if(used>84) result.overflow=true;break;}
     // The game's divider art is near-black on the dark page (it vanished in the v650 preview): a plain gold rule reads.
     const auto rule=[&](int y,int rh,COLORREF colour) {fill(64,y+rh/2,1792,2,colour);};rule(216,20,gold);rule(1080,10,dim_gold);
     for(int x:{64,1855}) diamond(x,227,6,gold); // the launcher's ornament: diamonds on the brass rule
-    constexpr int cell=1792/guide_page_count;
-    for(unsigned i=0;i<guide_page_count;++i) {const int x=64+static_cast<int>(i)*cell;if(i==page) {if(auto a=art("highlight_brush")) {GdiFlush();blit_art_band(pixels,w,h,*a,36,x,1098,x+cell,1142);}else fill(x,1098,cell,44,white);}
-        caps(guide_page_names[i],x,1098,cell,44,selector_font.f,i==page?card:muted,3,DT_CENTER);}
+    const unsigned tabs=guide_page_count+(settings_tab?1u:0u);const int cell=1792/static_cast<int>(tabs);
+    for(unsigned t=0;t<tabs;++t) {const int x=64+static_cast<int>(t)*cell;const bool here=t==page+(settings_tab?1u:0u);
+        if(here) {if(auto a=art("highlight_brush")) {GdiFlush();blit_art_band(pixels,w,h,*a,36,x,1098,x+cell,1142);}else fill(x,1098,cell,44,white);}
+        caps(settings_tab && t==0?std::wstring(L"VR Settings"):std::wstring(guide_page_names[t-(settings_tab?1u:0u)]),x,1098,cell,44,selector_font.f,here?card:muted,3,DT_CENTER);}
     text(L"Right stick \x2190 / \x2192: pages   \x25C6   Right temple + grip: close",64,1144,1792,40,nav_font.f,muted,DT_CENTER);
     struct Section {std::size_t first,end;const GuideItem* figure{};};std::vector<Section> sections;
     for(std::size_t i=0;i<items.size();++i) if(items[i].kind==GuideItem::section && items[i].page_index==page) {std::size_t e=i+1;while(e<items.size() && items[e].kind!=GuideItem::section && items[e].kind!=GuideItem::page) ++e;

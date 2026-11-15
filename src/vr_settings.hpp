@@ -29,7 +29,7 @@ inline std::optional<PanelPointer> panel_pointer(const TrackedPose& aim,const Tr
 // 13 px, checked by vr_settings_check for every row) and then the footer band (key boxes B / A, the "In play" hint) at settings_footer_top, settings_footer_height tall. The plate bottom is
 // 524, the footer top 528 and its bottom 558, all inside the 560 px bitmap.
 constexpr int settings_plate_top=430,settings_plate_height=94,settings_footer_top=528,settings_footer_height=30;
-constexpr int settings_row_top=64,settings_row_pitch=28,settings_row_height=25,settings_row_count=13;
+constexpr int settings_row_top=64,settings_row_pitch=26,settings_row_height=24,settings_row_count=14; // v-afw: 14 rows (Renderer added) end at y=426
 class VrSettings {
     bool previous_y_{},previous_a_{},previous_b_{},previous_x_{},previous_trigger_{},previous_left_trigger_{},stick_held_{};
     bool controls_valid_{};
@@ -70,6 +70,10 @@ class VrSettings {
     bool aa_chosen_{},crosshair_{true}; // v609: persisted AA-chosen marker and the aim crosshair switch
     unsigned upscaler_generation_{3}; // Actual runtime backend; preferences retain the existing quality modes.
     bool performance_mode_{};
+    int renderer_{};          // the Renderer row's selection: 0 native stereo, 1 alternate eye (built-in warp), 2 AFW (vr_preferences.hpp v12)
+    int renderer_applied_{};  // what renders now (and is saved); the selection takes effect only on Apply (A on the row)
+    bool renderer_capable_{}; // this session started alternate-capable, so every renderer switches live
+    std::string afw_status_;  // afw_puredark.hpp Runtime::problem(), shown under the Renderer row
     std::optional<int> effective_temporal_aa_;
     bool dlss_available_{}; // NVIDIA GPU and a usable nvngx_dlss.dll: the DLAA/DLSS Quality rows are offered only then
     int hud_percent_{65};
@@ -105,7 +109,7 @@ public:
     }
     struct PalmOffsetChange {unsigned side{};PalmOffset value{};};
     struct Changes {std::optional<double> resolution;std::optional<bool> antialiasing;std::optional<int> temporal_aa;std::optional<int> upscale_percent;std::optional<TurnControl::Config> turning;
-                   std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;std::optional<bool> crosshair;std::optional<bool> scripted_recenter;std::optional<CutsceneMode> cutscene_mode;
+                   std::optional<MirrorMode> mirror;std::optional<double> sharpness;std::optional<int> hud_percent;std::optional<bool> controls_hint;std::optional<bool> crosshair;std::optional<bool> scripted_recenter;std::optional<CutsceneMode> cutscene_mode;std::optional<int> renderer;
                    bool recenter{},consume{},opened{},calibrate{},player_measurements{},test_unlock{},controls_guide{};
                    std::optional<PalmOffsetChange> palm_offset;};
     void initialize(double scale,bool aa,TurnControl::Config turning={},MirrorMode mirror=MirrorMode::right_eye,double sharpness=.5,int temporal_aa=2,
@@ -191,7 +195,7 @@ public:
     int temporal_aa() const noexcept {return temporal_aa_;}
     VrPreferences preferences() const {
         return {requested_,aa_,turning_,mirror_,sharpness_,temporal_aa_,hud_percent_,controls_hint_,player_measurements_,
-                aa_chosen_,crosshair_,scripted_recenter_,cutscene_mode_,upscale_custom_};
+                aa_chosen_,crosshair_,scripted_recenter_,cutscene_mode_,upscale_custom_,renderer_applied_};
     }
     // Upscaler scale: the render scale (percent) of the selected upscaler mode. Custom = set by the player instead of the mode's
     // preset (FSR Quality 77, Balanced 67, Native/DLAA 100, DLSS Quality = NGX optimal); picking an AA mode clears it.
@@ -219,6 +223,25 @@ public:
     void dlss_available(bool value) noexcept {dlss_available_=value;}
     bool dlss_available() const noexcept {return dlss_available_;}
     void performance_mode(bool value) noexcept {performance_mode_=value;}
+    int renderer() const noexcept {return renderer_;}
+    int renderer_applied() const noexcept {return renderer_applied_;}
+    void set_renderer(int v) noexcept {renderer_=renderer_applied_=std::clamp(v,0,2);}           // the saved choice, at load
+    void renderer_capable(bool v) noexcept {renderer_capable_=v;}
+    bool renderer_capable() const noexcept {return renderer_capable_;}
+    void cycle_renderer(int direction) noexcept {renderer_=(renderer_+(direction<0?2:1))%3;}
+    bool renderer_pending() const noexcept {return renderer_!=renderer_applied_;}
+    bool renderer_available(int v) const noexcept {return v==0 || renderer_capable_;}
+    static const wchar_t* renderer_name(int v) noexcept {return v==1?L"Alternate eye (built-in warp)":v==2?L"AFW (alternate frame warping)":L"Native stereo";}
+    // Apply (A, or the pointer on the row's Apply chip): the selection becomes what renders, live. False: nothing to apply or unavailable.
+    bool apply_renderer() noexcept {if(!renderer_pending() || !renderer_available(renderer_)) return false;renderer_applied_=renderer_;return true;}
+    void afw_status(std::string s) {afw_status_=std::move(s);}
+    const std::string& afw_status() const noexcept {return afw_status_;}
+    // Every switch is live in an alternate-capable session (Native renders both eyes every frame there, as menus already do).
+    std::wstring renderer_text() const {
+        std::wstring t=L"Renderer: ";t+=renderer_name(renderer_);
+        if(renderer_pending()) t+=renderer_available(renderer_)?L" (A: apply)":L" (unavailable this session)";
+        return t;
+    }
     bool performance_mode() const noexcept {return performance_mode_;}
     void effective_temporal_aa(int mode) noexcept {effective_temporal_aa_=mode;}
     int effective_temporal_aa() const noexcept {return effective_temporal_aa_.value_or(temporal_aa_);}
@@ -436,7 +459,8 @@ public:
                 case 9:selected_=9;scripted_recenter_=!scripted_recenter_;out.scripted_recenter=scripted_recenter_;break;
                 case 10:selected_=10;cycle_cutscene_mode(1);out.cutscene_mode=cutscene_mode_;break;
                 case 11:selected_=11;if(p.u<.5) {calibration_page_=true;out.calibrate=true;} else out.recenter=true;break;
-                default:selected_=12;if(p.u<.5) out.test_unlock=true;else open_=false;break; // test unlock (left) | close (right)
+                case 12:selected_=12;if(p.u>.8 && apply_renderer()) out.renderer=renderer_applied_;else cycle_renderer(1);break; // the Apply chip | cycle
+                default:selected_=13;if(p.u<.5) out.test_unlock=true;else open_=false;break; // test unlock (left) | close (right)
             }
         } else if(selected_==0 && horizontal) {
             // Handled below; A does not silently raise resolution.
@@ -452,8 +476,10 @@ public:
         else if(selected_==10 && (horizontal || a)) {cycle_cutscene_mode(horizontal?horizontal:1);out.cutscene_mode=cutscene_mode_;}
         else if(selected_==11 && a) {calibration_page_=true;out.calibrate=true;}
         else if(selected_==11 && horizontal) {if(horizontal<0) {calibration_page_=true;out.calibrate=true;} else out.recenter=true;}
-        else if(selected_==12 && horizontal<0) out.test_unlock=true;
-        else if(selected_==12 && a) open_=false;
+        else if(selected_==12 && horizontal) cycle_renderer(horizontal); // choose; nothing changes until Apply
+        else if(selected_==12 && a) {if(apply_renderer()) out.renderer=renderer_applied_;else if(!renderer_pending()) cycle_renderer(1);}
+        else if(selected_==13 && horizontal<0) out.test_unlock=true;
+        else if(selected_==13 && a) open_=false;
         if(selected_==0 && horizontal) {
             const auto next=std::clamp(std::round((requested_+horizontal*.1)*10)/10,.5,2.);
             if(next!=requested_) {requested_=next;out.resolution=next;}

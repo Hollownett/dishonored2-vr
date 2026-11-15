@@ -1,7 +1,12 @@
 # Used by tools/vr_selftest.py --launch (and the sim setup scripts): never start Dishonored 2 over a game the user is playing.
 # Exit 0 when Steam tracks no running game other than Dishonored 2 (403640); exit 2 and name it otherwise.
-import re,subprocess,sys
-log=r'C:\Program Files (x86)\Steam\logs\gameprocess_log.txt'
+import os,re,subprocess,sys
+def steam_root():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r'Software\Valve\Steam') as k: return winreg.QueryValueEx(k,'SteamPath')[0]
+    except OSError: return r'C:\Program Files (x86)\Steam'
+log=os.path.join(steam_root(),'logs','gameprocess_log.txt') # Steam's own install path (not always the default C: one)
 running={}
 for line in open(log,encoding='utf-8',errors='replace'):
     m=re.search(r'AppID (\d+) adding PID (\d+) as a tracked process "(.*)"',line)

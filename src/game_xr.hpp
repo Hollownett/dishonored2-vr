@@ -11,6 +11,8 @@
 #include "refresh_rate_policy.hpp"
 #include "stale_eye_warp.hpp"
 #include "warp_play_space.hpp"
+#include "afw_puredark.hpp"
+#include "vr_menu_imgui.hpp"
 #include "context_state.hpp"
 #include "mod_gpu_timer.hpp"
 #include "controller_input.hpp"
@@ -68,6 +70,7 @@
 #include <chrono>
 #include <mutex>
 #include <sstream>
+#include <fstream>
 
 namespace d2vr {
 // Object-art destination for in-game tutorials: not object-anchored, so it is drawn on a
@@ -102,6 +105,20 @@ class GameXr {
     std::optional<NativeAvatarMeasurements> avatar_measurements_;
     bool settings_enabled_{};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> settings_texture_;
+    struct AfwCapture {Microsoft::WRL::ComPtr<ID3D11Texture2D> rebuilt,prev;std::uint64_t frame{};UINT eye{};bool pending{};int index{};} afw_capture_;
+    void afw_capture_save_(ID3D11Texture2D* texture,const std::wstring& name) {
+        Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+        D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;D3D11_MAPPED_SUBRESOURCE m{};
+        if(FAILED(device->CreateTexture2D(&d,nullptr,&staging))) return;
+        context_->CopyResource(staging.Get(),texture);
+        if(FAILED(context_->Map(staging.Get(),0,D3D11_MAP_READ,0,&m))) return;
+        std::ofstream out(afw_capture_dir+L"\\"+name+L".rgba",std::ios::binary|std::ios::trunc);
+        for(UINT y=0;y<d.Height;++y) out.write(static_cast<const char*>(m.pData)+static_cast<std::size_t>(y)*m.RowPitch,static_cast<std::streamsize>(d.Width)*4);
+        context_->Unmap(staging.Get(),0);
+        std::ofstream meta(afw_capture_dir+L"\\"+name+L".json",std::ios::trunc);meta<<"{\"width\":"<<d.Width<<",\"height\":"<<d.Height<<",\"format\":"<<d.Format<<"}"<<std::endl;
+    }
+    std::unique_ptr<VrMenuImgui> imgui_menu_;bool imgui_menu_failed_{},y_hold_settings_pending_{};unsigned undrawable_run_{};
     std::unique_ptr<DesktopMirror> settings_compositor_;
     std::vector<unsigned char> settings_pixels_;XrSwapchain settings_chain_{};std::vector<XrSwapchainImageD3D11KHR> settings_images_;
     bool settings_in_world_{}; // the panel was opened during play: a world-locked quad, not part of the eye image
@@ -566,6 +583,8 @@ public:
     std::string stale_warp_error; // v1197: the first 300 characters of the exception that turned the warp off (exception text, HRESULT, shader log)
     const Afw2Pass* afw2_pass() const noexcept {return stale_warp_ && stale_warp_->afw2?stale_warp_->afw2.get():nullptr;} // v1197: read-only (stage_ms)
 private:
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> afw_motion_{},afw_out_{}; // AFW: fresh-eye motion copy; rebuilt eye images
+    std::array<std::array<float,2>,2> afw_motion_jitter_{};std::array<std::uint64_t,2> afw_motion_frame_{};
     bool stale_warp_failed_{};
     // v796: the game camera of each eye's image shown by a Present (and of each kept image), each eye's target game camera and kept depth
     // handed over for the Present in the *_frame_ stamps, and the parallax of each eye's last warp (the reticle follows it).
@@ -606,6 +625,29 @@ private:
             if(FAILED(device->CreateTexture2D(&desc,nullptr,&settings_texture_))) throw std::runtime_error("Cannot create native menu settings image");
             settings_compositor_=std::make_unique<DesktopMirror>(device.Get());
         }
+        // ImGui panel (vr_menu_imgui.hpp) for the main page; the calibration pages keep the GDI image. build/menu-gdi restores GDI.
+        if(imgui_menu_enabled && !imgui_menu_failed_ && !settings_.calibration_page()) try {
+            if(!imgui_menu_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);imgui_menu_=std::make_unique<VrMenuImgui>(device.Get(),context_.Get());}
+            imgui_menu_->render(settings_,effective_scale_,width_,height_,pointer,settings_.gameplay_panel_open()); // tabs: page 1 of the combined menu
+            context_->CopyResource(settings_texture_.Get(),imgui_menu_->texture());
+            ++settings_pixel_generation_; // redrawn every frame while open (the pointer dot moves)
+            ++imgui_menu_frames;
+            if(observe_settings && imgui_menu_frames%30==1) { // diagnostics only: a CPU copy for the settings-panel capture
+                Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+                D3D11_TEXTURE2D_DESC d{};settings_texture_->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;D3D11_MAPPED_SUBRESOURCE m{};
+                if(SUCCEEDED(device->CreateTexture2D(&d,nullptr,&staging))) {
+                    context_->CopyResource(staging.Get(),settings_texture_.Get());
+                    if(SUCCEEDED(context_->Map(staging.Get(),0,D3D11_MAP_READ,0,&m))) {
+                        settings_pixels_.resize(640u*560u*4u);
+                        for(UINT y=0;y<560;++y) std::memcpy(settings_pixels_.data()+y*640u*4u,static_cast<const unsigned char*>(m.pData)+y*m.RowPitch,640u*4u);
+                        context_->Unmap(staging.Get(),0);
+                        observe_settings(settings_texture_.Get(),settings_pixels_.data(),settings_pixels_.size());
+                    }
+                }
+            }
+            return;
+        } catch(const std::exception&) {imgui_menu_failed_=true;imgui_menu_.reset();}
         {auto next=settings_panel_image(settings_,effective_scale_,width_,height_,pointer);
          if(next!=settings_pixels_) {settings_pixels_=std::move(next);++settings_pixel_generation_;}}
         const auto& pixels=settings_pixels_;
@@ -1374,9 +1416,9 @@ private:
         if(guide_refresh_.exchange(false)) game_art().refresh();
         const auto generation=game_art().generation();const int page=guide_page_.load(),character=game_character.load()==2?1:0;
         if(generation!=guide_art_generation_) {for(auto& pixels:guide_pages_) pixels.clear();guide_art_generation_=generation;hint_page_=-1;}
-        auto& pixels=guide_pages_[character*7+page];
-        if(pixels.empty()) pixels=controls_guide_image(controls_guide_markdown(),width,height,nullptr,page,character!=0);
-        if(page!=hint_page_ || character!=hint_character_) {hint_page_=page;hint_character_=character;++hint_revision_;}
+        const bool settings_tab=imgui_menu_enabled && !guide_from_menu_;auto& pixels=guide_pages_[character*7+page+(settings_tab?3:0)];
+        if(pixels.empty()) pixels=controls_guide_image(controls_guide_markdown(),width,height,nullptr,page,character!=0,true,settings_tab); // combined menu: a VR Settings tab first
+        if(page+(settings_tab?3:0)!=hint_page_ || character!=hint_character_) {hint_page_=page+(settings_tab?3:0);hint_character_=character;++hint_revision_;}
         OverlayKey overlay_key;
         if(overlay_needs_image(OverlayKind::hint,hint_chain_,hint_revision_,0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
@@ -1973,9 +2015,32 @@ public:
     UINT64 antialiased_eyes() const noexcept {return antialiasing_?antialiasing_->eye_passes:0;}
     bool settings_open() const noexcept {return settings_.open();}
     // The controls page: the right temple squeeze and the VR Settings "Controls & gestures" row toggle it; it opens in front of the head.
-    void toggle_guide(bool from_menu=false) noexcept {guide_placed_=false;guide_open_=!guide_open_.load();guide_from_menu_=from_menu && guide_open_.load();
+    // Combined VR menu (imgui_menu_enabled): right temple + grip (and the Y hold) open page 1, VR Settings (the ImGui panel); the
+    // right stick pages on to the guide's Body / Controllers / Gestures and back. The same gesture closes it from any page.
+    // The guide opened from the pause menu's "Controls & gestures" row (from_menu) stays the stand-alone guide.
+    std::atomic<bool> combined_open_pending_{false},combined_close_pending_{false};bool combined_guide_{};
+    void toggle_guide(bool from_menu=false) noexcept {
+        if(imgui_menu_enabled && !from_menu) {
+            if(guide_open_.load() || settings_.gameplay_panel_open()) {guide_open_=false;combined_guide_=false;combined_close_pending_=true;}
+            else combined_open_pending_=true;
+            guide_navigation_.claim();return;
+        }
+        guide_placed_=false;guide_open_=!guide_open_.load();guide_from_menu_=from_menu && guide_open_.load();combined_guide_=false;
         if(guide_open_) {guide_page_=0;guide_refresh_=true;guide_navigation_.claim();}}
-    void guide_page_delta(int delta) noexcept {if(delta && guide_open_) {guide_page_=guide_page_step(guide_page_.load(),delta);guide_refresh_=true;}}
+    std::atomic<std::uint64_t> combined_to_guide{0},combined_to_settings{0},combined_page_steps{0};std::atomic<int> combined_max_page{0};
+    int guide_page() const noexcept {return guide_page_.load();}
+    bool combined_settings_page_() const noexcept {return imgui_menu_enabled && settings_.gameplay_panel_open() && !guide_open_.load();}
+    void guide_page_delta(int delta) noexcept {
+        if(!delta) return;
+        if(combined_settings_page_()) { // page 1 -> the guide's first page
+            if(delta>0) {settings_.suspend();guide_placed_=false;guide_open_=true;guide_from_menu_=false;combined_guide_=true;guide_page_=0;guide_refresh_=true;++combined_to_guide;if(combined_max_page.load()<2) combined_max_page=2;}
+            return;
+        }
+        if(!guide_open_) return;
+        if(combined_guide_ && guide_page_.load()==0 && delta<0) {guide_open_=false;combined_guide_=false;combined_open_pending_=true;++combined_to_settings;return;} // back to page 1
+        guide_page_=guide_page_step(guide_page_.load(),delta);guide_refresh_=true;++combined_page_steps;
+        if(combined_guide_ && guide_page_.load()+2>combined_max_page.load()) combined_max_page=guide_page_.load()+2;
+    }
     bool guide_open() const noexcept {return guide_open_.load();}
     bool guide_stick_blocked() const noexcept {return guide_open() || guide_navigation_.blocked();}
     std::atomic<bool> settings_requested{false}; // native menu "VR Settings" item (native_menu_entry.hpp)
@@ -2173,6 +2238,18 @@ public:
     void stale_eye_depth(UINT eye,ID3D11Texture2D* depth,UINT width,UINT height,std::uint64_t frame) noexcept {
         if(eye<2) {stale_depth_[eye]=depth;stale_depth_width_[eye]=width;stale_depth_height_[eye]=height;stale_depth_frame_[eye]=frame;}
     }
+    // AFW renderer: the fresh eye's motion vectors (same render rectangle as its depth) and raster jitter, for this Present.
+    void afw_eye_motion(UINT eye,ID3D11Texture2D* motion,float jitter_x,float jitter_y,std::uint64_t frame) noexcept { // AFW (PureDark): the fresh eye's motion copy
+        if(eye<2) {afw_motion_[eye]=motion;afw_motion_jitter_[eye]={jitter_x,jitter_y};afw_motion_frame_[eye]=frame;}
+    }
+    std::string xr_runtime_name,xr_system_name; // OpenXR runtime and headset names (PSVR2 triggers need SteamVR + PlayStation VR2)
+    std::wstring afw_plugin_path;      // <game folder>\PDAFWPlugin.dll
+    // AFW capture (like the Dishonored 1 AFW sheet): each rebuilt held eye next to the SAME eye's next native image (one alternation later),
+    // saved as afw-capture-NN-{rebuilt,native}.rgba (+ .json) in afw_capture_dir. Command `afw capture N`; diagnostics only (CPU readback).
+    std::wstring afw_capture_dir;std::atomic<int> afw_capture_requested{0};std::uint64_t afw_captures_saved{};
+    std::uint64_t afw_rebuilds{};      // held eyes submitted from the AFW backend
+    bool imgui_menu_enabled{true};     // VR settings panel drawn with Dear ImGui (vr_menu_imgui.hpp)
+    std::uint64_t imgui_menu_frames{},imgui_hold_opens{},imgui_undrawable_closes{};
     bool last_layer_submitted{},last_menu_layer{};
     bool last_authored_camera_layer{};
     UINT64 state_events{},reference_events{};
@@ -2187,6 +2264,15 @@ public:
     XrViewStateFlags tracking_flags() const noexcept {return located_view_flags_;}
     void upscaler_generation(unsigned generation) noexcept {settings_.upscaler_generation(generation);}
     void performance_mode(bool value) noexcept {settings_.performance_mode(value);}
+    // Renderer row: the saved choice and the renderer this session started with (alternate eye on = 1 or 2).
+    // Renderer row: the saved choice, and whether this session can alternate (then every renderer switches live on Apply).
+    void renderer_setting(int saved,bool capable) noexcept {settings_.set_renderer(saved);settings_.renderer_capable(capable);renderer_live_=capable?saved:0;
+        afw::runtime().requested=renderer_live_==2;}
+    std::atomic<int> renderer_live_{0}; // what renders now: 0 both eyes every frame, 1 alternate + built-in warp, 2 alternate + AFW
+    int renderer_live() const noexcept {return renderer_live_.load();}
+    void open_vr_menu() noexcept {if(imgui_menu_enabled) combined_open_pending_=true;} // `vrmenu` test command (the temple gesture's page 1)
+    int renderer_setting() const noexcept {return settings_.renderer();}
+    void afw_status(std::string s) {settings_.afw_status(std::move(s));}
     void effective_temporal_aa(int mode) noexcept {settings_.effective_temporal_aa(mode);}
     void dlss_available(bool value) noexcept {settings_.dlss_available(value);} // offers the DLAA/DLSS Quality rows (NVIDIA GPU + user's nvngx_dlss.dll)
     // Latest completed HUD window surface (or null to hide it); set each frame by the producer.
@@ -2376,6 +2462,8 @@ public:
             for(UINT eye=0;eye<2;++eye) maximum_eye_sizes_[eye]={eye_configuration[eye].maxImageRectWidth,eye_configuration[eye].maxImageRectHeight};
             XrSystemProperties system_properties{};system_properties.type=XR_TYPE_SYSTEM_PROPERTIES;
             checked(api<PFN_xrGetSystemProperties>("xrGetSystemProperties",instance_)(instance_,system,&system_properties),"Read XR texture limits");
+            xr_system_name=system_properties.systemName; // PSVR2 triggers (psvr2_triggers.hpp): which headset
+            try {XrInstanceProperties ip{};ip.type=XR_TYPE_INSTANCE_PROPERTIES;if(XR_SUCCEEDED(api<PFN_xrGetInstanceProperties>("xrGetInstanceProperties",instance_)(instance_,&ip))) xr_runtime_name=ip.runtimeName;} catch(const std::exception&) {} // optional: the simulator has no instance properties
             system_maximum_={system_properties.graphicsProperties.maxSwapchainImageWidth,system_properties.graphicsProperties.maxSwapchainImageHeight};
             XrGraphicsRequirementsD3D11KHR requirements{};requirements.type=XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR;
             checked(api<PFN_xrGetD3D11GraphicsRequirementsKHR>("xrGetD3D11GraphicsRequirementsKHR",instance_)(instance_,system,&requirements),"XR device requirements");
@@ -2520,6 +2608,14 @@ public:
             if(FAILED(device->CreateTexture2D(&desc,nullptr,&alt_kept_[eye]))) {alternate_error=true;return;}
         }
         context_->CopyResource(alt_kept_[eye].Get(),processed);
+        if(afw_capture_.pending && eye==afw_capture_.eye && alternate_frame>afw_capture_.frame) { // AFW capture: this eye's next native frame
+            if(alternate_frame-afw_capture_.frame<=2) {
+                wchar_t n[64];swprintf_s(n,L"afw-capture-%02d",afw_capture_.index);
+                afw_capture_save_(afw_capture_.rebuilt.Get(),std::wstring(n)+L"-rebuilt");afw_capture_save_(alt_kept_[eye].Get(),std::wstring(n)+L"-native");afw_capture_save_(afw_capture_.prev.Get(),std::wstring(n)+L"-held");
+                ++afw_capture_.index;++afw_captures_saved;--afw_capture_requested;
+            }
+            afw_capture_.pending=false;
+        }
         alt_processing_[eye]=transfer_processing_[eye];
         record={rendered_views_[eye],alternate_frame,pose_epoch(),true,rendered_display_times_[eye],rendered_locate_cpu_times_[eye]};
         kept_cameras_[eye]=rendered_cameras_[eye];kept_camera_valid_[eye]=rendered_camera_frame_[eye]==alternate_frame; // v796
@@ -2611,7 +2707,7 @@ public:
             end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;xrEndFrame(session_,&end);frame_open_=false;
         }
         context_.Reset();invalidate_overlays();chain_generations_.clear();leases_.clear(); // a restarted session re-renders every overlay
-        settings_texture_.Reset();settings_compositor_.reset();
+        imgui_menu_.reset();settings_texture_.Reset();settings_compositor_.reset();
         world_ui_source_.Reset();world_ui_images_.clear();
         hud_window_source_.Reset();hud_window_images_.clear();
         if(hud_window_chain_ && xrDestroySwapchain) xrDestroySwapchain(hud_window_chain_);
@@ -2787,14 +2883,15 @@ public:
         sample_input();
         // User's illustrated guide owns the right stick before settings or native menu navigation can see it.
         guide_temple_input=controller_input;
-        const auto guide_nav=guide_navigation_.update(guide_open(),controller_input.turn_x,controller_input.turn_y,controller_input.right_click,
+        const auto guide_nav=guide_navigation_.update(guide_open() || combined_settings_page_(),controller_input.turn_x,controller_input.turn_y,controller_input.right_click,
             controller_input.active && state==XR_SESSION_STATE_FOCUSED);
         guide_page_delta(guide_nav.delta);
         if(guide_nav.consume) {controller_input.turn_x=controller_input.turn_y=0;controller_input.right_click=false;}
         // Preserve squeeze actions before the paused overlay consumes controls.
         // Recognize raw Y before settings consumes input. Only the exact native pause state permits the paused shortcut;
         // wheel/title/loading are not Pause. Legacy keeps the previous gameplay settings panel and paused short-Y shortcut.
-        const bool panel_drawable=SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera,continuity_.usable() && left && right,
+        const bool panel_drawable=SettingsMenuLayout::gameplay_drawable(gameplay,authored_camera,continuity_.usable() && ((left && right) || (alternate_enabled && (left || right))), // alternate eye: one fresh eye per frame
+           
             !tracked_gameplay_required_ || tracked_pair_(),views_valid_,settings_chain_!=XR_NULL_HANDLE);
         const bool hold_ready=y_hold_enabled && state==XR_SESSION_STATE_FOCUSED && controller_input.active;
         const bool hold_gameplay=gameplay && !authored_camera && continuity_.usable() && views_valid_ &&
@@ -2807,6 +2904,7 @@ public:
             [&]() {const auto owned=y_hold_owned_now.load();return controller_input.menu_modifier || (owned && owned());});
         if(hold.blocked_press) ++y_hold_blocked_presses;
         if(hold.pause || hold.settings) {++y_hold_fires;y_hold_last_ms=static_cast<UINT64>(hold.held_s*1000);}
+        if(hold.settings) y_hold_settings_pending_=true;
         controller_input.pause_request=hold.pause;
         // An opening settings update must see the held Y to seed its edge state. A native Pause event suppresses it immediately.
         if(hold.suppress_y && !hold.settings) {controller_input.y=false;controller_input.suppress_y=true;}
@@ -2830,7 +2928,10 @@ public:
             // v1073 (user: "delete the old VR menu; the user must not see it when holding any buttons; the only way to VR settings is Pause >
             // VR Settings"): nothing opens the drawn panel any more - not the menu item's fallback request, not a Y hold, not a Y press.
             settings_requested.store(false);
-            if(settings_.gameplay_panel_open() && !panel_drawable && !unpaired_flat_frame) settings_.suspend(); // never consume input while the panel is not drawn (v1248: a flat-fallback frame keeps it)
+            // never consume input while the panel is not drawn (v1248: a flat-fallback frame keeps it). ImGui menu: opening it switches alternate eye to
+            // paired rendering, and that hand-off frame has no drawable pair, so only a run of undrawable frames closes it (the old panel closed on the first one).
+            undrawable_run_=settings_.gameplay_panel_open() && !panel_drawable && !unpaired_flat_frame?undrawable_run_+1:0;
+            if(undrawable_run_>(imgui_menu_enabled?10u:0u)) {settings_.suspend();++imgui_undrawable_closes;undrawable_run_=0;}
             settings_in_world_=gameplay && settings_.open();
             if(settings_.open()) {
                 constexpr XrSpaceLocationFlags valid_pose=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
@@ -2856,10 +2957,13 @@ public:
             auto settings_input=controller_input;
             // A paused tap of Y must not bypass the new hold, but Y still closes an open panel and serves calibration pages.
             if(!settings_.open()) settings_input.y=false;   // v1073: Y never opens the drawn panel
+            if(combined_close_pending_.exchange(false) && settings_.gameplay_panel_open()) settings_.suspend(); // combined menu: the temple gesture closes page 1
+            if(combined_open_pending_.exchange(false) && imgui_menu_enabled) y_hold_settings_pending_=true; // page 1 opens like the Y hold
+            if(imgui_menu_enabled && y_hold_settings_pending_) {y_hold_settings_pending_=false;if(gameplay && !settings_.open()) {settings_.open_from_gameplay();settings_input.y=controller_input.y;++imgui_hold_opens;}} // the held Y seeds the panel's edge state, so it does not read as a closing press // ImGui VR menu: the gameplay hold opens it
             auto changes=settings_.update(settings_input,gameplay || unpaired_flat_frame,state==XR_SESSION_STATE_FOCUSED,pointer,settings_available,palm_fit_dt_);
             // v1073: the drawn panel may show only the avatar calibration page started from the game's own VR Settings page (its Calibrate row).
             // Anything else - the old settings page, the automatic recalibration prompt in a menu - is closed before it is ever drawn.
-            if(settings_.open() && !(settings_.calibration_page() && settings_.native_calibration())) {settings_.suspend();changes.opened=false;++old_panel_blocked;}
+            if(settings_.open() && !imgui_menu_enabled && !(settings_.calibration_page() && settings_.native_calibration())) {settings_.suspend();changes.opened=false;++old_panel_blocked;}
             if(changes.palm_offset) confirm_palm_offset(changes.palm_offset->side,changes.palm_offset->value);
             // The game's own options page ("VR Settings"): its values and actions take the panel's path (apply, save, calibrate).
             {std::vector<NativeOptionsPage::Kind> page_kinds;
@@ -2902,7 +3006,7 @@ public:
             if(changes.upscale_percent) upscale_due_=GetTickCount64()+250;
             if(upscale_due_ && GetTickCount64()>=upscale_due_) {upscale_due_=0;temporal_change_=settings_.temporal_aa();} // same path as an AA mode change (FSR 4 Native <-> Quality)
             if(changes.hud_percent) hud_change_=changes.hud_percent;
-            if(changes.controls_guide) toggle_guide(!gameplay);
+            if(changes.controls_guide) {if(combined_settings_page_()) guide_page_delta(1);else toggle_guide(!gameplay);} // combined menu: the row is page 2
             if(guide_stick_blocked()) {controller_input.turn_x=controller_input.turn_y=0;controller_input.right_click=false;}
             if(guide_from_menu_ && gameplay) {guide_open_=false;guide_from_menu_=false;} // opened over the pause menu: back in the game, it goes
             if(changes.recenter) {
@@ -2916,11 +3020,12 @@ public:
                 }
                 antialiasing_enabled_=*changes.antialiasing;
             }
-            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.upscale_percent || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.scripted_recenter || changes.cutscene_mode || changes.player_measurements))
+            if(!preferences_file_.empty() && (changes.resolution || changes.antialiasing || changes.turning || changes.mirror || changes.sharpness || changes.temporal_aa || changes.upscale_percent || changes.hud_percent || changes.controls_hint || changes.crosshair || changes.scripted_recenter || changes.cutscene_mode || changes.player_measurements || changes.renderer))
                 save_preferences(preferences_file_,settings_.preferences());
             // Includes squeeze: holding the calibration pose must not open the native weapon selector.
             if(changes.consume) {controller_input={};settings_consumed=true;}
             if(changes.test_unlock) test_unlock_requested=true;
+            if(changes.renderer) {renderer_live_=settings_.renderer_capable()?*changes.renderer:0;afw::runtime().requested=renderer_live_.load()==2;} // Apply: live
             publish_palm_preview(); // the fit page opened, was nudged, confirmed or left
         }
         // Notes (2) get no pointer: pointer input switches the game to keyboard glyphs ("Esc Close") and a note has nothing to click.
@@ -3105,6 +3210,42 @@ public:
                             }
                             if(!stale_layers_[eye]) ++stale_eye_parallax_misses;
                         }
+                        // AFW renderer (afw_puredark.hpp): rebuild this eye from the fresh eye of this moment instead of warping its old image.
+                        // Any refusal leaves the built-in warp below for this frame; a hard failure (plugin missing, ABI) for the session.
+                        ID3D11Texture2D* afw_image=nullptr;
+                        if(afw::runtime().requested.load() && !afw::runtime().hard_failed() && fresh_now && afw_motion_frame_[fresh_eye]==alternate_frame &&
+                           afw_motion_[fresh_eye] && stale_target_camera_frame_[eye]==alternate_frame) {
+                            const auto cam=[](const WarpCamera& w,const XrFovf& fov,double m10,double m11) {
+                                afw::Camera c{};c.pos[0]=w.pose.position.x;c.pos[1]=w.pose.position.y;c.pos[2]=w.pose.position.z;
+                                const Vec3* axes[3]={&w.pose.basis[0],&w.pose.basis[1],&w.pose.basis[2]};double* out[3]={c.fwd,c.left,c.up};
+                                for(int i=0;i<3;++i) {out[i][0]=axes[i]->x;out[i][1]=axes[i]->y;out[i][2]=axes[i]->z;}
+                                c.tan_left=std::tan(fov.angleLeft);c.tan_right=std::tan(fov.angleRight);c.tan_up=std::tan(fov.angleUp);c.tan_down=std::tan(fov.angleDown);
+                                c.m10=m10;c.m11=m11;return c;
+                            };
+                            const auto& fresh_camera=rendered_cameras_[fresh_eye];
+                            const afw::Camera src=cam(fresh_camera,alt_records_[fresh_eye].view.fov,fresh_camera.m10,fresh_camera.m11);
+                            const afw::Camera dst=cam(stale_target_cameras_[eye],to.fov,fresh_camera.m10,fresh_camera.m11);
+                            ModGpuScope afw_scope(context_.Get(),ModSpan::aa_sharpen);
+                            if(auto* rebuilt=afw::runtime().rebuild(context_.Get(),static_cast<int>(fresh_eye),alternate_frame,alt_kept_[fresh_eye].Get(),
+                                   stale_depth_[fresh_eye].Get(),afw_motion_[fresh_eye].Get(),stale_depth_width_[fresh_eye],stale_depth_height_[fresh_eye],
+                                   afw_motion_jitter_[fresh_eye][0],afw_motion_jitter_[fresh_eye][1],src,dst,afw_plugin_path)) {
+                                D3D11_TEXTURE2D_DESC want{};alt_kept_[fresh_eye]->GetDesc(&want);
+                                if(afw_out_[eye]) {D3D11_TEXTURE2D_DESC have{};afw_out_[eye]->GetDesc(&have);if(have.Width!=want.Width || have.Height!=want.Height || have.Format!=want.Format) afw_out_[eye].Reset();}
+                                if(!afw_out_[eye]) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);want.BindFlags=D3D11_BIND_SHADER_RESOURCE;device->CreateTexture2D(&want,nullptr,&afw_out_[eye]);}
+                                if(afw_out_[eye]) {context_->CopyResource(afw_out_[eye].Get(),rebuilt);afw_image=afw_out_[eye].Get();}
+                            }
+                        }
+                        if(afw_image) {
+                            stale_layers_[eye].reset(); // the reticle follows the rotation-only mapping
+                            processed=afw_image;++afw_rebuilds;
+                            if(afw_capture_requested.load()>0 && !afw_capture_.pending && !afw_capture_dir.empty()) { // keep it until this eye renders natively
+                                D3D11_TEXTURE2D_DESC d{};afw_image->GetDesc(&d);d.BindFlags=0;
+                                if(!afw_capture_.rebuilt) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);device->CreateTexture2D(&d,nullptr,&afw_capture_.rebuilt);}
+                                if(!afw_capture_.prev) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);D3D11_TEXTURE2D_DESC k{};alt_kept_[eye]->GetDesc(&k);k.BindFlags=0;device->CreateTexture2D(&k,nullptr,&afw_capture_.prev);}
+                                if(afw_capture_.rebuilt && afw_capture_.prev) {context_->CopyResource(afw_capture_.rebuilt.Get(),afw_image);context_->CopyResource(afw_capture_.prev.Get(),alt_kept_[eye].Get());afw_capture_.frame=alternate_frame;afw_capture_.eye=eye;afw_capture_.pending=true;}
+                            }
+                            stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;
+                        } else {
                         const auto parallax_before=stale_warp_->parallax_passes;
                         const StaleDepth kept_depth{stale_depth_[eye].Get(),stale_depth_width_[eye],stale_depth_height_[eye]};
                         const StaleDepth fresh_depth{fresh_now?stale_depth_[fresh_eye].Get():nullptr,stale_depth_width_[fresh_eye],stale_depth_height_[fresh_eye]};
@@ -3120,6 +3261,7 @@ public:
                         if(stale_warp_->parallax_passes==parallax_before) stale_layers_[eye].reset(); // depth refused: rotation only, the reticle too
                         if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
                         stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;
+                        }
                     }
                 } catch(const std::exception& e) {stale_warp_failed_=true;stale_warped_frame_[eye]=0;++stale_eye_warp_failures;processed=sources[eye];
                     try {stale_warp_error=std::string(e.what()).substr(0,300);} catch(...) {}} // v1197: the reason, for the status
