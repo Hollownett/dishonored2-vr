@@ -264,8 +264,15 @@ private:
 // v1361 (headset v1360: a prop held in the LEFT hand was never placed - 742 renders, drawn at the grab motor's goal instead of the drawn hand - while
 // the native left gun hung holstered on another joint and was published for that hand provisionally, which took the hand's slot): a hand whose grab
 // holds a prop publishes the prop; its weapon yields the hand (the grab's hand is the prop's: manual equip treats a gun hand that holds a prop as
-// occupied). grabbed = the prop the grab holds in this hand (0: none). weapon_first = build/legacy-hand-weapon-first (v1360: the weapon first).
-inline bool hand_takes_weapon(std::uintptr_t grabbed,bool weapon_first=false) noexcept {return weapon_first || !grabbed;}
+// occupied). Per hand the prop its weapon yields to (0: the weapon keeps the hand). grabbed = the props the grab holds per hand; weapons = the weapon
+// entities (native, copies). v1362: never a two-handed hold (the publisher leaves it at the game's frame, so the hands keep their weapons as before)
+// and never a weapon entity itself. weapon_first = build/legacy-hand-weapon-first (v1360: the weapon first).
+inline std::array<std::uintptr_t,2> hand_yields(const std::array<std::uintptr_t,2>& grabbed,const std::array<std::uintptr_t,4>& weapons,bool weapon_first=false) noexcept {
+    std::array<std::uintptr_t,2> out{};
+    if(weapon_first || (grabbed[0] && grabbed[0]==grabbed[1])) return out;
+    for(unsigned h=0;h<2;++h) if(grabbed[h] && std::find(weapons.begin(),weapons.end(),grabbed[h])==weapons.end()) out[h]=grabbed[h];
+    return out;
+}
 
 // The two frames a held weapon can be composed from. Native and crossed items are bound to the engine's hand ATTACHMENT joint 59;
 // a copy is teleported from the controller GRIP (the authored arm socket moves the attachment relative to the grip, and the copy's
@@ -796,6 +803,7 @@ public:
             if(id_[side]) {++resets_;keep(side);}
             id_[side]=id;side_[side]={};others_[side]={};render_l_[side]={};
             if(id) take(side,id);
+            hold_path_[side]=path_[side].load(std::memory_order_relaxed);   // v1362: the path this hold's clusters were learned on
             return;
         }
         const unsigned path=path_[side].load(std::memory_order_relaxed);
@@ -825,7 +833,7 @@ public:
             else if(const Cand* t2=c.top()) c.anchor=t2->value;
         }
     }
-    static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};others_={};render_l_={};placed_frame_=0;placed_n_=0;kept_={};}
+    static void clear() noexcept {std::lock_guard<std::mutex> lock(mutex_);side_={};id_={};others_={};render_l_={};placed_frame_=0;placed_n_=0;kept_={};hold_path_={};}
     // v1258 one-pose census: a draw with the vertex shader + cb2 size of a part this hold has placed (any pose, any render)
     static bool has_key(unsigned side,std::uint64_t key) noexcept {
         if(side>1) return false;
@@ -932,17 +940,19 @@ private:
     }
     // v1361 (mutex_ held): a thing's clusters when its hold ends, and a new hold's start from them: the other side's while it still holds the thing this
     // publish (a hand-to-hand pass to side 0: side 1 folds after it), else the kept ones. Samples of the last render are not carried (pending dropped).
+    // v1362: only between holds on the same publisher path (a cluster's ref names a child of the hold's kids list, whose make-up the path decides).
     static constexpr std::uint64_t keep_folds=540;   // two folds a render: ~3 s at 90 Hz
-    struct Kept {std::uintptr_t id{};std::uint64_t at{};std::array<Cluster,clusters> c{};};
-    inline static std::array<Kept,2> kept_{};inline static std::uint64_t folds_{},kept_takes_{};
+    struct Kept {std::uintptr_t id{};std::uint64_t at{};unsigned path{};std::array<Cluster,clusters> c{};};
+    inline static std::array<Kept,2> kept_{};inline static std::uint64_t folds_{},kept_takes_{};inline static std::array<unsigned,2> hold_path_{};
     static void keep(unsigned side) noexcept {
         Kept* k=&kept_[0];
         for(auto& e:kept_) {if(e.id==id_[side]) {k=&e;break;}if(e.at<k->at) k=&e;}
-        k->id=id_[side];k->at=folds_;k->c=side_[side];for(auto& c:k->c) c.pending_frame=0;
+        k->id=id_[side];k->at=folds_;k->path=hold_path_[side];k->c=side_[side];for(auto& c:k->c) c.pending_frame=0;
     }
     static void take(unsigned side,std::uintptr_t id) noexcept {
-        const std::array<Cluster,clusters>* from=id_[side^1u]==id?&side_[side^1u]:nullptr;
-        if(!from) for(auto& e:kept_) if(e.id==id && folds_-e.at<=keep_folds) {from=&e.c;e.id=0;break;}
+        const unsigned path=path_[side].load(std::memory_order_relaxed);
+        const std::array<Cluster,clusters>* from=id_[side^1u]==id && hold_path_[side^1u]==path?&side_[side^1u]:nullptr;
+        if(!from) for(auto& e:kept_) if(e.id==id && e.path==path && folds_-e.at<=keep_folds) {from=&e.c;e.id=0;e.at=0;break;}   // a taken entry is a free slot
         if(!from) return;
         side_[side]=*from;for(auto& c:side_[side]) c.pending_frame=0;++kept_takes_;
     }

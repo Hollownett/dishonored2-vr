@@ -4187,9 +4187,12 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                 const unsigned keep=d(g1)<d(g0)?1u:0u;
                 suppress[keep^1u]=true;
             }}
-        // v1361: the prop each hand's grab holds (weapon_draw::hand_takes_weapon): such a hand publishes the prop below, its weapon yields the hand
+        // v1361: the prop each hand's grab holds; such a hand publishes the prop below and its weapon yields the hand (weapon_draw::hand_yields)
         std::array<std::uintptr_t,2> grabbed{};
         if(physical_grab_requested && !no_held_draw_place) for(unsigned hand=0;hand<2;++hand) if(native_grab.holding(hand)) if(const auto h=native_grab.held(hand); h && h->bone<0) grabbed[hand]=h->entity;
+        std::array<std::uintptr_t,2> yields{};
+        if(grabbed[0] || grabbed[1]) {const auto c0=d2vr::NativeWeaponHands::copy_draw(0),c1=d2vr::NativeWeaponHands::copy_draw(1);
+            yields=d2vr::weapon_draw::hand_yields(grabbed,{native_ent[0],native_ent[1],c0.valid?c0.entity:0,c1.valid?c1.entity:0},legacy_hand_weapon_first);}
         // v1106 (round 6): rigid binding. The per-frame writer pair and gate are gone from the placement path. Each physical hand's
         // binder learns G once from the writer's own composition (native: inverse(read)*F; copy: the exact offset the service applied),
         // keeps it while the weapon/hand/grip stay the same, and provides B = H_image * G for every render. A hand without a valid G
@@ -4197,7 +4200,7 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
         for(unsigned hand=0;weapons && hand<2;++hand) {
             const auto skip=[&](unsigned why) {++weapon_draw_skipped[hand];++weapon_draw_skip_reason[hand][why];weapon_draw_last_skip[hand].store(static_cast<int>(why),std::memory_order_relaxed);};
             weapon_draw_provisional_now[hand].store(false,std::memory_order_relaxed);
-            if(!d2vr::weapon_draw::hand_takes_weapon(grabbed[hand],legacy_hand_weapon_first)) {d2vr::weapon_draw::Binder::idle(hand);++weapon_draw_yielded[hand];continue;}
+            if(yields[hand]) {d2vr::weapon_draw::Binder::idle(hand);++weapon_draw_yielded[hand];continue;}
             if(suppress[hand]) {skip(5);continue;}
             const auto copy=d2vr::NativeWeaponHands::copy_draw(hand);
             const bool live_models[2]={models[0]!=0,models[1]!=0};

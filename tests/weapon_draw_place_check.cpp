@@ -570,18 +570,26 @@ static void v1361_hand_pass_lab(const Mat& part) {
     std::printf("v1361 prop passed hand to hand: stale draws after a regrab/pass unplaced %ld of %ld (first hold of the thing, L unknown: %ld), depth/colour splits %ld, worst %.2e; %s\n",
         stale_unplaced,stale_draws,first_hold_unplaced,splits,err,RigidLocal::json().c_str());
     CHECK(stale_draws>0 && stale_unplaced==0 && splits==0 && err<2e-4);
+    // v1362: the kept clusters only for a hold on the same publisher path (a child ref names the hold's kids list): the game's Use takes it next
+    const auto takes=[] {const auto j=RigidLocal::json();const auto p=j.find("\"kept_takes\":");return p==std::string::npos?0ull:std::stoull(j.substr(p+13));};
+    const auto before=takes();
+    publish_side(frame++,-1,Mat{},Mat{},0,3*t++,0,0);RigidLocal::set_path(0,RigidLocal::path_use);
+    publish_side(frame++,0,b_prev,b_prev,prop,3*t++,Place::kind_use,.5);
+    std::printf("v1362 the same thing held next on another path: kept clusters taken %llu (want 0)\n",takes()-before);
+    CHECK(takes()==before);RigidLocal::set_path(0,RigidLocal::path_unknown);
 }
 // v1361: the LEFT hand of the same session - the native left gun hung holstered on another joint (hidden, no draws; engine_bind refused 'other joint'
 // 4435) and was published for hand 0 provisionally at its own frame (provisional [3827, 614]) while the grab held the prop there (742 renders).
 // v1360 rule (the weapon first): the hand published the gun, the prop's draws matched nothing and stayed at the engine's pose (held_exact_placed [0, 2434]).
 static void v1361_left_hand_lab(const Mat& part) {
     const Mat hold=rigid(rot(1,0,0,.3),.05,-.02,.03),gun=rigid(rot(0,1,0,1.2),-91.7,-92.3,4.3);   // the holster on the hip, 0.6 m below the hand
-    const std::uintptr_t prop=0x25bfc1e4e90,gun_model=0x2594a0b0;long placed[2]{},draws[2]{};double err=0;
+    const std::uintptr_t prop=0x25bfc1e4e90,gun_model=0x2594a0b0,gun_entity=0x2594f000;long placed[2]{},draws[2]{};double err=0;
+    const std::array<std::uintptr_t,4> weapons{gun_entity,0,0,0};   // the hands' weapon entities: the native left gun, no right weapon, no copies
     for(int legacy=1;legacy>=0;--legacy) {
         Place::clear();std::uint32_t frame=38000+static_cast<std::uint32_t>(legacy)*1000;Mat b_prev{};
         for(int n=0;n<80;++n,++frame) {
             const Mat b=mul(prop_hand(0,n),hold),f=n?b_prev:b;b_prev=b;
-            if(hand_takes_weapon(prop,legacy!=0)) publish_side(frame,0,gun,gun,gun_model,3*n,Place::kind_weapon,0);
+            if(!hand_yields({prop,0},weapons,legacy!=0)[0]) publish_side(frame,0,gun,gun,gun_model,3*n,Place::kind_weapon,0);
             else publish_side(frame,0,f,b,prop,3*n,Place::kind_prop,.5);
             std::array<std::array<bool,2>,2> p{};draw_prop(frame,n%5!=0,f,b,part,p,err);
             if(n<12) continue;   // the thing's first hold: L settles from the current-view renders 0, 5 and 10
@@ -590,7 +598,10 @@ static void v1361_left_hand_lab(const Mat& part) {
     }
     std::printf("v1361 prop in the hand with a holstered gun: v1360 rule (weapon first) placed %ld of %ld, v1361 placed %ld of %ld, worst %.2e\n",placed[1],draws[1],placed[0],draws[0],err);
     CHECK(placed[1]==0 && placed[0]==draws[0] && draws[0]>0 && err<2e-4);
-    CHECK(!hand_takes_weapon(prop) && hand_takes_weapon(0) && hand_takes_weapon(prop,true));
+    // v1362: a two-handed hold stays at the game's frame (the weapons keep both hands); the grab holding a weapon entity itself keeps that weapon's binding
+    const auto two=hand_yields({prop,prop},weapons),own=hand_yields({gun_entity,0},weapons),right=hand_yields({0,prop},weapons);
+    std::printf("v1362 yields: two-handed [%d %d], weapon entity grabbed [%d], prop in the right hand [%d %d]\n",int(two[0]!=0),int(two[1]!=0),int(own[0]!=0),int(right[0]!=0),int(right[1]!=0));
+    CHECK(!two[0] && !two[1] && !own[0] && !right[0] && right[1]==prop);
 }
 
 int main() {
