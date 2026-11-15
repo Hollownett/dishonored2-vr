@@ -136,6 +136,37 @@ static Result draw_held(std::uint32_t frame,const Mat& m,unsigned e,const Mat* w
     }
     return r;
 }
+// v1320: a held thing's draw the engine composed with this eye's PREVIOUS view-projection (the head turning) is matched through that view
+// and placed at B * part under the current one; with the match off it is not placed (it stayed at the game's pose)
+static void v1320_stale_view_lab(const Mat& part) {
+    const Mat hold=rigid(rot(1,0,0,.2),.03,-.02,.01),start=rigid(rot(0,0,1,.4),-91.7,-92.4,4.9);
+    int placed[2]{},draws=0;double worst=0,worst_off=0;
+    for(int pass=0;pass<2;++pass) {
+        Place::clear();Place::stale_view_match.store(pass==0);
+        std::uint32_t frame=36000+static_cast<std::uint32_t>(pass)*100;
+        for(int n=0;n<30;++n,++frame) {
+            const Mat f=held_pose(n*tick_s,2.,120.,start),b=mul(f,hold);
+            publish_held(frame,f,b,0xb000+static_cast<std::uintptr_t>(pass),n*6);   // the head turns 4.8 deg a render
+            if(n<3) continue;
+            const Mat m=mul(f,part),want=mul(b,part);
+            const bool stale=n>=12 && n%4!=0;   // current-view draws settle L (the engine's exact draws), then 3 in 4 composed with the stale view
+            for(unsigned e=0;e<2;++e) {
+                const Wp& w=frames_seen.at(frame);const Wp& before=frames_seen.at(frame-1);
+                if(!stale) {const auto c=floats(mul(w.vp[e],m));std::array<float,16> o{},q{};Place::place(frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,0x1239);continue;}
+                const auto c=floats(mul(before.vp[e],m));std::array<float,16> o{},q{};
+                const Result r=Place::place(frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,0x1239);
+                if(!pass) ++draws;
+                if(r.side!=0) continue;
+                ++placed[pass];
+                {const auto got=Place::model_rows(w.inv[e].data(),o.data());double& wr=pass?worst_off:worst;for(std::size_t i=0;i<12;++i) wr=std::max(wr,std::abs(got[i]-want[i]));}
+            }
+        }
+    }
+    Place::stale_view_match.store(true);
+    std::printf("v1320 stale-view held draws: placed %d of %d, worst %.2e (match off: %d placed by prediction, worst %.2e); %llu stale matches\n",placed[0],draws,worst,placed[1],worst_off,
+        static_cast<unsigned long long>(Place::stale_view_matches_.load()));
+    CHECK(placed[0]==draws && worst<2e-4 && Place::stale_view_matches_.load()>=static_cast<std::uint64_t>(draws));
+}
 static bool old_match(const Mat& m,const Mat& f_now,const Mat& f_prev) {   // what v1238 could match: F or the previous read, axes within 0.004
     Place::Rows r{};for(std::size_t i=0;i<12;++i) r[i]=m[i];
     return Place::same_orientation(r,f_now,.004) || Place::same_orientation(r,f_prev,.004);
@@ -421,6 +452,31 @@ static void v1317_kid_motion_lab() {
     std::printf("v1317 parts in motion: copy part (lagging) placed %d err %.2e (v1316 rule %.2e), native part placed %d err %.2e (v1316 %.2e); %s\n",
         placed[1][0],worst[1][0],worst[1][1],placed[0][0],worst[0][0],worst[0][1],Place::kid_json().c_str());
     CHECK(placed[1][0]==10 && placed[0][0]==10 && worst[1][0]<2e-4 && worst[0][0]<2e-4 && worst[1][1]>1e-2);
+}
+
+// v1320: the paired (stereo) passes place a part like the one-view and shadow passes do: a lagging copy part at B * L, previous rows B_prev * L
+static void v1320_paired_kid_lab() {
+    const Mat l=rigid(rot(.3,.1,.2,.6),.05,.02,-.03),mesh=rigid(identity(),.01,0,.005),g=rigid(identity(),.02,0,0);
+    const auto f_at=[](int n) {const double t=n+.35*std::sin(.9*n);return rigid(rot(0,0,1,.5+.02*t),-91.7+.03*t,-92.4+.01*t+.004*std::sin(1.7*n),4.9+.02*t);};
+    Binder::clear();Place::clear();Place::kid_motion.store(true);
+    const std::uintptr_t kid=0x7373;double worst=0,worst_prev=0,worst_v1319=0;int placed=0;
+    for(int n=0;n<14;++n) {
+        const Mat f=f_at(n),e=mul(n>0?f_at(n-1):f,l),b=mul(f,g);
+        const std::uint32_t frame=2100u+static_cast<std::uint32_t>(n);
+        Place::stage(0,Place::kind_weapon,&e,1,false,&kid);
+        publish_frame(frame,f,true,b,Mat{},false,Mat{},90+n);
+        if(n<4) continue;
+        const Wp& w=frames_seen.at(frame);
+        const auto cur=floats(mul(w.vp[1],mul(e,mesh)));std::array<float,16> o{},q{};
+        const Result r=Place::place(frame,provider,cur.data(),nullptr,o.data(),q.data(),-1,1);
+        if(r.side!=0) continue;
+        ++placed;
+        worst=std::max(worst,worst_rows(o.data(),floats(mul(w.vp[1],mul(mul(b,l),mesh))).data()));
+        worst_prev=std::max(worst_prev,worst_rows(q.data(),floats(mul(frames_seen.at(frame-1).vp[1],mul(mul(mul(f_at(n-1),g),l),mesh))).data()));
+        worst_v1319=std::max(worst_v1319,worst_rows(o.data(),floats(mul(w.vp[1],mul(mul(mul(b,inv(f)),e),mesh))).data()));
+    }
+    std::printf("v1320 paired lagging part: placed %d, row error at B*L %.2e, previous at B_prev*L %.2e (v1319 rule B*inv(F)*E differs by %.2e)\n",placed,worst,worst_prev,worst_v1319);
+    CHECK(placed==10 && worst<2e-4 && worst_prev<2e-4 && worst_v1319>1e-2);
 }
 
 // ---- v1308: a held weapon's part drawn with direct instancing: its record's world rows (the part's frame E) are placed at B * inverse(F) * E,
@@ -817,6 +873,7 @@ int main() {
     }
 
     v1239_lab(part);
+    v1320_stale_view_lab(part);
     v1284_note_carry_lab();
     v1284_cross_recall_lab();
     v1284_cull_lab(part);
@@ -825,6 +882,7 @@ int main() {
     v1308_instance_record_lab();
     v1316_carry_lab();
     v1317_kid_motion_lab();
+    v1320_paired_kid_lab();
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }

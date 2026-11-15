@@ -1294,6 +1294,24 @@ public:
         }
         else if(side_distance[0]>=0) candidate=0;
         else if(side_distance[1]>=0) candidate=1;
+        // v1320 (user, v1319 stereo: a carried whale-oil tank "strongly doubles"; sims: a game-carried bottle was placed in ~9 % of its draws, the
+        // others refused as not rigid, and 895 of 898 unplaced renders decoded onto the thing's frame through this eye's PREVIOUS view-projection -
+        // the engine composed them with the stale view, so the draw alternated between the hand and the game's pose): a held thing's draw that
+        // matches no read through the current view is matched through this eye's previous render's view - only as exactly F * L (2 mm, 0.2 deg)
+        // with the thing's settled L for this draw (a camera turn can make another pose look like a read through the wrong view) - and placed
+        // with the current view.
+        if(candidate<0 && pass_eye_ok && stale_view_match.load(std::memory_order_relaxed)) {
+            const unsigned e=static_cast<unsigned>(pass_eye);
+            for(unsigned s=0;s<2 && candidate<0;++s) {
+                const Side& w=slot->side[s];
+                if(!w.valid || !w.bound || !w.rigid || !views.prev_ok[s][e]) continue;
+                Mat l{};if(!RigidLocal::settled_l(s,draw_key,l)) continue;
+                const Rows pm=model_rows(views.prev_inv[s][e].data(),cur);
+                const Mat got=full(pm),want=mul(w.model,l);
+                if(!(distance(got,want)<=.002 && frame_angle(got,want)<=.0035)) continue;
+                candidate=static_cast<int>(s);hit[s]=0;cur_model[e]=pm;stale_view_matches_.fetch_add(1,std::memory_order_relaxed);
+            }
+        }
         bool predicted=false;Mat predicted_x{},predicted_l{};
         if(candidate<0 && pass_eye_ok && views.ok[pass_eye]) {   // v1239: no read matches: the predicted match (held things with a settled L)
             int ref=0;
@@ -1337,8 +1355,14 @@ public:
         const bool previous=w.have_prev && w.prev_eye_ok[eye] && views.prev_frame[candidate]==w.prev_frame && views.prev_ok[candidate][eye];
         Mat hist_delta{},hist_prev{};
         if(use_hist && !rebase(w,h,static_cast<unsigned>(eye),hist_delta,hist_prev)) {result.stage=rejected;return result;}
-        const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:w.delta;
-        const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:use_hist?hist_prev:w.prev_eye[static_cast<unsigned>(eye)];
+        // v1320: a part through its place on the weapon (B * L_k, previous B_prev * L_k), as place_one_view and the shadow pass place it since
+        // v1304. Paired (stereo) passes took B * inverse(F) * E_k, so a part the engine moved from the previous F sat one frame of hand motion off the
+        // body there - and since v1318 every part of a held weapon is a plain draw placed here.
+        const bool use_kid=!use_alt && !use_hist && h>1 && w.extra_rok[static_cast<std::size_t>(h-2)];
+        Mat kid_delta{},kid_prev{};
+        if(use_kid) {const Mat& r=w.extra_r[static_cast<std::size_t>(h-2)];kid_delta=mul(w.bound_frame,r);kid_prev=mul(mul(w.prev_eye[static_cast<unsigned>(eye)],w.model),r);}
+        const Mat& delta=use_alt?w.alt_delta:use_hist?hist_delta:use_kid?kid_delta:w.delta;
+        const Mat& prev_eye=use_alt?w.alt_prev_eye[static_cast<unsigned>(eye)]:use_hist?hist_prev:use_kid?kid_prev:w.prev_eye[static_cast<unsigned>(eye)];
         Mat l=predicted_l;const unsigned lref=predicted?static_cast<unsigned>(h):l_ref(h);
         const bool rigid=predicted || rigid_part(w,static_cast<unsigned>(candidate),matched,draw_key,frame,m,h,l);
         const Mat x=predicted?predicted_x:rigid?mul(matched,l):m;   // v1223: F_used * settled L (else M); v1239: predicted = F * L
@@ -1736,6 +1760,8 @@ private:
 public:
     inline static std::atomic<bool> child_rebase{true};   // v1304: off = build/legacy-child-place
     inline static std::atomic<bool> kid_motion{true};   // v1317: a part's place learned in motion too; off = build/legacy-kid-learn (v1316: at rest only)
+    inline static std::atomic<bool> stale_view_match{true};   // v1320: a held thing's draw composed with the eye's previous view; off = build/no-stale-view-match
+    inline static std::atomic<std::uint64_t> stale_view_matches_{};
     static std::string kid_json() {return "{\"lagged\":"+std::to_string(kid_lagged_.load())+",\"current\":"+std::to_string(kid_current_.load())+",\"unlearned\":"+std::to_string(kid_unlearned_.load())+
         ",\"learned\":["+std::to_string(kid_learn_[0].load())+","+std::to_string(kid_learn_[1].load())+","+std::to_string(kid_learn_[2].load())+"]}";}
 private:

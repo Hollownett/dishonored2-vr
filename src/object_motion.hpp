@@ -729,25 +729,7 @@ private:
             return false;
         });
         if(held) held_matches_.fetch_add(1,std::memory_order_relaxed);
-        else if(!output_.empty()) held_miss(vp,cur);   // v1305 diagnostics
-        return held;
-    }
-    // v1305 (copy crossbow parts class 0 in both masks, sim c9): a near draw that missed every held frame but sits within 0.6 m of one: the
-    // nearest frame by origin, its index in the publish (order: weapons, their parts, copy read/live, copy parts), the row difference (the
-    // 0.004 test) and the origin distance. First 600 to artifacts/held-miss.jsonl.
-    static void held_miss(const weapon_draw::Mat& vp,const float* cur) noexcept {
-        static std::atomic<unsigned> n{};if(n.load(std::memory_order_relaxed)>=600) return;
-        try {
-            weapon_draw::Mat inv{};if(!weapon_draw::inverse_cached(vp,inv)) return;
-            const auto rows=weapon_draw::Place::model_rows(inv.data(),cur);
-            double best=1e9,diff=0;int gi=-1,fi=-1;unsigned count=0;
-            held_.read([&](const HeldSnap& h) {for(unsigned g=0;g<2;++g) {if(!g) count=h.g[0].n;for(unsigned i=0;i<h.g[g].n;++i) {const double d=weapon_draw::Place::origin_distance(rows,h.g[g].f[i]);
-                if(d<best) {best=d;gi=static_cast<int>(g);fi=static_cast<int>(i);double m=0;for(int r=0;r<3;++r) for(int c=0;c<3;++c) m=std::max(m,std::abs(rows[static_cast<std::size_t>(r*4+c)]-h.g[g].f[i][static_cast<std::size_t>(r*4+c)]));diff=m;}}}return true;});
-            if(!(best<.6)) return;
-            if(n.fetch_add(1,std::memory_order_relaxed)>=600) return;
-            static std::mutex m;std::lock_guard<std::mutex> l(m);std::ofstream o(output_/L"held-miss.jsonl",std::ios::app);
-            o<<"{\"g\":"<<gi<<",\"i\":"<<fi<<",\"n\":"<<count<<",\"mm\":"<<best*1000<<",\"row_diff\":"<<diff<<",\"w\":"<<cur[15]<<",\"scale\":["<<std::hypot(rows[0],std::hypot(rows[4],rows[8]))<<","<<std::hypot(rows[1],std::hypot(rows[5],rows[9]))<<"]}\n";
-        } catch(...) {}
+        return held;   // v1320: v1305's held_miss probe ran for EVERY rejected near draw (past the v1284 cull/inverse early-outs) - removed
     }
     // v1284 (plan B3): the rig target book's answers per draw thread, refreshed only when the book changed (a Setup), not under its lock per draw
     struct LatestOf {unsigned gen{};bool ok[2]{};rig_target::M4 e[2]{};float vp[2][16]{};};
@@ -1997,16 +1979,21 @@ private:
         // placement rewrites a near object's MVP/depth/motion vectors - the only object in the frame whose temporal inputs are
         // authored by the mod - which is what FSR/TAA turn into a black or ghosting weapon in one eye. build/weapon-draw-place
         // opts back into the round-6 binder (A/B and lab work); build/no-weapon-draw-place still forces it off.
-        const bool draw_place_knob=std::filesystem::exists(knobs_/L"weapon-draw-place",error);
+        // v1320 (user, v1319 stereo: "the crossbow renders unstably" while performance mode glues it to the hand): on by default again - the binding
+        // is exact (v1319 engine bind), placed draws carry their own submitted previous rows (v1218), held props have used this placement in stereo
+        // by default since v1140, and a part goes through its place on the weapon (v1320). build/no-weapon-draw-place: off (v1319 stereo).
         const bool no_draw_place_knob=std::filesystem::exists(knobs_/L"no-weapon-draw-place",error);
-        weapon_mode_.store(draw_place_knob && !no_draw_place_knob?1:0,std::memory_order_relaxed);
+        weapon_mode_.store(no_draw_place_knob?0:1,std::memory_order_relaxed);
         placed_history.store(!std::filesystem::exists(knobs_/L"no-placed-history",error),std::memory_order_relaxed); // v1218
         weapon_draw::RigidLocal::on.store(!std::filesystem::exists(knobs_/L"no-rigid-local",error),std::memory_order_relaxed); // v1223
         held_shadow_place.store(!std::filesystem::exists(knobs_/L"no-held-shadow-place",error),std::memory_order_relaxed); // v1238
         weapon_draw::Place::cull.store(!std::filesystem::exists(knobs_/L"no-weapon-near-cull",error),std::memory_order_relaxed); // v1284 (B1)
         weapon_draw::Place::child_rebase.store(!std::filesystem::exists(knobs_/L"legacy-child-place",error),std::memory_order_relaxed); // v1304
         weapon_draw::Place::kid_motion.store(!std::filesystem::exists(knobs_/L"legacy-kid-learn",error),std::memory_order_relaxed); // v1317
-        instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error),std::memory_order_relaxed); // v1308
+        weapon_draw::Place::stale_view_match.store(!std::filesystem::exists(knobs_/L"no-stale-view-match",error),std::memory_order_relaxed); // v1320
+        // v1308; v1320: only with build/legacy-part-batching - since v1318 a held part is never instanced (sims: 256 records read from the mapped
+        // buffer and matched every frame, 0 placed), so the record scan is pure cost
+        instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error) && std::filesystem::exists(knobs_/L"legacy-part-batching",error),std::memory_order_relaxed);
         instance_mirror.store(!std::filesystem::exists(knobs_/L"no-instance-mirror",error),std::memory_order_relaxed); // v1310
         instance_target.store(!std::filesystem::exists(knobs_/L"no-instance-target",error),std::memory_order_relaxed); // v1315
         instance_redraw.store(!std::filesystem::exists(knobs_/L"legacy-instance-fill-place",error),std::memory_order_relaxed); // v1316
