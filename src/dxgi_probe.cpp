@@ -7368,8 +7368,27 @@ static void lens_slicing_force() noexcept {   // render thread, every lens pass
 static void lens_slicing_poll() noexcept {   // Present thread, every frame
     if(lens_slicing.forced.load() && frames.load(std::memory_order_relaxed)-lens_slicing.last.load()>180) {lens_slicing_set(lens_slicing.saved);lens_slicing.forced=false;}
 }
+// v1325 (user, v1323 stereo: the Timepiece image is "extremely unstable, especially the shadows", "at different angles of the lens the
+// shadows fix or break" - also in release v1295): the Timepiece's SetSecondaryView rect (renderer +0x98, 6 ints) is the screen box of six
+// device joints projected with the FLAT game camera (0x44d230: game FOV and aspect, 0x14053dac0 joint positions, VP 0x14010ad80), and the
+// setup wrapper 0x374b60 copies a non-null rect into the view's pass rects +0x7768/+0x7798 (an eye gets its window rect there), so the lens
+// passes refreshed only that box of the portal image. The lens is drawn with an eye's camera (other FOV, IPD offset), so where the glass
+// shows the image outside the flat box it showed stale passes. Each lens pass gets the borrowed view's own window rect (+0x7878, the full
+// eye rect its last Setup copied). build/lens-game-rect: the game's box (the pre-v1325 behaviour). Status timepiece.rect.
+static bool lens_game_rect=false;
+static std::atomic<UINT64> lens_rect_full{},lens_rect_game_area{};
+static void lens_full_rect(void* renderer,std::uintptr_t view) noexcept {
+    if(lens_game_rect || !renderer || !view) return;
+    const auto at=reinterpret_cast<std::uintptr_t>(renderer);
+    std::array<std::int32_t,6> game{},full{};
+    if(!read_self(at+0x98,game.data(),sizeof game) || !read_self(view+0x7878,full.data(),sizeof full)) return;
+    if(!(full[2]>full[0] && full[3]>full[1] && full[0]>=0 && full[1]>=0)) return;   // not a window rect
+    lens_rect_game_area=static_cast<UINT64>(std::max(0,game[2]-game[0]+1))*static_cast<UINT64>(std::max(0,game[3]-game[1]+1));
+    if(game!=full && lens_write(at+0x98,full.data(),sizeof full)) ++lens_rect_full;
+}
 static bool lens_pass(void* renderer,void* entry,std::uintptr_t view,int pass_eye,bool between) noexcept {
     lens_slicing_force();   // v1323
+    lens_full_rect(renderer,view);   // v1325
     lens_pass_eye=pass_eye;lens_between=between;lens_began=false;lens_pass_camera={};lens_shadow_open=false;lens_grid_same=false;
     lens_eye_grid_ok=read_grid(d2vr::PostTonemapPass::eye_views[pass_eye==1?1:0].load(),lens_eye_grid);   // v1265: the eye that composites this image, before the pass
     lens_view=view;lens_active=true;
@@ -7501,6 +7520,7 @@ static std::string lens_status_json() {
     o<<"{\"guard\":"<<(lens_guard_enabled?"true":"false")<<",\"state\":"<<lens_stats.state.load()<<",\"lens_frames\":"<<lens_stats.frames.load()
      <<",\"slicing\":{\"keep\":"<<(lens_shadow_slicing?"true":"false")<<",\"forced\":"<<(lens_slicing.forced.load()?"true":"false")<<",\"forces\":"<<lens_slicing.forces.load()   // v1323
      <<",\"cvars\":"<<(slicing_cvar[0] && slicing_cvar[1]?"true":"false")<<'}'
+     <<",\"rect\":{\"game_rect\":"<<(lens_game_rect?"true":"false")<<",\"full_writes\":"<<lens_rect_full.load()<<",\"last_game_area\":"<<lens_rect_game_area.load()<<'}'   // v1325
      <<",\"begins_eye0_eye1_lens_null_other\":"<<list(lens_stats.begins)<<",\"borrowed_eye0_eye1_other\":"<<list(lens_stats.borrowed)
      <<",\"lens_setups\":"<<lens_stats.setups.load()<<",\"camera_follow_own_none\":["<<lens_stats.camera_follow.load()<<','<<lens_stats.camera_own.load()<<','<<lens_stats.camera_none.load()<<']'
      <<",\"camera_centre_pair\":"<<"["<<lens_stats.camera_centre.load()<<','<<lens_stats.camera_pair.load()<<"]"<<",\"lens_eye0_camera\":"<<(lens_eye0_camera?"true":"false")   // v1256
@@ -17613,6 +17633,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             lens_mono=fs::exists(root/L"build"/L"lens-mono");lens_shared_shadows=fs::exists(root/L"build"/L"lens-shared-shadows");   // v1257: v1256 camera / v1256 shadows
             lens_isolated=!fs::exists(root/L"build"/L"no-lens-isolation");   // v1259: build/no-lens-isolation = v1257
             lens_shadow_slicing=fs::exists(root/L"build"/L"lens-shadow-slicing");   // v1323: keep sun-cascade time slicing while the lens is in use
+            lens_game_rect=fs::exists(root/L"build"/L"lens-game-rect");   // v1325: the game's flat-camera box for the lens passes
             lens_no_follow_latch=fs::exists(root/L"build"/L"no-lens-follow-latch");   // v1291
             lens_follow_prepared=fs::exists(root/L"build"/L"lens-follow-prepared");   // v1269: the v1264 follows test
             lens_stamp_mode=fs::exists(root/L"build"/L"no-lens-stamp")?d2vr::secondary_view::StampMode::off:   // v1269: v1264 (no stamp on a lens pass)
