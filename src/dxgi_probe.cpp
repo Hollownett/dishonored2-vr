@@ -6482,6 +6482,7 @@ static std::uintptr_t find_cvar(const std::string& name) noexcept; // defined be
 static std::string engine_cvars_applied;
 static bool shadow_slicing_cvars=false; // v1159/v1160 meta: a slicing cvar was applied as 1 (apply_engine_cvars)
 static std::array<std::uintptr_t,2> slicing_cvar{};   // v1323: r_shadowParallelPartialSliceUpdate, r_shadowParallelPartialDynaUpdate (the lens slicing guard)
+static std::uintptr_t tighten_cvar{};   // v1340: r_tightenParallelShadows (off during lens passes, lens_untighten)
 static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
     try {
         // v1109: with no file, the engine's own sun-cascade time slicing (slice 0 every frame, far slices in turn, no dynamic
@@ -6517,6 +6518,7 @@ static void apply_engine_cvars(const std::filesystem::path& root) noexcept {
         if(no_slicing) {write("r_shadowParallelPartialSliceUpdate",0,"(alternate)");write("r_shadowParallelPartialDynaUpdate",0,"(alternate)");}
         if(!slicing_cvar[0]) slicing_cvar[0]=find_cvar("r_shadowParallelPartialSliceUpdate");   // v1323: the lens slicing guard (a file without them)
         if(!slicing_cvar[1]) slicing_cvar[1]=find_cvar("r_shadowParallelPartialDynaUpdate");
+        tighten_cvar=find_cvar("r_tightenParallelShadows");   // v1340: off during lens passes
         if(engine_cvars_applied.empty()) engine_cvars_applied="none";
     } catch(...) {engine_cvars_applied="failed";}
 }static std::uintptr_t find_cvar(const std::string& name) noexcept {
@@ -7386,6 +7388,31 @@ static void lens_full_rect(void* renderer,std::uintptr_t view) noexcept {
     lens_rect_game_area=static_cast<UINT64>(std::max(0,game[2]-game[0]+1))*static_cast<UINT64>(std::max(0,game[3]-game[1]+1));
     if(game!=full && lens_write(at+0x98,full.data(),sizeof full)) ++lens_rect_full;
 }
+// v1340 (user, v1325 stereo: the lens shadows are "visibly not in their places", worse when the device is close to the face): SHADOWS_PREPARE
+// (0x332900) fits the sun cascade fars to the farthest tile of coarseDepthCPU (0x3329bf: only with r_tightenParallelShadows on), a 64x64
+// depth readback that every view build (0x351780) copies at 0x352b81 from the render context's 4-slot staging ring (+0x60, index +0x80),
+// newest ready slot first. Only non-secondary views write that ring (0x353d90 skips it for view+0x3a34 bit 0, which the secondary render sets
+// through def+0x64 at 0x366714), so every lens pass fitted its cascades to an EYE's depth: the present scene with the tracked hand and the
+// Timepiece in front of the face. The nearer the device, the nearer the eye's farthest tile and the shorter the lens's cascades (the past
+// scene's shadows beyond them are lost), and the two lens passes read whichever eye slot was ready (other fars per eye and frame). The engine
+// already keeps the local-light coarse tightening off for that bit (0x332f20, 0x333673); each lens pass now runs with the tightening off (the
+// r_shadowCascadeFars defaults), put back right after the pass. build/lens-coarse-tighten keeps it. Status timepiece.tighten.
+static bool lens_coarse_tighten=false;
+static std::atomic<UINT64> lens_untightened{};
+static std::array<std::atomic<float>,3> lens_far{};   // last cascade far [after the last lens pass, the eye fit before it, the nearest such eye fit]
+static float last_cascade_far() noexcept {   // the fars the last PREPARE left (0x3309920, the shader's parallelLightSliceFars source)
+    std::int32_t slices{};float fars[4]{};
+    if(!read_self(image_base+0x397a2f8,&slices,4) || slices<1 || slices>4 || !read_self(image_base+0x3309920,fars,sizeof fars)) return 0.f;
+    return std::isfinite(fars[slices-1])?fars[slices-1]:0.f;
+}
+static bool lens_untighten(std::array<std::byte,8>& saved) noexcept {
+    if(const float eye=last_cascade_far();eye>0.f) {lens_far[1]=eye;if(!(lens_far[2].load()>0.f) || eye<lens_far[2].load()) lens_far[2]=eye;}
+    std::int32_t on{};
+    if(lens_coarse_tighten || !tighten_cvar || !read_self(tighten_cvar+0x28,saved.data(),saved.size())) return false;
+    std::memcpy(&on,saved.data(),4);
+    const std::array<std::int32_t,2> off{};   // int 0 at +0x28, float 0.0f at +0x2c
+    return on && lens_write(tighten_cvar+0x28,off.data(),sizeof off) && (++lens_untightened,true);
+}
 static bool lens_pass(void* renderer,void* entry,std::uintptr_t view,int pass_eye,bool between) noexcept {
     lens_slicing_force();   // v1323
     lens_full_rect(renderer,view);   // v1325
@@ -7397,7 +7424,10 @@ static bool lens_pass(void* renderer,void* entry,std::uintptr_t view,int pass_ey
     const int borrowed_eye=d2vr::ObjectMotion::eye_of_view(view);   // v1265: the eye whose view object the pass borrows (its records must survive the pass)
     const std::uint64_t records_before=borrowed_eye>=0?d2vr::ObjectMotion::records_digest(static_cast<unsigned>(borrowed_eye)):0;
     if(lens_isolated) {d2vr::RenderPassMap::secondary_view=view;d2vr::ObjectMotion::note_borrowed_view(view,static_cast<unsigned>(pass_eye));}
+    std::array<std::byte,8> tighten{};const bool untightened=lens_untighten(tighten);   // v1340
     original_lens_render(renderer,entry);
+    if(untightened) lens_write(tighten_cvar+0x28,tighten.data(),tighten.size());   // v1340: the eyes fit to their own depth
+    if(lens_began.load()) lens_far[0]=last_cascade_far();
     d2vr::RenderPassMap::secondary_view=0;
     lens_active=false;lens_between=false;
     if(lens_shadow_open) shadow_share.on_secondary_end();
@@ -7521,6 +7551,8 @@ static std::string lens_status_json() {
      <<",\"slicing\":{\"keep\":"<<(lens_shadow_slicing?"true":"false")<<",\"forced\":"<<(lens_slicing.forced.load()?"true":"false")<<",\"forces\":"<<lens_slicing.forces.load()   // v1323
      <<",\"cvars\":"<<(slicing_cvar[0] && slicing_cvar[1]?"true":"false")<<'}'
      <<",\"rect\":{\"game_rect\":"<<(lens_game_rect?"true":"false")<<",\"full_writes\":"<<lens_rect_full.load()<<",\"last_game_area\":"<<lens_rect_game_area.load()<<'}'   // v1325
+     <<",\"tighten\":{\"keep\":"<<(lens_coarse_tighten?"true":"false")<<",\"cvar\":"<<(tighten_cvar?"true":"false")<<",\"off_passes\":"<<lens_untightened.load()   // v1340
+     <<",\"far_lens_eye_eyemin\":["<<lens_far[0].load()<<','<<lens_far[1].load()<<','<<lens_far[2].load()<<"]}"
      <<",\"begins_eye0_eye1_lens_null_other\":"<<list(lens_stats.begins)<<",\"borrowed_eye0_eye1_other\":"<<list(lens_stats.borrowed)
      <<",\"lens_setups\":"<<lens_stats.setups.load()<<",\"camera_follow_own_none\":["<<lens_stats.camera_follow.load()<<','<<lens_stats.camera_own.load()<<','<<lens_stats.camera_none.load()<<']'
      <<",\"camera_centre_pair\":"<<"["<<lens_stats.camera_centre.load()<<','<<lens_stats.camera_pair.load()<<"]"<<",\"lens_eye0_camera\":"<<(lens_eye0_camera?"true":"false")   // v1256
@@ -17634,6 +17666,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             lens_isolated=!fs::exists(root/L"build"/L"no-lens-isolation");   // v1259: build/no-lens-isolation = v1257
             lens_shadow_slicing=fs::exists(root/L"build"/L"lens-shadow-slicing");   // v1323: keep sun-cascade time slicing while the lens is in use
             lens_game_rect=fs::exists(root/L"build"/L"lens-game-rect");   // v1325: the game's flat-camera box for the lens passes
+            lens_coarse_tighten=fs::exists(root/L"build"/L"lens-coarse-tighten");   // v1340: lens cascades fitted to an eye's coarse depth (pre-v1340)
             lens_no_follow_latch=fs::exists(root/L"build"/L"no-lens-follow-latch");   // v1291
             lens_follow_prepared=fs::exists(root/L"build"/L"lens-follow-prepared");   // v1269: the v1264 follows test
             lens_stamp_mode=fs::exists(root/L"build"/L"no-lens-stamp")?d2vr::secondary_view::StampMode::off:   // v1269: v1264 (no stamp on a lens pass)
