@@ -136,6 +136,7 @@ public:
         std::array<std::uint32_t,4> r{};for(int i=0;i<4;++i) r[i]=static_cast<const std::uint32_t*>(m.pData)[i];
         context_->Unmap(st.Get(),0);return r;
     }
+    std::array<float,4*48> last_constants{};                  // tools: the constant buffer of the last run (replay dumps it)
     int rig_order{},rig_debug{};                                // v1190: inside the rig target, 0 this eye's kept rig first, 1 the fresh eye's first (tools)
     inline static std::atomic<int> untargeted_lands{1};        // v1312: class-251 held texels land without the rig target (build/no-untargeted-lands: 0)
     explicit Afw2Pass(ID3D11Device* device);
@@ -242,10 +243,15 @@ float3 KeptStep(float3 d,float part) {return part*float3(dot(axes[0].xyz,d),dot(
 float3 KeptPointAt(int2 i,out float a) {a=KeptAhead(i);return Ray(keptFov,(float2(i)+0.5)*grid.zw)*a;}
 // the drawn hand that owns rig point p (kept metres): 2 left, 3 right, 1 the head's (carried); v1159/v1164 rules. Without the masks the
 // v811 palm sphere (22 cm) gives a hand or nothing (0).
-int Owner(float3 p,bool rig) {
+// v1323 (user, v1323 performance mode: the crossbow "still doubles, especially when walking"): a HELD texel (mask < 253.5) belongs to its hand
+// whatever its distance. The head rule (farther than 45 cm from both palms, or nearer the eye than its palm) is the forearm's (v1159/v1164);
+// it gave the crossbow's far or near-the-eye parts the head's layer, and while walking the hands move against the head (sims: 2-6k held
+// texels a dump landing 0-80 % on the target's held mask, 10-30 texels off). Without palms it stays the head's.
+int Owner(float3 p,bool rig,bool held=false) {
     const float dl=palmL.w>0?distance(p,palmL.xyz):1e9,dr=palmR.w>0?distance(p,palmR.xyz):1e9;
     if(flags.x>0) {
         if(!rig) return 0;
+        if(held && min(dl,dr)<1e8) return dl<=dr?2:3;
         if(min(dl,dr)>=min(0.45,length(p))) return 1;
         return dl<=dr?2:3;
     }
@@ -397,7 +403,7 @@ bool OnFreshOutline(float3 p) {
     float3 d=float3(0,0,0);uint w=0;
     if(a<=0) {PutMotion(Index(i),float4(0,0,0,kSky|kConfirmed));return;}
     const bool rig=KeptRigAt(i);
-    const int owner=Owner(p,rig);
+    const int owner=Owner(p,rig,rig && flags.x>0 && keptRig.Load(int3(i,0))<253.5/255);
     const float4 own=flags.y>0?keptMotion.Load(int3(i,0)):float4(0,0,0,0);
     if(owner==0) {
         // the world: stands unless its own vector moves it (a mover); then confirmed by the chain, else it goes on as it moved
@@ -716,7 +722,7 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
     // the rig of a group that stood down (v1185: only then; the fresh eye's rim-lit fingers showed around a kept hand otherwise); a near
     // mover (within reach: its vector may be unusable, see Motion), never a far one (its own shading)
     const bool rig=FreshRigAt(i);
-    if(rig && (TargetOn() || !StandsDown(uint(Owner(Apply(TK,Apply(FT,Ray(freshFov,uv)*a)),true))))) return;
+    if(rig && (TargetOn() || !StandsDown(uint(Owner(Apply(TK,Apply(FT,Ray(freshFov,uv)*a)),true,freshRig.Load(int3(i,0))<253.5/255))))) return;
     if(!rig && !(flags.y>0 && a<1.5 && freshMotion.Load(int3(i,0)).w>=fillStep.w)) return;
     const float3 t=Apply(FT,Ray(freshFov,uv)*a);
     if(t.z<=1e-3) return;
@@ -1063,6 +1069,7 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     put(rig_target && kept_rig && fresh_rig?1:0,rig_order,rig_debug,untargeted_lands.load(std::memory_order_relaxed));   // (the rig target needs the masks: its colour comes from rig texels)
     const auto upload=[&](double step,bool last) {c[step_at]=float(step);c[step_at+1]=last?1.f:0.f;context_->UpdateSubresource(constants_.Get(),0,nullptr,c.data(),0,0);};
     upload(0,false);
+    last_constants=c;
     ID3D11Buffer* cb=constants_.Get();context_->CSSetConstantBuffers(0,1,&cb);context_->PSSetConstantBuffers(0,1,&cb);
     ID3D11SamplerState* sm=sampler_.Get();context_->PSSetSamplers(0,1,&sm);
     ID3D11ShaderResourceView* inputs[8]{kept,kept_depth,fresh,fresh_depth,motions?kept_motion:nullptr,motions?fresh_motion:nullptr,masks?kept_rig:nullptr,masks?fresh_rig:nullptr};

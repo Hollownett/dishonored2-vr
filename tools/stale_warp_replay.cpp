@@ -439,6 +439,7 @@ int main(int argc, char** argv) {
             }
             if (layers.afw2 && warp.afw2) {const auto t = warp.afw2->hole_tiles(); std::printf("      afw2: %u target texels left empty after the fill; hole tiles %u of %u\n", warp.afw2->holes(), t[0], t[1]);}
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 votes (confirmed/refuted): head %u/%u left %u/%u right %u/%u; hands moving %d %d, masks %d\n", v[2], v[3], v[4], v[5], v[6], v[7], int(layers.hand_moving[0]), int(layers.hand_moving[1]), int(masks));}
+            if (layers.afw2 && warp.afw2) std::ofstream(out + "/stale-warp-" + std::to_string(n) + "-afw-constants.f32", std::ios::binary).write(reinterpret_cast<const char*>(warp.afw2->last_constants.data()), sizeof warp.afw2->last_constants);   // tools: the AFW constants (layers, cameras)
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 outline votes on/off: held head %u/%u left %u/%u right %u/%u; arm head %u/%u left %u/%u right %u/%u; target %u/%u\n", v[20], v[21], v[22], v[23], v[24], v[25], v[12], v[13], v[14], v[15], v[16], v[17], v[26], v[27]);}
             if (layers.afw2 && warp.afw2) {const auto r = warp.afw2->rig_stats_wait(); std::printf("      afw2 rig stats: target %s, %u sampled target px, %u to the world (%.1f %%)\n", r[0] == 1 ? "used" : r[0] == 2 ? "IGNORED" : "none", r[1], r[2], r[1] ? 100.0 * r[2] / r[1] : 0.0);}
             return c;
