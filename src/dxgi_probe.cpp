@@ -689,6 +689,14 @@ static std::array<std::optional<d2vr::WorldTrackedPose>,2> gun_drawn_frame;stati
 // (hand_max_jump_mm: the second cause tests/weapon_contact_lab.cpp found at convex edges, in hand_clamp.hpp). build/legacy-weapon-contact restores
 // the v1288 blade response (WeaponCollision::legacy_step); the counters run in both modes.
 static bool legacy_weapon_contact{};
+// v1374 (user, v1381 headset: "in the release build the grip worked fine; something we did is not right - recheck"; sims release v1297 / v1381 /
+// v1381 with build/no-weapon-collision, scripts v1372-grip-a/b: a dual-wield gun copy held beside a sofa): a gun COPY's hand sweeps no blade.
+// The copy rides the hand's target grip (NativeWeaponHands' copy service, the draw-time binder through that grip), not the solved hand; v1301's
+// blade response turned that grip up to 35 deg / 10 cm, the solved arm did not follow it, and the copy left the visible hand - the crossbow
+// rotated in the fist, the pistol 10-15 cm out of it (v1381: right-hand blade contact 9-17 s of 30, 93-168 mm / 18-35 deg; v1297 0.5 s; in
+// hand with the collision off). The palm clamp still stops the hand; native guns and swords keep the response (they ride the solved hand).
+// build/copy-blade-collision: the v1381 response for copies too.
+static bool copy_blade_collision{};
 // v1301 (user after v1295-v1298: "the weapon sits unstable in the hands and sometimes jumps out of the hands"): the whole WeaponContactStats per hand
 // under one lock - v1289's counters plus share (contact frames over armed frames), answers / clear / hits by class [world, npc, dynamic, self, held],
 // max_dev (the drawn weapon's largest deviation from the controller's), clamp_fires (the max_turn / max_push bound held it) and resets by reason
@@ -10016,7 +10024,8 @@ void prepare_head_view(void* view) noexcept {
                         const unsigned side_extra=static_cast<unsigned>(arm_copy_now(side)); // dual wield: the hand's mod-owned weapon
                         const bool sword_side=(side==sword_arm_now() && !side_extra) ||
                             side_extra==static_cast<unsigned>(d2vr::arm::Held::guard_sword); // the sword's hand (or a guard's sword), else the gun's
-                        const double blade=armed?(sword_side?sword_blade_length:shape[2]):0.,blade_radius=armed && !sword_side?shape[3]:0.;
+                        const bool blade_on=armed && (copy_blade_collision || !d2vr::arm::is_gun(static_cast<d2vr::arm::Held>(side_extra)));   // v1374: no blade for a gun copy
+                        const double blade=blade_on?(sword_side?sword_blade_length:shape[2]):0.,blade_radius=blade_on && !sword_side?shape[3]:0.;
                         const d2vr::Vec3 blade_offset=armed && !sword_side?g.basis[2]*shape[0]-g.basis[0]*shape[1]:d2vr::Vec3{};
                         // v1033: a gun's barrel is not the hand's forward axis (authored_gun_frame). The sweep and the collision body take the
                         // gun's own drawn frame; the sword keeps its hand-relative blade line.
@@ -18232,6 +18241,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         gun_shape_override={};{std::ifstream knob(root/L"build"/L"gun-shape");GunShape v{};if(knob>>v[0]>>v[1]>>v[2]>>v[3] && v[2]>.05 && v[2]<.8 && v[3]>=0 && v[3]<.15) gun_shape_override=v;}
         {std::ifstream knob(root/L"build"/L"slash-speed");float f{};if(knob>>f && f>=1.f && f<=2.f) slash_speed_factor=f;}weapon_collision=d2vr::WeaponCollision{};weapon_collision_qpc=0;
         legacy_weapon_contact=fs::exists(root/L"build"/L"legacy-weapon-contact");weapon_collision.set_legacy(legacy_weapon_contact);   // v1289: the v1288 blade response
+        copy_blade_collision=fs::exists(root/L"build"/L"copy-blade-collision");   // v1374
         {std::lock_guard<std::mutex> l(weapon_contact_mutex);weapon_contact_status={};}
         hand_clamp=d2vr::HandClamp{};hand_clamp_budget.reset();reset_clamp_state();
         hand_clamp_enabled=!fs::exists(root/L"build"/L"no-hand-clamp"); // headset A/B: the pre-Task-5 drawn hand
