@@ -317,7 +317,7 @@ public:
     static void note_eye_view(unsigned eye,std::uintptr_t view) noexcept {
         if(eye>1) return;
         eye_views_[eye].store(view,std::memory_order_relaxed);
-        if(view && on()) {std::lock_guard<std::mutex> lock(views_mutex_);snapshot(eye,view);}
+        if(view && on()) {std::lock_guard<std::mutex> lock(views_mutex_);tl_snap_src_=1;snapshot(eye,view);tl_snap_src_=0;}
     }
     // v1151 status: the alternate-mode draws by kind (same,own_last,other_now,other_last,unproven,miss), camera-only fallbacks, untagged.
     static std::string alternate_status_json() {
@@ -796,9 +796,30 @@ private:
         if(!inverse_last_row(v.m[2],false,v.inv[0]) || !inverse_last_row(v.m[2],true,v.inv[1])) return false;
         return v.valid=true;
     }
+    // v1364 diagnostics (diagnostics on): every new eye record and every rewrite of a frame's record with other matrices, for artifacts/eye-records.csv:
+    // tick us, eye, frame, what took the snapshot (1 Setup entry, 2 classify, 3 record_view, 0 other), new/rewrite, thread, camera pitch/yaw (VP w row),
+    // and for a rewrite the old record's pitch/yaw.
+    inline static thread_local int tl_snap_src_{0};
+    inline static std::mutex rec_log_m_;inline static std::string rec_log_;inline static unsigned rec_log_n_{};
+    static void note_record(unsigned eye,const EyeView& v,const EyeView* old) noexcept {
+        if(!weapon_perf::enabled()) return;
+        const auto look=[](const float* vp,double& pitch,double& yaw) {const double x=vp[12],y=vp[13],z=vp[14],n=std::sqrt(x*x+y*y+z*z);
+            if(!(n>1e-9)) {pitch=yaw=-999;return;}pitch=std::asin(std::clamp(z/n,-1.,1.))*57.29577951308232;yaw=std::atan2(y,x)*57.29577951308232;};
+        double p{},y{},op{-999},oy{-999};look(v.m[2],p,y);if(old) look(old->m[2],op,oy);
+        char line[200];
+        std::snprintf(line,sizeof line,"%lld,%u,%u,%d,%c,%lu,%.3f,%.3f,%.3f,%.3f\n",static_cast<long long>(weapon_draw::Place::now_us()),eye,v.frame,tl_snap_src_,old?'r':'n',
+            static_cast<unsigned long>(GetCurrentThreadId()),p,y,op,oy);
+        std::lock_guard<std::mutex> lock(rec_log_m_);
+        if(rec_log_n_>=40000u) return;
+        ++rec_log_n_;rec_log_+=line;
+    }
     static void store(unsigned eye,const EyeView& v) noexcept { // under views_mutex_
         auto& ring=eye_records_[eye];auto* slot=&ring[0];
         for(auto& old:ring) {if(old.valid && old.frame==v.frame) {if(old.receipt && !v.receipt) return; slot=&old;break;} if(!old.valid || old.frame<slot->frame) slot=&old;}
+        if(weapon_perf::enabled()) {   // v1364 diagnostics
+            if(slot->valid && slot->frame==v.frame) {if(!near16(slot->m[2],v.m[2])) {const EyeView old=*slot;note_record(eye,v,&old);}}
+            else note_record(eye,v,nullptr);
+        }
         *slot=v;records_gen_.fetch_add(1,std::memory_order_release); // v1200: the content candidates are rebuilt
         std::uint32_t newest=newest_eye_frame_[eye].load(std::memory_order_relaxed);
         if(v.frame>=newest) { // the draw hooks read these without the views lock
@@ -814,7 +835,7 @@ private:
     // frame unique even with the head still). The VP's offset is remembered, so most writes compare one float4 block.
     static bool classify(const float* f,UINT size,View& out) noexcept {
         std::lock_guard<std::mutex> lock(views_mutex_);
-        for(unsigned eye=0;eye<2;++eye) if(const auto view=eye_views_[eye].load(std::memory_order_relaxed)) snapshot(eye,view);
+        tl_snap_src_=2;for(unsigned eye=0;eye<2;++eye) if(const auto view=eye_views_[eye].load(std::memory_order_relaxed)) snapshot(eye,view);tl_snap_src_=0;
         // v1206: alternate records come only from receipts (note_alternate_render); a snapshot here could catch the view inside the next
         // Setup (its stamp still this frame's, matrices already seeded) and file that under this render
         int best_eye=-1,best_rank=-1;const EyeView* best=nullptr;UINT best_at=0;
@@ -1227,7 +1248,7 @@ private:
     inline static std::array<std::atomic<std::uint64_t>,2> record_views_{}; // v1226: [eye views built from records, of which the other eye's VP was identical]
     static bool record_view(unsigned eye,std::uint32_t frame,View& out) noexcept {
         std::lock_guard<std::mutex> lock(views_mutex_);
-        if(const auto view=eye_views_[eye&1u].load(std::memory_order_relaxed)) snapshot(eye&1u,view);
+        if(const auto view=eye_views_[eye&1u].load(std::memory_order_relaxed)) {tl_snap_src_=3;snapshot(eye&1u,view);tl_snap_src_=0;}
         for(const auto& r:eye_records_[eye&1u]) if(r.valid && r.frame==frame) {
             for(const auto& o:eye_records_[eye^1u]) if(o.valid && o.frame==frame && near16(o.m[2],r.m[2])) {record_views_[1].fetch_add(1,std::memory_order_relaxed);return false;} // not a distinct eye view: stay untagged
             record_views_[0].fetch_add(1,std::memory_order_relaxed);
@@ -1498,6 +1519,7 @@ private:
                 static thread_local unsigned weapon_sample{};const bool timed=!(++weapon_sample&15);   // one draw in 16 is timed
                 const auto started=timed?__rdtsc():0;
                 const bool rig=RigMask::draw_is_rig();
+                weapon_draw::Place::tl_pass_=pass;   // v1364 diagnostics (held-draw-trace.csv)
                 const auto r=weapon_draw::Place::place(frame,&weapon_views,cur,have_prev?prev:nullptr,placed,placed_prev,
                     have_view?static_cast<int>(view.eye):-1,pass_eye,still,draw_key(s,*sh),!rig && weapon_perf::enabled());   // v1284 (B6): the near census probes, diagnostics only
                 // v1237 census: per pass, unplaced draws within a held thing's reach [same axes, other]; placed draws whose classified view is
@@ -1998,7 +2020,7 @@ private:
         weapon_draw::Place::cull.store(!std::filesystem::exists(knobs_/L"no-weapon-near-cull",error),std::memory_order_relaxed); // v1284 (B1)
         weapon_draw::Place::child_rebase.store(!std::filesystem::exists(knobs_/L"legacy-child-place",error),std::memory_order_relaxed); // v1304
         weapon_draw::Place::kid_motion.store(!std::filesystem::exists(knobs_/L"legacy-kid-learn",error),std::memory_order_relaxed); // v1317
-        weapon_draw::Place::stale_view_match.store(!std::filesystem::exists(knobs_/L"no-stale-view-match",error),std::memory_order_relaxed); // v1320
+        weapon_draw::Place::stale_view_match.store(std::filesystem::exists(knobs_/L"stale-view-match",error),std::memory_order_relaxed); // v1320; v1365: opt-in (weapon_draw_place.hpp)
         weapon_draw::Place::stale_view_history.store(!std::filesystem::exists(knobs_/L"no-stale-view-history",error),std::memory_order_relaxed); // v1363
         // v1308; v1320: only with build/legacy-part-batching - since v1318 a held part is never instanced (sims: 256 records read from the mapped
         // buffer and matched every frame, 0 placed), so the record scan is pure cost
@@ -2051,9 +2073,12 @@ private:
         if(const std::string trace=weapon_draw::Place::take_trace();!trace.empty()) {   // v1363: a held thing's draws (weapon_draw_place.hpp Place::trace)
             static bool header{};std::ofstream csv(output_/L"held-draw-trace.csv",header?std::ios::app|std::ios::binary:std::ios::trunc|std::ios::binary);
             if(!header) {csv<<"placed,frame,us_after_publish,eye,side,key,own_l,stage,predicted,age,cur_F_mm,cur_F_deg,cur_prior_mm,cur_prior_deg,cur_given_mm,cur_given_deg,cur_body_mm,cur_body_deg,"
-                "prev_F_mm,prev_F_deg,prev_prior_mm,prev_prior_deg,prev_given_mm,prev_given_deg,prev_body_mm,prev_body_deg\n";header=true;}
+                "prev_F_mm,prev_F_deg,prev_prior_mm,prev_prior_deg,prev_given_mm,prev_given_deg,prev_body_mm,prev_body_deg,pass,prev_frame,cur_pitch,cur_yaw,prev_pitch,prev_yaw\n";header=true;}
             csv<<trace;
         }
+        {std::string recs;{std::lock_guard<std::mutex> lock(rec_log_m_);recs.swap(rec_log_);}   // v1364 diagnostics: eye view records (note_record)
+         if(!recs.empty()) {static bool header{};std::ofstream csv(output_/L"eye-records.csv",header?std::ios::app|std::ios::binary:std::ios::trunc|std::ios::binary);
+             if(!header) {csv<<"us,eye,frame,src,kind,thread,pitch,yaw,old_pitch,old_yaw\n";header=true;}csv<<recs;}}
         std::ofstream json(output_/L"object-motion.json",std::ios::trunc);
         json<<"{\"mode\":"<<mode<<",\"installed\":"<<(installed_?"true":"false")<<",\"proxy_layouts\":"<<(layout_?"true":"false")
             <<",\"proxy_shaders\":["<<proxy[0]<<','<<proxy[1]<<','<<proxy[2]<<','<<proxy[3]<<','<<proxy[4]

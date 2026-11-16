@@ -1473,6 +1473,7 @@ public:
     // draw's model against F * L, the previous read * L, the pose the engine was last given * L and the physics body * L (L: the draw key's
     // settled L, else the thing's first, else identity), as mm/deg (-1: not available); and microseconds since the publish it was matched against.
     inline static std::mutex trace_m_;inline static std::string trace_;inline static unsigned trace_unplaced_{},trace_placed_{};inline static std::atomic<std::int64_t> publish_us_{};
+    inline static thread_local int tl_pass_{-1};   // v1364 diagnostics: the pass index of the draw being placed (ObjectMotion sets it)
     static std::int64_t now_us() noexcept {return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
     static void trace(const Slot& slot,const Views& v,unsigned e,const float* cur,std::uint64_t key,std::uint32_t frame,const Result& r) noexcept {
         const bool placed=r.side>=0;
@@ -1494,9 +1495,14 @@ public:
             char a[4][32]{},b[4][32]{};
             for(unsigned i=0;i<4;++i) {res(cm,fs[i],a[i],sizeof a[i]);if(prev_ok) res(pm,fs[i],b[i],sizeof b[i]);else std::snprintf(b[i],sizeof b[i],"-1,-1");}
             if(!placed && !near_thing) continue;   // another object: no decode within 30 cm and 11 deg of the thing
-            char line[400];
-            std::snprintf(line,sizeof line,"%c,%u,%lld,%u,%u,%016llx,%d,%u,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s\n",placed?'p':'u',frame,static_cast<long long>(now_us()-publish_us_.load(std::memory_order_relaxed)),
-                e,s,static_cast<unsigned long long>(key),own?1:0,static_cast<unsigned>(r.stage),r.predicted?1:0,placed?r.age:-1,a[0],a[1],a[2],a[3],b[0],b[1],b[2],b[3]);
+            // v1364 diagnostics: the render pass (ObjectMotion), this side's previous publish frame, and the camera of each view (pitch/yaw of the VP's w row)
+            const auto look=[](const Mat& vp,double& pitch,double& yaw) {const double n=std::sqrt(vp[12]*vp[12]+vp[13]*vp[13]+vp[14]*vp[14]);
+                if(!(n>1e-9)) {pitch=yaw=-999;return;}pitch=std::asin(std::clamp(vp[14]/n,-1.,1.))*57.29577951308232;yaw=std::atan2(vp[13],vp[12])*57.29577951308232;};
+            double cp{},cy{},pp{-999},py{-999};look(v.vp[e],cp,cy);if(prev_ok) look(v.prev_vp[s][e],pp,py);
+            char line[480];
+            std::snprintf(line,sizeof line,"%c,%u,%lld,%u,%u,%016llx,%d,%u,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%d,%u,%.2f,%.2f,%.2f,%.2f\n",placed?'p':'u',frame,static_cast<long long>(now_us()-publish_us_.load(std::memory_order_relaxed)),
+                e,s,static_cast<unsigned long long>(key),own?1:0,static_cast<unsigned>(r.stage),r.predicted?1:0,placed?r.age:-1,a[0],a[1],a[2],a[3],b[0],b[1],b[2],b[3],
+                tl_pass_,v.prev_frame[s],cp,cy,pp,py);
             std::lock_guard<std::mutex> lock(trace_m_);
             if(!placed) {if(trace_unplaced_>=3000u) return;++trace_unplaced_;}
             if(trace_.size()<(4u<<20)) trace_+=line;
@@ -1871,7 +1877,13 @@ private:
 public:
     inline static std::atomic<bool> child_rebase{true};   // v1304: off = build/legacy-child-place
     inline static std::atomic<bool> kid_motion{true};   // v1317: a part's place learned in motion too; off = build/legacy-kid-learn (v1316: at rest only)
-    inline static std::atomic<bool> stale_view_match{true};   // v1320: a held thing's draw composed with the eye's previous view; off = build/no-stale-view-match
+    // v1320: a held thing's draw that decodes onto it only through the eye's PREVIOUS view is placed with the current view. v1365: OFF by default
+    // (opt-in build/stale-view-match), as in the release v1297. Stereo sims on the user's save (teapot held, v1381): those draws were composed
+    // with the camera of the image they are drawn into, while the placement's current record for the eye was another camera 44 degrees away
+    // (held-draw-trace: placed draws at 30-45 deg / 0.3-0.8 m through the current view, < 1 mm through the previous one); placing them with it
+    // drew the prop away from the hand - the walking burst showed the teapot in 2 of 16 frames (v1297, or v1381 + no-stale-view-match: 16 of 16).
+    // Left alone, such a draw shows the engine's pose, which is the drawn hold (held_render_pose).
+    inline static std::atomic<bool> stale_view_match{false};
     inline static std::atomic<std::uint64_t> stale_view_matches_{};
     inline static std::atomic<bool> stale_view_history{true};   // v1363: earlier reads and the thing's other settled Ls too; off = build/no-stale-view-history
     inline static std::array<std::atomic<std::uint64_t>,4> stale_how_{};   // v1363: [latest read + own L, earlier read + own L, latest + the thing's L, earlier + the thing's L]

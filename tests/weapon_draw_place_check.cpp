@@ -649,7 +649,48 @@ static void v1363_rest_lab(const Mat& part) {
     CHECK(renders>0 && flicker==0 && unplaced==0 && splits==0 && twin_placed==0 && err<2e-4);
 }
 
+// ---- v1365 (user, v1381 stereo: physically held props "render badly", release v1297 fine). Sim on the user's save, teapot held in the right hand:
+// v1381's walking burst showed the teapot in 2 of 16 frames (both eyes), v1297 and v1381 + no-stale-view-match in 16 of 16. held-draw-trace: half
+// the placed draws were stale-view matches whose draw decodes exactly onto the thing through the eye's previous record (0.2 mm) but 44 deg / 0.35 m
+// away through the current one - the placement's current record for the eye was another camera than the image the draw goes into, and the
+// v1320 match placed the draw with it. Here: renders whose current record is a camera pitched 44 deg away (the engine composes every draw with
+// the image's camera, which the previous record matches); a draw must end either at the engine's pose (unplaced) or at the drawn hold, both
+// seen through the image's camera - never elsewhere. Good renders must still be placed. Runs with the shipped default of the stale-view match.
+static void v1365_wrong_view_lab(const Mat& part,bool stale_default) {
+    const bool was=Place::stale_view_match.load();Place::stale_view_match.store(stale_default);
+    Place::clear();
+    const Mat hold=rigid(rot(1,0,0,.3),.05,-.02,.03),pitch44=rot(1,0,0,44/57.29577951308232);
+    std::uint32_t frame=39500;long renders=0,away=0,bad_renders=0,good_unplaced=0;double worst_good=0;
+    for(int n=0;n<60;++n,++frame) {
+        const Mat f=rigid(mul(rot(1,.3,.2,.003*n),rot(.2,.3,1,.4)),-91.75,-92.45,4.9),b=mul(f,hold);   // standing: the hand barely turns
+        const bool bad=n>=12 && n%3==1;
+        Wp image;for(unsigned e=0;e<2;++e) {image.vp[e]=vp_of(eye_pose(0,e),0);image.inv[e]=inv(image.vp[e]);}   // the head still: one image camera
+        Wp record=image;
+        if(bad) for(unsigned e=0;e<2;++e) {record.vp[e]=vp_of(mul(eye_pose(0,e),pitch44),0);record.inv[e]=inv(record.vp[e]);}
+        frames_seen[frame]=record;
+        const auto raw=raw_of(f);std::array<const float*,2> rp{nullptr,raw.data()};std::array<const Mat*,2> bp{nullptr,&b};
+        Place::stage(1,Place::kind_prop);Place::publish_bound(frame,rp,bp,{0.,.5},{0,0x2d7dc5b2210},n*tick_s);
+        if(n<4) continue;
+        const Mat m=mul(f,part),want=mul(b,part);
+        bool drawn_away=false;
+        for(unsigned e=0;e<2;++e) for(unsigned k=0;k<2;++k) {   // depth and colour pass
+            const auto c=floats(mul(image.vp[e],m));std::array<float,16> o{},q{};
+            const Result r=Place::place(frame,provider,c.data(),nullptr,o.data(),q.data(),-1,int(e),nullptr,k?0x1365cull:0x1365dull);
+            const auto seen=r.side>=0?Place::model_rows(image.inv[e].data(),o.data()):Place::model_rows(image.inv[e].data(),c.data());   // what the image shows
+            double to_engine=0,to_hold=0;for(std::size_t i=0;i<12;++i) {to_engine=std::max(to_engine,std::abs(seen[i]-m[i]));to_hold=std::max(to_hold,std::abs(seen[i]-want[i]));}
+            if(n>=12 && !bad) {if(r.side<0) ++good_unplaced;else worst_good=std::max(worst_good,to_hold);}
+            if(to_engine>2e-4 && to_hold>2e-4) drawn_away=true;
+        }
+        if(n>=12) {++renders;bad_renders+=bad;away+=drawn_away;}
+    }
+    Place::stale_view_match.store(was);
+    std::printf("v1365 current record another camera (44 deg) in %ld of %ld renders: prop drawn away from both the hand and the engine's pose in %ld renders "
+        "(stale-view match %s); good renders unplaced %ld draws, worst %.2e\n",bad_renders,renders,away,stale_default?"on":"off",good_unplaced,worst_good);
+    CHECK(bad_renders>0 && away==0 && good_unplaced==0 && worst_good<2e-4);
+}
+
 int main() {
+    const bool stale_default=Place::stale_view_match.load();   // v1365: the shipped default, before any lab changes it
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
     const Mat native_grip=rigid(rot(.2,.6,.3,.4),.04,-.02,.03);
     const Mat cross_grip=mul(y180(),native_grip);
@@ -1011,6 +1052,7 @@ int main() {
     v1361_hand_pass_lab(part);
     v1361_left_hand_lab(part);
     v1363_rest_lab(part);
+    v1365_wrong_view_lab(part,stale_default);
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }
