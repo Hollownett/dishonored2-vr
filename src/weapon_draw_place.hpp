@@ -126,6 +126,22 @@ inline bool valid_grip(const Mat& g) noexcept {
     const double det=g[0]*(g[5]*g[10]-g[6]*g[9])-g[1]*(g[4]*g[10]-g[6]*g[8])+g[2]*(g[4]*g[9]-g[5]*g[8]);
     return det>.98;
 }
+// v1367 (user, v1381 stereo: the sticky grenade and the stun mine "render badly"; release v1297 never placed stereo weapons). Sim on the user's save,
+// a gadget in the RIGHT hand (slot 1 on the crossed arm, as the user holds it): its engine bind gave a G that turns it 152 deg away from where the
+// engine itself draws it (weapon_draw.binding.sanity: 0.01 mm, 152 deg; engine bind vs the learned G 107 deg mean, the user's headset run the
+// same, max 152). Renders whose draws were placed showed it turned over, the others the engine pose: the burst flips between the two. A binding
+// is used only while its frame is within bind_sane_deg of the weapon's own engine frame F - the engine draws the weapon in the drawn hand, and a
+// frame of hand lag turns it a few degrees, never 45. The preferred source first, then the other; neither sane: provisional (B = F, as before
+// any binding). gate off (build/no-bind-gate) = the v1366 choice.
+enum BindPick : unsigned {pick_engine,pick_learned,pick_provisional,bind_picks};
+inline constexpr double bind_sane_deg=45.;
+inline BindPick pick_binding(const Mat& engine_frame,const Mat* engine_bound,const Mat* learned_bound,bool engine_first,double max_deg=bind_sane_deg) noexcept {
+    const double limit=max_deg/57.29577951308232;
+    const auto sane=[&](const Mat* b) {return b!=nullptr && frame_angle(engine_frame,*b)<=limit;};
+    if(engine_first) {if(sane(engine_bound)) return pick_engine;if(sane(learned_bound)) return pick_learned;}
+    else {if(sane(learned_bound)) return pick_learned;if(sane(engine_bound)) return pick_engine;}
+    return pick_provisional;
+}
 
 // v1284 (plan 2026-11-13 phase B; user, v1282 headset: the frame time doubles whenever a weapon is published). Every near draw (clip w < 3 m: the
 // arms, the body, scenery along a wall, thousands on a street) inverted its view-projection, took mutexes and tested every published frame before

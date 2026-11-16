@@ -313,12 +313,32 @@ public:
     }
     static void set_alternate_eye(AlternateEye f) noexcept {alt_eye_.store(f,std::memory_order_relaxed);}
     static bool alternate() noexcept {return alt_view_.load(std::memory_order_relaxed)!=0;}
-    // From the engine's view Setup (entry: the view still holds its last frame's matrices). 0 = not a paired eye.
+    // From the engine's view Setup ENTRY. 0 = not a paired eye.
+    // v1366: no snapshot here any more. v1364 eye-records.csv (stereo sim, head pitch -35): at the entry the view already carries the NEW frame's
+    // stamp but the game's own level camera (pitch 0), so every record began as the wrong camera until a render thread's classify snapshot
+    // replaced it 3-5 ms later; Views built in between (cached per frame) placed or refused that render's held draws with the level camera.
+    // The record is now taken at the Setup EXIT (note_eye_setup_done), where the view holds this frame's eye camera.
+    // build/legacy-eye-record-entry = the entry snapshot again (v1365).
     static void note_eye_view(unsigned eye,std::uintptr_t view) noexcept {
         if(eye>1) return;
         eye_views_[eye].store(view,std::memory_order_relaxed);
-        if(view && on()) {std::lock_guard<std::mutex> lock(views_mutex_);tl_snap_src_=1;snapshot(eye,view);tl_snap_src_=0;}
+        if(view && on() && !record_at_exit.load(std::memory_order_relaxed)) {std::lock_guard<std::mutex> lock(views_mutex_);tl_snap_src_=1;snapshot(eye,view);tl_snap_src_=0;}
     }
+    // v1366: the engine's view Setup returned (claimed eye Setups): the paired eye view's record of the frame it now carries.
+    static void note_eye_setup_done(std::uintptr_t view) noexcept {
+        if(!view || !on() || !record_at_exit.load(std::memory_order_relaxed)) return;
+        for(unsigned e=0;e<2;++e) if(eye_views_[e].load(std::memory_order_relaxed)==view) {
+            std::lock_guard<std::mutex> lock(views_mutex_);tl_snap_src_=4;snapshot(e,view);tl_snap_src_=0;
+        }
+    }
+    inline static std::atomic<bool> record_at_exit{true};   // v1366; off = build/legacy-eye-record-entry
+    inline static std::atomic<bool> views_versioned{true};   // v1366: cached Views rebuilt when a record of their frames changes; off = build/legacy-views-cache
+    // v1366 lab seam (tests/eye_record_check.cpp): a reader over fake view memory and an installed mode; never called by the DLL.
+    static void lab_attach(Read r) noexcept {read_=r;mode_.store(1,std::memory_order_relaxed);}
+    static const weapon_draw::Views* lab_views(std::uint32_t frame,std::uint32_t previous0,std::uint32_t previous1) noexcept {return weapon_views(frame,previous0,previous1);}
+    static void lab_snapshot(unsigned eye) noexcept {   // what a render thread's classify() does first: snapshot the paired eye view
+        if(eye>1) return;const auto view=eye_views_[eye].load(std::memory_order_relaxed);if(!view) return;
+        std::lock_guard<std::mutex> lock(views_mutex_);tl_snap_src_=2;snapshot(eye,view);tl_snap_src_=0;}
     // v1151 status: the alternate-mode draws by kind (same,own_last,other_now,other_last,unproven,miss), camera-only fallbacks, untagged.
     static std::string alternate_status_json() {
         std::string s="{\"active\":"+std::string(alternate()?"true":"false")+",\"kinds\":[";
@@ -623,7 +643,7 @@ private:
     inline static std::array<std::atomic<std::uint64_t>,7> placed_fail_{};
     inline static std::array<std::atomic<std::uint64_t>,2> weapon_placed_side_{},weapon_alt_side_{};   // alt (v1072): placed from the previous read F
     inline static std::array<std::array<std::atomic<std::uint64_t>,weapon_draw::stages>,2> weapon_skip_side_{}; // per hand by rejection stage
-    struct ViewsEntry {std::atomic<std::uint32_t> ready{};std::uint32_t previous0{},previous1{};weapon_draw::Views views{};};
+    struct ViewsEntry {std::atomic<std::uint32_t> ready{};std::uint32_t previous0{},previous1{};weapon_draw::Views views{};std::uint64_t ver{};};   // v1366: ver = record_versions at build
     inline static std::array<ViewsEntry,8> views_cache_{};
     inline static std::mutex views_cache_mutex_;
     inline static std::mutex probe_mutex_;
@@ -816,10 +836,12 @@ private:
     static void store(unsigned eye,const EyeView& v) noexcept { // under views_mutex_
         auto& ring=eye_records_[eye];auto* slot=&ring[0];
         for(auto& old:ring) {if(old.valid && old.frame==v.frame) {if(old.receipt && !v.receipt) return; slot=&old;break;} if(!old.valid || old.frame<slot->frame) slot=&old;}
-        if(weapon_perf::enabled()) {   // v1364 diagnostics
-            if(slot->valid && slot->frame==v.frame) {if(!near16(slot->m[2],v.m[2])) {const EyeView old=*slot;note_record(eye,v,&old);}}
+        {const bool same_frame=slot->valid && slot->frame==v.frame,changed=!same_frame || !near16(slot->m[2],v.m[2]);
+         if(changed) rec_ver_[v.frame&7].fetch_add(1,std::memory_order_acq_rel);   // v1366: cached Views of this frame are rebuilt (cached_views)
+         if(weapon_perf::enabled()) {   // v1364 diagnostics
+            if(same_frame) {if(changed) {const EyeView old=*slot;note_record(eye,v,&old);}}
             else note_record(eye,v,nullptr);
-        }
+         }}
         *slot=v;records_gen_.fetch_add(1,std::memory_order_release); // v1200: the content candidates are rebuilt
         std::uint32_t newest=newest_eye_frame_[eye].load(std::memory_order_relaxed);
         if(v.frame>=newest) { // the draw hooks read these without the views lock
@@ -1658,7 +1680,14 @@ private:
     static const weapon_draw::Views* cached_views(std::uint32_t frame,std::uint32_t previous0,std::uint32_t previous1) noexcept {
         ViewsEntry& entry=views_cache_[frame&7];
         if(entry.ready.load(std::memory_order_acquire)!=frame+1 || entry.previous0!=previous0 || entry.previous1!=previous1) return nullptr;
+        if(views_versioned.load(std::memory_order_relaxed) && entry.ver!=record_versions(frame,previous0,previous1)) return nullptr;   // v1366: a record changed
         return &entry.views;
+    }
+    // v1366: the versions of the records a Views entry reads (its frame and the two previous publishes), packed; rec_ver_ is bumped by store().
+    inline static std::array<std::atomic<std::uint32_t>,8> rec_ver_{};
+    static std::uint64_t record_versions(std::uint32_t frame,std::uint32_t previous0,std::uint32_t previous1) noexcept {
+        const auto v=[](std::uint32_t f) -> std::uint64_t {return f?rec_ver_[f&7].load(std::memory_order_acquire)&0x1fffffu:0u;};
+        return v(frame)|(v(previous0)<<21)|(v(previous1)<<42);
     }
     // The frame's built views whatever the previous-render key was (the probe's diagnostic model matrices only need the current ones).
     static const weapon_draw::Views* any_cached_views(std::uint32_t frame) noexcept {
@@ -1672,8 +1701,10 @@ private:
         entry.ready.store(0,std::memory_order_release);
         weapon_draw::Views v{};
         const std::uint32_t previous[2]={previous0,previous1};
+        std::uint64_t ver{};
         {
             std::lock_guard<std::mutex> lock(views_mutex_);
+            ver=record_versions(frame,previous0,previous1);   // v1366: under the records' lock, before they are read
             for(unsigned e=0;e<2;++e) for(const auto& r:eye_records_[e]) if(r.valid) {
                 if(r.frame==frame) {v.vp[e]=weapon_draw::widen(r.m[2]);v.ok[e]=weapon_draw::inverse(v.vp[e],v.inv[e]);}
                 for(unsigned s=0;s<2;++s) if(previous[s] && r.frame==previous[s]) {
@@ -1684,7 +1715,7 @@ private:
             }
         }
         if(!v.ok[0] || !v.ok[1]) return nullptr;
-        entry.previous0=previous0;entry.previous1=previous1;entry.views=v;
+        entry.previous0=previous0;entry.previous1=previous1;entry.views=v;entry.ver=ver;
         entry.ready.store(frame+1,std::memory_order_release);
         return &entry.views;
     }
@@ -2022,6 +2053,8 @@ private:
         weapon_draw::Place::kid_motion.store(!std::filesystem::exists(knobs_/L"legacy-kid-learn",error),std::memory_order_relaxed); // v1317
         weapon_draw::Place::stale_view_match.store(std::filesystem::exists(knobs_/L"stale-view-match",error),std::memory_order_relaxed); // v1320; v1365: opt-in (weapon_draw_place.hpp)
         weapon_draw::Place::stale_view_history.store(!std::filesystem::exists(knobs_/L"no-stale-view-history",error),std::memory_order_relaxed); // v1363
+        record_at_exit.store(!std::filesystem::exists(knobs_/L"legacy-eye-record-entry",error),std::memory_order_relaxed); // v1366
+        views_versioned.store(!std::filesystem::exists(knobs_/L"legacy-views-cache",error),std::memory_order_relaxed); // v1366
         // v1308; v1320: only with build/legacy-part-batching - since v1318 a held part is never instanced (sims: 256 records read from the mapped
         // buffer and matched every frame, 0 placed), so the record scan is pure cost
         instance_place.store(!std::filesystem::exists(knobs_/L"no-instance-place",error) && std::filesystem::exists(knobs_/L"legacy-part-batching",error),std::memory_order_relaxed);

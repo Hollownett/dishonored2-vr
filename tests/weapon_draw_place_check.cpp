@@ -689,6 +689,38 @@ static void v1365_wrong_view_lab(const Mat& part,bool stale_default) {
     CHECK(bad_renders>0 && away==0 && good_unplaced==0 && worst_good<2e-4);
 }
 
+// ---- v1367 (user, v1381 stereo: the sticky grenade and the stun mine "render badly"). Sim on the user's save, a gadget in the RIGHT hand (slot 1 on
+// the crossed arm): the binding's sanity said 0.01 mm / 152 deg from the engine frame, engine bind vs learned G 107 deg mean; the burst showed the
+// mine turned over in the placed renders (f1, f5) and in the engine's pose in the others. The publisher used the engine bind whenever present
+// (v1319). Now pick_binding uses a source only while its frame is within 45 deg of the engine frame F; neither: provisional (B = F).
+static void v1367_bind_gate_lab() {
+    const Mat hand=rigid(mul(rot(0,0,1,.7),rot(1,0,0,-.4)),-91.8,-92.4,5.0);   // the drawn joint 59
+    Mat f=mul(hand,rigid(rot(.3,1,.2,.9),.03,-.01,.02));for(int c=0;c<3;++c) for(int r=0;r<3;++r) f[static_cast<std::size_t>(r*4+c)]*=1.02;   // the engine frame (scaled, as a model frame)
+    const auto turned=[&](double deg,double ax,double ay,double az) {Mat b=f;for(int c=0;c<3;++c) for(int r=0;r<3;++r) b[static_cast<std::size_t>(r*4+c)]/=1.02;   // a rigid B at F's origin, turned
+        const Mat r=rot(ax,ay,az,deg/57.29577951308232);const Mat t=mul(b,r);return rigid(t,f[3],f[7],f[11]);};
+    struct Case {const char* name;double engine_deg,learned_deg;bool have_learned,engine_first;BindPick want;};
+    const Case cases[]={{"gadget, crossed (engine bind 152 deg, learned 2 deg)",152,2,true,true,pick_learned},
+                        {"gadget, both off (152 / 107 deg)",152,107,true,true,pick_provisional},
+                        {"gadget, engine bind only (152 deg, nothing learned)",152,0,false,true,pick_provisional},
+                        {"pistol (engine bind 1 deg)",1,3,true,true,pick_engine},
+                        {"fast flick (engine bind 25 deg behind)",25,30,true,true,pick_engine},
+                        {"learned first (learned 90 deg, engine 3 deg)",3,90,true,false,pick_engine},
+                        {"learned first (learned 4 deg)",60,4,true,false,pick_learned}};
+    int ok=0,legacy_turned=0;
+    for(const auto& c:cases) {
+        const Mat eb=turned(c.engine_deg,.2,1,.3),lb=turned(c.learned_deg,1,.1,.2);
+        const BindPick p=pick_binding(f,&eb,c.have_learned?&lb:nullptr,c.engine_first);
+        const Mat& used=p==pick_engine?eb:p==pick_learned?lb:f;
+        const double deg=frame_angle(f,used)*57.29577951308232;
+        const bool good=p==c.want && deg<=45.;
+        ok+=good;if(!good) std::printf("  v1367 %s: pick %u (want %u), %.1f deg from the engine frame\n",c.name,unsigned(p),unsigned(c.want),deg);
+        const Mat& legacy=c.engine_first?eb:(c.have_learned?lb:eb);   // v1366: the preferred source whenever present
+        legacy_turned+=frame_angle(f,legacy)*57.29577951308232>45.;
+    }
+    std::printf("v1367 binding gate: %d of %zu cases held within 45 deg of the engine frame (the v1366 choice turned the weapon more than 45 deg in %d)\n",ok,std::size(cases),legacy_turned);
+    CHECK(ok==static_cast<int>(std::size(cases)) && legacy_turned==4);
+}
+
 int main() {
     const bool stale_default=Place::stale_view_match.load();   // v1365: the shipped default, before any lab changes it
     const Mat part=rigid(identity(),.11,0,.065);   // a fixed part offset from F; the rig must not change it
@@ -1053,6 +1085,7 @@ int main() {
     v1361_left_hand_lab(part);
     v1363_rest_lab(part);
     v1365_wrong_view_lab(part,stale_default);
+    v1367_bind_gate_lab();
     std::printf(failures?"weapon_draw_place_check FAILED\n":"weapon_draw_place_check OK\n");
     return failures?1:0;
 }
