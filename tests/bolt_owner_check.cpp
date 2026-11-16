@@ -57,6 +57,15 @@ int main() {
         // incendiary runs out: the game switches the native, it follows; the copy is untouched
         assert(native_ammo(false,true,0)==NativeAmmo::follow);native_own=1;assert(copy_own==2);
     }
+    {   // v1372 fresh_copy_take(the copy is new to this hand, a wheel choice of the weapon by this hand, its age, this hand's native of the weapon
+        // seen, its age): the bolt a copy new to a hand starts from (tests/bolt_reacquire_check.cpp runs it through NativeRangedFire)
+        assert(fresh_copy_take(false,true,0,true,0)==FreshTake::none);              // the instance the hand already showed: its own
+        assert(fresh_copy_take(true,true,100,true,100)==FreshTake::pick);           // the choice it came for, first
+        assert(fresh_copy_take(true,true,pick_ms-1,false,0)==FreshTake::pick && fresh_copy_take(true,true,pick_ms,false,0)==FreshTake::none);
+        assert(fresh_copy_take(true,true,pick_ms,true,100)==FreshTake::native);     // a stale choice: the displaced native's bolt
+        assert(fresh_copy_take(true,false,0,true,carry_ms-1)==FreshTake::native && fresh_copy_take(true,false,0,true,carry_ms)==FreshTake::none);
+        assert(fresh_copy_take(true,false,0,false,0)==FreshTake::none);             // a caught / picked-up copy: its own
+    }
     std::puts("bolt_owner_check: ok");
     return 0;
 }
