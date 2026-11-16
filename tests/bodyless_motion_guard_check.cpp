@@ -32,4 +32,25 @@ int main(){
     assert(!G::stale_body(rd,world,0x01000005));                 // a slot mid-create (free marker): leave it to the engine
     assert(!G::stale_body(rd,world,0x01000007));                 // unreadable slot: unchanged behaviour
     assert(!G::stale_body(rd,0x80000,0x3c000003));               // unreadable world
+    // v1385: 0xc90a90(world, motion) walks the motion's body ring (motion +0x28 first, body +0x74 next) and reads every body's +0x88.
+    // Crash 2026-11-16 10:18 (0xcaf005): a ring body with +0x88 null. A ring that never closes would spin like the 09:07 hang.
+    const std::uintptr_t w2=0x90000,p2=0xa0000,m2=0xb0000;put(w2+0x28,&p2,8);put(w2+0x120,&m2,8);
+    auto body=[&](std::uint32_t slot,std::uint32_t id,std::uint32_t next,std::uint64_t props){put(p2+slot*0xb0+0x70,&id,4);put(p2+slot*0xb0+0x74,&next,4);put(p2+slot*0xb0+0x88,&props,8);};
+    auto motion=[&](std::uint32_t m,std::uint32_t first){put(m2+m*0x80+0x28,&first,4);};
+    body(4,0x01000004,0x01000004,0x1234);motion(1,0x01000004);   // a lone live body
+    assert(!G::dead_motion(rd,w2,1));
+    body(5,0x01000005,0x01000006,0x1234);body(6,0x01000006,0x01000005,0x1234);motion(2,0x01000005);   // a live two-body ring
+    assert(!G::dead_motion(rd,w2,2));
+    body(7,0x01000007,0x01000007,0);motion(3,0x01000007);        // the crash shape: +0x88 null
+    assert(G::dead_motion(rd,w2,3));
+    motion(4,0x02000004);                                         // a stale first id (slot 4 holds 0x01000004)
+    assert(G::dead_motion(rd,w2,4));
+    body(8,0x01000008,0x01000009,0x1234);body(9,0x01000009,0x0100000a,0);motion(5,0x01000008);   // dead body later in the ring
+    assert(G::dead_motion(rd,w2,5));
+    body(10,0x0100000a,0x0100000b,0x1234);body(11,0x0100000b,0x0100000b,0x1234);motion(6,0x0100000a);   // ring never returns to its first
+    assert(G::dead_motion(rd,w2,6));
+    motion(7,0x00ffffff);                                         // no body: the engine's own early exit, pass through
+    assert(!G::dead_motion(rd,w2,7));
+    assert(!G::dead_motion(rd,w2,9));                             // unreadable motion: unchanged behaviour
+    assert(!G::dead_motion(rd,0xc0000,1));                        // unreadable world
     std::puts("bodyless_motion_guard_check ok");return 0;}

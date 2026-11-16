@@ -37,6 +37,9 @@ public:
     static constexpr std::array<unsigned char,40> set_motion_prologue{
         0x89,0x54,0x24,0x10,0x55,0x53,0x56,0x57,0x41,0x56,0x48,0x8d,0x6c,0x24,0xc9,0x48,0x81,0xec,0xf0,0x00,0x00,0x00,0x48,0x8b,
         0x79,0x28,0x44,0x8b,0xd2,0x41,0x8b,0xd8,0x41,0x81,0xe2,0xff,0xff,0xff,0x00,0x45};
+    static constexpr std::uintptr_t motion_rva=0xc90a90;
+    static constexpr std::array<unsigned char,24> motion_prologue{
+        0x4c,0x8b,0xdc,0x55,0x57,0x41,0x56,0x41,0x57,0x49,0x8d,0xab,0x78,0xfd,0xff,0xff,0x48,0x81,0xec,0x68,0x03,0x00,0x00,0x44};
     static constexpr bool forbidden_body(std::uint32_t id) noexcept {const auto i=id&0xffffff;return i==0 || i==0xffffff;}
     // v1384 (hang 2026-11-16, after Stilton's mission): an id is serial<<24 | slot, and 0xc86800 looks the body up by the slot alone. A game
     // caller still holding the previous level's 0x3c000003 switched the new level's static trigger 0x01000003 to dynamic and linked the
@@ -46,6 +49,25 @@ public:
         std::uintptr_t pool{};std::uint32_t stored{};const auto slot=id&0xffffff;
         if(!read(world+0x28,&pool,8) || !pool || !read(pool+std::uintptr_t{slot}*0xb0+0x70,&stored,4))return false;
         return (stored&0xffffff)==slot && stored!=id;
+    }
+    // v1385 (crash 2026-11-16 10:18 at 0xcaf005, Timepiece raised in a level after its mission): 0xc90a90(world, u32 motion; void, 12 direct
+    // callers, e.g. arkCpntPhysicsSystem 0x76ca80) rebuilds a motion from its attached bodies: motion ([world+0x120] + m*0x80) +0x28 first id,
+    // body ([world+0x28] + slot*0xb0) +0x74 next, and 0xcaefc0 dereferences every ring body's +0x88. A ring body that is not that id any more
+    // or has no +0x88 crashes; a ring that never comes back to its first spins (the 09:07 hang shape). Such a motion is skipped, as the
+    // engine itself skips a motion with no first body (0xc90ac8 -> 0xc90dc4). Unreadable: unchanged behaviour.
+    template<class Reader> static bool dead_motion(Reader&& read,std::uintptr_t world,std::uint32_t motion) noexcept {
+        std::uintptr_t pool{},motions{};std::uint32_t first{};
+        if(!read(world+0x28,&pool,8) || !read(world+0x120,&motions,8) || !pool || !motions ||
+           !read(motions+std::uintptr_t{motion}*0x80+0x28,&first,4) || (first&0xffffff)==0xffffff)return false;
+        std::uint32_t id=first;
+        for(int n=0;n<4096;++n) {
+            const auto body=pool+std::uintptr_t{id&0xffffff}*0xb0;std::uint32_t stored{},next{};std::uintptr_t props{};
+            if(!read(body+0x70,&stored,4) || !read(body+0x74,&next,4) || !read(body+0x88,&props,8))return false;
+            if(stored!=id || !props)return true;
+            if(next==first)return false;
+            id=next;
+        }
+        return true;
     }
 
     template<class Reader> static bool doomed(Reader&& read,std::uintptr_t system,std::uint16_t bone,std::uint16_t sentinel) noexcept {
@@ -69,16 +91,22 @@ public:
            !read(base+flag_rva,flag.data(),flag.size()) || flag!=flag_code)return false;
         std::array<unsigned char,set_motion_prologue.size()> set_entry{};
         if(!read(base+set_motion_rva,set_entry.data(),set_entry.size()) || set_entry!=set_motion_prologue)return false;
-        void* trampoline{};void* set_trampoline{};
+        std::array<unsigned char,motion_prologue.size()> motion_entry{};
+        if(!read(base+motion_rva,motion_entry.data(),motion_entry.size()) || motion_entry!=motion_prologue)return false;
+        void* trampoline{};void* set_trampoline{};void* motion_trampoline{};
         if(MH_CreateHook(reinterpret_cast<void*>(base+rva),reinterpret_cast<void*>(&hook),&trampoline)!=MH_OK)return false;
         if(MH_CreateHook(reinterpret_cast<void*>(base+set_motion_rva),reinterpret_cast<void*>(&set_motion_hook),&set_trampoline)!=MH_OK)return false;
+        if(MH_CreateHook(reinterpret_cast<void*>(base+motion_rva),reinterpret_cast<void*>(&motion_hook),&motion_trampoline)!=MH_OK)return false;
         base_=base;original_.store(reinterpret_cast<Original>(trampoline));set_original_.store(reinterpret_cast<SetMotion>(set_trampoline));
-        if(MH_EnableHook(reinterpret_cast<void*>(base+rva))!=MH_OK || MH_EnableHook(reinterpret_cast<void*>(base+set_motion_rva))!=MH_OK)return false;
+        motion_original_.store(reinterpret_cast<RebuildMotion>(motion_trampoline));
+        if(MH_EnableHook(reinterpret_cast<void*>(base+rva))!=MH_OK || MH_EnableHook(reinterpret_cast<void*>(base+set_motion_rva))!=MH_OK ||
+           MH_EnableHook(reinterpret_cast<void*>(base+motion_rva))!=MH_OK)return false;
         installed_=true;return true;
     }
     static bool installed() noexcept {return installed_.load();}
     static std::uint64_t skips() noexcept {return skips_.load(std::memory_order_relaxed);}
     static std::uint64_t body_skips() noexcept {return body_skips_.load(std::memory_order_relaxed);}
+    static std::uint64_t motion_skips() noexcept {return motion_skips_.load(std::memory_order_relaxed);}
 
 private:
     using Original=std::uintptr_t (__fastcall*)(std::uintptr_t,std::uintptr_t,std::uint16_t,std::uintptr_t,std::uint16_t);
@@ -91,6 +119,13 @@ private:
     static void __fastcall set_motion_hook(std::uintptr_t world,std::uint32_t id,std::uint8_t type,std::uint8_t activation) {
         if(forbidden_body(id) || stale_body(&seh_read,world,id)) {body_skips_.fetch_add(1,std::memory_order_relaxed);return;}
         set_original_.load()(world,id,type,activation);
+    }
+    using RebuildMotion=void (__fastcall*)(std::uintptr_t,std::uint32_t);
+    inline static std::atomic<RebuildMotion> motion_original_{};
+    inline static std::atomic<std::uint64_t> motion_skips_{};
+    static void __fastcall motion_hook(std::uintptr_t world,std::uint32_t motion) {
+        if(dead_motion(&seh_read,world,motion)) {motion_skips_.fetch_add(1,std::memory_order_relaxed);return;}
+        motion_original_.load()(world,motion);
     }
     inline static std::uintptr_t base_{};
     static bool seh_read(std::uintptr_t address,void* out,std::size_t size) noexcept {
