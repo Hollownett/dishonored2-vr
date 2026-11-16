@@ -2369,6 +2369,7 @@ void __fastcall view_setup_hook(void* view,int* window_rect,int* render_rect) {
             const auto dlss_setup_input=claimed?begin_dlss_setup_observation(view):std::optional<temporal_eye::SetupObservation>{};
             bool dlss_jitter_written=false;
             original(view,window_rect,render_rect);setup_completed=true;
+            if(claimed) d2vr::ObjectMotion::note_eye_setup_done(reinterpret_cast<std::uintptr_t>(view));   // v1366: the eye record of the frame this Setup made
             view_trace("setup_out",view,claimed?1:0,head_wrote?1:0,trace_caller);
             if(claimed) alt_taa_trace(view);
             if(claimed && forced_view_jitter && view_jitter_abi) { // see d2vr::engine_taa_jitter
@@ -4053,6 +4054,7 @@ static std::uint64_t weapon_copy_write(unsigned side,std::uintptr_t entity,std::
 // placed by it, renders compared with a learned G (mean/max mm and deg, mm histogram <0.5 <2 <10 <50 >=50), refusals [no bind, another master,
 // another joint, bad values], the last bind read.
 static bool engine_bind_on=true,engine_bind_only=true;static std::array<std::array<std::atomic<std::uint64_t>,5>,2> engine_bind_hist{};
+static bool bind_gate=true;static std::array<std::array<std::atomic<std::uint64_t>,d2vr::weapon_draw::bind_picks>,2> bind_gate_picks{};   // v1367 (weapon_draw::pick_binding): [engine, learned, provisional] per hand; off = build/no-bind-gate
 static std::array<std::atomic<std::uint64_t>,2> engine_bind_used{},engine_bind_compared{};static std::array<std::atomic<std::uint64_t>,4> engine_bind_refused{};
 static std::mutex engine_bind_m;static std::array<double,2> engine_bind_mm_sum{},engine_bind_deg_sum{},engine_bind_mm_max{},engine_bind_deg_max{};
 static std::array<float,8> engine_bind_last{};static std::atomic<int> engine_bind_last_joint{-1};
@@ -4087,7 +4089,8 @@ static std::string engine_bind_json() {
     std::lock_guard<std::mutex> l(engine_bind_m);
     for(unsigned h=0;h<2;++h) {const auto n=engine_bind_compared[h].load();o<<(h?",":",\"vs_learned\":[")<<"{\"mm\":"<<(n?engine_bind_mm_sum[h]/static_cast<double>(n):0.)<<",\"mm_max\":"<<engine_bind_mm_max[h]<<",\"deg\":"<<(n?engine_bind_deg_sum[h]/static_cast<double>(n):0.)<<",\"deg_max\":"<<engine_bind_deg_max[h]<<'}';}
     o<<"],\"hist_mm\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned b=0;b<5;++b) o<<(b?",":"")<<engine_bind_hist[h][b].load();o<<']';}
-    o<<"],\"last\":{\"joint\":"<<engine_bind_last_joint.load()<<",\"o\":["<<engine_bind_last[0]<<','<<engine_bind_last[1]<<','<<engine_bind_last[2]<<"],\"q\":["<<engine_bind_last[3]<<','<<engine_bind_last[4]<<','<<engine_bind_last[5]<<','<<engine_bind_last[6]<<"]}}";
+    o<<"],\"last\":{\"joint\":"<<engine_bind_last_joint.load()<<",\"o\":["<<engine_bind_last[0]<<','<<engine_bind_last[1]<<','<<engine_bind_last[2]<<"],\"q\":["<<engine_bind_last[3]<<','<<engine_bind_last[4]<<','<<engine_bind_last[5]<<','<<engine_bind_last[6]<<"]}";
+    o<<",\"bind_gate\":{\"on\":"<<(bind_gate?"true":"false")<<",\"picks\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned k=0;k<d2vr::weapon_draw::bind_picks;++k) o<<(k?",":"")<<bind_gate_picks[h][k].load();o<<']';}o<<"]}}";   // v1367
     return o.str();
 }
 static void bound_children(std::uintptr_t entity,const d2vr::weapon_draw::Mat& f,d2vr::weapon_draw::Mat* kids,unsigned& n,unsigned max,std::uintptr_t* ids=nullptr) noexcept;
@@ -4334,8 +4337,25 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
             if(!image) {skip(1);continue;}
             const auto hand_mat=weapon_mat(*image);
             d2vr::weapon_draw::Mat bound_frame{};
-            const bool by_engine=engine_g && (!is_bound || engine_bind_only);   // v1319
-            if(by_engine) {bound_frame=d2vr::weapon_draw::mul(hand_mat,*engine_g);engine_bind_used[hand].fetch_add(1,std::memory_order_relaxed);}
+            bool by_engine=engine_g && (!is_bound || engine_bind_only);   // v1319
+            if(bind_gate) {   // v1367 (weapon_draw::pick_binding): a binding more than 45 deg from where the engine draws the weapon is not used
+                d2vr::weapon_draw::Mat engine_b{},learned_b{};
+                const bool have_learned=is_bound && d2vr::weapon_draw::Binder::frame(hand,hand_mat,learned_b);
+                if(engine_g) engine_b=d2vr::weapon_draw::mul(hand_mat,*engine_g);
+                const auto pick=d2vr::weapon_draw::pick_binding(live,engine_g?&engine_b:nullptr,have_learned?&learned_b:nullptr,by_engine);
+                bind_gate_picks[hand][pick].fetch_add(1,std::memory_order_relaxed);
+                if(pick==d2vr::weapon_draw::pick_provisional) {   // neither source holds the weapon where the engine draws it: its own frame (as unbound)
+                    if(weapon_provisional) {
+                        bound[hand]=live;raw_ptr[hand]=raw[hand].data();bound_ptr[hand]=&bound[hand];place_ids[hand]=identity;stage_weapon(true);
+                        ++weapon_draw_provisional[hand];weapon_draw_provisional_now[hand].store(true,std::memory_order_relaxed);
+                    }
+                    continue;
+                }
+                by_engine=pick==d2vr::weapon_draw::pick_engine;
+                bound_frame=by_engine?engine_b:learned_b;
+                if(by_engine) engine_bind_used[hand].fetch_add(1,std::memory_order_relaxed);
+            }
+            else if(by_engine) {bound_frame=d2vr::weapon_draw::mul(hand_mat,*engine_g);engine_bind_used[hand].fetch_add(1,std::memory_order_relaxed);}
             else if(!d2vr::weapon_draw::Binder::frame(hand,hand_mat,bound_frame)) {skip(3);continue;}
             d2vr::weapon_draw::Binder::note_sanity(hand,live,bound_frame);   // report-only: engine F vs the bound frame
             raw_ptr[hand]=raw[hand].data();bound[hand]=bound_frame;bound_ptr[hand]=&bound[hand];place_ids[hand]=identity;weapon_draw_last_skip[hand].store(-1,std::memory_order_relaxed);
@@ -18171,6 +18191,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::RigMask::instanced_rig_check=!fs::exists(root/L"build"/L"legacy-instanced-rig"); // v1317: an instanced draw without a VS layout is not the rig
         part_batch_on=!fs::exists(root/L"build"/L"legacy-part-batching"); // v1318: held weapon parts keep their own shader-parm block (never merged)
         engine_bind_on=!fs::exists(root/L"build"/L"no-engine-bind");engine_bind_only=!fs::exists(root/L"build"/L"engine-bind-gaps"); // v1319
+        bind_gate=!fs::exists(root/L"build"/L"no-bind-gate"); // v1367
         alt_weapon_place_knob=alt_defaults && !fs::exists(root/L"build"/L"no-alt-weapon-place");d2vr::ObjectMotion::alt_weapon_place=alt_weapon_place_knob; // v1191
         if(!rig_target_knob && !alt_weapon_place_knob) d2vr::rig_target::book().clear();
         d2vr::ObjectMotion::held_mask=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-held-mask"); // v1183: held weapons/props in the rig mask (253) // v1181: the same fix on paired stereo frames
