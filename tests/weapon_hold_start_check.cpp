@@ -154,6 +154,28 @@ int main() {
             const auto d=drawn(sol.solve(inputs(&idle,true,second_item,true)));
             expect(!(d.finger_mode==3 && angle_between(d.socket.q,first_grip.socket.q)<1*deg),"the new item's draw never starts from the previous item's grip");
         }
+        {   // v1373 (user, v1381: "in the release build the grip worked fine"): switching back and forth between two items (crossbow <-> pistol in
+            // one hand) - each draw of an item held before starts from ITS remembered grip through the draw clip, as a holster -> draw of one
+            // item does (v613). v1360 ends the hold on every item change, and the memory held one item per hand: the item held before the last
+            // one always started from the draw clip's first frame (40 deg off, fingers open) until the clip was steady.
+            BodySolver sol(body,left,right,{eye_height,span});Output out;
+            for(int f=0;f<60;++f) out=sol.solve(inputs(&idle,false,first_item,false));
+            const auto first_grip=drawn(out);
+            for(int f=0;f<60;++f) out=sol.solve(inputs(&other,false,second_item,false));   // the second item, held until calibrated
+            double worst_deg=0,worst_m=0;
+            for(std::size_t f=0;f<draw.size();++f) {   // back to the first item: its draw clip
+                const auto d=drawn(sol.solve(inputs(&draw[f],false,first_item,false)));
+                worst_deg=std::max(worst_deg,angle_between(d.socket.q,first_grip.socket.q)/deg);worst_m=std::max(worst_m,length(d.socket.p-first_grip.socket.p));
+            }
+            std::printf("back to an item held before: socket off its own grip by at most %.2f deg %.1f mm through its draw clip\n",worst_deg,worst_m*1000);
+            expect(worst_deg<1 && worst_m<.002,"an item held before starts from its own remembered grip after another item");
+            double second_deg=0;   // and the second item again (its draw frames 70 deg off its grip, steady only after 0.25 s): its own grip too
+            for(int f=0;f<60;++f) out=sol.solve(inputs(&idle,false,first_item,false));
+            const auto far_draw=clip(-30*deg,60*deg);
+            for(int f=0;f<15;++f) second_deg=std::max(second_deg,angle_between(drawn(sol.solve(inputs(&far_draw,false,second_item,false))).socket.q,own_grip.socket.q)/deg);
+            std::printf("and back to the second: socket off its own grip by at most %.2f deg\n",second_deg);
+            expect(second_deg<1,"the second item, drawn again after the first, starts from its own remembered grip");
+        }
     }
     if(failures) {std::cerr<<failures<<" failure(s)\n";return 1;}
     std::puts("weapon hold start check ok");return 0;
