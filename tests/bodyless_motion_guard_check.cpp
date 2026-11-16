@@ -23,4 +23,13 @@ int main(){
     assert(!G::doomed(rd,0x50000,all,all));                      // unreadable: unchanged behaviour
     assert(G::forbidden_body(0) && G::forbidden_body(0x5000000) && G::forbidden_body(0xffffff) && G::forbidden_body(0xffffffff));   // world body / invalid id (high byte = flags)
     assert(!G::forbidden_body(1) && !G::forbidden_body(0x123));
+    // v1384: the 2026-11-16 hang shape. world+0x28 -> pool (0xb0 per body, own id at +0x70). Slot 3 holds trigger 0x01000003; a caller
+    // still holding the previous level's 0x3c000003 must not switch it (the engine indexes by the low 24 bits and links the stale id).
+    const std::uintptr_t world=0x60000,pool=0x70000;put(world+0x28,&pool,8);
+    const std::uint32_t live=0x01000003,freed=0x02ffffff;put(pool+3*0xb0+0x70,&live,4);put(pool+5*0xb0+0x70,&freed,4);
+    assert(G::stale_body(rd,world,0x3c000003));                  // same slot, other serial: a body from another life
+    assert(!G::stale_body(rd,world,0x01000003));                 // the body itself
+    assert(!G::stale_body(rd,world,0x01000005));                 // a slot mid-create (free marker): leave it to the engine
+    assert(!G::stale_body(rd,world,0x01000007));                 // unreadable slot: unchanged behaviour
+    assert(!G::stale_body(rd,0x80000,0x3c000003));               // unreadable world
     std::puts("bodyless_motion_guard_check ok");return 0;}

@@ -38,6 +38,15 @@ public:
         0x89,0x54,0x24,0x10,0x55,0x53,0x56,0x57,0x41,0x56,0x48,0x8d,0x6c,0x24,0xc9,0x48,0x81,0xec,0xf0,0x00,0x00,0x00,0x48,0x8b,
         0x79,0x28,0x44,0x8b,0xd2,0x41,0x8b,0xd8,0x41,0x81,0xe2,0xff,0xff,0xff,0x00,0x45};
     static constexpr bool forbidden_body(std::uint32_t id) noexcept {const auto i=id&0xffffff;return i==0 || i==0xffffff;}
+    // v1384 (hang 2026-11-16, after Stilton's mission): an id is serial<<24 | slot, and 0xc86800 looks the body up by the slot alone. A game
+    // caller still holding the previous level's 0x3c000003 switched the new level's static trigger 0x01000003 to dynamic and linked the
+    // stale id into its motion ring (body +0x74, motion +0x28); destroying the trigger later walked that ring forever (0xc92860).
+    // Stale = the slot holds another live body (same slot, other serial). A free slot or an unreadable one goes to the engine unchanged.
+    template<class Reader> static bool stale_body(Reader&& read,std::uintptr_t world,std::uint32_t id) noexcept {
+        std::uintptr_t pool{};std::uint32_t stored{};const auto slot=id&0xffffff;
+        if(!read(world+0x28,&pool,8) || !pool || !read(pool+std::uintptr_t{slot}*0xb0+0x70,&stored,4))return false;
+        return (stored&0xffffff)==slot && stored!=id;
+    }
 
     template<class Reader> static bool doomed(Reader&& read,std::uintptr_t system,std::uint16_t bone,std::uint16_t sentinel) noexcept {
         if(bone!=sentinel || !system)return false;
@@ -80,7 +89,7 @@ private:
     inline static std::atomic<SetMotion> set_original_{};
     inline static std::atomic<std::uint64_t> body_skips_{};
     static void __fastcall set_motion_hook(std::uintptr_t world,std::uint32_t id,std::uint8_t type,std::uint8_t activation) {
-        if(forbidden_body(id)) {body_skips_.fetch_add(1,std::memory_order_relaxed);return;}
+        if(forbidden_body(id) || stale_body(&seh_read,world,id)) {body_skips_.fetch_add(1,std::memory_order_relaxed);return;}
         set_original_.load()(world,id,type,activation);
     }
     inline static std::uintptr_t base_{};
