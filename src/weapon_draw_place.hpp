@@ -1883,6 +1883,11 @@ public:
     // (held-draw-trace: placed draws at 30-45 deg / 0.3-0.8 m through the current view, < 1 mm through the previous one); placing them with it
     // drew the prop away from the hand - the walking burst showed the teapot in 2 of 16 frames (v1297, or v1381 + no-stale-view-match: 16 of 16).
     // Left alone, such a draw shows the engine's pose, which is the drawn hold (held_render_pose).
+    // Why the current record was another camera (v1364 eye-records.csv, sim): every eye record is first taken at the Setup ENTRY snapshot
+    // (ObjectMotion::note_eye_view), where the view already carries the new frame's stamp but the game's own level camera (pitch 0, the eye
+    // at -35), and a render thread's classify snapshot replaces it with the eye camera 3-5 ms later (4666 rewrites level -> eye, none back).
+    // Views built in that window are cached for the frame (weapon_views) and never rebuilt: those renders were placed with the level camera.
+    // Not fixed here (the records also feed the TAA/FSR previous rows); a record taken at the Setup exit would remove the window.
     inline static std::atomic<bool> stale_view_match{false};
     inline static std::atomic<std::uint64_t> stale_view_matches_{};
     inline static std::atomic<bool> stale_view_history{true};   // v1363: earlier reads and the thing's other settled Ls too; off = build/no-stale-view-history
