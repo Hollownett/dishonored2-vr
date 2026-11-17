@@ -369,29 +369,40 @@ public:
 // the game's Talk (+0xe8) and Pickpocket (+0xc0) offers. The grip keeps doors, keyholes, loot and the deliberate neck choke; the
 // trigger press becomes a short native Use (220 ms), exactly as the grip's own Use press was, and is consumed so it never fires
 // or casts. A change of target, or letting go of the feature/hand, cancels the claim.
-enum class NpcAction {none,talk,pickpocket,loot};   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot = a lying body's Loot, on the trigger like Pickpocket
+enum class NpcAction {none,talk,pickpocket,loot,carry};   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot = a lying body's Loot, on the trigger like Pickpocket
+// v1392 (user 2026-11-17: "carrying the body just by holding the trigger"; the grip still drags): carry = a body's Carry offer. The trigger is
+// then the game's HELD Use (its carry is a ~0.55 s hold), as long as the trigger is held, at most carry_hold_ms. A lootable body is looted by
+// the first 220 ms (the game's tap), and a trigger still held when its Carry offer appears presses again (after a release gap) to carry it.
 class NpcTriggerOwner {
 public:
     using Target=TalkYOwner::Target;
     struct Result {bool consume_trigger{},interact{},owned{};};
+    static constexpr std::uint64_t tap_ms=220,carry_hold_ms=1500,carry_gap_ms=120;
 private:
-    bool down_=true,claimed_{};
-    Target target_{};std::uint64_t epoch_{},until_{};
+    bool down_=true,claimed_{},swallow_{};NpcAction action_{};
+    Target target_{};std::uint64_t epoch_{},from_{},until_{};
 public:
     void cancel() noexcept {claimed_=false;until_=0;}
     Result update(bool pressed,bool allowed,std::uint64_t epoch,std::uint64_t now,Target target,NpcAction action) noexcept {
         if(epoch_!=epoch || !allowed || !epoch) {claimed_=false;until_=0;}
         epoch_=epoch;
         const bool was_down=down_;
-        if(!pressed) down_=false;
+        if(!pressed) {down_=false;swallow_=false;}
         else if(!was_down) {
             down_=true;
-            if(allowed && epoch && target && action!=NpcAction::none) {claimed_=true;target_=target;until_=now+220;}
+            if(allowed && epoch && target && action!=NpcAction::none) {
+                claimed_=true;target_=target;action_=action;from_=now;until_=now+(action==NpcAction::carry?carry_hold_ms:tap_ms);
+                swallow_=action==NpcAction::carry || action==NpcAction::loot;   // a body's trigger is never a shot or a throw until let go
+            }
+        }
+        // the loot went and the same body now offers Carry: the still-held trigger carries it (a fresh Use edge after a gap)
+        if(claimed_ && pressed && action==NpcAction::carry && action_==NpcAction::loot && target==target_) {
+            action_=NpcAction::carry;from_=std::max(now,until_+carry_gap_ms);until_=from_+carry_hold_ms;
         }
         if(claimed_ && (!pressed || !(target==target_) || action==NpcAction::none || !allowed || !epoch)) {claimed_=false;until_=0;}
         // The claim consumes the trigger until it is let go (so a late press never turns into a shot), but only the first
-        // 220 ms is a native Use: the game sees one press, never an endless held X.
-        return {claimed_,claimed_ && now<until_,claimed_};
+        // 220 ms is a native Use (a Carry: while held, bounded): the game sees one press, never an endless held X.
+        return {claimed_ || swallow_,claimed_ && now>=from_ && now<until_,claimed_};
     }
 };
 // The trigger, not the grip, owns an NPC's Talk/Pickpocket offer: suppress the grip's native Use for that hand. A hand that

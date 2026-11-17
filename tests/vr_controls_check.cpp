@@ -1051,6 +1051,20 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         r=run(true,true,1390,other,d2vr::NpcAction::loot);assert(r.owned && r.interact && r.consume_trigger);   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot offer + trigger = the game's Use
         r=run(true,true,1700,other,d2vr::NpcAction::loot);assert(r.owned && !r.interact);   // one 220 ms press, then only consumed
         assert(d2vr::npc_trigger_owns_hand(true,false,false,false,true) && !d2vr::npc_trigger_owns_hand(true,false,false,true,true));   // a body's loot offer owns the trigger, never a weapon hand's
+        {   // v1392: trigger on a body = the game's carry (held Use); a lootable body: loot tap, then the carry while still held
+            d2vr::NpcTriggerOwner c;const d2vr::TalkYOwner::Target body{0x5000,9,44,0x6000};
+            const auto go=[&](bool p,std::uint64_t now,d2vr::TalkYOwner::Target t,d2vr::NpcAction a) {return c.update(p,true,3,now,t,a);};
+            auto q=go(false,1990,body,d2vr::NpcAction::carry);
+            q=go(true,2000,body,d2vr::NpcAction::carry);assert(q.interact && q.consume_trigger);
+            q=go(true,2600,body,d2vr::NpcAction::carry);assert(q.interact);                       // held past the game's ~0.55 s carry gauge
+            q=go(true,2700,{},d2vr::NpcAction::none);assert(!q.interact && q.consume_trigger);    // carried: target gone, the trigger is never a throw
+            q=go(false,2800,{},d2vr::NpcAction::none);assert(!q.consume_trigger);
+            q=go(true,3000,body,d2vr::NpcAction::loot);assert(q.interact);                        // loot tap
+            q=go(true,3225,body,d2vr::NpcAction::loot);assert(!q.interact && q.owned);
+            q=go(true,3230,body,d2vr::NpcAction::carry);assert(!q.interact && q.owned);          // the Carry offer: a release gap first
+            q=go(true,3600,body,d2vr::NpcAction::carry);assert(q.interact);                       // then the held Use carries it
+            q=go(true,3600+d2vr::NpcTriggerOwner::carry_hold_ms,body,d2vr::NpcAction::carry);assert(!q.interact);   // bounded
+        }
     }
     return 0;
 }

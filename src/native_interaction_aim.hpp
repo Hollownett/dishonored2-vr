@@ -2410,11 +2410,13 @@ public:
     // v966: the raw native primary action for this hand (declaration+offset), independent of the strict Talk/Loot receipt.
     // The headset's Talk prompt is often drawn from this offer while native_talk_offer_current rejects the receipt, which left
     // Talk/pickpocket on the grip and its X hint. +0xe8/+0x110 are Talk, +0xc0 Pickpocket.
-    enum class NpcOfferKind {none,talk,pickpocket,loot};   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot = a body's Loot (+0x98), owned by the trigger like Pickpocket
+    enum class NpcOfferKind {none,talk,pickpocket,loot,carry};   // v1392: carry = the selector offers +0x70 (m_carryCorpse); the caller checks the owner is a body
+      // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): loot = a body's Loot (+0x98), owned by the trigger like Pickpocket
     struct NpcOffer {
         NpcOfferKind kind{};std::uintptr_t component{},owner{};unsigned spawn{};int generation{-1};
         explicit operator bool() const noexcept {return kind!=NpcOfferKind::none && component && generation>=0 && spawn;}
     };
+    static constexpr std::int64_t native_carry_offer_offset=0x70;   // the NPC interaction's Carry (112 in the shoulder journal's offer)
     NpcOffer npc_offer(int side,std::uint64_t now) {
         if(side<0 || side>1) return {};
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2428,6 +2430,7 @@ public:
         auto kind=kind_of(loot_primary_offset_[at]);
         if(kind==NpcOfferKind::none) kind=kind_of(loot_secondary_offset_[at]);   // Talk is the secondary offer on some NPCs
         if(kind==NpcOfferKind::none && live_loot_offer(at,now)) kind=NpcOfferKind::loot;   // v1141: the validated Loot receipt (NPC interaction, player-owned sensor), never an item pickup
+        if(kind==NpcOfferKind::none && (loot_primary_offset_[at]==native_carry_offer_offset || loot_secondary_offset_[at]==native_carry_offer_offset)) kind=NpcOfferKind::carry;
         if(kind==NpcOfferKind::none) return {};
         return {kind,target_object_[at],target_owner_[at],target_spawn_[at],target_generation_[at]};
     }
