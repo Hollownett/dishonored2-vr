@@ -3,7 +3,7 @@
 Work down this list, one change at a time, until the game holds your headset's refresh rate.
 
 1. **Headset app: 72 Hz or 90 Hz.** 72 Hz is the easiest to hold. 90 Hz is smoother but leaves less time for each
-   frame. In Virtual Desktop, also set Synchronous Spacewarp to **Disabled**.
+   frame.
 2. **Mod, Resolution: 1.00x** (100% in game). This is the biggest lever: 1.50x is 2.25 times the pixels and 2.00x is
    4 times. Your headset app has its own resolution setting and the two multiply, so raise only one of them.
 3. **Mod, Anti-aliasing.** FSR and DLSS cost some frame time of their own. The default (DLAA or FSR Native) is the
