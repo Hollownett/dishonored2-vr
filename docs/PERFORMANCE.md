@@ -17,8 +17,9 @@ To hold 72 or 90 fps, start here and change one thing at a time:
 
 1. **Headset app:** pick 72 Hz (the easiest) or 90 Hz. In Virtual Desktop, set Synchronous Spacewarp to **Disabled**.
 2. **Mod, Resolution:** start at **1.00x**. Raise it only once the game holds the refresh rate.
-3. **Mod, Anti-aliasing:** **DLSS Quality** (NVIDIA RTX) or **FSR 3 / FSR 4 Quality** to gain speed. DLAA and the FSR Native
-   modes give a cleaner image but render every pixel, so they give no speed back.
+3. **Mod, Anti-aliasing:** FSR and DLSS cost GPU time of their own, so **SMAA** or **Off** gains a few frames over
+   DLAA or FSR Native. To keep a temporal upscaler, use **DLSS Quality** (NVIDIA RTX) or **FSR 3 / FSR 4 Quality**:
+   they render fewer pixels, which usually saves more than the upscaler costs.
 4. **Game, Shadow Quality:** **Low** or Medium. It is the game setting most worth lowering (see below).
 5. **Mod, Monitor view:** **Off** (fastest) or Right eye. Both eyes costs the most.
 6. Still short? Turn **Performance mode** on in the launcher Settings. Read what it costs first ([below](#performance-mode)).
@@ -69,17 +70,27 @@ both show as 36 fps. Cutting a fifth of the work can be enough to get the full r
 | Anti-aliasing entry | Renders | Speed |
 |---|---|---|
 | Off | 100% | Fastest; edges shimmer |
-| SMAA | 100% | Cheap edge smoothing |
+| SMAA | 100% | A light edge-smoothing pass, much cheaper than FSR or DLSS; thin distant detail can still shimmer |
 | Game TAA | 100% | Leaves ghost trails on moving things in VR; not recommended |
-| FSR 3 Native, FSR 4 Native, DLAA | 100% | Anti-aliasing only: costs extra, gives no speed |
-| FSR 3 Quality, FSR 4 Quality | 77% | Faster |
+| FSR 3 Native, FSR 4 Native, DLAA | 100% | Slower than Off or SMAA: every pixel plus the upscaler pass. The cleanest image |
+| FSR 3 Quality, FSR 4 Quality | 77% | Fewer pixels, plus the upscaler pass. Usually faster than Native at headset resolution |
 | FSR 3 Balanced | 67% | Faster still, softer |
-| DLSS Quality (NVIDIA RTX) | about 67% (NVIDIA picks it) | Faster |
+| DLSS Quality (NVIDIA RTX) | about 67% (NVIDIA picks it) | Fewer pixels, plus the upscaler pass |
 | SSAA 125% | **sets Resolution to 1.25x** | 1.56x the pixels |
 | SSAA 200% + SMAA | **sets Resolution to 2.00x** | 4x the pixels, the heaviest setting there is |
 
+- **FSR and DLSS are not free.** They run an extra pass on the GPU for each eye, every frame, and the pass grows with
+  the resolution. At headset resolution, FSR 4 Native measured about 4.7 ms for both eyes on an RX 9070 XT (v1107 cut most
+  of that by running FSR 4 only on the centre of each eye). At 90 Hz the whole frame has 11.1 ms.
+- **Switching to SMAA or Off removes that pass,** so it can gain some frames when the GPU is the limit. You trade the
+  steadier temporal image for more edge shimmer. The gain is largest at high Resolution; at a small test resolution
+  (1912x1046), Off and FSR 3 Native measured about the same.
+- The Quality and Balanced modes render fewer pixels, which usually saves more than the pass costs at headset
+  resolution. At low Resolution, or when the CPU is the limit, they can save nothing. Try SMAA there.
 - The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 Native where FSR 4 runs, otherwise FSR 3 Native. These
-  are full-resolution anti-aliasing modes. They are not speed settings.
+  are full-resolution anti-aliasing modes. They cost frames; they do not save them.
+- In performance mode, Off, SMAA and Game TAA run as FSR 3 Native, so switching to them does not remove the upscaler
+  pass there.
 - **The two SSAA entries also change Resolution.** If you once picked SSAA, check both rows when looking for speed.
 - In game, **VR Settings > Upscaler scale** (50% to 100%) sets how much the FSR and DLSS modes render. Lower is faster and
   softer.
@@ -180,3 +191,4 @@ edges in fast motion. Fix the frame rate instead of relying on it.
 - 90 Hz held on the reference rig: [VR-v1109-RELEASE.md](VR-v1109-RELEASE.md).
 - Performance mode pacing in the headset: [superpowers/plans/2026-11-01-performance-mode-research.md](superpowers/plans/2026-11-01-performance-mode-research.md).
 - Anti-aliasing modes and the SSAA presets: `launcher/Program.cs`, `src/vr_settings_native.hpp`, [VR-ANTIALIASING.md](VR-ANTIALIASING.md).
+- Upscaler pass cost: FSR 4 Native about 4.7 ms for both eyes ([ENGINE-PERF-PLAN.md](ENGINE-PERF-PLAN.md), "Candidate GPU levers"), foveated FSR 4 2.65 -> 0.65 ms per eye ([VR-v1109-RELEASE.md](VR-v1109-RELEASE.md)), Off against FSR 3 Native at 1912x1046 on the RTX 3070 Laptop sim, 13.52 against 13.53 ms total GPU ([VR-PERF-LAPTOP.md](VR-PERF-LAPTOP.md), "Anti-aliasing modes compared").
