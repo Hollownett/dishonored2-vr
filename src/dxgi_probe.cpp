@@ -9629,7 +9629,10 @@ void prepare_head_view(void* view) noexcept {
                         shoulder_place_body=in.entity;shoulder_place_hand=side;
                         const d2vr::TrackedPose at{head_t+d2vr::rotated(yaw,dock_local_p[side]),d2vr::normalized(d2vr::multiplied(yaw,dock_local_q[side]))};
                         grab_hand=d2vr::to_game_pose(d2vr::camera_relative_controller(at,hand_centre,head_origin.position),head_origin,anchor,1.0);grab_grip=1.f;
-                        shoulder_dock_game[side]={grab_hand,grab_now};
+                        // v1390 (user, headset v1389: still hard): the query point is the body's own grasp point, not where the hand let go
+                        // (headset v1389 journal: the 7 carries that started kept the body as the Use target for the ~0.58 s hold; the
+                        // failures lost it every 30-150 ms while the sphere at the release point only grazed the swinging body)
+                        {auto query=grab_hand;if(hold && std::isfinite(hold->anchor.x)) query.position=hold->anchor;shoulder_dock_game[side]={query,grab_now};}
                     } else if(shoulder_place_hand.load()==side) {shoulder_place_body=0;shoulder_place_hand=2;shoulder_place_tick=0;}   // a resume, a release, a take or a fault: no placement to press for
                 } catch(...) {shoulder_dock.reset(side);++dock_faults;}
                 native_grab.set_docked(side,shoulder_dock.anchored(side));
@@ -9697,7 +9700,7 @@ void prepare_head_view(void* view) noexcept {
                 const auto now_s=GetTickCount64();const auto hand=shoulder_place_hand.load();const auto at=shoulder_place_tick.load();
                 if(hand<2 && shoulder_place_body.load() && at && now_s>=at && now_s-at<d2vr::shoulder_handoff_ms) {
                     const auto& dock=shoulder_dock_game[hand];
-                    if(dock.second && now_s>=dock.second && now_s-dock.second<=200) {hand_rays[hand]=dock.first;grip_centres[hand]=dock.first.position;++shoulder_dock_queries;}
+                    if(dock.second && now_s>=dock.second && now_s-dock.second<=200) {hand_rays[hand]=dock.first;grip_poses[hand]=dock.first;grip_centres[hand]=dock.first.position;++shoulder_dock_queries;}   // v1390: the palm probe that ranks the hits too
                 }
             }
             {   // v1250: a hand pointing at the downed-body target queries along its own aim ray with the game's Use reach (body_target_update);

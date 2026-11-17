@@ -13,7 +13,8 @@
 // The game's Use while a body is carried is its DROP (a toggle), so the hold ends before then and is never repeated on a carry.
 #include <cstdint>
 namespace d2vr {
-inline constexpr std::uint64_t shoulder_carry_window_ms=1500;   // the body stays docked this long while the handoff is tried (v613:
+inline constexpr std::uint64_t shoulder_carry_window_ms=3000;   // v1390: 1500 -> 3000, more held-Use retries before the physical shoulder keeps it
+                                                                 //   // the body stays docked this long while the handoff is tried (v613:
                                                                  // ~0.55 s from the held Use to the engine's carry, plus the lock and retries)
 inline constexpr std::uint64_t shoulder_carry_retry_ms=250;     // the least gap between two held-Use episodes
 inline constexpr std::uint64_t shoulder_carry_target_grace_ms=200;   // a lost native target inside this keeps the hold (a locked
@@ -21,7 +22,8 @@ inline constexpr std::uint64_t shoulder_carry_target_grace_ms=200;   // a lost n
 inline constexpr std::uint64_t shoulder_carry_min_hold_ms=700;  // once a hold starts it is kept this long even if the routed target
                                                                 // reads empty (the engine's carry is the held Use; v613 measured
                                                                 // ~0.55 s, so a 200 ms episode is far too short for it)
-inline constexpr unsigned shoulder_carry_max_presses=3;         // episodes per placement (a flickering target cannot chatter)
+inline constexpr unsigned shoulder_carry_max_presses=6;   // v1390: 3 -> 6 with the longer window
+                                                //         // episodes per placement (a flickering target cannot chatter)
 // v1142 (user, 2026-11-11: "grabbing an enemy and a body are different controls"; v1141 moved Loot to the trigger and dropped v674's grip
 // loot, so an unlooted body put on the shoulder never reached the carry: loot_blocked, silently). A body still offering Loot is looted by a
 // TAP of Use first (the engine's primary action on a press), then carried by the held Use once the offer clears: on the shoulder = carried.
