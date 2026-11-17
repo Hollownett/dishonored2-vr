@@ -30,6 +30,12 @@ int main() {
     assert(!eye_reticle_rect(0,0,0,1600));
     const auto pixels=eye_reticle_pixels();
     assert(pixels[3]==0 && pixels[4*(15*32+15)+3]>=240);
+    {   // v1387 copy ring: hollow centre, white opaque ring at radius 11, transparent corners
+        const auto ring=eye_copy_reticle_pixels();const auto at=[&](unsigned x,unsigned y,unsigned c){return ring[4*(y*32+x)+c];};
+        assert(at(15,15,3)==0 && at(0,0,3)==0);
+        assert(at(26,15,3)>=230 && at(26,15,0)>=230);   // on the ring (x = 15.5 + 11 ~ 26)
+        assert(at(29,15,3)>0 && at(29,15,0)<128);       // the dark rim outside it
+    }
     frames.clear();assert(!frames.find(1,10,4,3,1031));
     std::cout<<"PASS: per-image stereo reticle receipts, kept-eye identity, offscreen rejection and full-eye pixel geometry\n";
 }

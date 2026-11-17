@@ -83,4 +83,16 @@ inline std::array<std::uint8_t,32*32*4> eye_reticle_pixels() noexcept {
     }
     return pixels;
 }
+// v1387 (user: "add a second crosshair for a second weapon, could be a simple circle"): the dual-wield copy gun's reticle. A white ring
+// (radius 11 of the 32-px frame, ~2.5 px wide) over a thin dark rim on both sides so it reads on bright walls too. Straight alpha.
+inline std::array<std::uint8_t,32*32*4> eye_copy_reticle_pixels() noexcept {
+    std::array<std::uint8_t,32*32*4> pixels{};
+    for(unsigned y=0;y<32;++y)for(unsigned x=0;x<32;++x) {
+        const float dx=static_cast<float>(x)-15.5f,dy=static_cast<float>(y)-15.5f,e=std::abs(std::sqrt(dx*dx+dy*dy)-11.f);
+        const float white=std::clamp(1.75f-e,0.f,1.f),rim=std::clamp(2.9f-e,0.f,1.f)*.55f;
+        const float a=white+rim*(1.f-white),v=a>0.f?white/a:0.f;   // white over the dark rim
+        const auto i=4*(y*32+x);pixels[i]=pixels[i+1]=pixels[i+2]=static_cast<std::uint8_t>(v*255.f+.5f);pixels[i+3]=static_cast<std::uint8_t>(a*255.f+.5f);
+    }
+    return pixels;
+}
 } // namespace d2vr

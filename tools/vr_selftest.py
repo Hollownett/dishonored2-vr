@@ -480,7 +480,20 @@ for _n in ('shoulderdrop', 'shoulderthrow'):
 # left-hand keep did exactly that). The pistol goes to the slot-1 arm 3 s before the reach.
 for _n in ('shoulderdrop', 'shoulderthrow'):
     SCENARIOS[_n + '_armed'] = [[0, 3000, NEUTRAL, None, {"command": "equip pistol"}]] + [[sg[0] + 3000, sg[1] + 3000] + sg[2:] for sg in SCENARIOS[_n]]
-TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow', 'shoulderdrop_armed', 'shoulderthrow_armed')
+# v1387: the same lift with the LEFT hand along the right hand's path (offsets +0.4 m: the default grips are 0.4 m apart), for saves where the right
+# hand holds the drawn sword (its grip takes the sword, not the body).
+def _left_path(segs):
+    out = []
+    for sg in segs:
+        inp = {('left_grip' if k == 'right_grip' else k): v for k, v in sg[2].items()}
+        ex = dict(sg[4]) if len(sg) > 4 else {}
+        if sg[3] is not None:
+            ex['left_hand_offset'] = [round(sg[3][0] + 0.4, 4), sg[3][1], sg[3][2]]
+        out.append([sg[0], sg[1], inp, None, ex])
+    return out
+SCENARIOS['shoulderdropleft'] = _left_path(SCENARIOS['shoulderdrop'])
+PAIR_PLAN['shoulderdropleft'] = PAIR_PLAN['shoulderdrop']
+TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow', 'shoulderdrop_armed', 'shoulderthrow_armed', 'shoulderdropleft')
 # v1046 (user, headset v1045: the Heart "quite often just picking up randomly when I squeeze my hand ... should behave as a normal weapon,
 # same as gun or crossbow"; dual wield). The Heart is equipped by name (slot-1 arm, the left), held by the left grip, let go in front: it
 # falls as its pickup and the right hand, squeezing right next to it, takes it (into the RIGHT hand). Held by the right grip, carried to the
@@ -1230,6 +1243,7 @@ def main():
     ap.add_argument('--scenario', default='all', choices=sorted(SCENARIOS))
     ap.add_argument('--load-save', action='store_true', help='game is at the title screen: load the last save')
     ap.add_argument('--launch', action='store_true', help='start the game from Steam (background) and load the last save')
+    ap.add_argument('--pre-command', action='append', help="mod command sent once gameplay is reached, before --near (repeatable), e.g. 'console damage <guard> damage/explosion_grenade'")
     ap.add_argument('--near', choices=['item', 'bottle', 'npc', 'npc-front', 'npc-side', 'civ-front', 'corpse', 'oldcorpse', 'shop', 'door', 'limb'],
                     help='teleport next to the nearest pickable item / 0.9 m behind (npc) or in front of (npc-front) the nearest guard, facing it')
     ap.add_argument('--teleport', nargs=3, type=float, metavar=('X', 'Y', 'Z'), help='engine setviewpos (eye position) before the scenario')
@@ -1361,6 +1375,10 @@ def main():
             set_god(pid, True)
             command('console setviewpos %.2f %.2f %.2f' % tuple(a.pre_teleport))
             time.sleep(4)  # the area's NPCs stream in and wake
+        for pc in (a.pre_command or []) if reached else []:  # e.g. kill a guard so --near corpse finds a live ragdoll
+            set_god(pid, True)
+            command(pc)
+            time.sleep(3)
         scenario_end = time.time() + seconds - 1
         bottle_rot = []
         bottle_addr, bottle_track, bottle_geom = None, [], {}  # the near-bottle item's entity, its world positions (script ms, x, y, z), stand geometry

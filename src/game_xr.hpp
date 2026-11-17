@@ -290,6 +290,8 @@ private:
     std::array<NoteHandReceipt,2> note_hands_{};
     std::array<NoteHandReceipt,2> wheel_hands_{};bool wheel_eye_art_disabled_{}; // v776: the hands the hand wheel's ring goes behind; a ring eye-art fault falls back to the quad layer
     EyeReticleFrames eye_reticles_;
+    std::array<EyeReticleFrames,2> copy_reticles_;   // v1387: per hand, the dual-wield copy gun's ring reticle
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> copy_reticle_texture_;
     struct CrosshairArt {Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;D3D11_BOX crop{};float anchor_x{},anchor_y{},scale{1.f};UINT64 epoch{},tick{};};
     CrosshairArt crosshair_art_;
     bool eye_reticle_failed_{};
@@ -1807,7 +1809,9 @@ public:
     }
     bool eye_reticle_available() const noexcept {return !eye_reticle_failed_;}
     void eye_reticle(unsigned eye,EyeReticle value) noexcept {eye_reticles_.publish(eye,value);}
-    void clear_eye_reticles() noexcept {eye_reticles_.clear();}
+    void clear_eye_reticles() noexcept {eye_reticles_.clear();for(auto& c:copy_reticles_) c.clear();}
+    void copy_reticle(unsigned hand,unsigned eye,EyeReticle value) noexcept {if(hand<2) copy_reticles_[hand].publish(eye,value);}
+    UINT64 copy_reticle_draws{};
     std::array<std::optional<Vec3>,2> interaction_targets;
     void interaction_target(int side,std::optional<Vec3> point) noexcept {if(side==0 || side==1) interaction_targets[static_cast<unsigned>(side)]=point;}
     MirrorMode mirror_mode() const noexcept {return settings_.mirror();}
@@ -3010,7 +3014,9 @@ public:
                     const auto now=GetTickCount64();XrView view{XR_TYPE_VIEW};view.pose=layers[eye].pose;view.fov=layers[eye].fov;
                     if(!authored_camera && eye_reticle_available() && settings_.crosshair() && !settings_.open() && state==XR_SESSION_STATE_FOCUSED && controller_input.active) try {
                         const auto image_frame=alternate_enabled?alt_effective_()[eye].frame:alternate_frame;
-                        auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now);
+                        // v792/v796/v808: a point placed in the kept image moves into the warped one (with parallax at its own distance), then
+                        // from the turned image into the one submitted. Shared by the game's reticle and the copy rings (v1387).
+                        const auto into_submitted=[&](std::optional<EyeReticle>& reticle) {
                         if(reticle && stale_warped_(eye)) { // v792: the point was placed in the kept image; move it into the warped one
                             const double ru=(reticle->x+1.)*.5,rv=(1.-reticle->y)*.5; // v796: with parallax, at the reticle's own distance
                             const auto moved=stale_layers_[eye] && reticle->depth>0?parallax_target(stale_layers_[eye]->world,ru,rv,reticle->depth):warp_point(stale_back_[eye],ru,rv);
@@ -3022,6 +3028,9 @@ public:
                             if(moved) {reticle->x=static_cast<float>((*moved)[0]*2.-1.);reticle->y=static_cast<float>(1.-(*moved)[1]*2.);}
                             else reticle.reset();
                         }
+                        };
+                        auto reticle=eye_reticles_.find(eye,image_frame,pose_epoch(),reference_epoch(),now);
+                        into_submitted(reticle);
                         bool game_crosshair=false;
                         if(reticle && crosshair_art_.texture && crosshair_art_.epoch==pose_epoch() && now>=crosshair_art_.tick && now-crosshair_art_.tick<=150 && ensure_native_eye_art()) {
                             // The element's anchor sits on the reticle point at the game's own pixel size.
@@ -3029,7 +3038,7 @@ public:
                             const float px=(reticle->x+1.f)*.5f*w-a.anchor_x*a.scale,py=(1.f-reticle->y)*.5f*h-a.anchor_y*a.scale;
                             const float cw=static_cast<float>(a.crop.right-a.crop.left)*a.scale,ch=static_cast<float>(a.crop.bottom-a.crop.top)*a.scale;
                             const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,a.texture.Get(),a.crop,
-                                {px/w*2.f-1.f,1.f-py/h*2.f,(px+cw)/w*2.f-1.f,1.f-(py+ch)/h*2.f},format_,true);
+                                {px/w*2.f-1.f,1.f-py/h*2.f,(px+cw)/w*2.f-1.f,1.f-(py+ch)/h*2.f},format_,true,DXGI_FORMAT_UNKNOWN,false,false,true);   // v1387: whitened
                             if(art_result.drawn) {++eye_reticle_draws;++crosshair_art_draws;game_crosshair=true;}
                             else {note_eye_art_fault(art_result,"game crosshair");crosshair_art_={};}
                         }
@@ -3052,10 +3061,30 @@ public:
                                     else note_eye_art_fault(art_result,"eye reticle"); // the game crosshair child still draws
                                 }
                             }
+                        for(unsigned hand=0;hand<2;++hand) {   // v1387: the dual-wield copy guns' ring reticles
+                            auto ring=copy_reticles_[hand].find(eye,image_frame,pose_epoch(),reference_epoch(),now);
+                            into_submitted(ring);
+                            if(!ring) continue;
+                            const auto rect=eye_reticle_rect(ring->x,ring->y,width_,height_,std::max(10.f,static_cast<float>(width_)*.0045f));
+                            if(!rect || !ensure_native_eye_art()) continue;
+                            if(!copy_reticle_texture_) {
+                                Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+                                if(!device) throw std::runtime_error("Missing copy reticle device");
+                                const auto pixels=eye_copy_reticle_pixels();D3D11_TEXTURE2D_DESC d{};
+                                d.Width=d.Height=32;d.MipLevels=d.ArraySize=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+                                d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_IMMUTABLE;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+                                D3D11_SUBRESOURCE_DATA initial{};initial.pSysMem=pixels.data();initial.SysMemPitch=32*4;
+                                if(FAILED(device->CreateTexture2D(&d,&initial,&copy_reticle_texture_))) throw std::runtime_error("Cannot create copy reticle");
+                            }
+                            const D3D11_BOX crop{0,0,0,32,32,1};
+                            const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,copy_reticle_texture_.Get(),crop,
+                                {(*rect)[0],(*rect)[1],(*rect)[2],(*rect)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM);
+                            if(art_result.drawn) ++copy_reticle_draws;else note_eye_art_fault(art_result,"copy reticle");
+                        }
                     } catch(...) {
                         // Fail locally. The following prepared frame restores
                         // the engine's own validated crosshair child.
-                        eye_reticle_failed_=true;eye_reticle_texture_.Reset();eye_reticles_.clear();crosshair_art_={};
+                        eye_reticle_failed_=true;eye_reticle_texture_.Reset();copy_reticle_texture_.Reset();eye_reticles_.clear();for(auto& c:copy_reticles_) c.clear();crosshair_art_={};
                     }
                     for(unsigned art_slot=0;art_slot<native_object_art_.size();++art_slot) if(const auto& art=native_object_art_[art_slot];art.fresh(pose_epoch(),now)) {
                         if(authored_camera && !art.locked) continue;
