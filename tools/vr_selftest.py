@@ -492,8 +492,15 @@ def _left_path(segs):
         out.append([sg[0], sg[1], inp, None, ex])
     return out
 SCENARIOS['shoulderdropleft'] = _left_path(SCENARIOS['shoulderdrop'])
+# v1388: free the right hand first in dual wield (a test copy pistol replaces the drawn sword, then is let go), then the right-hand lift.
+SCENARIOS['shoulderdropfree'] = ([[0, 1000, NEUTRAL, None, {"command": "extra right pistol"}], [1000, 2500, NEUTRAL, None, {"command": "extra right none"}]] +
+                                 [[sg[0] + 2500, sg[1] + 2500, dict(sg[2], right_trigger=1.0) if sg[2].get('right_grip') else sg[2]] + sg[3:] for sg in SCENARIOS['shoulderdrop']])   # a full fist grabs
+# v1388 second crosshair: a copy pistol in the right hand (the left keeps the native gun), both hands aimed forward; eye pairs show the game's
+# crosshair (left) and the copy's ring (right).
+SCENARIOS['ringaim'] = [[0, 1500, NEUTRAL, None, {"command": "extra right pistol"}], [1500, 5500, NEUTRAL, None, {"hand_pitch_degrees": -50}],
+                        [5500, 9500, NEUTRAL, None, {"hand_pitch_degrees": -80}], [9500, 13000, NEUTRAL, None, dict(_AIM_GUN)]]
 PAIR_PLAN['shoulderdropleft'] = PAIR_PLAN['shoulderdrop']
-TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow', 'shoulderdrop_armed', 'shoulderthrow_armed', 'shoulderdropleft')
+TORSO_SCENARIOS = ('carrydrop', 'carrythrow', 'shoulderdrop', 'shoulderthrow', 'shoulderdrop_armed', 'shoulderthrow_armed', 'shoulderdropleft', 'shoulderdropfree')
 # v1046 (user, headset v1045: the Heart "quite often just picking up randomly when I squeeze my hand ... should behave as a normal weapon,
 # same as gun or crossbow"; dual wield). The Heart is equipped by name (slot-1 arm, the left), held by the left grip, let go in front: it
 # falls as its pickup and the right hand, squeezing right next to it, takes it (into the RIGHT hand). Held by the right grip, carried to the
@@ -871,8 +878,8 @@ def set_god(pid, on, buddha=False):
     return ok
 
 
-def drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3):
-    """Drive main-menu, pause and game-over choices; only native InGame is success."""
+def drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3, drive=True):
+    """Drive main-menu, pause and game-over choices; only native InGame is success. drive=False only waits (someone else drives the menus)."""
     base, read = attach(pid)
     end = time.time() + timeout
     while time.time() < end:
@@ -882,6 +889,9 @@ def drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3):
             mask = None
         if mask == 2:
             return True
+        if not drive:
+            time.sleep(1)
+            continue
         if mask == 64:
             command('pad a 200')
         elif mask in (4, 1024):
@@ -1243,6 +1253,7 @@ def main():
     ap.add_argument('--scenario', default='all', choices=sorted(SCENARIOS))
     ap.add_argument('--load-save', action='store_true', help='game is at the title screen: load the last save')
     ap.add_argument('--launch', action='store_true', help='start the game from Steam (background) and load the last save')
+    ap.add_argument('--no-menu-drive', action='store_true', help='with --inject-at-title: send no menu keys or pad presses; wait for gameplay while the menus are driven from outside')
     ap.add_argument('--pre-command', action='append', help="mod command sent once gameplay is reached, before --near (repeatable), e.g. 'console damage <guard> damage/explosion_grenade'")
     ap.add_argument('--near', choices=['item', 'bottle', 'npc', 'npc-front', 'npc-side', 'civ-front', 'corpse', 'oldcorpse', 'shop', 'door', 'limb'],
                     help='teleport next to the nearest pickable item / 0.9 m behind (npc) or in front of (npc-front) the nearest guard, facing it')
@@ -1358,12 +1369,14 @@ def main():
                 print('  ' + line)
         if a.inject_at_title:
             time.sleep(8)
-            if a.load_slot is not None:  # the newest save may open on a cutscene: load this slot from the title instead (Steam Cloud restores hidden slots)
+            if a.no_menu_drive:
+                pass  # the menus are driven from outside (e.g. Load Game -> a chosen save)
+            elif a.load_slot is not None:  # the newest save may open on a cutscene: load this slot from the title instead (Steam Cloud restores hidden slots)
                 command('console loadgame %d' % a.load_slot)
             else:
                 keys(0x0D, 0x0D, 0x0D)  # title -> Campaign -> Continue, with the mod already in
             time.sleep(10)
-        reached = drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3 - (time.time() - proc_start))
+        reached = drive_to_gameplay(pid, timeout=LEAD_MS / 1000 - 3 - (time.time() - proc_start), drive=not a.no_menu_drive)
         home = None  # teleports are undone before the session ends: a player left in water drowns afterwards
         if reached and (a.teleport or a.near):
             try:

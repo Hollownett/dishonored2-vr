@@ -5399,7 +5399,7 @@ static bool legacy_corpse_carry=false;static UINT64 corpse_drop_press_until{},ca
 // hand's native Use target is still that body, and keeps the carry (the v637 auto-drop stands aside) once the game took it.
 static std::array<std::pair<d2vr::WorldTrackedPose,UINT64>,2> shoulder_dock_game{};   // v1387: render thread; the docked body's hold point (game space) and its tick
 static d2vr::ShoulderCarryTrigger shoulder_carry_trigger;static std::atomic<std::uintptr_t> shoulder_place_body{};static std::atomic<unsigned> shoulder_place_hand{2};static std::atomic<UINT64> shoulder_place_tick{};
-static std::atomic<unsigned> shoulder_dock_queries{};static std::atomic<unsigned> shoulder_places{},shoulder_presses{},shoulder_started{},shoulder_loot_blocked{},shoulder_failed{},shoulder_takeoffs{};static std::atomic<int> shoulder_offer{-1};   // offer: the placing hand's secondary native action offset (112 = 0x70 Carry, 152 = 0x98 Loot, -1 none)
+static std::atomic<unsigned> shoulder_dock_queries{};static std::array<std::atomic<UINT64>,2> copy_ring_published{},copy_ring_no_pose{};static std::array<std::atomic<float>,2> copy_ring_ndc{};   /* v1389 status crosshair.copy_ring */static std::atomic<unsigned> shoulder_places{},shoulder_presses{},shoulder_started{},shoulder_loot_blocked{},shoulder_failed{},shoulder_takeoffs{};static std::atomic<int> shoulder_offer{-1};   // offer: the placing hand's secondary native action offset (112 = 0x70 Carry, 152 = 0x98 Loot, -1 none)
 static std::atomic<unsigned> carry_left_redraws{};   // v1041: draws of the left item queued after the carry settled
 static std::atomic<bool> shoulder_native_carry{};   // the carry the placement started (the auto-drop must not put it down)
 static bool shoulder_press_hold{};                  // input thread: hold the game's Use while the handoff is being tried
@@ -11481,7 +11481,9 @@ void prepare_head_view(void* view) noexcept {
             for(unsigned h=0;h<2;++h) {
                 static std::array<float,2> ring_distance_m{30.f,30.f};
                 d2vr::EyeReticle ring{0,0,alt_display,game_xr->pose_epoch(),game_xr->reference_epoch(),GetTickCount64(),false};
-                const auto pose=dual_wield_enabled && crosshair_visible_now.load() && d2vr::arm::is_gun(arm_copy_now(h))?d2vr::NativeWeaponHands::held_copy_pose(h):std::nullopt;
+                const bool copy_gun=dual_wield_enabled && crosshair_visible_now.load() && d2vr::arm::is_gun(arm_copy_now(h));
+                const auto pose=copy_gun?d2vr::NativeWeaponHands::held_copy_pose(h):std::nullopt;
+                if(copy_gun && !pose && per_frame) ++copy_ring_no_pose[h];
                 if(pose) {
                     const auto muzzle=pose->position+pose->basis[0]*.2;
                     if(per_frame) {
@@ -11496,6 +11498,7 @@ void prepare_head_view(void* view) noexcept {
                         const double tx=-d2vr::dot(d,world.basis[1])/depth,ty=d2vr::dot(d,world.basis[2])/depth;
                         const double l=std::tan(proj_fov.left),r=std::tan(proj_fov.right),u=std::tan(proj_fov.up),dn=std::tan(proj_fov.down);
                         ring.x=static_cast<float>((2*tx-(r+l))/(r-l));ring.y=static_cast<float>((2*ty-(u+dn))/(u-dn));ring.valid=true;ring.depth=static_cast<float>(depth);
+                        if(per_frame) {++copy_ring_published[h];copy_ring_ndc[0]=ring.x;copy_ring_ndc[1]=ring.y;}
                     }
                 }
                 game_xr->copy_reticle(h,reticle_eye,ring);
@@ -15039,6 +15042,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"eye_last_rejects\":" << [&]{const auto states=d2vr::NativeHudChildDraw::eye_diagnostics();if(!states)return std::string("null");std::ostringstream o;o<<'[';for(unsigned i=0;i<states->size();++i){o<<(i?",":"")<<'[';for(unsigned j=0;j<(*states)[i].size();++j)o<<(j?",":"")<<(*states)[i][j];o<<']';}o<<']';return o.str();}()
                                      << ",\"binding_last_rejects\":" << [&]{const auto states=native_crosshair.ownership_diagnostics();if(!states)return std::string("null");std::ostringstream o;o<<'[';for(unsigned i=0;i<states->size();++i){o<<(i?",":"")<<'[';for(unsigned j=0;j<(*states)[i].size();++j)o<<(j?",":"")<<(*states)[i][j];o<<']';}o<<']';return o.str();}()
                                      << ",\"intent_clear_calls\":" << native_crosshair.intent_clear_calls.load() << ",\"validation_record_diff\":" << native_crosshair.validation_record_diff.load() << ",\"owner_record_diff\":" << native_crosshair.owner_record_diff.load()
+                                     << ",\"copy_ring\":{\"published\":[" << copy_ring_published[0].load() << ',' << copy_ring_published[1].load() << "],\"no_pose\":[" << copy_ring_no_pose[0].load() << ',' << copy_ring_no_pose[1].load() << "],\"last_ndc\":[" << copy_ring_ndc[0].load() << ',' << copy_ring_ndc[1].load() << "],\"draws\":" << (game_xr?game_xr->copy_reticle_draws:0) << '}'
                                      << ",\"direct_eye_draws\":" << (game_xr?game_xr->eye_reticle_draws:0) << ",\"game_art_draws\":" << (game_xr?game_xr->crosshair_art_draws:0) << ",\"game_art_captures\":" << d2vr::NativeHudChildDraw::crosshair_captures.load() << ",\"direct_failed\":" << (game_xr && !game_xr->eye_reticle_available()?"true":"false") << ",\"direct_composed\":" << (d2vr::NativeHudChildDraw::crosshair_composed.load()?"true":"false")
                                      << ",\"eye_shifts\":" << d2vr::NativeHudChildDraw::crosshair_eye_shifts.load() << ",\"unlayouts\":" << d2vr::NativeHudChildDraw::crosshair_unlayouts.load()
                                      << ",\"cast_posts\":" << crosshair_cast_posts << ",\"cast_hits\":" << crosshair_cast_hits << ",\"distance_m\":" << crosshair_distance_m
