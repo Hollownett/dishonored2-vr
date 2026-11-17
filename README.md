@@ -13,6 +13,7 @@ One launcher file installs it next to your Steam copy of the game; nothing from 
   <a href="#install-and-play">Install</a> ·
   <a href="#controls">Controls</a> ·
   <a href="#troubleshooting">Troubleshooting</a> ·
+  <a href="docs/PERFORMANCE.md">Performance</a> ·
   <a href="docs/VR-v1123-RELEASE.md">What's new</a>
 </p>
 
