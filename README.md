@@ -163,7 +163,7 @@ Troubleshooting
 | Walking looks steppy or the game runs at half rate | Disable Synchronous Spacewarp in Virtual Desktop |
 | Nothing happens in the headset | Check the launcher's Play page: the OpenXR runtime (Virtual Desktop or SteamVR) must be active and SteamVR installed |
 | The headset disconnected | The mod reconnects by itself after a second or two |
-| Low frame rate | FSR Quality or Balanced, a lower render scale in VR Settings, or performance mode in the launcher Settings (it can show some visual artifacts) |
+| Low frame rate | Lower Resolution in VR Settings, use DLSS Quality or FSR Quality, set the game's Shadow Quality to Low, or turn on performance mode in the launcher Settings (it can show some visual artifacts). Which setting does what: [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
 | The game starts flat | Press LAUNCH VR once; it reinstalls the loader next to `Dishonored2.exe` |
 | I want to play flat again | Game closed: Tools > Uninstall proxy |
 | Reporting a bug | Turn on **Save diagnostic logs** under Features, reproduce it, and attach `%LOCALAPPDATA%\DishonoredVR\artifacts` (the Tools page opens it). Turn it off afterwards |
