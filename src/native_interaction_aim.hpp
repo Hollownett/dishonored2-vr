@@ -591,6 +591,19 @@ class NativeInteractionAim {
     std::uintptr_t eligibility_result_body(void* sensor,const void* descriptor,void* component,const float* point,std::uintptr_t caller) {
         const auto* scope=context_;
         const auto native=[&]{return eligibility_(sensor,descriptor,component,point);};
+        // v1391 (user, headset v1390: the shoulder carry still needed 2-3 tries): native 3b80a0 refuses a candidate whose facing test
+        // (descriptor+0x1c & 0x10: (range origin - point) . owner forward +0x30c >= 0) fails, and a body lifted onto the shoulder faces a
+        // random way, so about half the handoffs never got the body as the Use target. The placed body alone, for its handoff window only,
+        // is offered whatever its facing; the player FSM's own carry rules (both hands emptied, state) still decide the carry.
+        if(active_.load(std::memory_order_acquire) && scope && scope->stage==0 && scope->side==shoulder_side_.load() &&
+           (caller==base_+0x3b8a10 || caller==base_+0x3b8a35) && reinterpret_cast<std::uintptr_t>(sensor)==scope->sensor && GetTickCount64()<shoulder_until_.load()) {
+            const auto owner=rig::value<std::uintptr_t>(read_,reinterpret_cast<std::uintptr_t>(component)+0x10);
+            if(owner && *owner && *owner==shoulder_owner_.load()) {
+                const auto result=native();
+                if(!(result&0xffu)) {++shoulder_forced;return (result&~std::uintptr_t{0xff})|1;}
+                return result;
+            }
+        }
         if(!active_.load(std::memory_order_acquire) || !scope || scope->stage!=0 || scope->side<0 || scope->hand.reach ||
            (caller!=base_+0x3b8a10 && caller!=base_+0x3b8a35) || reinterpret_cast<std::uintptr_t>(sensor)!=scope->sensor ||
            !fresh(*scope,GetTickCount64()))return native();
@@ -650,6 +663,12 @@ class NativeInteractionAim {
         }
         return effective;
     }
+public:
+    // v1391: the shoulder placement's body is the placing hand's Use candidate whatever its facing (eligibility_result_body)
+    void force_shoulder(std::uintptr_t owner,int side,std::uint64_t until) noexcept {shoulder_owner_=owner;shoulder_side_=side;shoulder_until_=until;}
+    inline static std::atomic<unsigned> shoulder_forced{};
+private:
+    std::atomic<std::uintptr_t> shoulder_owner_{};std::atomic<int> shoulder_side_{-1};std::atomic<std::uint64_t> shoulder_until_{};
     static std::uintptr_t __fastcall eligibility_hook(void* sensor,const void* descriptor,void* component,const float* point) {
         auto* self=instance_;const auto caller=reinterpret_cast<std::uintptr_t>(_ReturnAddress());
         return counted_callback(self,[&]{return self->eligibility_result(sensor,descriptor,component,point,caller);});
