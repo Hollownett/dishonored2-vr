@@ -2493,7 +2493,8 @@ static LONG saved_temporal_aa{};
 static constexpr std::uintptr_t temporal_aa_value_rva=0x397bbf8;
 static bool full_scale_requested=false,full_scale_written=false,full_scale_restored=true;static LONG render_fraction_bits=0x3f800000;
 // FSR upscaling: the engine renders each eye at upscale_fraction (its own forced dynamic-resolution path).
-// DLSS Quality follows the NGX optimal settings while engaged (offered, not failed); otherwise its fallback is FSR 3 Native.
+// DLSS Quality follows the NGX optimal settings (2/3 until known); its fallback (not offered, or failed) is FSR 3 at that same
+// fraction (plan 1.2), DLAA's is FSR 3 Native. A custom Upscaler scale wins in both.
 inline float aa_mode_fraction(int mode) noexcept {
     return d2vr::dlss_mode::render_fraction(mode,fsr_taa.dlss_quality_fraction.load(),dlss_offered() && !fsr_taa.dlss_failed(),
         mode==taa_preference?upscale_percent_preference:0,fsr_taa.dlss_range_low.load(),fsr_taa.dlss_range_high.load()); // the Upscaler scale applies to the selected mode only
@@ -14700,9 +14701,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     dlss_jitter_mode=(dlss_jitter || fsr_upscaling) && view_jitter_abi && projection_jitter;}
                                 if(fsr_taa.dlss_failed() && !dlss_fallback_noted) {
                                     dlss_fallback_noted=true;
-                                    upscale_fraction=aa_mode_fraction(live_mode);apply_upscale(upscale_fraction); // DLSS Quality's fallback renders native: FSR 3 Native now
+                                    upscale_fraction=aa_mode_fraction(live_mode);apply_upscale(upscale_fraction); // FSR 3 at DLSS Quality's fraction (DLAA: native), or the custom scale
                                     const auto dlss_reason=static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load());
-                                    std::ostringstream dlss_note;dlss_note<<"DLSS unavailable ("<<d2vr::DlssEyeUpscaler::reason_name(dlss_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_last_result.load())<<std::dec<<"): FSR 3 for this session";
+                                    std::ostringstream dlss_note;dlss_note<<"DLSS unavailable ("<<d2vr::DlssEyeUpscaler::reason_name(dlss_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_last_result.load())<<std::dec<<"): FSR 3 at "<<std::lround(upscale_fraction*100.f)<<"% for this session";
                                     note_recoverable(dlss_note.str().c_str());
                                 }
                             }

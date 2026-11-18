@@ -24,10 +24,16 @@ int main() {
             require(std::wstring(fsr3.temporal_aa_text())==L"Anti-aliasing: FSR 3 Balanced (67%)","FSR3 label wrong");
             // DLSS modes (7 DLAA, 8 DLSS Quality) report the NGX backend (generation 5) or the FSR 3 fallback.
             VrSettings dlss;dlss.initialize(1,true,{},MirrorMode::both_eyes,.5,7);
-            require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLAA (unavailable, FSR 3)","DLAA fallback label wrong");
+            require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLAA (unavailable: FSR 3 Native)","DLAA fallback label wrong");
             dlss.upscaler_generation(5);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLAA","DLAA label wrong");
             dlss.set_temporal_aa(8);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLSS Quality","DLSS Quality label wrong");
-            dlss.upscaler_generation(3);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLSS Quality (unavailable, FSR 3)","DLSS Quality fallback label wrong");
+            // Plan 1.2: the fallback row states the scale FSR 3 renders at (DLSS Quality's fraction, or the player's own scale).
+            dlss.upscaler_generation(3);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLSS Quality (unavailable: FSR 3 at 67%)","DLSS Quality fallback label wrong");
+            dlss.dlss_quality_percent(58);require(std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLSS Quality (unavailable: FSR 3 at 58%)","DLSS Quality fallback label ignores NGX's optimal scale");
+            dlss.dlss_quality_percent(67);
+            require(dlss.set_upscale_percent(80) && std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLSS Quality (unavailable: FSR 3 at 80%)","DLSS Quality fallback label ignores the custom scale");
+            dlss.set_temporal_aa(7);require(dlss.set_upscale_percent(90) && std::wstring(dlss.temporal_aa_text())==L"Anti-aliasing: DLAA (unavailable: FSR 3 at 90%)","DLAA fallback label ignores the custom scale");
+            dlss.set_temporal_aa(8);require(dlss.upscale_custom_percent()==0,"Picking DLSS Quality kept DLAA's custom scale");
             require(dlss.temporal_aa()==8,"Runtime backend changed the saved DLSS mode");
             // The rows cycle through 7/8 only when DLSS is offered; a saved DLSS mode steps off like the last FSR 4 row otherwise.
             require(!dlss.dlss_available() && dlss.temporal_aa_choices()==7,"DLSS offered by default");
