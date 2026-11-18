@@ -23,6 +23,7 @@
 #include "xr_continuity.hpp"
 #include "xr_layer_pose.hpp"
 #include "xr_frame_hardening.hpp"
+#include "xr_fault_policy.hpp"
 #include "eye_antialiasing.hpp"
 #include "eye_sharpen.hpp"
 #include "eye_resolve.hpp"
@@ -334,14 +335,64 @@ private:
     XR_MEMBER(xrDestroyInstance) XR_MEMBER(xrDestroySession) XR_MEMBER(xrDestroySpace)
     XR_MEMBER(xrDestroySwapchain) XR_MEMBER(xrPollEvent) XR_MEMBER(xrBeginSession)
     XR_MEMBER(xrEndSession) XR_MEMBER(xrWaitFrame) XR_MEMBER(xrBeginFrame)
-    XR_MEMBER(xrEndFrame) XR_MEMBER(xrLocateViews) XR_MEMBER(xrAcquireSwapchainImage)
-    XR_MEMBER(xrWaitSwapchainImage) XR_MEMBER(xrReleaseSwapchainImage)
+    XR_MEMBER(xrEndFrame) XR_MEMBER(xrLocateViews)
     XR_MEMBER(xrStringToPath) XR_MEMBER(xrCreateActionSet) XR_MEMBER(xrDestroyActionSet)
     XR_MEMBER(xrCreateAction) XR_MEMBER(xrSuggestInteractionProfileBindings) XR_MEMBER(xrAttachSessionActionSets)
     XR_MEMBER(xrCreateActionSpace) XR_MEMBER(xrSyncActions) XR_MEMBER(xrGetActionStatePose)
     XR_MEMBER(xrGetActionStateFloat) XR_MEMBER(xrGetActionStateVector2f) XR_MEMBER(xrGetActionStateBoolean)
     XR_MEMBER(xrLocateSpace) XR_MEMBER(xrApplyHapticFeedback)
 #undef XR_MEMBER
+    // v1393: swapchain images are leased through these three members (same names and signatures as the OpenXR functions, so every call
+    // site is unchanged). Each chain counts its acquired and waited images; a frame abandoned by a fault (abandon_frame) hands back what
+    // it held instead of leaving the chain an image out of step, which made every later acquire/wait/release on it fail.
+    PFN_xrAcquireSwapchainImage raw_acquire_image_{};PFN_xrWaitSwapchainImage raw_wait_image_{};PFN_xrReleaseSwapchainImage raw_release_image_{};
+    struct ImageLease {XrSwapchain chain{};unsigned acquired{},waited{};};
+    std::vector<ImageLease> leases_;
+    bool eye_released_since_capture_{}; // an eye image was released after last_good_projection_ captured: its replay would show that image
+    ImageLease* find_lease_(XrSwapchain chain) noexcept {for(auto& lease:leases_) if(lease.chain==chain) return &lease;return nullptr;}
+    ImageLease& lease_(XrSwapchain chain) {if(auto* lease=find_lease_(chain)) return *lease;leases_.push_back({chain,0,0});return leases_.back();}
+    void forget_lease_(XrSwapchain chain) noexcept {leases_.erase(std::remove_if(leases_.begin(),leases_.end(),[chain](const ImageLease& l){return l.chain==chain;}),leases_.end());}
+    // The wrist chains keep an image acquired across frames on purpose (a 0-timeout wait, polled by release_pending_wrist): never settled here.
+    bool self_managed_chain_(XrSwapchain chain) const noexcept {return chain && (chain==wrist_chains_[0] || chain==wrist_chains_[1]);}
+    // Hands back what an abandoned frame left on `chain`: waited images are released; an image whose wait timed out is polled once
+    // more without blocking and released when ready. False while the runtime still holds such an image.
+    bool settle_lease_(XrSwapchain chain) {
+        auto* lease=find_lease_(chain);
+        if(!lease || !lease->acquired) return true;
+        XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+        if(chain==chains_[0] || chain==chains_[1]) eye_released_since_capture_=true; // whatever is released here was a faulted frame's image
+        while(lease->waited) {
+            if(XR_FAILED(raw_release_image_(chain,&release))) return false;
+            --lease->waited;--lease->acquired;++settled_images;
+        }
+        while(lease->acquired) {
+            XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=0;
+            const auto ready=raw_wait_image_(chain,&wait);
+            if(XR_FAILED(ready) || ready==XR_TIMEOUT_EXPIRED) return false;
+            if(XR_FAILED(raw_release_image_(chain,&release))) {++lease->waited;return false;}
+            --lease->acquired;++settled_images;
+        }
+        return true;
+    }
+    XrResult xrAcquireSwapchainImage(XrSwapchain chain,const XrSwapchainImageAcquireInfo* info,uint32_t* index) {
+        // An image left by an abandoned frame goes back first; while the runtime still holds it this acquire fails (a dropped frame),
+        // never a second acquire that would pair the next wait/release with the wrong image.
+        if(!self_managed_chain_(chain) && !settle_lease_(chain)) return XR_ERROR_CALL_ORDER_INVALID;
+        const auto result=raw_acquire_image_(chain,info,index);
+        if(XR_SUCCEEDED(result)) ++lease_(chain).acquired;
+        return result;
+    }
+    XrResult xrWaitSwapchainImage(XrSwapchain chain,const XrSwapchainImageWaitInfo* info) {
+        const auto result=raw_wait_image_(chain,info);
+        if(XR_SUCCEEDED(result) && result!=XR_TIMEOUT_EXPIRED) if(auto* lease=find_lease_(chain);lease && lease->waited<lease->acquired) ++lease->waited;
+        return result;
+    }
+    XrResult xrReleaseSwapchainImage(XrSwapchain chain,const XrSwapchainImageReleaseInfo* info) {
+        const auto result=raw_release_image_(chain,info);
+        if(XR_SUCCEEDED(result)) if(auto* lease=find_lease_(chain)) {if(lease->waited) --lease->waited;if(lease->acquired) --lease->acquired;}
+        if(XR_SUCCEEDED(result) && chain && (chain==chains_[0] || chain==chains_[1])) eye_released_since_capture_=true;
+        return result;
+    }
     PFN_xrGetCurrentInteractionProfile xrGetCurrentInteractionProfile{};PFN_xrPathToString xrPathToString{}; // optional: a runtime without them keeps the suggested profile
     UINT width_{},height_{};
     DXGI_FORMAT format_{};
@@ -672,7 +723,7 @@ private:
     void destroy_overlay_chain(XrSwapchain chain,const char* name) {
         count_chain_op();std::array<std::uint32_t,2> size{};if(const auto known=chain_sizes_.find(chain);known!=chain_sizes_.end()) size=known->second;
         log_chain_event_(false,name,size[0],size[1],chain); // logged before the call: a destroy that hangs the runtime is still on record
-        chain_sizes_.erase(chain);chain_generations_.erase(chain);checked(xrDestroySwapchain(chain),name);
+        chain_sizes_.erase(chain);chain_generations_.erase(chain);forget_lease_(chain);checked(xrDestroySwapchain(chain),name);
     }
     // A quad/cylinder swapchain is exactly the size of what it shows (SteamVR rejects sub-rects): rebuilt here, between frames, when that size changes.
     void rebuild_overlay_chain(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images,UINT& have_width,UINT& have_height,UINT width,UINT height,const std::string& label) {
@@ -1699,7 +1750,9 @@ public:
     bool vignette_color_scale() const noexcept {return color_scale_supported_;}
     std::array<UINT64,4> layer_pose_repaired{},layer_pose_dropped{};UINT64 layer_pose_no_submit{};
     std::string layer_pose_last; // kind and raw pose of the most recent offending layer
-    UINT64 end_frame_rejections{};unsigned end_frame_rejected_run_{};void (*observe_frame_rejection)(const char*){}; // layer errors dropped as one frame
+    UINT64 end_frame_rejections{};unsigned end_frame_rejected_run_{};std::uint64_t end_frame_rejected_since_{};
+    void (*observe_frame_rejection)(const char*){}; // rejected frames dropped as one frame
+    bool legacy_frame_rejection{}; // knob build/legacy-xr-recovery: only layer errors drop a frame, a run of 30 recovers (pre-v1393)
     UINT64 subrect_layers{}; // quad/cylinder layers submitted with a rect smaller than their swapchain; must stay 0
     UINT64 swapchain_creates_in_frame{}; // xrCreateSwapchain/xrDestroySwapchain between xrBeginFrame and xrEndFrame; must stay 0
     // Frames that would have gone out with zero layers while the session shows frames (xr_frame_hardening.hpp), and what was sent instead.
@@ -2178,8 +2231,10 @@ public:
             XR_LOAD(xrDestroyInstance) XR_LOAD(xrDestroySession) XR_LOAD(xrDestroySpace)
             XR_LOAD(xrDestroySwapchain) XR_LOAD(xrPollEvent) XR_LOAD(xrBeginSession)
             XR_LOAD(xrEndSession) XR_LOAD(xrWaitFrame) XR_LOAD(xrBeginFrame)
-            XR_LOAD(xrEndFrame) XR_LOAD(xrLocateViews) XR_LOAD(xrAcquireSwapchainImage)
-            XR_LOAD(xrWaitSwapchainImage) XR_LOAD(xrReleaseSwapchainImage)
+            XR_LOAD(xrEndFrame) XR_LOAD(xrLocateViews)
+            raw_acquire_image_=api<PFN_xrAcquireSwapchainImage>("xrAcquireSwapchainImage",instance_);
+            raw_wait_image_=api<PFN_xrWaitSwapchainImage>("xrWaitSwapchainImage",instance_);
+            raw_release_image_=api<PFN_xrReleaseSwapchainImage>("xrReleaseSwapchainImage",instance_);
             XR_LOAD(xrStringToPath) XR_LOAD(xrCreateActionSet) XR_LOAD(xrDestroyActionSet)
             XR_LOAD(xrCreateAction) XR_LOAD(xrSuggestInteractionProfileBindings) XR_LOAD(xrAttachSessionActionSets)
             XR_LOAD(xrCreateActionSpace) XR_LOAD(xrSyncActions) XR_LOAD(xrGetActionStatePose)
@@ -2288,7 +2343,7 @@ public:
             drain_gpu_for_surface();
             for(auto& chain:chains_) if(chain) {
                 log_chain_event_(false,"Destroy replaced eye swapchain",width_,height_,chain);
-                chain_sizes_.erase(chain);checked(xrDestroySwapchain(chain),"Destroy replaced eye swapchain");chain=XR_NULL_HANDLE;
+                chain_sizes_.erase(chain);forget_lease_(chain);checked(xrDestroySwapchain(chain),"Destroy replaced eye swapchain");chain=XR_NULL_HANDLE;
             }
         } catch(...) {for(auto chain:next) if(chain) xrDestroySwapchain(chain);throw;}
         chains_=next;images_=std::move(images);width_=width;height_=height;format_=format;rendered_mask_=0;menu_band_width_=0; // prepare_overlays rebuilds the band chain
@@ -2393,6 +2448,40 @@ public:
         rendered_locate_cpu_times_[eye]=locate_cpu_time_;
     }
     bool ready_to_close() {return !session_ || gpu_retirement_ready(close_retirement_);}
+    // v1393 (xr_fault_policy.hpp): a fault can be ridden through while the session exists and the runtime has not asked it to end
+    // (also while it is idle/ready/stopping, as during a Steam Link reconnect: abandon_frame then has no frame to end).
+    bool session_alive() const noexcept {return session_ && !exit_requested;}
+    bool session_shows_frames() const noexcept {return session_alive() && running_ && xr_session_shows_frames(state);}
+    bool force_frame_fault_once{}; // knob build/force-xr-frame-fault: one exception mid-frame, with eye 0's image leased (tests the ride-through)
+    // Call only inside a catch handler: true when the exception being handled says the session or instance cannot be used again.
+    static bool handling_session_fatal() noexcept {
+        try {throw;}
+        catch(const XrSessionFault&) {return true;}
+        catch(const XrOperationError& error) {return xr_result_session_fatal(error.result);}
+        catch(...) {return false;}
+    }
+    UINT64 abandoned_frames{},settled_images{};
+    // v1393: a fault inside present() (or after it in the Present hook) left this frame open and maybe swapchain images leased. Hand the
+    // images back and end the frame with the last good projection or a black quad (never zero layers: xr_frame_hardening.hpp), so the
+    // runtime keeps getting frames and SteamVR / Steam Link never see the app leave VR. Throws only when the runtime says the session is gone.
+    void abandon_frame() {
+        if(!session_) return;
+        ContextState::Scope graphics_scope(graphics_state_);
+        for(std::size_t i=0;i<leases_.size();++i) if(!self_managed_chain_(leases_[i].chain)) settle_lease_(leases_[i].chain); // index: settle never adds leases
+        if(!frame_open_) return;
+        frame_open_=false;++abandoned_frames;
+        XrFrameEndInfo end{};end.type=XR_TYPE_FRAME_END_INFO;end.displayTime=frame_.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        const XrCompositionLayerBaseHeader* layer=nullptr;XrCompositionLayerQuad quad{};
+        // The replay shows each eye chain's most recently released image: only when no eye image went back since the capture (else it
+        // would be this faulted frame's, half drawn or with another pose) and none is still held. Otherwise one black frame.
+        bool eyes_clean=!eye_released_since_capture_;
+        for(const auto eye_chain:chains_) if(const auto* lease=find_lease_(eye_chain);lease && lease->acquired) eyes_clean=false;
+        if(eyes_clean && last_good_projection_.usable(chains_,GetTickCount64(),pose_epoch())) layer=last_good_projection_.header();
+        else if(const auto black=black_fallback_layer_()) {quad=*black;layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);}
+        if(layer) {end.layerCount=1;end.layers=&layer;}
+        const auto ended=xrEndFrame(session_,&end);
+        if(XR_FAILED(ended) && xr_result_session_fatal(ended)) checked(ended,"End abandoned XR frame");
+    }
     void close() noexcept {
         PalmSaver::process().flush_for(200); // a fit confirmed just before stop reaches the disk (bounded wait)
         ContextState::Scope graphics_scope(graphics_state_);
@@ -2407,7 +2496,7 @@ public:
             XrFrameEndInfo end{};end.type=XR_TYPE_FRAME_END_INFO;end.displayTime=frame_.predictedDisplayTime;
             end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;xrEndFrame(session_,&end);frame_open_=false;
         }
-        context_.Reset();invalidate_overlays();chain_generations_.clear(); // a restarted session re-renders every overlay
+        context_.Reset();invalidate_overlays();chain_generations_.clear();leases_.clear(); // a restarted session re-renders every overlay
         settings_texture_.Reset();settings_compositor_.reset();
         world_ui_source_.Reset();world_ui_images_.clear();
         hud_window_source_.Reset();hud_window_images_.clear();
@@ -2504,9 +2593,11 @@ public:
                 if(state==XR_SESSION_STATE_EXITING || state==XR_SESSION_STATE_LOSS_PENDING) exit_requested=true;
                 if(state==XR_SESSION_STATE_READY && !running_) {
                     XrSessionBeginInfo begin{};begin.type=XR_TYPE_SESSION_BEGIN_INFO;begin.primaryViewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-                    checked(xrBeginSession(session_,&begin),"Begin game XR session");running_=true;
+                    // v1393: a failed begin/end is a session fault, never ridden through (the READY/STOPPING event is already consumed)
+                    if(const auto began=xrBeginSession(session_,&begin);XR_FAILED(began)) throw XrSessionFault("Begin game XR session: "+std::to_string(began));
+                    running_=true;
                 } else if(state==XR_SESSION_STATE_STOPPING) {
-                    if(running_) checked(xrEndSession(session_),"End game XR session");running_=false;
+                    if(running_) {running_=false;if(const auto ended=xrEndSession(session_);XR_FAILED(ended)) throw XrSessionFault("End game XR session: "+std::to_string(ended));}
                 }
             }
             if(event.type==XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR) {
@@ -2544,7 +2635,10 @@ public:
         timing.display_time=frame_.predictedDisplayTime;timing.display_period=frame_.predictedDisplayPeriod;
         XrFrameBeginInfo begin{};begin.type=XR_TYPE_FRAME_BEGIN_INFO;
         stage_start=cpu_time_ns();
-        checked(xrBeginFrame(session_,&begin),"Begin game XR frame");frame_open_=true;
+        // v1393: a failed xrBeginFrame after a successful xrWaitFrame leaves a waited frame that was never begun (the next xrWaitFrame may
+        // block on it), and there is no open frame to abandon: a session fault.
+        if(const auto began=xrBeginFrame(session_,&begin);XR_FAILED(began)) throw XrSessionFault("Begin game XR frame: "+std::to_string(began));
+        frame_open_=true;
         timing.begin_ns=cpu_time_ns()-stage_start;stage_start=cpu_time_ns();
         XrViewLocateInfo locate{};locate.type=XR_TYPE_VIEW_LOCATE_INFO;locate.viewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         // Native eyes are prepared after this Present, rendered in the next interval and submitted at the Present after that (the engine
@@ -2818,7 +2912,8 @@ public:
                 checked(xrAcquireSwapchainImage(chains_[eye],&acquire,&index),"Acquire game eye");
                 XrSwapchainImageWaitInfo image_wait{};image_wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;image_wait.timeout=1'000'000'000;
                 auto ready=xrWaitSwapchainImage(chains_[eye],&image_wait);checked(ready,"Wait game eye");
-                if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Game eye wait timed out");}
+                if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Game eye wait timed out");
+                if(force_frame_fault_once) {force_frame_fault_once=false;throw std::runtime_error("Forced mid-frame fault with a leased eye image (build/force-xr-frame-fault)");}}
                 XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
                 try {
                 D3D11_TEXTURE2D_DESC desc{};sources[eye]->GetDesc(&desc);source_eye_sizes[eye]={desc.Width,desc.Height};
@@ -3202,8 +3297,9 @@ public:
         XrCompositionLayerQuad fallback_quad{};const XrCompositionLayerBaseHeader* fallback_layer=nullptr;
         const unsigned real_layers=end.layerCount;
         if(real_layers && end.layers[0]->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION &&
-           last_good_projection_.capture(*reinterpret_cast<const XrCompositionLayerProjection*>(end.layers[0]),GetTickCount64(),pose_epoch()))
-            last_good_scene_=authored_scene_render?scene_id:0;
+           last_good_projection_.capture(*reinterpret_cast<const XrCompositionLayerProjection*>(end.layers[0]),GetTickCount64(),pose_epoch())) {
+            last_good_scene_=authored_scene_render?scene_id:0;eye_released_since_capture_=false;
+        }
         if(!real_layers) {
             gates.layer_count=0;
             const auto reason=classify_empty_frame(gates);
@@ -3231,14 +3327,25 @@ public:
         }
         if(const auto ended=xrEndFrame(session_,&end);XR_FAILED(ended)) {
             // SteamVR fails single frames with layer errors ("compositor failed EndFrame()"): drop that frame instead of recreating the
-            // session (the user sees SteamVR home); a run of 30 still recovers. The layer dump goes to xr-recoveries.log either way.
+            // session (the user sees SteamVR home). The layer dump goes to xr-recoveries.log either way.
+            // v1393: any code that leaves the session usable drops only that frame (a Steam Link hitch can fail frames with other codes,
+            // e.g. XR_ERROR_RUNTIME_FAILURE, and each of those used to destroy the XR instance). A lost session recovers at once; frames
+            // rejected for 3 s on end (and at least 30 of them) recover too.
             const auto name="Submit game XR frame ["+describe_frame_layers(end)+"]";
             const bool layer_error=ended==XR_ERROR_POSE_INVALID || ended==XR_ERROR_SWAPCHAIN_RECT_INVALID || ended==XR_ERROR_LAYER_INVALID || ended==XR_ERROR_LAYER_LIMIT_EXCEEDED;
             if(layer_error && vignette_panel && !vignette_runtime_off_) { // the optional ring is the likeliest culprit and costs nothing to lose
                 vignette_runtime_off_=true;end_frame_rejected_run_=0;
                 if(observe_frame_rejection) observe_frame_rejection("Comfort vignette disabled for this session after the runtime rejected a frame carrying it");
             }
-            if(!layer_error || ++end_frame_rejected_run_>30) checked(ended,name.c_str());
+            if(legacy_frame_rejection) {
+                if(!layer_error || ++end_frame_rejected_run_>30) checked(ended,name.c_str());
+            } else {
+                if(xr_result_session_fatal(ended)) checked(ended,name.c_str());
+                const auto now_ms=GetTickCount64();
+                if(!end_frame_rejected_run_++) end_frame_rejected_since_=now_ms;
+                if(end_frame_rejected_run_>30 && now_ms-end_frame_rejected_since_>=3000)
+                    throw XrSessionFault(name+": "+std::to_string(ended)+" (every frame rejected for 3 s)");
+            }
             ++end_frame_rejections;if(observe_frame_rejection) observe_frame_rejection((name+": "+std::to_string(ended)+" (frame dropped)").c_str());
         } else end_frame_rejected_run_=0;
         frame_open_=false;

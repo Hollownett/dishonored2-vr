@@ -673,6 +673,7 @@ static std::atomic<bool> hands_native{false};
 static std::uint64_t controls_epoch{};static UINT64 wheel_frames{};static int wheel_logic{-1};
 static UINT64 script_capture_next{};
 static bool force_xr_fault=false;
+static bool force_xr_frame_fault=false; // v1393: build/force-xr-frame-fault, one mid-frame fault after 200 gameplay frames (ride-through test, real runtime too)
 static std::array<bool,2> grab_was_holding{};
 static ULONGLONG swing_until_tick{};static d2vr::MotionSwordSwing sword_swing;static UINT64 physical_swings{};
 // VR combat (src/vr_combat.hpp): blade-tip swings, thrust stealth kill, choke reach, block pose, drop assist.
@@ -13621,6 +13622,11 @@ std::string sha256(const fs::path& path) {
 // unexpected engine state costs a second of black instead of ending VR.
 static ULONGLONG xr_retry_tick{};
 static UINT64 xr_recoveries{};
+// v1393 (xr_fault_policy.hpp): faults that leave the session usable are ridden through (handle_xr_fault); the backoff below starts over
+// after 30 s of frames. Knob build/legacy-xr-recovery restores the pre-v1393 behaviour (every fault recovers, the backoff never resets).
+static d2vr::XrFaultPolicy xr_fault_policy;
+static bool xr_legacy_recovery=false;
+static UINT64 xr_abandoned_frames{},xr_settled_images{},xr_end_frame_rejections{}; // GameXr counters, copied on the Present thread for the status
 void recover_xr_session(const char* reason) noexcept {
     note_recoverable(reason);
     try {
@@ -13635,9 +13641,32 @@ void recover_xr_session(const char* reason) noexcept {
         attachment_pose.set_allowed(0,0,0);full_body_tracking_ready=false;full_body.clear();full_body_restore_requested=true;native_grab.clear();arm_tracking.clear();native_interaction_aim.clear();native_left_aim.clear();native_weapon_attachment.clear();
         if(controller_requested) controller_bridge.publish({},false);
         ++xr_recoveries;
-        xr_retry_tick=GetTickCount64()+std::min<ULONGLONG>(10000,1000ull<<std::min<UINT64>(xr_recoveries-1,4));
+        xr_retry_tick=GetTickCount64()+(xr_legacy_recovery?std::min<ULONGLONG>(10000,1000ull<<std::min<UINT64>(xr_recoveries-1,4)):xr_fault_policy.recovered());
     } catch(...) {
         record_callback_error("XR session recovery failed");capturing=false;
+    }
+}
+// v1393: the Present hook's fault handler. Before this every fault ran recover_xr_session, which on SteamVR is the game leaving VR
+// (Steam Link drops or resets the stream; user report 2026-11-18). Now a fault that leaves the session usable only abandons this frame:
+// the frame is ended with the last good projection or a black quad and the next Present renders normally. A lost session, a session
+// that is not running or exiting, and a fault storm (xr_fault_policy.hpp) still recover. Present thread only; call inside a catch
+// handler (fatal is computed there).
+static UINT64 xr_ridden_logged{};
+void handle_xr_fault(const char* reason,bool fatal) noexcept {
+    const auto now=GetTickCount64();
+    const bool session_ok=game_xr && !xr_recovery_retiring.load() && game_xr->session_alive();
+    if(xr_legacy_recovery || xr_fault_policy.fault(now,fatal,session_ok)!=d2vr::XrFaultPolicy::Action::ride_through) {recover_xr_session(reason);return;}
+    try {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        XrGraphicsScope graphics_scope;
+        game_xr->abandon_frame();
+    } catch(const std::exception& error) {
+        std::string why;try {why=std::string(reason)+"; then the abandoned frame failed: "+error.what();} catch(...) {}
+        recover_xr_session(why.empty()?reason:why.c_str());return;
+    } catch(...) {recover_xr_session(reason);return;}
+    // The first 40 ridden faults get a line each, then one in 100 (note_recoverable keeps its own cap of 200 for everything else).
+    if(++xr_ridden_logged<=40 || xr_ridden_logged%100==0) {
+        try {note_recoverable(("Frame fault ridden through, VR kept running (#"+std::to_string(xr_ridden_logged)+"): "+reason).c_str());} catch(...) {}
     }
 }
 // v1041: the XR eye chains follow a slider step on the Present thread. GameXr::resize creates the new chains before it destroys the old
@@ -14063,6 +14092,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 game_xr->wheel_native_pointer=!fs::exists(output_directory.always().parent_path()/L"build"/L"wheel-no-pointer");
                                 game_xr->wheel_eye_art_enabled=!fs::exists(output_directory.always().parent_path()/L"build"/L"wheel-quad"); // v776: the hand wheel's ring in the eyes unless build/wheel-quad (the quad layer, as v775)
                                 game_xr->wrist_hud_enabled=!no_wrist_hud;game_xr->legacy_wrist_hud=legacy_wrist_hud;
+                                game_xr->legacy_frame_rejection=xr_legacy_recovery; // v1393
                                 game_xr->wrist_hud_size_cm=wrist_hud_size_cm;game_xr->wrist_haptic_enabled=!no_wrist_haptic;
                                 game_xr->wrist_hud_backdrop=wrist_hud_backdrop;
                                 game_xr->y_hold_enabled=hold_y_menu_enabled;game_xr->legacy_hold_y_settings=legacy_hold_y_settings;
@@ -14844,9 +14874,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 requested_output_size=density;headset_size_applied=false;headset_size_tick=GetTickCount64();
                                 xr_tracked_transfer_frames=0;optical_density_applied=true;
                             }
-                            if(game_xr->exit_requested) throw std::runtime_error("XR runtime ended the session; reconnecting");
-                            if(force_xr_fault && xr_gameplay_frames>=200) {force_xr_fault=false;throw std::runtime_error("Forced simulated XR fault (build/force-xr-fault)");}
+                            if(game_xr->exit_requested) throw d2vr::XrSessionFault("XR runtime ended the session; reconnecting");
+                            if(force_xr_fault && xr_gameplay_frames>=200) {force_xr_fault=false;throw d2vr::XrSessionFault("Forced simulated XR fault (build/force-xr-fault)");}
+                            if(force_xr_frame_fault && xr_gameplay_frames>=200) {force_xr_frame_fault=false;game_xr->force_frame_fault_once=true;} // thrown inside the next frame
                             xr_submitted=game_xr->submitted;xr_dropped=game_xr->dropped;xr_last_state=game_xr->state;
+                            xr_abandoned_frames=game_xr->abandoned_frames;xr_settled_images=game_xr->settled_images;xr_end_frame_rejections=game_xr->end_frame_rejections;
                             xr_antialiased_eyes=game_xr->antialiased_eyes();
                             xr_settings_layers=game_xr->settings_layers;xr_world_ui_layers=game_xr->world_ui_layers;
                             xr_wrist_layers=game_xr->wrist_layers;xr_world_ui_layers_by_kind=game_xr->world_ui_layers_by_kind;
@@ -16935,12 +16967,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
             }
         }
     }
+    xr_fault_policy.frame_ok(GetTickCount64(),game_xr && !xr_recovery_retiring.load() && game_xr->session_shows_frames()); // v1393: a Present without a fault
     } catch(const std::exception& error) {
-        if(xr_requested && capturing.load()) {desktop_interval=interval;desktop_xr_paced=false;recover_xr_session(error.what());}
+        if(xr_requested && capturing.load()) {desktop_interval=interval;desktop_xr_paced=false;handle_xr_fault(error.what(),d2vr::GameXr::handling_session_fatal());}
         else {native_output_size.clear();cached_output_restored=cached_output_size.restore();record_callback_error(error.what());capturing=false;}
     } catch(...) {
         // Never allow exceptions to escape into the game.
-        if(xr_requested && capturing.load()) {desktop_interval=interval;desktop_xr_paced=false;recover_xr_session("Unknown renderer callback exception");}
+        if(xr_requested && capturing.load()) {desktop_interval=interval;desktop_xr_paced=false;handle_xr_fault("Unknown renderer callback exception",false);}
         else {native_output_size.clear();cached_output_restored=cached_output_size.restore();record_callback_error("Unknown renderer callback exception");callback_failed=true;capturing=false;}
     }
     // Flat diagnostic stereo modes (paired 3 / single 2) have no XR path above: feed the frame split from the Present itself, so
@@ -17153,7 +17186,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             resolution_log_path=output/L"resolution-apply.log";
         }
-        {std::ofstream reset(recovery_log_path,std::ios::trunc);}recoverable_faults=0;xr_recoveries=0;xr_retry_tick=0;script_capture_next=2000;physical_swings=0;sword_swing={};swing_until_tick=0;native_menu_failure_noted=native_turning_failure_noted=native_left_aim_failure_noted=false;
+        {std::ofstream reset(recovery_log_path,std::ios::trunc);}recoverable_faults=0;xr_recoveries=0;xr_retry_tick=0;xr_fault_policy={};xr_ridden_logged=0;xr_abandoned_frames=xr_settled_images=xr_end_frame_rejections=0;script_capture_next=2000;physical_swings=0;sword_swing={};swing_until_tick=0;native_menu_failure_noted=native_turning_failure_noted=native_left_aim_failure_noted=false;
         // v1011: opt-in TLFLIGHTCULL input/output probe (artifacts/shadow-share-probe.jsonl).
         // The path is always configured so the live 1 Hz poll can turn the probe on and off.
         shadow_share.configure_probe(shadow_share_probe && d2vr::diag::on(),(output/L"shadow-share-probe.jsonl").string());
@@ -17363,6 +17396,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             throw std::runtime_error("Simulated VR requires a timed XR diagnostic without saved preferences");
         simulated_vr_requested=simulated_flag!=0;simulated_input_requested=simulated_flag==2;
         force_xr_fault=simulated_vr_requested && fs::exists(root/L"build"/L"force-xr-fault");
+        force_xr_frame_fault=fs::exists(root/L"build"/L"force-xr-frame-fault");
         avatar_calibration_applied=false;current_avatar_torso_width.reset();
         std::atomic_store(&current_avatar_torso,std::shared_ptr<const d2vr::NativeTorsoFitToken>{});last_verified_avatar_torso.reset();
         avatar_calibration_arm_scale=avatar_calibration_shoulder_drop=0;
@@ -18186,6 +18220,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         fsr_taa.fsr4_active=d2vr::dlss_mode::fsr4(temporal_live_mode.load());fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(temporal_live_mode.load());fsr_taa.dlss_active=false; // DLSS engages in the Present loop once the adapter is known
         upscale_fraction=aa_mode_fraction(temporal_live_mode.load());
         perf_governor_enabled=fs::exists(root/L"build"/L"governor");reset_perf_governor(temporal_live_mode.load());
+        xr_legacy_recovery=fs::exists(root/L"build"/L"legacy-xr-recovery"); // v1393: pre-v1393 fault handling (every fault tears down XR)
         {std::ifstream knob(root/L"build"/L"upscale");float f=1;if(knob>>f && f>=.5f && f<=1) upscale_fraction=f;} // diagnostics override
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
@@ -18648,6 +18683,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"taa_idle\":" << taa_history.idle() << ",\"taa_rebuilds\":" << taa_history.rebuilds() << ",\"taa_failures\":" << taa_history.failures() << ",\"taa_right_shared\":" << taa_history.right_shared() << ",\"right_eye_taa_wait_legacy\":" << (right_eye_taa_wait_legacy?"true":"false")
                << ",\"attachment_substitutions\":" << attachment_pose.substitutions() << ",\"attachment_calls\":" << attachment_pose.calls()
                << ",\"xr_recoveries\":" << xr_recoveries << ",\"recoverable_faults\":" << recoverable_faults.load()
+               << ",\"xr_fault_policy\":{\"legacy\":" << (xr_legacy_recovery?"true":"false") << ",\"ridden\":" << xr_fault_policy.ridden
+               << ",\"storms\":" << xr_fault_policy.storms << ",\"backoff_recoveries\":" << xr_fault_policy.recoveries << ",\"backoff_resets\":" << xr_fault_policy.backoff_resets
+               << ",\"abandoned_frames\":" << xr_abandoned_frames << ",\"settled_images\":" << xr_settled_images
+               << ",\"end_frame_rejections\":" << xr_end_frame_rejections << "}"
                << ",\"arm_upload_requested\":" << (arm_upload_requested?"true":"false")
                << ",\"arm_upload_hook_disabled\":" << (arm_upload_disabled?"true":"false")
                << ",\"body_material_restored\":" << (body_material_restored?"true":"false")
