@@ -805,6 +805,8 @@ sealed class MainForm : Form
         launching = true; stopping = false; launch.Enabled = false; stop.Enabled = true;
         log.Clear(); ShowLog(true);
         Append(log, $"Launching {candidate!.Dll} from {env.Root}", Ui.Teal);
+        if (Features.DiagnosticsOn(FeatureBuild))  // plan 1.5: the logging costs frame time and causes hitches
+            Append(log, Features.DiagnosticsWarning, Ui.Gold);
         try
         {
             if (await Probe.Launch(candidate, env.Root, l => Append(log, l), () => env.LiveStatus().gameplay))
