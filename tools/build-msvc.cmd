@@ -1242,6 +1242,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\shadow_share_cons
 if not "%errorlevel%"=="0" exit /b 1
 build\shadow_share_consistency_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\static_shadow_cache_check.cpp /Fo:build\static_shadow_cache_check.obj /Fe:build\static_shadow_cache_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\static_shadow_cache_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT tests\mod_gpu_timer_check.cpp /Fo:build\mod_gpu_timer_check.obj /Fe:build\mod_gpu_timer_check.exe /link d3d11.lib dxgi.lib
 if not "%errorlevel%"=="0" exit /b 1
 build\mod_gpu_timer_check.exe

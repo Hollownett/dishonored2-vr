@@ -197,6 +197,7 @@ static HandChainTrace::V trace_v(const d2vr::Vec3& v) {return {v.x,v.y,v.z};}
 #include "render_pass_map.hpp"
 #include "gpu_pass_window.hpp"
 #include "shadow_share.hpp"
+#include "static_shadow_cache.hpp"
 #include "native_menu_entry.hpp"
 #include "native_world_ui.hpp"
 #include "note_tablet.hpp"
@@ -1219,6 +1220,14 @@ static d2vr::NativeListGpuTimer::Stats native_gpu_summary;
 static d2vr::RenderPassMap render_pass_map;
 static d2vr::GpuPassWindow gpu_pass_window;
 static d2vr::shadow_share::Runtime shadow_share;
+// Plan 2A.1 (docs/STATIC-SHADOW-CACHE.md): observe-only static shadow cache. build/static-shadow-cache (optional first token: the
+// refresh period in frames, default 8) turns it on; build/static-shadow-cache-probe adds the draw/rect/atlas/order probe. Both live.
+static d2vr::static_shadow_cache::Runtime static_shadow_cache;
+static std::uint32_t static_shadow_cache_period(const fs::path& root) {
+    std::uint32_t period=8;
+    if(std::ifstream knob{root/L"build"/L"static-shadow-cache"}) {long long value=0;if(knob>>value && value>=2 && value<=240) period=static_cast<std::uint32_t>(value);}
+    return period;
+}
 static bool shadow_share_requested{};
 static bool shadow_share_eye_hook_ok{};
 static bool native_gpu_requested{},native_gpu_prepared{};
@@ -2755,6 +2764,10 @@ static void poll_elision_knob() noexcept {
         // v1011: build/shadow-share-probe is opt-in and live (the path was set at session start).
         shadow_share.set_probe_enabled(d2vr::diag::on() && fs::exists(root/L"build"/L"shadow-share-probe",error));
     }
+    // Plan 2A.1: the observe-only static shadow cache follows its knobs live once the session wired it (knob present at start).
+    if(static_shadow_cache.requested())
+        static_shadow_cache.set_live(fs::exists(root/L"build"/L"static-shadow-cache",error),static_shadow_cache_period(root),
+                                     fs::exists(root/L"build"/L"static-shadow-cache-probe",error));
 }
 // The mod's own ContextState scopes swap the whole context state and restore it: calls inside a scope are not the game's
 // state and must be neither recorded nor elided (the restore puts back exactly what the shadow already says).
@@ -3327,6 +3340,7 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     // v1307; v1320: only with build/legacy-part-batching (v1318 tags keep held parts out of instanced draws, so no instanced draw is a held mesh)
     if((d2vr::RigMask::draw_is_held() || d2vr::ObjectMotion::draw_placed()) && !d2vr::RigMask::draw_is_rig()) {if(!part_batch_on) note_held_mesh(count,start,base,frames.load(std::memory_order_relaxed));}
     else if(d2vr::RigMask::draw_depth()) for(unsigned i=0;i<24;++i) if(held_mesh_count[i].load(std::memory_order_relaxed)==count) {note_mesh(nh_mesh_count.data(),nh_mesh_hits.data(),24,count);break;}   // a held mesh drawn NOT held
+    d2vr::RenderPassMap::cache_probe_draw(context,count,1,start,base); // plan 2A.1 probe: one thread-local load unless a probed world job
     reinterpret_cast<DrawIndexedFn>(gpu_bindings.original(3,Binding))(context,count,start,base);
     rig_mask.after({0,count,1,start,base,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163: with every binding of the draw still in place
     cross_eye.after();
@@ -3371,6 +3385,7 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     if(d2vr::RigMask::draw_is_held() || d2vr::RigMask::draw_depth()) held_instances[(d2vr::RigMask::draw_is_held()?0:4)+std::min<UINT>(instances,4u)-1u].fetch_add(1,std::memory_order_relaxed);   // v1306 diagnostics
     ID3D11ShaderResourceView* engine_records{};
     if(current_records) {context->VSGetShaderResources(current_slot,1,&engine_records);context->VSSetShaderResources(current_slot,1,&current_records);}   // v1316
+    d2vr::RenderPassMap::cache_probe_draw(context,count,instances,start,base); // plan 2A.1 probe
     reinterpret_cast<DrawIndexedInstancedFn>(gpu_bindings.original(4,Binding))(context,count,instances,start,base,first);
     if(current_records) {context->VSSetShaderResources(current_slot,1,&engine_records);if(engine_records) engine_records->Release();current_records->Release();}
     rig_mask.after({1,count,instances,start,base,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
@@ -3382,6 +3397,7 @@ template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UI
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
+    d2vr::RenderPassMap::cache_probe_draw(context,count,1,start,0); // plan 2A.1 probe
     reinterpret_cast<DrawFn>(gpu_bindings.original(5,Binding))(context,count,start);
     rig_mask.after({2,count,1,start,0,0},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
@@ -3392,6 +3408,7 @@ template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11Device
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
     const d2vr::ObjectMotion::DrawScope object_motion(context); // per-eye previous MVP at b2 for this draw
     if(d2vr::RigMask::draw_is_rig() && d2vr::RigMask::instanced_rig_check.load(std::memory_order_relaxed) && !d2vr::ObjectMotion::draw_has_layout(context)) d2vr::RigMask::not_rig();   // v1317
+    d2vr::RenderPassMap::cache_probe_draw(context,count,instances,start,0); // plan 2A.1 probe
     reinterpret_cast<DrawInstancedFn>(gpu_bindings.original(6,Binding))(context,count,instances,start,first);
     rig_mask.after({3,count,instances,start,0,first},&rig_mask_draw<Binding>,&rig_mask_targets<Binding>,&rig_mask_targets_uav<Binding>); // v1163
     cross_eye.after();
@@ -11964,7 +11981,8 @@ static std::string gpu_passes_block_json() {
 // enabled:false + reason:"prologue_mismatch" instead of a missing block.
 static std::string shadow_share_block_json() {
     if(!shadow_share_requested) return {};
-    return ",\"shadow_share\":"+shadow_share.json();
+    return ",\"shadow_share\":"+shadow_share.json()+
+        (static_shadow_cache.requested()?",\"static_shadow_cache\":"+static_shadow_cache.json():std::string{}); // plan 2A.1
 }
 // v1104: the name of FullBodyDriver::Diagnostic::clip_source (0 none, 1 captured, 2 sampled, 3 fallback).
 static const char* clip_source_name(int source) noexcept {
@@ -13528,6 +13546,7 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
                                         d2vr::Phase phase=d2vr::Phase::pre;
                                         {std::lock_guard<std::mutex> phase_lock(frame_split_mutex);phase=frame_split_eyes.phase(frame_split_in_hook.load(std::memory_order_acquire));}
                                         const int mapped_pass=render_pass_map.pass_for_list(list);
+                                        if(static_shadow_cache.probe()) static_shadow_cache.note_execute(mapped_pass,frames.load(std::memory_order_relaxed)); // plan 2A.1
                                         const auto pass=mapped_pass>=0?static_cast<std::uint8_t>(mapped_pass):d2vr::NativeListGpuTimer::untagged_pass;
                                         ticket=native_gpu_timer.begin_list(context,phase,pass);
                                     }
@@ -13771,7 +13790,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
             // v1002: an XR close/recovery is not a session stop. The engine keeps rendering, so the job-executor hook (pass map,
             // shadow share) stays installed; a single-view frame meanwhile falls back by itself. Only the full session stops
             // (StartProbe teardown paths) disable it. v999-v1001 disabled it here and never re-installed it after a recovery.
-            shadow_share.reset();
+            shadow_share.reset();static_shadow_cache.invalidate(); // plan 2A.1
             if(native_gpu_prepared) {native_gpu_summary=native_gpu_timer.stats();native_gpu_timer.clear();native_gpu_prepared=false;d2vr::mod_gpu_timer().clear();clear_gpu_passes();}
             else if(shadow_share_requested) clear_gpu_passes();
             restore_audio_session();
@@ -18146,6 +18165,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(native_gpu_requested || shadow_share_requested || weapon_pass_needed || visibility_stamp_requested) {
             clear_gpu_passes();render_pass_map.clear();
             render_pass_map.set_shadow_share(shadow_share_requested?&shadow_share:nullptr);
+            {   // Plan 2A.1: observe-only static shadow cache; nothing is attached without build/static-shadow-cache.
+                const bool cache_knob=fs::exists(root/L"build"/L"static-shadow-cache");
+                static_shadow_cache.configure(cache_knob,cache_knob,static_shadow_cache_period(root),fs::exists(root/L"build"/L"static-shadow-cache-probe"));
+                render_pass_map.set_static_shadow_cache(cache_knob?&static_shadow_cache:nullptr);
+            }
             const bool pass_map_installed=render_pass_map.install(image_base);
             if(shadow_share_requested) shadow_share.set_installed(pass_map_installed && shadow_share_eye_hook_ok);
         }
@@ -18941,7 +18965,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         const bool manual_equip_disabled=d2vr::NativeManualEquipRuntime::process_owner().disable();
         const bool grab_disabled=interaction_disabled && native_grab.disable();
         if(taa_history_installed) taa_history.disable();
-        shadow_share.stop();render_pass_map.set_shadow_share(nullptr);render_pass_map.disable();clear_gpu_passes();
+        shadow_share.stop();render_pass_map.set_shadow_share(nullptr);render_pass_map.set_static_shadow_cache(nullptr);render_pass_map.disable();clear_gpu_passes();
         if(attachment_pose_installed) attachment_pose.disable();
         const bool pad_disabled=native_pad_focus.disable();
         restore_camera_comfort();wheel_step_realtime(false); // v778: the wheel's own 0.05 back for flat play
@@ -19041,7 +19065,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(native_interaction_aim.disable())native_grab.disable();
         d2vr::NativeManualEquipRuntime::process_owner().disable();
         if(taa_history_installed) taa_history.disable();
-        shadow_share.stop();render_pass_map.set_shadow_share(nullptr);render_pass_map.disable();clear_gpu_passes();
+        shadow_share.stop();render_pass_map.set_shadow_share(nullptr);render_pass_map.set_static_shadow_cache(nullptr);render_pass_map.disable();clear_gpu_passes();
         if(attachment_pose_installed) attachment_pose.disable();
         native_turning.disable();
         native_pad_focus.disable();

@@ -142,6 +142,19 @@ struct Counters {
     std::uint64_t secondary_writer_jobs{}, secondary_prepare_jobs{}, secondary_reader_jobs{}, secondary_actions{}, secondary_own_frames{};
 };
 
+// Plan 2A.1 (static shadow cache, docs/STATIC-SHADOW-CACHE.md): what happened to the shared atlas in
+// a finished frame.  Snapshotted when the next frame's first view begins, so a consumer that runs in
+// the next frame (the cache's per-frame decision) knows whether that frame's first view owned the
+// atlas (no fallback) and whether a secondary pass ran in it.
+struct FrameOutcome {
+    std::uint64_t serial{};
+    bool valid{};      // a frame with this serial was started
+    bool paired{};     // a second view paired with the first
+    bool shared{};     // at least one second-view writer was suppressed
+    bool fallback{};   // the frame fell back (the second view drew its own shadows)
+    bool secondary{};  // a secondary (lens) pass began while this frame was current
+};
+
 // The effect the runtime applies to one job item.
 struct JobAction {
     bool suppress{};
@@ -191,6 +204,8 @@ public:
         clear_captures();
         secondary_open_ = false;
         secondary_ = 0;
+        secondary_this_frame_ = false;
+        previous_frame_ = {};
         reason_ = enabled_ ? Reason::none : Reason::disabled;
     }
 
@@ -248,6 +263,7 @@ public:
     // isolate=false (build/lens-shared-shadows) keeps the v1256 behaviour and only opens the accounting window.
     void on_secondary_begin(std::uintptr_t view, bool between_eyes, bool isolate = true) noexcept {
         if (!enabled_) return;
+        secondary_this_frame_ = true;   // plan 2A.1: the static shadow cache bypasses such a frame
         if (isolate) {
             if (between_eyes) {fail(Reason::secondary_view); ++counters.secondary_own_frames;}
             frame_started_ = false;
@@ -469,6 +485,8 @@ public:
         return -1;
     }
     std::uint64_t frame_serial() const noexcept {return frame_serial_;}
+    // Plan 2A.1: the outcome of the frame before the current one (see FrameOutcome).
+    const FrameOutcome& previous_frame() const noexcept {return previous_frame_;}
     bool has_capture(int pass) const noexcept {
         return pass >= 0 && pass < pass_slots && captures_[pass].valid;
     }
@@ -486,6 +504,9 @@ private:
     };
     void begin_frame() noexcept {
         if (!frame_fallback_ && frame_shared_) reason_ = Reason::none;
+        previous_frame_ = FrameOutcome{frame_serial_, frame_serial_ != 0, paired_, frame_shared_, frame_fallback_,
+                                       secondary_this_frame_};
+        secondary_this_frame_ = false;
         ++frame_serial_;
         first_ = {};
         second_ = {};
@@ -537,6 +558,8 @@ private:
     bool canonical_valid_{};
     bool secondary_open_{};
     std::uintptr_t secondary_{};
+    bool secondary_this_frame_{};
+    FrameOutcome previous_frame_{};
     Mode mode_{Mode::atlas};
     Reason reason_{Reason::disabled};
     ViewSignature first_{}, second_{};

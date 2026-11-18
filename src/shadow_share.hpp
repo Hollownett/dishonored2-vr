@@ -134,6 +134,19 @@ public:
         model_.on_secondary_end();
     }
     Counters stats() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return model_.stats();}
+    // Plan 2A.1 (static shadow cache, docs/STATIC-SHADOW-CACHE.md): the current frame serial, the
+    // view's index in it (0 = the first view, which owns the shared atlas; 1 = second; -1 = neither)
+    // and the outcome of the previous frame, read under one lock.  False when sharing is not active:
+    // the cache only runs on frames the share model is tracking.
+    bool cache_frame_info(std::uintptr_t view, std::uint64_t& serial, int& view_index,
+                          FrameOutcome& previous) const noexcept {
+        if (!active_.load(std::memory_order_acquire)) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        serial = model_.frame_serial();
+        view_index = model_.view_index(view);
+        previous = model_.previous_frame();
+        return true;
+    }
     // Kept for the model lab and for callers that only need the suppression answer.
     bool should_suppress(int pass, std::uintptr_t view, bool cached_list) noexcept {
         if (!active_.load(std::memory_order_acquire)) return false;
