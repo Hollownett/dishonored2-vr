@@ -1,5 +1,6 @@
 #pragma once
-// v1106: the lens-hidden area (XR_KHR_visibility_mask) and the part of our render frustum outside the runtime FOV are stamped into
+// v1106: the lens-hidden area (XR_KHR_visibility_mask; plan 1.4: the built-in lens_mask_fallback when the runtime's hidden mesh is
+// empty, e.g. SteamVR / Steam Link) and the part of our render frustum outside the runtime FOV are stamped into
 // the scene depth at the reverse-Z near value (1.0) before the first draw of each FORWARD_WORLD pass job, so the forward passes
 // (FORWARD_WORLD, FORWARD_DYNAMIC: the depth-tested shading after the prepass) reject those pixels. v1105 headset: 28.2 % of each
 // canted eye image (10.9 % lens mask + about 17 % outside the FOV) is never seen.
@@ -84,6 +85,12 @@ public:
     inline static std::array<std::atomic<std::uint32_t>,2> triangles{};
     inline static std::array<std::atomic<float>,2> stamped_share{}; // NDC area share of the stamp (the wasted share, minus the margin)
     inline static std::array<std::atomic<std::uint32_t>,2> last_viewport_w{},last_viewport_h{};
+    // Plan 1.4: the built-in lens mask (visibility_mask.hpp lens_mask_fallback) for an eye whose runtime hidden mesh is empty.
+    // fallback_allowed: kill switch build/no-mask-fallback; fallback_scale: build/mask-fallback-scale. Set before the first stamp build.
+    inline static std::atomic<bool> fallback_allowed{true};
+    inline static std::atomic<float> fallback_scale{static_cast<float>(LensMaskFallback::default_scale)};
+    inline static std::array<std::atomic<bool>,2> fallback_used{};
+    inline static std::array<std::atomic<float>,2> fallback_share{}; // share of the runtime FOV the fallback hides (0 when not used)
 
     // Present thread, once the device exists.
     static bool create(ID3D11Device* device) noexcept {
@@ -158,7 +165,11 @@ public:
         o<<"{\"enabled\":"<<(enabled.load()?"true":"false")<<",\"stamps\":["<<stamps[0].load()<<','<<stamps[1].load()<<"],\"triangles\":["<<triangles[0].load()<<','<<triangles[1].load()
          <<"],\"stamped_share\":["<<stamped_share[0].load()<<','<<stamped_share[1].load()<<"],\"viewport\":[["<<last_viewport_w[0].load()<<','<<last_viewport_h[0].load()<<"],["
          <<last_viewport_w[1].load()<<','<<last_viewport_h[1].load()<<"]],\"skipped\":{\"no_eye\":"<<no_eye.load()<<",\"no_depth\":"<<no_depth.load()<<",\"no_geometry\":"<<no_geometry.load()
-         <<",\"no_viewport\":"<<no_viewport.load()<<"},\"failures\":"<<failures.load()<<'}';
+         <<",\"no_viewport\":"<<no_viewport.load()<<"},\"failures\":"<<failures.load()
+         <<",\"fallback\":"<<(fallback_used[0].load() || fallback_used[1].load()?"true":"false")
+         <<",\"fallback_eyes\":["<<(fallback_used[0].load()?"true":"false")<<','<<(fallback_used[1].load()?"true":"false")
+         <<"],\"fallback_share\":["<<fallback_share[0].load()<<','<<fallback_share[1].load()<<"],\"fallback_allowed\":"<<(fallback_allowed.load()?"true":"false")
+         <<",\"fallback_scale\":"<<fallback_scale.load()<<'}';
         return o.str();
     }
     static void reset() noexcept {

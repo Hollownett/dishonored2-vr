@@ -18130,6 +18130,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // v1106: the visibility stamp needs the pass map too (FORWARD_WORLD jobs and their eye view). Kill switch build/no-visibility-stamp.
         const bool visibility_stamp_requested=!fs::exists(root/L"build"/L"no-visibility-stamp");
         d2vr::VisibilityStamp::enabled=visibility_stamp_requested;
+        // Plan 1.4: the built-in lens mask for a runtime whose hidden mesh is empty (SteamVR / Steam Link). Kill switch build/no-mask-fallback;
+        // build/mask-fallback-scale (1.05..1.41, default 1.32; smaller hides more and risks visible corners) for a headset A/B.
+        d2vr::VisibilityStamp::fallback_allowed=!fs::exists(root/L"build"/L"no-mask-fallback");
+        {
+            float scale=static_cast<float>(d2vr::LensMaskFallback::default_scale);std::ifstream knob(root/L"build"/L"mask-fallback-scale");
+            if(knob>>scale && !(scale>=d2vr::LensMaskFallback::min_scale && scale<d2vr::LensMaskFallback::max_scale)) scale=static_cast<float>(d2vr::LensMaskFallback::default_scale);
+            d2vr::VisibilityStamp::fallback_scale=scale;
+        }
         // v1107: foveated FSR 4 (the box half angle in degrees, default 30; build/foveated-upscale-deg overrides, build/no-foveated-upscale = off).
         {
             float deg=30.f;std::ifstream knob(root/L"build"/L"foveated-upscale-deg");if(knob>>deg && !(deg>=10.f && deg<=60.f)) deg=30.f;
@@ -18263,6 +18271,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         turn_ramp_enabled=!fs::exists(root/L"build"/L"no-turn-ramp");
         discovery_throttle_enabled=!fs::exists(root/L"build"/L"no-discovery-throttle"); // plan E task 4: discovery every 8th frame once stable
         d2vr::GameXr::overlay_skip_enabled=!fs::exists(root/L"build"/L"no-overlay-skip");  // plan E task 4: unchanged overlays re-submit their last image
+        d2vr::GameXr::auto_refresh_rate_requested=fs::exists(root/L"build"/L"auto-refresh-rate"); // plan 1.6: XR_FB_display_refresh_rate from the measured work (opt-in)
         d2vr::NativeHeldObject::legacy_throw.store(fs::exists(root/L"build"/L"legacy-throw"));
         start_running_knobs(root,output.when_on());   // Task 9: build/legacy-arm-root-carry, build/no-hand-body-feedforward, build/no-moving-controller-visual (logged to running-knobs.txt)
         start_finger_touch_knobs(root,output.when_on());   // plan C: build/finger-touch.cfg, build/legacy-finger-curl (read once, logged to finger-touch.txt)

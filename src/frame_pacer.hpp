@@ -20,10 +20,17 @@ namespace d2vr {
 // The wakes still sit on one grid while pacing, and the grid shift rule (a runtime that ignores the wake time) is unchanged.
 // miss_lock (knob build/pacer-miss-lock, v844) keeps the old miss-rate lock: a steady half rate when more than ~15% of frames
 // miss their slot, which v863 showed is too eager (its ~63 fps became 45).
+//
+// Plan 1.6 (docs/PERF-PLAN-90HZ-2026-11-19.md): each cadence change is held for at least min_hold_ns. A scene whose work hovers
+// around the thresholds locked and unlocked 37 times in a 6-minute headset session (E2), and every switch is a visible judder; the
+// thresholds are unchanged, only the earliest time the next switch may happen moves. 2 s is several 32-frame windows (0.35-0.7 s
+// each), so a real scene change still switches within ~2 s, while a switch cannot repeat faster than that.
 struct FramePacer {
+    static constexpr std::int64_t default_min_hold_ns=2'000'000'000;
+    std::int64_t min_hold_ns{default_min_hold_ns}; // the lab sets 0 to reproduce the pre-hold behaviour
     std::int64_t base{};                 // refresh period: the shortest runtime period seen
     int k{1};
-    std::int64_t target{},prev_ret{},prev_display{},shifted_at{};
+    std::int64_t target{},prev_ret{},prev_display{},shifted_at{},changed_at{}; // changed_at: ret of the last cadence change (0: none)
     int score{};bool active{},miss_lock{};
     // Work samples (ns) of the last 32 frames. Work, not the interval, is what a scene costs: while pacing, the interval is the
     // locked two periods and says nothing about how much headroom there is.
@@ -44,11 +51,22 @@ struct FramePacer {
         return copy[work_count_/2];
     }
     unsigned locks{},unlocks{},paced_frames{},frames{}; // status: how often the cadence moved, and how much of the session it paced
+    unsigned held_frames{}; // status: frames whose rule asked for a change the hold deferred
+    // The display refresh rate changed (refresh_rate_policy.hpp): the shortest period seen no longer applies. Restart the period at the
+    // new rate's (0: the next runtime period), the work window and the cadence; the status counters stay. A runtime period more than
+    // 5 % shorter than the new rate's is a frame predicted before the switch and is ignored from then on.
+    std::int64_t min_period{};
+    void rebase(std::int64_t period=0) noexcept {
+        base=period>0?period:0;min_period=period>0?period-period/20:0;k=1;
+        target=prev_ret=prev_display=shifted_at=changed_at=0;score=0;work_next_=work_count_=0;
+    }
     // After xrWaitFrame: ret = its return time; idle = this frame's pacing sleep + xrWaitFrame wait.
     void update(std::int64_t ret,std::int64_t idle,std::int64_t display,std::int64_t runtime_period,bool enabled) noexcept {
-        if(runtime_period>0 && (!base || runtime_period<base)) base=runtime_period;
-        if(!enabled || !base) {const auto b=base;*this=FramePacer{};base=b;return;}
+        if(runtime_period>0 && runtime_period>min_period && (!base || runtime_period<base)) base=runtime_period;
+        if(!enabled || !base) {const auto b=base;const auto hold=min_hold_ns;const auto floor=min_period;*this=FramePacer{};base=b;min_hold_ns=hold;min_period=floor;return;}
         active=true;++frames;
+        const bool held=changed_at && ret-changed_at<min_hold_ns;
+        const int k_before=k;
         const bool on_grid=k>1 && target && ret>=target && ret-target<base/2;
         if(prev_ret) {
             const auto work=ret-prev_ret-idle;
@@ -58,18 +76,22 @@ struct FramePacer {
             if(work>0 && work<=base*2) add_work(work);
             else work_count_=work_next_=0;
         }
+        bool want_lock=false,want_unlock=false;
         if(miss_lock) { // v844: the miss-rate lock, opt-in
             if(prev_ret) {
                 const bool miss=ret-prev_ret-idle>base || (prev_display && display-prev_display>k*base+base/2);
                 score=std::clamp(score+(miss?6:-1),0,120);
-                if(k==1 && score>=60) {k=2;++locks;}
-                else if(k==2 && score<=12) {k=1;++unlocks;score=0;}
+                want_lock=k==1 && score>=60;want_unlock=k==2 && score<=12;
             }
         } else if(work_count_>=work_window/2) { // half a window is enough to judge a scene change (16 frames = 0.35 s at 45 Hz)
             const auto median=work_median();
-            if(k==1 && median*tenths>base*lock_tenths) {k=2;++locks;}
-            else if(k==2 && median*tenths<base*unlock_tenths) {k=1;++unlocks;}
+            want_lock=k==1 && median*tenths>base*lock_tenths;
+            want_unlock=k==2 && median*tenths<base*unlock_tenths;
         }
+        if((want_lock || want_unlock) && held) ++held_frames;
+        else if(want_lock) {k=2;++locks;}
+        else if(want_unlock) {k=1;++unlocks;if(miss_lock) score=0;}
+        if(k!=k_before) changed_at=ret;
         if(k>1) ++paced_frames;
         // Next wake k periods after this one on the same grid; an overrun restarts the grid. A step other than k while on the grid
         // means the wakes sit at the runtime's slot boundary: move the grid half a period, at most once a second (a runtime whose
