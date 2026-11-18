@@ -112,6 +112,28 @@ private:
     void fail(unsigned reason,int result) noexcept {state_=State::failed;++failures_;last_reason_=reason;last_result_=result;waiting_=0;}
 };
 
+// v1394 safety net for the foveated DLSS feature (v1108: one feature at the fovea box size, writing into a region of the
+// whole eye). The first failed evaluation of a box feature does not fail the session: DLSS drops the fovea for the rest of
+// the session and rebuilds a whole-eye feature (FsrTaa keeps the eye on FSR 3 meanwhile). A whole-eye failure, or a second
+// box failure, fails the session as before. A new session may use the fovea again.
+class DlssFoveaRetry {
+    bool off_=false;
+    unsigned retries_=0,last_reason_=0;
+    int last_result_=0;
+public:
+    bool fovea_allowed() const noexcept {return !off_;}
+    unsigned retries() const noexcept {return retries_;}
+    unsigned last_reason() const noexcept {return last_reason_;}
+    int last_result() const noexcept {return last_result_;}
+    // An evaluation failed. box: the failing feature was the foveated box. True: retry without the fovea (the caller retires
+    // the pair and rebuilds); false: no retry, the caller fails the session.
+    bool note_failure(bool box,unsigned reason,int result) noexcept {
+        if(!box || off_) return false;
+        off_=true;++retries_;last_reason_=reason;last_result_=result;return true;
+    }
+    void session_end() noexcept {off_=false;}
+};
+
 // Consecutive EVENT-slot refusals (the owner's bounded ring is full for longer than GPU latency explains) become a
 // session failure after `threshold`, instead of silently alternating DLSS and FSR 3 eyes.
 class DlssRefusalStreak {

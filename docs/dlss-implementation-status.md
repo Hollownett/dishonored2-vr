@@ -8,6 +8,19 @@ pending as for every mode; the evidence below is standalone RTX hardware and sim
 
 This checkpoint tracks the [design](superpowers/specs/2026-10-22-dlss-design.md) and [task plan](superpowers/plans/2026-10-22-dlss.md), whose 2026-10-23 ruling wires DLSS at the FSR 3 seam and supersedes the T3 native-census gates for this version.
 
+## 2026-11-19: foveated DLSS fixed on RTX (plan item 1.1)
+
+On the RTX 5070 every DLSS session failed its first evaluation with NGX `0xBAD00005` (`FAIL_InvalidParameter`) and fell
+back to FSR 3. Cause: the v1108 foveated feature (on by default) writes its box into a region of the whole-eye output
+(`InOutputSubrectBase` != 0, output larger than the feature target), but the feature was created without
+`NVSDK_NGX_DLSS_Create_Params::InEnableOutputSubrects`. `tests/dlss_rtx_gpu_check.cpp` reproduces it with the mod's exact
+box geometry (2246x2419 and 2621x2822, fractions 0.6665/0.70, half_deg 30, the 2026-11-19 canted FOV) and the Cyberpunk
+2077 provider 310.9.1: all box cases without the flag fail with `0xBAD00005` on both eyes; with it they evaluate and write
+only the box. DLAA and whole-eye Quality (at and above the NGX optimal size) evaluate in both cases. The box feature is now
+created with output subrects (`Desc::output_subrects`), and a failed box evaluation retries once as whole-eye DLSS for the
+rest of the session (`DlssFoveaRetry`; status `dlss.fovea_box`, `fovea_retries`, a note in `xr-recoveries.log`) before
+DLSS falls back to FSR 3. Headset image quality and comfort of foveated DLSS remain unverified.
+
 ## 2026-10-26: v622 alternating-eye validation
 
 Selected temporal AA is now default-on in alternate-eye performance rendering, including DLAA and DLSS Quality. Native per-eye ownership checks and safe startup/current-colour fallback remain required. The 2026-10-23 alternate-eye restriction below describes that historical checkpoint and is superseded by v622.

@@ -131,6 +131,10 @@ public:
         temporal_eye::MotionContract motion;
         temporal_eye::ColourContract colour_contract;
         bool inverted_depth{}, mv_low_resolution{};
+        // v1394: the feature writes into a region of a larger output (Eval::output_region, the foveated box). NGX needs
+        // NVSDK_NGX_DLSS_Create_Params::InEnableOutputSubrects at create for that; without it the first evaluate with an
+        // output subrect fails with NVSDK_NGX_Result_FAIL_InvalidParameter (0xBAD00005) (RTX 5070 lab, tests/dlss_rtx_gpu_check.cpp).
+        bool output_subrects{};
     };
     struct Paths { std::wstring provider_directory, cache_directory; };
     struct Surface {
@@ -265,7 +269,7 @@ private:
             a.device_generation == b.device_generation && a.dimension_generation == b.dimension_generation &&
             a.feature_generation == b.feature_generation && a.retry_generation == b.retry_generation &&
             a.motion == b.motion && a.colour_contract == b.colour_contract &&
-            a.inverted_depth == b.inverted_depth && a.mv_low_resolution == b.mv_low_resolution;
+            a.inverted_depth == b.inverted_depth && a.mv_low_resolution == b.mv_low_resolution && a.output_subrects == b.output_subrects;
     }
     static bool conventions(const Desc& d) noexcept {
         const auto& m = d.motion; const auto& c = d.colour_contract;
@@ -471,6 +475,7 @@ public:
             create.Feature.InTargetWidth = desc.width; create.Feature.InTargetHeight = desc.height;
             create.Feature.InPerfQualityValue = desc.quality == Quality::dlaa ? NVSDK_NGX_PerfQuality_Value_DLAA : NVSDK_NGX_PerfQuality_Value_MaxQuality;
             create.InFeatureCreateFlags = flags(desc);
+            create.InEnableOutputSubrects = desc.output_subrects;
             result = calls_.create(context, &e.handle, e.parameters, &create);
             const bool duplicate_handle = handle_owned(e.handle, pair.get(), &e);
             if (duplicate_handle) e.handle = nullptr;

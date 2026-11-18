@@ -1427,7 +1427,7 @@ static std::atomic<bool> dlss_jitter_mode{false};static std::atomic<std::uint32_
 static std::array<std::atomic<bool>,2> jitter_owner_dlss{};
 // The user's nvngx_dlss.dll (never bundled): found in the mod home or through build/dlss-dll-path at session start.
 static bool dlss_provider_found=false;static int dlss_provider_source=0;static std::string dlss_provider_utf8;
-static std::atomic<unsigned> present_adapter_vendor{},present_adapter_attempts{};static bool dlss_fallback_noted=false;
+static std::atomic<unsigned> present_adapter_vendor{},present_adapter_attempts{};static bool dlss_fallback_noted=false;static unsigned dlss_fovea_retries_noted=0;
 static bool dlss_offered() noexcept {return dlss_provider_found && present_adapter_vendor.load(std::memory_order_relaxed)==0x10de;}
 // v613: whether FSR 4 runs on the game's adapter, by the FSR 4 backend's own rule (bundled signed AMD provider, no build/fsr4.off, a same-adapter
 // D3D12 device with SM 6.6, a genuine FSR 4 version, a context that creates): a 64x64 probe context, once per session, Present thread.
@@ -12185,7 +12185,9 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"fallbacks\":" << fsr_taa.dlss_fallbacks.load() << ",\"owner_refusals\":" << fsr_taa.dlss_owner_refusals.load() << ",\"owner_status\":" << fsr_taa.dlss_owner_status.load()
         << ",\"features_created\":" << fsr_taa.dlss_features_created.load() << ",\"optimal_queries\":" << fsr_taa.dlss_optimal_queries.load() << ",\"waiting\":" << fsr_taa.dlss_waiting.load() << ",\"owner_rebuilds\":" << fsr_taa.dlss_owner_rebuilds.load()
         << ",\"optimal\":[" << fsr_taa.dlss_optimal_width.load() << ',' << fsr_taa.dlss_optimal_height.load() << "],\"quality_fraction\":" << fsr_taa.dlss_quality_fraction.load()
-        << ",\"last_reason\":\"" << d2vr::DlssEyeUpscaler::reason_name(static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load())) << "\",\"last_result\":" << fsr_taa.dlss_last_result.load() << '}'
+        << ",\"last_reason\":\"" << d2vr::DlssEyeUpscaler::reason_name(static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load())) << "\",\"last_result\":" << fsr_taa.dlss_last_result.load()
+        << ",\"fovea_box\":" << (fsr_taa.dlss_box_feature.load()?"true":"false") << ",\"fovea_retries\":" << fsr_taa.dlss_fovea_retries.load()
+        << ",\"fovea_retry_reason\":\"" << d2vr::DlssEyeUpscaler::reason_name(static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_fovea_retry_reason.load())) << "\",\"fovea_retry_result\":" << fsr_taa.dlss_fovea_retry_result.load() << '}'
         << ",\"aa_first_start\":{\"state\":\"" << first_start_state << "\",\"fsr4_supported\":" << fsr4_supported_state << ",\"removed\":[";
     for(std::size_t removed_index=0;removed_index<first_start_removed.size();++removed_index) out << (removed_index?",":"") << '"' << first_start_removed[removed_index] << '"';
     out << "],\"crosshair_migrated\":" << (crosshair_migrated?"true":"false") << "}"
@@ -14704,6 +14706,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto dlss_reason=static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load());
                                     std::ostringstream dlss_note;dlss_note<<"DLSS unavailable ("<<d2vr::DlssEyeUpscaler::reason_name(dlss_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_last_result.load())<<std::dec<<"): FSR 3 for this session";
                                     note_recoverable(dlss_note.str().c_str());
+                                }
+                                if(fsr_taa.dlss_fovea_retries.load()>dlss_fovea_retries_noted) { // v1394: a failed foveated DLSS box retries whole-eye
+                                    dlss_fovea_retries_noted=fsr_taa.dlss_fovea_retries.load();
+                                    const auto retry_reason=static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_fovea_retry_reason.load());
+                                    std::ostringstream retry_note;retry_note<<"DLSS foveated box failed ("<<d2vr::DlssEyeUpscaler::reason_name(retry_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_fovea_retry_result.load())<<std::dec<<"): retrying DLSS without the fovea for this session";
+                                    note_recoverable(retry_note.str().c_str());
                                 }
                             }
                             if(fsr_taa.enabled.load()) {ComPtr<ID3D11Device> fsr_device;context->GetDevice(&fsr_device);if(fsr_device) {device_creation_flags=fsr_device->GetCreationFlags();fsr_taa.prepare(fsr_device.Get());}}
@@ -18173,6 +18181,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             }
             fsr_taa.dlss_evaluations=0;fsr_taa.dlss_evaluate_failures=0;fsr_taa.dlss_create_failures=0;fsr_taa.dlss_fallbacks=0;fsr_taa.dlss_owner_refusals=0;
             fsr_taa.dlss_features_created=0;fsr_taa.dlss_optimal_queries=0;fsr_taa.dlss_waiting=0;fsr_taa.dlss_owner_rebuilds=0;fsr_taa.dlss_quality_fraction=d2vr::dlss_mode::default_quality_fraction;
+            fsr_taa.dlss_fovea_retries=0;fsr_taa.dlss_fovea_retry_reason=0;fsr_taa.dlss_fovea_retry_result=0;dlss_fovea_retries_noted=0;
             dlss_fallback_noted=false;present_adapter_vendor=0;present_adapter_attempts=0;fsr4_supported_state=-1;dlss_jitter_mode=false;for(auto& owner:jitter_owner_dlss) owner=false;
             for(unsigned side=0;side<2;++side) {fsr_taa.eye_motion_width[side]=0;fsr_taa.eye_motion_height[side]=0;}
         }
