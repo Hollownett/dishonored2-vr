@@ -18220,8 +18220,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         fsr_taa.fsr4_active=d2vr::dlss_mode::fsr4(temporal_live_mode.load());fsr_taa.dlss_quality=d2vr::dlss_mode::is_quality(temporal_live_mode.load());fsr_taa.dlss_active=false; // DLSS engages in the Present loop once the adapter is known
         upscale_fraction=aa_mode_fraction(temporal_live_mode.load());
         perf_governor_enabled=fs::exists(root/L"build"/L"governor");reset_perf_governor(temporal_live_mode.load());
-        xr_legacy_recovery=fs::exists(root/L"build"/L"legacy-xr-recovery"); // v1393: pre-v1393 fault handling (every fault tears down XR)
         {std::ifstream knob(root/L"build"/L"upscale");float f=1;if(knob>>f && f>=.5f && f<=1) upscale_fraction=f;} // diagnostics override
+        xr_legacy_recovery=fs::exists(root/L"build"/L"legacy-xr-recovery"); // v1393: pre-v1393 fault handling (every fault tears down XR); kept below the block tests/settings_startup_check.py extracts
         projection_jitter=!fs::exists(root/L"build"/L"no-projection-jitter");
         hold_y_menu_enabled=!fs::exists(root/L"build"/L"no-hold-y-menu");
         legacy_hold_y_settings=false;   // v1073: build/legacy-hold-y-settings retired with the old drawn settings panel

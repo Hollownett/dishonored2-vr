@@ -27,7 +27,10 @@ int main() {
     auto* page=static_cast<unsigned char*>(VirtualAlloc(nullptr,0x10000,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE));assert(page);
     const auto first=reinterpret_cast<std::uintptr_t>(page);
     // Occupy the first candidate slot above the page so the upward search must step past it.
-    const auto occupied=VirtualAlloc(reinterpret_cast<void*>((first&~std::uintptr_t{0xffff})+0x10000),4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    // If something else already holds that slot, the precondition (slot occupied) still holds.
+    const auto slot=reinterpret_cast<void*>((first&~std::uintptr_t{0xffff})+0x10000);
+    auto occupied=VirtualAlloc(slot,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    if(!occupied) {MEMORY_BASIC_INFORMATION info{};if(VirtualQuery(slot,&info,sizeof(info))&&info.State!=MEM_FREE)occupied=slot;}
     std::array<std::uintptr_t,4> trampolines{first+0x40,first+0x80,first+0xc0,first+0x100};std::array<Block*,4> blocks{};
     for(unsigned index=0;index<trampolines.size();++index) {
         blocks[index]=add_table(trampolines[index]);
