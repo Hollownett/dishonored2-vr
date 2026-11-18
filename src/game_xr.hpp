@@ -8,6 +8,7 @@
 #include <openxr/openxr_platform.h>
 #include "alternate_eye.hpp"
 #include "frame_pacer.hpp"
+#include "refresh_rate_policy.hpp"
 #include "stale_eye_warp.hpp"
 #include "warp_play_space.hpp"
 #include "context_state.hpp"
@@ -278,6 +279,75 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Query> frame_fence_; // v840: GPU fence after the last xrEndFrame; present() waits on it (one frame in flight)
     bool frame_fence_pending_{};
     FramePacer pacer_; // v841: steady paired cadence and the period poses are predicted with (frame_pacer.hpp)
+    // Plan 1.6: automatic display refresh rate through XR_FB_display_refresh_rate (refresh_rate_policy.hpp), opt-in knob
+    // build/auto-refresh-rate. The extension is enabled only with the knob; every change and request is logged to xr-recoveries.log.
+    RefreshRatePolicy refresh_;
+    bool refresh_rate_supported_{},refresh_logged_{};
+    PFN_xrEnumerateDisplayRefreshRatesFB xrEnumerateDisplayRefreshRatesFB_{};PFN_xrGetDisplayRefreshRateFB xrGetDisplayRefreshRateFB_{};
+    PFN_xrRequestDisplayRefreshRateFB xrRequestDisplayRefreshRateFB_{};
+    std::int64_t refresh_prev_ret_{},refresh_polled_at_{};unsigned refresh_log_lines_{};
+    inline static float refresh_ceiling_hz_{}; // the first session's rate (the player's headset-app choice); survives XR restarts
+    void refresh_log_(const char* text) {
+        if(!observe_xr_event) return;
+        if(refresh_log_lines_<100) {++refresh_log_lines_;observe_xr_event(text);}
+        else if(refresh_log_lines_==100) {++refresh_log_lines_;observe_xr_event("xr-refresh: further refresh-rate lines are counted in the status only");}
+    }
+    void setup_refresh_rate_() { // constructor, after the session exists
+        if(!xrEnumerateDisplayRefreshRatesFB_ || !xrGetDisplayRefreshRateFB_ || !xrRequestDisplayRefreshRateFB_) return;
+        std::uint32_t count{};std::array<float,RefreshRatePolicy::max_rates> rates{};float current{};
+        if(XR_FAILED(xrEnumerateDisplayRefreshRatesFB_(session_,0,&count,nullptr)) || !count) return;
+        count=std::min<std::uint32_t>(count,RefreshRatePolicy::max_rates);
+        if(XR_FAILED(xrEnumerateDisplayRefreshRatesFB_(session_,count,&count,rates.data())) || XR_FAILED(xrGetDisplayRefreshRateFB_(session_,&current))) return;
+        if(!(refresh_ceiling_hz_>0.f)) refresh_ceiling_hz_=current;
+        refresh_.configure(rates.data(),std::min<std::uint32_t>(count,RefreshRatePolicy::max_rates),current,refresh_ceiling_hz_);
+    }
+    // The runtime's rate changed (event or query). A change we did not ask for is the player's (or the runtime's) choice: the new ceiling.
+    void refresh_rate_changed_(float hz,const char* how) {
+        if(!(hz>0.f) || std::abs(hz-refresh_.current)<0.01f) return;
+        const float from=refresh_.current;const bool ours=refresh_.pending>0.f && std::abs(hz-refresh_.pending)<0.5f;
+        refresh_.changed(hz);
+        if(!ours) {refresh_ceiling_hz_=hz;refresh_.ceiling=hz;}
+        pacer_.rebase(static_cast<std::int64_t>(1e9/static_cast<double>(hz))); // the cadence and the period restart at the new rate
+        char line[200];std::snprintf(line,sizeof line,"xr-refresh: display %.1f -> %.1f Hz (%s, %s)",from,hz,how,ours?"requested":"not requested: new ceiling");
+        refresh_log_(line);
+    }
+    // Once per frame after xrWaitFrame: ret = its return time, idle = the pacing sleep + the xrWaitFrame wait (FramePacer's work measure).
+    void update_refresh_rate_(std::int64_t ret,std::int64_t idle) {
+        if(!refresh_.active()) {refresh_prev_ret_=0;return;}
+        if(!refresh_logged_) {
+            refresh_logged_=true;std::string text="xr-refresh: automatic refresh rate on; offered";char number[16];
+            for(unsigned i=0;i<refresh_.rate_count;++i) {std::snprintf(number,sizeof number," %.1f",refresh_.rates[i]);text+=number;}
+            std::snprintf(number,sizeof number,"%.1f",refresh_.current);text+=" Hz; current ";text+=number;
+            std::snprintf(number,sizeof number,"%.1f",refresh_.ceiling);text+=" Hz; ceiling ";text+=number;text+=" Hz";
+            refresh_log_(text.c_str());
+        }
+        if(refresh_prev_ret_) refresh_.add_work(ret-refresh_prev_ret_-idle);
+        refresh_prev_ret_=ret;
+        if(refresh_.pending>0.f && ret-refresh_polled_at_>1'000'000'000) { // backstop for a runtime that sends no change event
+            refresh_polled_at_=ret;float now_hz{};
+            if(XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_,&now_hz))) refresh_rate_changed_(now_hz,"query");
+        }
+        const bool was_stopped=refresh_.stopped;
+        if(const float want=refresh_.update(ret)) {
+            const double work_ms=static_cast<double>(refresh_.work_median())/1e6;const float from=refresh_.current;
+            const XrResult r=xrRequestDisplayRefreshRateFB_(session_,want);
+            refresh_.requested(want,ret,XR_SUCCEEDED(r));
+            char line[200];std::snprintf(line,sizeof line,"xr-refresh: request %.1f Hz (current %.1f Hz, work p50 %.2f ms): result %d%s",want,from,work_ms,static_cast<int>(r),
+                XR_SUCCEEDED(r)?"":" (rate dropped for this session)");
+            refresh_log_(line);
+        }
+        if(!was_stopped && refresh_.stopped) refresh_log_("xr-refresh: the runtime did not switch after two accepted requests; automatic refresh rate off for this session");
+    }
+    std::string refresh_status_json_() const {
+        std::ostringstream o;
+        o<<"{\"auto\":"<<(auto_refresh_rate_requested?"true":"false")<<",\"supported\":"<<(refresh_rate_supported_?"true":"false")
+         <<",\"active\":"<<(refresh_.active()?"true":"false")<<",\"rates\":[";
+        for(unsigned i=0;i<refresh_.rate_count && i<RefreshRatePolicy::max_rates;++i) o<<(i?",":"")<<refresh_.rates[i];
+        o<<"],\"current\":"<<refresh_.current<<",\"ceiling\":"<<refresh_.ceiling<<",\"requests\":"<<refresh_.requests<<",\"changes\":"<<refresh_.changes
+         <<",\"ignored\":"<<refresh_.ignored<<",\"rejected\":"<<refresh_.rejected<<",\"stopped\":"<<(refresh_.stopped?"true":"false")
+         <<",\"work_ms_p50\":"<<(static_cast<double>(refresh_.work_median())/1e6)<<'}';
+        return o.str();
+    }
     DisplayHorizon display_horizon_; // v890: recent predicted display times; the median step is the locate horizon while unlocked
     std::array<UINT64,2> wrist_retry_ticks_{};
     std::array<UINT64,2> wrist_image_ticks_{};
@@ -2017,6 +2087,7 @@ public:
     bool stale_eye_warp_enabled{};
     bool steady_pacing{true}; // v841: paired cadence locked to whole refresh periods (frame_pacer.hpp); knob build/legacy-pacing
     bool pacer_miss_lock{false}; // v890: the v844 miss-rate lock (45 Hz when >15% of frames miss a slot); knob build/pacer-miss-lock
+    static inline bool auto_refresh_rate_requested=false; // plan 1.6: knob build/auto-refresh-rate, set before the first GameXr exists (instance extensions)
     bool median_horizon{true}; // v890: locate at D + the median measured display step (DisplayHorizon); knob build/legacy-display-horizon
     bool gpu_queue_limit{true}; // v840: one frame in flight (present waits for the previous submit's GPU fence); knob build/legacy-gpu-queue
     int locate_periods{2}; // v794: display periods between this Present's predicted display and the one that shows the image located now
@@ -2043,7 +2114,9 @@ public:
         std::ostringstream o;
         o<<"{\"k\":"<<pacer_.k<<",\"locks\":"<<pacer_.locks<<",\"unlocks\":"<<pacer_.unlocks
          <<",\"paced_frames\":"<<pacer_.paced_frames<<",\"frames\":"<<pacer_.frames
-         <<",\"work_ms_p50\":"<<(static_cast<double>(pacer_.work_median())/1e6)<<",\"base_ms\":"<<(static_cast<double>(pacer_.base)/1e6)<<'}';
+         <<",\"work_ms_p50\":"<<(static_cast<double>(pacer_.work_median())/1e6)<<",\"base_ms\":"<<(static_cast<double>(pacer_.base)/1e6)
+         <<",\"hold_ms\":"<<(static_cast<double>(pacer_.min_hold_ns)/1e6)<<",\"held_frames\":"<<pacer_.held_frames // plan 1.6
+         <<",\"refresh\":"<<refresh_status_json_()<<'}';
         return o.str();
     }
     void record_rendered_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {rendered_cameras_[eye]=camera;rendered_camera_frame_[eye]=frame;}}
@@ -2244,14 +2317,16 @@ public:
                             visibility_mask_supported_=visibility_mask_supported_ || !std::strcmp(prop.extensionName,XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
                             cylinder_supported_=cylinder_supported_ || !std::strcmp(prop.extensionName,XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
                             color_scale_supported_=color_scale_supported_ || !std::strcmp(prop.extensionName,XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
+                            refresh_rate_supported_=refresh_rate_supported_ || !std::strcmp(prop.extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
                         }
                 }
-            } catch(...) {cylinder_supported_=false;color_scale_supported_=false;visibility_mask_supported_=false;}
+            } catch(...) {cylinder_supported_=false;color_scale_supported_=false;visibility_mask_supported_=false;refresh_rate_supported_=false;}
             if(!vignette_enabled || !vignette_color_scale_requested) color_scale_supported_=false; // nothing would use it; the chained struct is opt-in (build/vignette-color-scale)
             std::vector<const char*> extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
             if(cylinder_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
             if(color_scale_supported_) extensions.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
             if(visibility_mask_supported_) extensions.push_back(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
+            if(refresh_rate_supported_ && auto_refresh_rate_requested) extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME); // plan 1.6, opt-in
             XrInstanceCreateInfo create{};create.type=XR_TYPE_INSTANCE_CREATE_INFO;
             strcpy_s(create.applicationInfo.applicationName,"Dishonored 2 game-image preview");
             create.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
@@ -2278,6 +2353,14 @@ public:
                 palm_.profile_query_available=xrGetCurrentInteractionProfile && xrPathToString;
                 address=nullptr;
                 if(visibility_mask_supported_ && XR_SUCCEEDED(get_(instance_,"xrGetVisibilityMaskKHR",&address)) && address) xrGetVisibilityMaskKHR_=reinterpret_cast<PFN_xrGetVisibilityMaskKHR>(address);
+                if(refresh_rate_supported_ && auto_refresh_rate_requested) { // plan 1.6: all three or none (setup_refresh_rate_ checks)
+                    address=nullptr;
+                    if(XR_SUCCEEDED(get_(instance_,"xrEnumerateDisplayRefreshRatesFB",&address)) && address) xrEnumerateDisplayRefreshRatesFB_=reinterpret_cast<PFN_xrEnumerateDisplayRefreshRatesFB>(address);
+                    address=nullptr;
+                    if(XR_SUCCEEDED(get_(instance_,"xrGetDisplayRefreshRateFB",&address)) && address) xrGetDisplayRefreshRateFB_=reinterpret_cast<PFN_xrGetDisplayRefreshRateFB>(address);
+                    address=nullptr;
+                    if(XR_SUCCEEDED(get_(instance_,"xrRequestDisplayRefreshRateFB",&address)) && address) xrRequestDisplayRefreshRateFB_=reinterpret_cast<PFN_xrRequestDisplayRefreshRateFB>(address);
+                }
             }
             XrSystemGetInfo query{};query.type=XR_TYPE_SYSTEM_GET_INFO;query.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
             XrSystemId system{};
@@ -2304,6 +2387,7 @@ public:
             XrGraphicsBindingD3D11KHR binding{};binding.type=XR_TYPE_GRAPHICS_BINDING_D3D11_KHR;binding.device=device;
             XrSessionCreateInfo session{};session.type=XR_TYPE_SESSION_CREATE_INFO;session.next=&binding;session.systemId=system;
             checked(api<PFN_xrCreateSession>("xrCreateSession",instance_)(instance_,&session,&session_),"Create game XR session");
+            try {setup_refresh_rate_();} catch(...) {} // plan 1.6, opt-in; a failure leaves the policy inactive, never the session
             XrReferenceSpaceCreateInfo space{};space.type=XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
             space.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;space.poseInReferenceSpace.orientation.w=1;
             checked(api<PFN_xrCreateReferenceSpace>("xrCreateReferenceSpace",instance_)(session_,&space,&local_),"Create local XR space");
@@ -2634,6 +2718,8 @@ public:
                 const auto* changed=reinterpret_cast<const XrEventDataVisibilityMaskChangedKHR*>(&event);
                 if(changed->session==session_ && changed->viewIndex<2) visibility_mask_logged_[changed->viewIndex]=false;
             }
+            if(event.type==XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB) // plan 1.6 (only with build/auto-refresh-rate: the extension is opt-in)
+                refresh_rate_changed_(reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(&event)->toDisplayRefreshRate,"runtime event");
             if(event.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
                 const auto* change=reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
                 if(change->session==session_ && (change->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL || (floor_space_ && change->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_STAGE))) {
@@ -2661,7 +2747,9 @@ public:
         checked(xrWaitFrame(session_,&wait,&frame_),"Wait game XR frame");
         timing.waited=true;timing.wait_ns=cpu_time_ns()-stage_start; // includes the pacing sleep: the governor counts both as idle
         pacer_.miss_lock=pacer_miss_lock;
-        pacer_.update(cpu_time_ns(),timing.wait_ns,frame_.predictedDisplayTime,frame_.predictedDisplayPeriod,steady_pacing && !alternate_enabled);
+        const auto waited_ns=cpu_time_ns();
+        pacer_.update(waited_ns,timing.wait_ns,frame_.predictedDisplayTime,frame_.predictedDisplayPeriod,steady_pacing && !alternate_enabled);
+        update_refresh_rate_(waited_ns,timing.wait_ns); // plan 1.6: no-op unless build/auto-refresh-rate and the runtime offers rates
         timing.display_time=frame_.predictedDisplayTime;timing.display_period=frame_.predictedDisplayPeriod;
         XrFrameBeginInfo begin{};begin.type=XR_TYPE_FRAME_BEGIN_INFO;
         stage_start=cpu_time_ns();

@@ -62,6 +62,34 @@ Recovery run_recovery(double heavy_ms,double light_ms,double heavy_s,double tota
     r.locks=pacer.locks;r.unlocks=pacer.unlocks;
     return r;
 }
+// Plan 1.6: a scene whose work alternates between `heavy_ms` and `light_ms` every `half_s` seconds (the user's 2026-11-19 session hovered
+// around the thresholds and switched 37 times in 6 min). Returns the number of cadence changes, the shortest gap between two changes,
+// and the frames the hold deferred.
+struct FlipFlop {unsigned changes{};double min_gap_s{1e9};unsigned held{};};
+FlipFlop run_flipflop(double heavy_ms,double light_ms,double half_s,double total_s,std::int64_t hold_ns,unsigned seed=13) {
+    constexpr std::int64_t base=11'111'111,lead=52'300'000,start=1'000'000'000;
+    d2vr::FramePacer pacer;pacer.min_hold_ns=hold_ns;std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> jitter(-1.,1.),wake_late(0.,300'000.);
+    std::int64_t t=start,prev_display=0,last_change=-1;int k_prev=1;FlipFlop r;
+    const auto end=start+static_cast<std::int64_t>(total_s*1e9),half=static_cast<std::int64_t>(half_s*1e9);
+    while(t<end) {
+        std::int64_t idle=0;
+        if(const auto w=pacer.wake(t)) {idle=w-t+static_cast<std::int64_t>(wake_late(rng));t+=idle;}
+        auto display=(t+lead+base-1)/base*base;
+        if(prev_display && display<prev_display+base) {display=prev_display+base;idle+=display-lead-t;t=display-lead;}
+        pacer.update(t,idle,display,base,true);
+        if(pacer.k!=k_prev) {
+            ++r.changes;
+            if(last_change>=0) r.min_gap_s=std::min(r.min_gap_s,static_cast<double>(t-last_change)/1e9);
+            last_change=t;k_prev=pacer.k;
+        }
+        prev_display=display;
+        const bool heavy=((t-start)/half)%2==0;
+        t+=static_cast<std::int64_t>(((heavy?heavy_ms:light_ms)+jitter(rng)*0.2)*1e6);
+    }
+    r.held=pacer.held_frames;
+    return r;
+}
 } // namespace
 
 int main() {
@@ -118,5 +146,36 @@ int main() {
     {const auto r=run_recovery(45,10.5,4,14);
      std::printf("v985 menu 45 ms then 10.5 ms: k end %d, paced after %.2f, locks %u\n",r.k_end,r.paced_after,r.locks);
      require(r.k_end==1 && r.paced_after<0.02,"menu or loading frames locked the cadence to half rate");}
+    // Plan 1.6: minimum hold. Work alternating 17.5 / 10 ms every 0.6 s crosses both thresholds (lock > 15.6 ms, unlock < 12.2 ms).
+    // Without the hold (the pre-1.6 rule) the cadence follows every swing; with it no two changes are closer than 2 s.
+    {const auto old_rule=run_flipflop(17.5,10,0.6,60,0);
+     const auto held=run_flipflop(17.5,10,0.6,60,d2vr::FramePacer::default_min_hold_ns);
+     std::printf("1.6 flip-flop 17.5/10 ms every 0.6 s, 60 s: no hold %u changes (min gap %.2f s); hold 2 s %u changes (min gap %.2f s, %u frames held)\n",
+         old_rule.changes,old_rule.min_gap_s,held.changes,held.min_gap_s,held.held);
+     require(old_rule.changes>=60 && old_rule.min_gap_s<1.0,"the lab no longer reproduces the flip-flop the hold is for");
+     require(held.min_gap_s>=2.0,"two cadence changes were closer than the minimum hold");
+     require(held.changes<=30 && held.changes>=10,"the hold did not bound the changes (or stopped the cadence from following the scene)");
+     require(held.held>0,"the hold never deferred a change");}
+    // A real scene change still switches within about the hold: 18 ms frames lock within ~2.5 s of the start even right after an unlock.
+    {d2vr::FramePacer pacer;pacer.update(1'000'000'000,0,1'050'000'000,11'111'111,true);
+     pacer.changed_at=1'000'000'000;pacer.k=1; // as if the cadence had just unlocked
+     std::int64_t t=1'000'000'000;double locked_after=-1;
+     for(int i=0;i<400 && locked_after<0;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);if(pacer.k==2) locked_after=(t-1'000'000'000)/1e9;}
+     std::printf("1.6 lock after a fresh unlock: %.2f s\n",locked_after);
+     require(locked_after>=2.0 && locked_after<=2.5,"a sustained heavy scene did not lock within the hold plus one frame window");}
+    // rebase(): a new refresh rate restarts the period and the cadence but keeps the status counters.
+    {d2vr::FramePacer pacer;std::int64_t t=1'000'000'000;
+     for(int i=0;i<200;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);}
+     require(pacer.k==2 && pacer.locks==1,"setup: 18 ms frames did not lock at 90 Hz");
+     pacer.rebase(13'888'889);
+     require(pacer.k==1 && pacer.base==13'888'889 && pacer.locks==1 && pacer.work_median()==0,"rebase did not restart the cadence");
+     for(int i=0;i<3;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);} // frames predicted before the switch
+     require(pacer.base==13'888'889,"a stale 90 Hz period after the switch to 72 Hz became the base again");
+     for(int i=0;i<200;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,13'888'889,true);}
+     require(pacer.base==13'888'889 && pacer.k==1,"after rebase to 72 Hz, 18 ms frames (1.3 periods) must run free");
+     pacer.rebase(11'111'111);
+     for(int i=0;i<200;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);}
+     require(pacer.base==11'111'111 && pacer.k==2,"back at 90 Hz, 18 ms frames must lock again");
+     d2vr::FramePacer fresh;fresh.rebase();require(fresh.base==0 && fresh.min_period==0,"rebase() without a period must take the next runtime period");}
     std::printf("PASS frame_pacer_check\n");
 }

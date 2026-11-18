@@ -18258,6 +18258,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         turn_ramp_enabled=!fs::exists(root/L"build"/L"no-turn-ramp");
         discovery_throttle_enabled=!fs::exists(root/L"build"/L"no-discovery-throttle"); // plan E task 4: discovery every 8th frame once stable
         d2vr::GameXr::overlay_skip_enabled=!fs::exists(root/L"build"/L"no-overlay-skip");  // plan E task 4: unchanged overlays re-submit their last image
+        d2vr::GameXr::auto_refresh_rate_requested=fs::exists(root/L"build"/L"auto-refresh-rate"); // plan 1.6: XR_FB_display_refresh_rate from the measured work (opt-in)
         d2vr::NativeHeldObject::legacy_throw.store(fs::exists(root/L"build"/L"legacy-throw"));
         start_running_knobs(root,output.when_on());   // Task 9: build/legacy-arm-root-carry, build/no-hand-body-feedforward, build/no-moving-controller-visual (logged to running-knobs.txt)
         start_finger_touch_knobs(root,output.when_on());   // plan C: build/finger-touch.cfg, build/legacy-finger-curl (read once, logged to finger-touch.txt)
