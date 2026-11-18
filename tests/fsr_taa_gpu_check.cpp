@@ -225,7 +225,8 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
         check(fsr->eye_upscaler_generation[0]==4 && fsr->eye_upscaler_generation[1]==4 && fsr->eye_fsr4_version[0] && fsr->eye_fsr4_version[1],"Both eyes must report actual FSR4 provider identities");
         std::printf("FSR4 per-eye dispatches=%llu provider_ids=[%llu,%llu]\n",static_cast<unsigned long long>(fsr->fsr4_dispatches.load()),static_cast<unsigned long long>(fsr->eye_fsr4_version[0].load()),static_cast<unsigned long long>(fsr->eye_fsr4_version[1].load()));
     } else if(!provider.empty()) {
-        check(fsr->fsr4_create_failures==2 && fsr->fsr4_dispatches==0 && fsr->fsr4_fallbacks==dispatches,"Unavailable FSR4 must retain the FSR3 route");
+        // Plan 1.3: a non-AMD adapter never tries (2 skips); elsewhere the first eye's failure latches and the second eye skips.
+        check(fsr->fsr4_create_failures<=1 && fsr->fsr4_create_failures+fsr->fsr4_create_skips==2 && fsr->fsr4_dispatches==0 && fsr->fsr4_fallbacks==dispatches,"Unavailable FSR4 must retain the FSR3 route without a second create");
         check(fsr->eye_upscaler_generation[0]==3 && fsr->eye_upscaler_generation[1]==3 && !fsr->eye_fsr4_version[0] && !fsr->eye_fsr4_version[1],"Fallback must not report an FSR4 provider");
         std::puts("PASS: missing FSR4 provider preserves FSR3 for both eyes");
     }
@@ -237,7 +238,9 @@ static void run(ID3D11Device* device,ID3D11DeviceContext* context,float fraction
         for(const float f:{fraction-.07f,fraction}) {fsr->fraction=f;fsr->prepare(device);check(fsr->ready,"resized FSR ready");pair(40);settle_pair();pair(41);settle_pair();}
         check(fsr->context_builds==builds && fsr->replaced==replaced+8 && fsr->failures==0,"smaller render size reuses the FSR contexts");
         if(expect_fsr4) check(fsr->fsr4_dispatches==ml_before+8 && fsr->fsr4_fallbacks==0,"FSR4 accepts a smaller render size");
+        const auto fsr4_failures=fsr->fsr4_create_failures.load();
         fsr->fraction=fraction+.05f;fsr->prepare(device);check(fsr->context_builds==builds+1,"larger render size rebuilds");
+        if(!expect_fsr4) check(fsr->fsr4_create_failures==fsr4_failures,"a rebuild never retries an FSR4 provider that failed or cannot run here");
         fsr->fraction=fraction;fsr->prepare(device);check(fsr->context_builds==builds+1,"back below the new maximum reuses");
         pair(42);settle_pair();check(fsr->failures==0,"dispatch after grow");
         std::printf("resize: builds=%llu (reused for %.2f/%.2f, rebuilt for %.2f)\n",static_cast<unsigned long long>(fsr->context_builds.load()),fraction-.07f,fraction,fraction+.05f);
