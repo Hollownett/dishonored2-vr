@@ -46,23 +46,24 @@ This is from reading the code. A Steam Link session's `xr-recoveries.log` has no
 - `tools/build-msvc.cmd`: `cutscene_skip_checkletterbox_gate_check` (two names glued together since v962, a check file
   that does not exist) split into `cutscene_skip_check letterbox_gate_check`.
 
-## Status (`artifacts/xr-live-status.json`)
+## Status (`artifacts/dxgi-probe-result.json`)
 
-New object `xr_fault_policy`: `legacy`, `ridden` (faults ridden through), `storms`, `backoff_recoveries`,
+The counters are in `dxgi-probe-result.json`, written when VR stops (Stop VR in the launcher; closing the game without
+it writes no result file), not in `xr-live-status.json`. New object `xr_fault_policy`: `legacy`, `ridden` (faults ridden through), `storms`, `backoff_recoveries`,
 `backoff_resets`, `abandoned_frames`, `settled_images`, `end_frame_rejections` (the last three count the current
 `GameXr` session). `xr_recoveries` still counts full recoveries. `xr-recoveries.log` gets one line per ridden fault
 (the first 40, then every 100th): `Frame fault ridden through, VR kept running (#N): <reason>`.
 
 ## Build and test on Windows
 
-1. `tools\build.ps1` (or `tools\build-msvc.cmd`); `xr_fault_policy_check` runs with the other checks. This change was
-   written on Linux without a Windows toolchain: it has not been compiled with MSVC yet (only the pure policy check was
-   built and run, with g++).
-2. Quick check of the ride-through: create `%LOCALAPPDATA%\DishonoredVR\build\force-xr-frame-fault`, play a minute, look
-   for `Frame fault ridden through` in `xr-recoveries.log` and the counters above; then delete the knob.
+1. `tools\build.ps1` (or `tools\build-msvc.cmd`); `xr_fault_policy_check` runs with the other checks. Built with MSVC on
+   Windows for v1393: `xr_fault_policy_check`, `xr_frame_hardening_check` and `game_xr_wrist_recovery_check` pass.
+2. Quick check of the ride-through: create `build\force-xr-frame-fault` in the folder the DLL runs from (the mod home,
+   or the repo when the launcher runs from `launcher\dist` in developer mode), play a minute, look for
+   `Frame fault ridden through` in `xr-recoveries.log`, press Stop VR for the counters above; then delete the knob.
 3. Steam Link session, 20-30 min of normal play, including the places where it froze before.
 4. Afterwards, **before starting the game again** (the log is cleared at launch), keep
-   `%LOCALAPPDATA%\DishonoredVR\artifacts\xr-recoveries.log` and `xr-live-status.json`, plus
+   `%LOCALAPPDATA%\DishonoredVR\artifacts\xr-recoveries.log` and `dxgi-probe-result.json`, plus
    `C:\Program Files (x86)\Steam\logs\vrserver.txt`, `vrcompositor.txt`, `driver_vrlink.txt`.
 5. Pass: no freeze longer than a moment, no Steam Link drop; `xr_recoveries` 0 (or only after a real disconnect).
    `ridden` > 0 means the fix caught faults that used to tear VR down; the log says which ones.
