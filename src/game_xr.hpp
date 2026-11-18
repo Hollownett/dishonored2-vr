@@ -133,6 +133,10 @@ private:
     // v1106: each eye's hidden mesh (tangent xy pairs + indices), kept for the depth stamp, and the inputs its geometry was built from
     std::array<std::vector<float>,2> mask_xy_{};std::array<std::vector<std::uint32_t>,2> mask_indices_{};
     std::array<std::array<float,4>,2> stamp_fov_{};bool stamp_canted_{};bool stamp_built_{};unsigned stamp_mask_epoch_{},stamp_built_epoch_{~0u};
+    // Plan 1.4: the runtime answered xrGetVisibilityMaskKHR successfully with an EMPTY hidden mesh for this eye (SteamVR / Steam Link):
+    // the stamp then uses the built-in lens_mask_fallback (visibility_mask.hpp), unless build/no-mask-fallback.
+    std::array<bool,2> mask_empty_{};
+    inline static std::array<bool,2> mask_data_logged_{}; // the runtime mesh's vertices and indices, logged once per process
     void update_visibility_stamp_() {
         if(!views_valid_ || !VisibilityStamp::enabled.load(std::memory_order_relaxed)) return;
         bool same=stamp_built_ && stamp_canted_==canted_views && stamp_built_epoch_==stamp_mask_epoch_;
@@ -146,9 +150,18 @@ private:
             const auto& f=views_[eye].fov;stamp_fov_[eye]={f.angleLeft,f.angleRight,f.angleUp,f.angleDown};
             RenderFrustum render{{0,0,0,1},std::tan(std::max(-f.angleLeft,f.angleRight)),std::tan(std::max(f.angleUp,-f.angleDown))};
             if(canted_views) if(const auto c=canted_fov(f.angleLeft,f.angleRight,f.angleUp,f.angleDown)) render={c->rotation,std::tan(c->half_x),std::tan(c->half_y)};
-            const auto& xy=mask_xy_[eye];const auto& ix=mask_indices_[eye];
+            const bool runtime_mesh=!mask_xy_[eye].empty() && !mask_indices_[eye].empty();
+            const auto source=lens_mask_source(runtime_mesh || mask_empty_[eye],runtime_mesh?mask_xy_[eye].size()/2:0,runtime_mesh?mask_indices_[eye].size():0,
+                VisibilityStamp::fallback_allowed.load(std::memory_order_relaxed));
+            LensMaskFallback fallback;
+            if(source==LensMaskSource::fallback) fallback=lens_mask_fallback(f.angleLeft,f.angleRight,f.angleUp,f.angleDown,VisibilityStamp::fallback_scale.load(std::memory_order_relaxed));
+            const bool use_fallback=!fallback.xy.empty();
+            const auto& xy=use_fallback?fallback.xy:mask_xy_[eye];const auto& ix=use_fallback?fallback.indices:mask_indices_[eye];
             VisibilityStamp::publish(eye,visibility_stamp_triangles(xy.empty()?nullptr:xy.data(),xy.size()/2,ix.empty()?nullptr:ix.data(),ix.size(),
                 f.angleLeft,f.angleRight,f.angleUp,f.angleDown,render,.01));
+            float share=0;
+            if(use_fallback) {const auto s=visibility_mask_stats(xy.data(),xy.size()/2,ix.data(),ix.size(),f.angleLeft,f.angleRight,f.angleUp,f.angleDown,render);if(s.valid) share=static_cast<float>(s.hidden_of_fov);}
+            VisibilityStamp::fallback_used[eye]=use_fallback;VisibilityStamp::fallback_share[eye]=share;
         }
         stamp_canted_=canted_views;stamp_built_epoch_=stamp_mask_epoch_;stamp_built_=true;
     }
@@ -186,8 +199,25 @@ private:
                 r=xrGetVisibilityMaskKHR_(session_,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,eye,kind,&mask);
             }
             if(XR_FAILED(r) || vertices.empty() || indices.empty()) {
-                std::snprintf(line,sizeof line,"xr-probe %s eye: hidden mesh result %d, %u vertices, %u indices",eye?"right":"left",static_cast<int>(r),mask.vertexCountOutput,mask.indexCountOutput);
+                // Plan 1.4: a successful answer with no triangles means this runtime has no lens mask: the stamp uses the built-in one.
+                const bool empty=XR_SUCCEEDED(r);const auto& f=views_[eye].fov;
+                if(empty && (mask_xy_[eye].size() || !mask_empty_[eye])) {mask_xy_[eye].clear();mask_indices_[eye].clear();mask_empty_[eye]=true;++stamp_mask_epoch_;}
+                const bool fallback=empty && VisibilityStamp::fallback_allowed.load(std::memory_order_relaxed);
+                std::snprintf(line,sizeof line,"xr-probe %s eye: hidden mesh result %d, %u vertices, %u indices; fov tan l %.3f r %.3f u %.3f d %.3f; built-in lens mask %s (scale %.2f)",
+                    eye?"right":"left",static_cast<int>(r),mask.vertexCountOutput,mask.indexCountOutput,std::tan(f.angleLeft),std::tan(f.angleRight),std::tan(f.angleUp),std::tan(f.angleDown),
+                    fallback?"on":empty?"off (build/no-mask-fallback)":"off (no answer)",VisibilityStamp::fallback_scale.load(std::memory_order_relaxed));
                 observe_xr_event(line);continue;
+            }
+            mask_empty_[eye]=false;
+            if(!mask_data_logged_[eye]) { // plan 1.4: the runtime's own mesh, so a later build can carry it for runtimes that return none
+                mask_data_logged_[eye]=true;
+                std::string data=std::string("xr-probe ")+(eye?"right":"left")+" eye: hidden mesh data; fov tan "+std::to_string(std::tan(views_[eye].fov.angleLeft))+' '+
+                    std::to_string(std::tan(views_[eye].fov.angleRight))+' '+std::to_string(std::tan(views_[eye].fov.angleUp))+' '+std::to_string(std::tan(views_[eye].fov.angleDown))+"; xy";
+                char number[24];
+                for(const auto& v:vertices) {std::snprintf(number,sizeof number," %.4f,%.4f",v.x,v.y);data+=number;}
+                data+="; indices";
+                for(const auto i:indices) data+=' '+std::to_string(i);
+                observe_xr_event(data.c_str());
             }
             const auto& f=views_[eye].fov;
             RenderFrustum render{{0,0,0,1},std::tan(std::max(-f.angleLeft,f.angleRight)),std::tan(std::max(f.angleUp,-f.angleDown))}; // plain symmetric frustum

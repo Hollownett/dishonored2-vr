@@ -18119,6 +18119,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // v1106: the visibility stamp needs the pass map too (FORWARD_WORLD jobs and their eye view). Kill switch build/no-visibility-stamp.
         const bool visibility_stamp_requested=!fs::exists(root/L"build"/L"no-visibility-stamp");
         d2vr::VisibilityStamp::enabled=visibility_stamp_requested;
+        // Plan 1.4: the built-in lens mask for a runtime whose hidden mesh is empty (SteamVR / Steam Link). Kill switch build/no-mask-fallback;
+        // build/mask-fallback-scale (1.05..1.41, default 1.32; smaller hides more and risks visible corners) for a headset A/B.
+        d2vr::VisibilityStamp::fallback_allowed=!fs::exists(root/L"build"/L"no-mask-fallback");
+        {
+            float scale=static_cast<float>(d2vr::LensMaskFallback::default_scale);std::ifstream knob(root/L"build"/L"mask-fallback-scale");
+            if(knob>>scale && !(scale>=d2vr::LensMaskFallback::min_scale && scale<d2vr::LensMaskFallback::max_scale)) scale=static_cast<float>(d2vr::LensMaskFallback::default_scale);
+            d2vr::VisibilityStamp::fallback_scale=scale;
+        }
         // v1107: foveated FSR 4 (the box half angle in degrees, default 30; build/foveated-upscale-deg overrides, build/no-foveated-upscale = off).
         {
             float deg=30.f;std::ifstream knob(root/L"build"/L"foveated-upscale-deg");if(knob>>deg && !(deg>=10.f && deg<=60.f)) deg=30.f;

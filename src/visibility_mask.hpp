@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 namespace d2vr {
 
@@ -74,6 +75,62 @@ inline VisibilityMaskStats visibility_mask_stats(const float* xy,std::size_t ver
     s.wasted_of_render=1-(fov_in_render-hidden_in_render)/render_area;
     s.valid=true;
     return s;
+}
+
+// Plan 1.4 (docs/PERF-PLAN-90HZ-2026-11-19.md, E8): a built-in hidden-area mesh for a runtime whose XR_KHR_visibility_mask hidden mesh
+// is EMPTY (SteamVR / Steam Link with a Quest 3 on 2026-11-19: "hidden mesh result 0, 0 vertices"). Never used when the runtime returns
+// a mesh, nor when the extension is missing or the call fails. Kill switch build/no-mask-fallback.
+//
+// Shape: the four FOV corners outside an ellipse centred on the FOV rectangle, with semi-axes `scale` x the rectangle's half extents in
+// tangent space (scale 1 = the inscribed ellipse; sqrt 2 passes through the corners and hides nothing). No primary source publishes the
+// Quest 3 geometry: VDXR forwards ovr_GetFovStencil (mbucchia/VirtualDesktop-OpenXR visibility_mask.cpp) and our 2026-11-19 log has
+// only its share and bounds. So the scale is chosen to be safe for any plausible lens outline that hides what the VDXR Quest 3 mesh
+// hides (9.1 % of the FOV, about 7.1 % inside it: the mesh's outer ring overhangs the FOV by ~1 % on every side), with the logged
+// FOV tangents l -0.933 r 1.000 u 1.111 d -1.192 (mirrored for the right eye). Outlines checked (tools/lens_mask_fallback_study.py,
+// at a 7.1 % share): an ellipse on the rectangle centre needs scale >= 1.16; a round lens about the optical axis (tangent 0,0)
+// >= 1.25, decentred by up to 0.04 tangent >= 1.30; superellipses n = 3 / 4 >= 1.17 / 1.19; chamfered corners >= 1.18.
+// default_scale 1.32 clears the worst (1.30) by 0.02 of the half extent (~25 px of a 2496 px eye) and hides ~0.9 % of that FOV (the
+// VDXR mesh hides 7-9 %). It is a floor, not an estimate of the real mask: the stamp it feeds must never darken a visible pixel.
+// build/mask-fallback-scale (1.05..1.41) overrides it for a headset A/B; a smaller scale hides more and risks visible corners.
+//
+// Geometry: in the rectangle-normalised domain the ellipse is the circle |p| = scale. Each corner is a fan from the corner over the
+// chain E1, P1..Pn, E2, where E1/E2 are where the circle meets the two edges and P1..Pn are the vertices of the circumscribed polygon
+// (tangent lines at evenly spaced angles), so every chord lies outside the circle and no triangle reaches inside it. For
+// 1 < scale <= sqrt 2 the corner sees the whole chain (1 + sqrt(scale^2 - 1) >= scale^2), so the fan never folds into the circle.
+// Output: tangent-space xy pairs and triangle indices, exactly what xrGetVisibilityMaskKHR would return (visibility_stamp_triangles
+// consumes either).
+struct LensMaskFallback {
+    static constexpr double default_scale=1.32;
+    static constexpr double min_scale=1.05,max_scale=1.41421356237;
+    std::vector<float> xy;std::vector<std::uint32_t> indices;
+};
+inline LensMaskFallback lens_mask_fallback(float left,float right,float up,float down,double scale=LensMaskFallback::default_scale,unsigned segments=8) {
+    LensMaskFallback m;
+    const double l=std::tan(left),r=std::tan(right),u=std::tan(up),d=std::tan(down);
+    if(!(r>l) || !(u>d) || !(scale>=LensMaskFallback::min_scale) || !(scale<LensMaskFallback::max_scale) || segments<1 || segments>64) return m;
+    const double cx=(l+r)/2,cy=(u+d)/2,hx=(r-l)/2,hy=(u-d)/2;
+    const double e=std::sqrt(scale*scale-1);               // the circle meets x = 1 at y = e (and y = 1 at x = e)
+    const double a0=std::atan2(e,1.),a1=std::atan2(1.,e),step=(a1-a0)/segments;
+    const double out=scale/std::cos(step/2);              // radius of the circumscribed polygon's vertices
+    std::vector<std::array<double,2>> chain;chain.reserve(segments+2);
+    chain.push_back({1.,e});
+    for(unsigned k=1;k<=segments;++k) {const double a=a0+(k-.5)*step;chain.push_back({out*std::cos(a),out*std::sin(a)});}
+    chain.push_back({e,1.});
+    for(const int sx:{1,-1}) for(const int sy:{1,-1}) {
+        const auto first=static_cast<std::uint32_t>(m.xy.size()/2);
+        auto put=[&](double x,double y) {m.xy.push_back(static_cast<float>(cx+hx*sx*x));m.xy.push_back(static_cast<float>(cy+hy*sy*y));};
+        put(1.,1.);
+        for(const auto& p:chain) put(p[0],p[1]);
+        for(std::uint32_t k=0;k+1<chain.size();++k) {m.indices.push_back(first);m.indices.push_back(first+1+k);m.indices.push_back(first+2+k);}
+    }
+    return m;
+}
+// Which hidden mesh the stamp uses for an eye, from what xrGetVisibilityMaskKHR returned (pure, so the lab covers the rule).
+enum class LensMaskSource {none,runtime,fallback};
+inline LensMaskSource lens_mask_source(bool call_succeeded,std::size_t runtime_vertices,std::size_t runtime_indices,bool fallback_allowed) {
+    if(!call_succeeded) return LensMaskSource::none;               // extension missing or the call failed: an unknown runtime, no guess
+    if(runtime_vertices && runtime_indices) return LensMaskSource::runtime;
+    return fallback_allowed?LensMaskSource::fallback:LensMaskSource::none; // success with an empty mesh: the runtime has no mask
 }
 
 } // namespace d2vr
