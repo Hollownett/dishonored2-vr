@@ -211,6 +211,11 @@ public static class Features
 
     static void ForceOff(Feature f, string path) { if (f.IsEnable) Retire(path); else Touch(path); }
 
+    /// <summary>"Save diagnostic logs" (build\diagnostics, src/diagnostics.hpp) is on. Plan 1.5 (docs/PERF-PLAN-90HZ-2026-11-19.md E12):
+    /// its writers cost frame time and cause hitches, so Launch VR warns while it is on. Off by default (tools/default_features.json).</summary>
+    public static bool DiagnosticsOn(string buildDir) => File.Exists(Path.Combine(buildDir, "diagnostics"));
+    public const string DiagnosticsWarning = "Save diagnostic logs is on (Settings > Features): it costs frame time and can cause hitches. Turn it off unless you are recording a bug.";
+
     /// <summary>On: the feature is in effect. Adopted: the id is in the state's off list (user switch or a hand-made no-knob).</summary>
     public static FeatureState State(string buildDir, IReadOnlyList<Feature> list, string id) => State(buildDir, list)[id];
 

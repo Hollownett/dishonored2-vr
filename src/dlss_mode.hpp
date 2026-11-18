@@ -21,13 +21,17 @@ inline constexpr float default_quality_fraction=2.f/3; // DLSS Quality (1.5x) un
 inline bool active(int mode) noexcept {return mode==dlaa || mode==quality;}
 inline bool is_quality(int mode) noexcept {return mode==quality;}
 inline bool fsr4(int mode) noexcept {return mode==5 || mode==6;}
+// DLSS Quality's fraction: NGX's optimal one once published (fsr_taa.hpp dlss_quality_fraction), else 2/3.
+inline float quality_render_fraction(float quality_fraction) noexcept {
+    return std::isfinite(quality_fraction) && quality_fraction>=.5f && quality_fraction<=1.f?quality_fraction:default_quality_fraction;
+}
 // The engine render fraction for a mode (dxgi_probe.cpp aa_mode_fraction). DLSS Quality follows the optimal settings
-// while DLSS is engaged (offered and not failed this session); otherwise its fallback is FSR 3 Native at fraction 1.
-inline float render_fraction(int mode,float quality_fraction,bool dlss_engaged) noexcept {
-    if(mode==quality) {
-        if(!dlss_engaged) return 1.f;
-        return std::isfinite(quality_fraction) && quality_fraction>=.5f && quality_fraction<=1.f?quality_fraction:default_quality_fraction;
-    }
+// (2/3 until NGX answers). Its fallback (DLSS not offered, or failed this session) is FSR 3 at that same fraction, never
+// FSR 3 Native: a failure must not silently render 2.25x the pixels (2026-11-19 RTX 5070: 2621x2822 per eye instead of
+// ~1747x1881). DLAA's fallback is FSR 3 Native. Engagement therefore no longer changes the preset fraction; it only
+// decides whether a custom scale is clamped to NGX's range (the overload below).
+inline float render_fraction(int mode,float quality_fraction,bool /*dlss_engaged*/) noexcept {
+    if(mode==quality) return quality_render_fraction(quality_fraction);
     return mode==3 || mode==6?.77f:mode==4?.67f:1.f;
 }
 // Upscaler modes (FSR 3/4 Native/Quality/Balanced, DLAA, DLSS Quality) have a render scale the player may set (percent, 50..100).
@@ -40,7 +44,8 @@ inline int preset_percent(int mode,int dlss_percent=67) noexcept {
 }
 // render_fraction with the player's custom scale (custom_percent 0 = the preset). A DLSS feature accepts a render size inside
 // NGX's [low,high] fraction range only (fsr_taa.hpp publishes it once queried; 0 = unknown), so a custom DLSS scale is clamped
-// to it while DLSS is engaged. Not engaged (unavailable or failed), the FSR 3 fallback renders at the custom scale.
+// to it while DLSS is engaged. Not engaged (unavailable or failed), the FSR 3 fallback renders at the custom scale, else at
+// the DLSS preset's fraction (DLSS Quality: NGX optimal or 2/3; DLAA: native).
 inline float render_fraction(int mode,float quality_fraction,bool dlss_engaged,int custom_percent,float low=0.f,float high=0.f) noexcept {
     if(!upscaler(mode) || custom_percent<min_percent || custom_percent>max_percent) return render_fraction(mode,quality_fraction,dlss_engaged);
     float f=static_cast<float>(custom_percent)/100.f;

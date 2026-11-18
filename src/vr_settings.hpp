@@ -230,13 +230,19 @@ public:
     TurnControl::Config turning() const noexcept {return turning_;}
     MirrorMode mirror() const noexcept {return mirror_;}
     double sharpness() const noexcept {return sharpness_;}
-    const wchar_t* temporal_aa_text() const noexcept {
+    // The FSR 3 fallback of a DLSS mode, with the scale it renders at (plan 1.2: DLSS Quality's fallback keeps its fraction,
+    // DLAA's is native, a custom Upscaler scale wins), e.g. " (unavailable: FSR 3 at 67%)".
+    std::wstring dlss_fallback_text() const {
+        const int percent=upscale_percent();
+        return percent>=dlss_mode::max_percent?std::wstring(L" (unavailable: FSR 3 Native)"):L" (unavailable: FSR 3 at "+std::to_wstring(percent)+L"%)";
+    }
+    std::wstring temporal_aa_text() const {
         // FSR 4 and DLSS modes say when the GPU/provider fell back to FSR 3 (upscaler generation 3).
         if(temporal_aa_==0) return aa_?L"Anti-aliasing: SMAA (edge AA)":(requested_>=1.24?L"Anti-aliasing: SSAA 125%":L"Anti-aliasing: Off");
         if(temporal_aa_==5) return upscaler_generation_==3?L"Anti-aliasing: FSR 4 Native (unavailable, FSR 3)":L"Anti-aliasing: FSR 4 Native";
         if(temporal_aa_==6) return upscaler_generation_==3?L"Anti-aliasing: FSR 4 Quality (unavailable, FSR 3)":L"Anti-aliasing: FSR 4 Quality (77%)";
-        if(temporal_aa_==7) return upscaler_generation_==5?L"Anti-aliasing: DLAA":L"Anti-aliasing: DLAA (unavailable, FSR 3)";
-        if(temporal_aa_==8) return upscaler_generation_==5?L"Anti-aliasing: DLSS Quality":L"Anti-aliasing: DLSS Quality (unavailable, FSR 3)";
+        if(temporal_aa_==7) return upscaler_generation_==5?L"Anti-aliasing: DLAA":L"Anti-aliasing: DLAA"+dlss_fallback_text();
+        if(temporal_aa_==8) return upscaler_generation_==5?L"Anti-aliasing: DLSS Quality":L"Anti-aliasing: DLSS Quality"+dlss_fallback_text();
         switch(temporal_aa_) {
             case 1:return L"Anti-aliasing: Game TAA";
             case 2:return L"Anti-aliasing: FSR 3 Native";

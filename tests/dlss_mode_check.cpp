@@ -54,7 +54,14 @@ static void modes() {
     expect(!is_quality(7) && is_quality(8) && fsr4(5) && fsr4(6) && !fsr4(7) && !fsr4(2),"quality and FSR 4 modes");
     for(const bool engaged:{false,true}) expect(near(render_fraction(2,.5f,engaged),1.f) && near(render_fraction(3,.5f,engaged),.77f) && near(render_fraction(4,.5f,engaged),.67f) && near(render_fraction(6,.5f,engaged),.77f) && near(render_fraction(7,.5f,engaged),1.f),"existing fractions untouched");
     expect(near(render_fraction(8,.6667f,true),.6667f),"DLSS Quality follows the published optimal fraction while engaged");
-    expect(near(render_fraction(8,.6667f,false),1.f) && near(render_fraction(8,default_quality_fraction,false),1.f),"DLSS Quality not engaged (not offered or failed) renders native: the fallback is FSR 3 Native");
+    // Plan 1.2 (2026-11-19, RTX 5070: NGX failed and "DLSS Quality" rendered FSR 3 Native at 2621x2822 per eye): the FSR 3
+    // fallback of DLSS Quality keeps the DLSS Quality fraction (NGX optimal if known, else 2/3); DLAA's stays native.
+    expect(near(render_fraction(8,.6667f,false),.6667f) && near(render_fraction(8,.58f,false),.58f),"DLSS Quality not engaged (not offered or failed) falls back to FSR 3 at NGX's optimal fraction");
+    expect(near(render_fraction(8,default_quality_fraction,false),default_quality_fraction) && near(render_fraction(8,0.f,false),default_quality_fraction) && near(render_fraction(8,std::nanf(""),false),default_quality_fraction),"DLSS Quality's FSR 3 fallback renders at 2/3 before NGX answered");
+    expect(render_fraction(8,.6667f,false)<.999f && render_fraction(8,default_quality_fraction,false)<.999f,"DLSS Quality's fallback is never FSR 3 Native");
+    expect(near(render_fraction(7,.6667f,false),1.f) && near(render_fraction(7,.6667f,true),1.f),"DLAA (engaged or not) stays native: its fallback is FSR 3 Native");
+    for(const float q:{0.f,.5f,.58f,.6667f,.9f,1.f,1.5f}) expect(near(render_fraction(8,q,false),render_fraction(8,q,true)),"engagement does not change DLSS Quality's preset fraction");
+    expect(near(quality_render_fraction(.6f),.6f) && near(quality_render_fraction(.49f),default_quality_fraction) && near(quality_render_fraction(1.01f),default_quality_fraction),"quality fraction sanity window [0.5, 1]");
     expect(near(render_fraction(8,0.f,true),default_quality_fraction) && near(render_fraction(8,1.5f,true),default_quality_fraction) && near(render_fraction(8,std::nanf(""),true),default_quality_fraction),"insane optimal fractions fall back to 2/3");
     {   // the Upscaler scale: custom percent per upscaler mode, clamped to NGX's range only while DLSS is engaged
         expect(upscaler(2) && upscaler(8) && !upscaler(0) && !upscaler(1) && !upscaler(9),"upscaler modes");
@@ -65,7 +72,8 @@ static void modes() {
         expect(near(render_fraction(1,.5f,true,60),1.f) && near(render_fraction(0,.5f,true,60),1.f) && near(render_fraction(9,.5f,true,60),1.f),"custom scales never touch non-upscaler modes");
         expect(near(render_fraction(8,.6667f,true,55),.55f) && near(render_fraction(7,.6667f,true,80),.80f),"DLSS custom scales apply before NGX's range is known");
         expect(near(render_fraction(8,.6667f,true,55,.58f,1.f),.58f) && near(render_fraction(8,.6667f,true,95,.5f,.9f),.9f) && near(render_fraction(7,.6667f,true,70,.5f,1.f),.70f),"DLSS custom scales stay inside NGX's range");
-        expect(near(render_fraction(8,.6667f,false,55,.58f,1.f),.55f),"the FSR 3 fallback of an unavailable DLSS renders at the custom scale");
+        expect(near(render_fraction(8,.6667f,false,55,.58f,1.f),.55f) && near(render_fraction(7,.6667f,false,80,.5f,1.f),.80f),"the FSR 3 fallback of an unavailable DLSS renders at the custom scale (a player's scale wins)");
+        expect(near(render_fraction(8,.6667f,false,0,.58f,1.f),.6667f) && near(render_fraction(8,.6f,false,0),.6f) && near(render_fraction(7,.6667f,false,0),1.f),"without a custom scale the FSR 3 fallback keeps the DLSS preset (Quality: optimal; DLAA: native)");
         expect(near(render_fraction(8,.6667f,true,55,0.3f,.4f),.55f),"an insane NGX range is ignored");
     }
     expect(governor_eligible(3,.77f) && governor_eligible(4,.67f) && governor_eligible(6,.77f),"governor steps FSR scaled modes");

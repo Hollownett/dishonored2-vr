@@ -1437,7 +1437,8 @@ static bool fsr4_supported(IDXGISwapChain* chain) noexcept {
     fsr4_supported_state=0;
     try {
         ComPtr<ID3D11Device> device;
-        if(chain && !fsr_taa.fsr4_provider_path.empty() && SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&device)))) {
+        if(chain && !fsr_taa.fsr4_provider_path.empty() && SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&device))) &&
+           d2vr::Fsr4CreateGate::vendor_may_run(d2vr::FsrTaa::adapter_vendor(device.Get()))) { // plan 1.3: no probe create on a non-AMD adapter
             d2vr::Fsr4EyeUpscaler probe;d2vr::Fsr3EyeUpscaler::Desc desc{};
             desc.render_w=desc.render_h=desc.display_w=desc.display_h=64;desc.hdr=false;desc.auto_exposure=false;desc.mv_jittered=true;
             fsr4_supported_state=probe.create(device.Get(),desc,fsr_taa.fsr4_provider_path.c_str(),DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM)?1:0;
@@ -2493,7 +2494,8 @@ static LONG saved_temporal_aa{};
 static constexpr std::uintptr_t temporal_aa_value_rva=0x397bbf8;
 static bool full_scale_requested=false,full_scale_written=false,full_scale_restored=true;static LONG render_fraction_bits=0x3f800000;
 // FSR upscaling: the engine renders each eye at upscale_fraction (its own forced dynamic-resolution path).
-// DLSS Quality follows the NGX optimal settings while engaged (offered, not failed); otherwise its fallback is FSR 3 Native.
+// DLSS Quality follows the NGX optimal settings (2/3 until known); its fallback (not offered, or failed) is FSR 3 at that same
+// fraction (plan 1.2), DLAA's is FSR 3 Native. A custom Upscaler scale wins in both.
 inline float aa_mode_fraction(int mode) noexcept {
     return d2vr::dlss_mode::render_fraction(mode,fsr_taa.dlss_quality_fraction.load(),dlss_offered() && !fsr_taa.dlss_failed(),
         mode==taa_preference?upscale_percent_preference:0,fsr_taa.dlss_range_low.load(),fsr_taa.dlss_range_high.load()); // the Upscaler scale applies to the selected mode only
@@ -12175,7 +12177,8 @@ std::string feedback_status_json() {    std::ostringstream out;
     }
     out << "],\"fsr4_requested\":" << (fsr_taa.fsr4_provider_path.empty()?"false":"true")
         << ",\"fsr4_create_failures\":" << fsr_taa.fsr4_create_failures.load() << ",\"fsr4_dispatches\":" << fsr_taa.fsr4_dispatches.load()
-        << ",\"fsr4_fallbacks\":" << fsr_taa.fsr4_fallbacks.load()
+        << ",\"fsr4_fallbacks\":" << fsr_taa.fsr4_fallbacks.load() << ",\"fsr4_create_skips\":" << fsr_taa.fsr4_create_skips.load()
+        << ",\"fsr4_skip\":\"" << d2vr::fsr4_skip_name(static_cast<d2vr::Fsr4CreateGate::Skip>(fsr_taa.fsr4_skip_reason.load())) << '"'
         << ",\"fsr_eye_dispatches\":[" << fsr_taa.eye_dispatches[0].load() << ',' << fsr_taa.eye_dispatches[1].load() << "],\"fsr_eye_resets\":[" << fsr_taa.eye_resets[0].load() << ',' << fsr_taa.eye_resets[1].load() << ']'
         << ",\"aa_phase_check\":" << taa_jitter_check.json() << ",\"taa_jitter_from_cb\":" << taa_mv_dejitter.from_cb_applied.load() << ",\"fsr_jitter_from_view\":" << (fsr_jitter_from_view.load()?"true":"false")
         << ",\"dlss\":{\"provider_found\":" << (dlss_provider_found?"true":"false") << ",\"provider_source\":" << dlss_provider_source << ",\"provider\":\"" << dlss_provider_utf8
@@ -14702,9 +14705,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     dlss_jitter_mode=(dlss_jitter || fsr_upscaling) && view_jitter_abi && projection_jitter;}
                                 if(fsr_taa.dlss_failed() && !dlss_fallback_noted) {
                                     dlss_fallback_noted=true;
-                                    upscale_fraction=aa_mode_fraction(live_mode);apply_upscale(upscale_fraction); // DLSS Quality's fallback renders native: FSR 3 Native now
+                                    upscale_fraction=aa_mode_fraction(live_mode);apply_upscale(upscale_fraction); // FSR 3 at DLSS Quality's fraction (DLAA: native), or the custom scale
                                     const auto dlss_reason=static_cast<d2vr::DlssEyeUpscaler::Reason>(fsr_taa.dlss_last_reason.load());
-                                    std::ostringstream dlss_note;dlss_note<<"DLSS unavailable ("<<d2vr::DlssEyeUpscaler::reason_name(dlss_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_last_result.load())<<std::dec<<"): FSR 3 for this session";
+                                    std::ostringstream dlss_note;dlss_note<<"DLSS unavailable ("<<d2vr::DlssEyeUpscaler::reason_name(dlss_reason)<<", NGX 0x"<<std::hex<<static_cast<unsigned>(fsr_taa.dlss_last_result.load())<<std::dec<<"): FSR 3 at "<<std::lround(upscale_fraction*100.f)<<"% for this session";
                                     note_recoverable(dlss_note.str().c_str());
                                 }
                                 if(fsr_taa.dlss_fovea_retries.load()>dlss_fovea_retries_noted) { // v1394: a failed foveated DLSS box retries whole-eye
@@ -18156,10 +18159,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             return eye;
         });
         d2vr::ObjectMotion::set_pass_name(+[](unsigned id) noexcept {return d2vr::render_pass_name(id);});
-        // FSR 4 is created next to FSR 3 whenever its provider ships, so the VR menu can switch at runtime.
+        // FSR 4 is created next to FSR 3 whenever its provider ships and the adapter can run it (fsr4_create_gate.hpp: AMD, no failed
+        // create this session), so the VR menu can switch at runtime.
         {const auto provider=root/L"third_party"/L"fsr4"/L"bin"/L"amd_fidelityfx_upscaler_dx12.dll";
          fsr_taa.fsr4_provider_path=fs::exists(provider) && !fs::exists(root/L"build"/L"fsr4.off")?provider.wstring():std::wstring{};}
-        fsr_taa.fsr4_create_failures=0;fsr_taa.fsr4_dispatches=0;fsr_taa.fsr4_fallbacks=0;
+        fsr_taa.fsr4_create_failures=0;fsr_taa.fsr4_dispatches=0;fsr_taa.fsr4_fallbacks=0;fsr_taa.fsr4_create_skips=0;fsr_taa.fsr4_skip_reason=0;
         for(unsigned side=0;side<2;++side) {fsr_taa.eye_upscaler_generation[side]=0;fsr_taa.eye_fsr4_version[side]=0;}
         {   // DLSS provider: the user's nvngx_dlss.dll in the mod home, else build/dlss-dll-path (the DLL or its folder). Never bundled.
             std::string knob_bytes;{std::ifstream knob(root/L"build"/L"dlss-dll-path",std::ios::binary);std::getline(knob,knob_bytes);}

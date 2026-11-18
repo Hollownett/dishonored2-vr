@@ -15,6 +15,7 @@
 #include <wrl/client.h>
 #include "fsr3_eye_upscaler.hpp"
 #include "fsr4_eye_upscaler.hpp"
+#include "fsr4_create_gate.hpp"
 #include "foveated_upscale.hpp"
 #include "dlss_eye_upscaler.hpp"
 #include "d3d11_temporal_owner.hpp"
@@ -224,6 +225,7 @@ private:
     DlssFoveaRetry dlss_fovea_retry_;      // v1394: a failed foveated (box) evaluation retries once as a whole-eye feature
     DlssRetirementLedger dlss_ledger_;
     DlssEyeUpscaler dlss_;                 // production owner: official SDK calls and signed-provider validation
+    Fsr4CreateGate fsr4_gate_;             // plan 1.3: no FSR 4 creates on non-AMD adapters or after a failure this session (guarded by mutex_)
     DlssEyeUpscaler::Lease dlss_lease_;    // the active pair; empty while off, pending or failed
     static std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> dlss_reserved_leases() {std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> v;v.reserve(DlssRetirementLedger::reserve_count);return v;}
     std::vector<std::pair<std::uint64_t,DlssEyeUpscaler::Lease>> dlss_retired_leases_=dlss_reserved_leases(); // retired pairs until the ledger releases them (reserved: no allocation in practice)
@@ -532,6 +534,15 @@ public:
     std::wstring fsr4_provider_path; // Optional signed DX12 provider, configured before rendering starts.
     std::atomic<bool> fsr4_active{true}; // runtime choice (VR menu FSR 4 modes); FSR 3 when false or unavailable
     std::atomic<std::uint64_t> fsr4_create_failures{},fsr4_dispatches{},fsr4_fallbacks{};
+    std::atomic<std::uint64_t> fsr4_create_skips{}; // eye contexts not attempted (Fsr4CreateGate: non-AMD adapter or an earlier failure this session)
+    std::atomic<unsigned> fsr4_skip_reason{};       // Fsr4CreateGate::Skip of the last rebuild's skipped create (0 = none)
+    // PCI vendor of the device's adapter (0 when the query fails).
+    static unsigned adapter_vendor(ID3D11Device* device) noexcept {
+        if(!device) return 0;
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
+        if(FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi))) || FAILED(dxgi->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc))) return 0;
+        return desc.VendorId;
+    }
     // DLSS runtime choice (VR menu modes 7/8) and the user-supplied provider (configured before rendering starts).
     std::atomic<bool> dlss_active{false},dlss_quality{false};
     std::wstring dlss_provider_directory,dlss_cache_directory; // NGX PathListInfo directory holding nvngx_dlss.dll; empty = no provider
@@ -772,6 +783,8 @@ public:
             const float cap=std::min(1.f,std::max(f,max_fraction.load()));
             const UINT cw=upscale?std::max(rw,static_cast<UINT>(std::lround(w*cap))):w,ch=upscale?std::max(rh,static_cast<UINT>(std::lround(h*cap))):h;
             ++context_builds;const auto rebuild_start=std::chrono::steady_clock::now();const auto fsr4_failures_before=fsr4_create_failures.load();
+            const bool fsr4_provider=!fsr4_provider_path.empty();const unsigned fsr4_vendor=fsr4_provider?adapter_vendor(device):0u;
+            Fsr4CreateGate::Skip fsr4_skipped=Fsr4CreateGate::Skip::none;
             for(auto& e:*eyes_) {
                 e.timer.clear();
                 e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();
@@ -842,27 +855,32 @@ public:
                 const std::size_t eye_index=static_cast<std::size_t>(&e-&(*eyes_)[0]);
                 e.fovea_box=upscale && fovea_want[eye_index][2]!=0;
                 if(e.fovea_box) {e.fovea_x=fovea_boxes[eye_index].x;e.fovea_y=fovea_boxes[eye_index].y;}
-                e.fovea=e.fovea_box && fsr4_active.load(std::memory_order_relaxed) && !fsr4_provider_path.empty();
+                // Plan 1.3: FSR 4 only where it can run (AMD adapter, no failed create this session); otherwise FSR 3 alone, no create cost.
+                const auto fsr4_skip=fsr4_gate_.skip(fsr4_provider,fsr4_vendor);const bool try_fsr4=fsr4_skip==Fsr4CreateGate::Skip::none;
+                e.fovea=e.fovea_box && fsr4_active.load(std::memory_order_relaxed) && try_fsr4;
                 if(e.fovea) {
                     // The box context: display = the box, max render = the box at the context's largest render fraction.
                     const auto& b=fovea_boxes[eye_index];e.fovea_x=b.x;e.fovea_y=b.y;
                     auto fd4=fd;fd4.display_w=b.x.display;fd4.display_h=b.y.display;
                     fd4.render_w=std::min(b.x.display,static_cast<UINT>(std::ceil(double(b.x.display)*cw/w))+2);
                     fd4.render_h=std::min(b.y.display,static_cast<UINT>(std::ceil(double(b.y.display)*ch/h))+2);
-                    if(!fsr4_provider_path.empty() && !e.fsr4.create(device,fd4,fsr4_provider_path.c_str(),format,format)) {++fsr4_create_failures;e.fovea=false;}
+                    const bool fsr4_ok=e.fsr4.create(device,fd4,fsr4_provider_path.c_str(),format,format);fsr4_gate_.note_create(fsr4_ok);
+                    if(!fsr4_ok) {++fsr4_create_failures;e.fovea=false;}
                     fovea::box_x[eye_index]=b.x.dst;fovea::box_y[eye_index]=b.y.dst;fovea::box_w[eye_index]=b.x.display;fovea::box_h[eye_index]=b.y.display;
                 } else {
-                    if(!fsr4_provider_path.empty() && !e.fsr4.create(device,fd,fsr4_provider_path.c_str(),format,format)) ++fsr4_create_failures;
+                    if(try_fsr4) {const bool fsr4_ok=e.fsr4.create(device,fd,fsr4_provider_path.c_str(),format,format);fsr4_gate_.note_create(fsr4_ok);if(!fsr4_ok) ++fsr4_create_failures;}
+                    else if(fsr4_skip!=Fsr4CreateGate::Skip::no_provider) {++fsr4_create_skips;fsr4_skipped=fsr4_skip;}
                     fovea::box_x[eye_index]=fovea::box_y[eye_index]=fovea::box_w[eye_index]=fovea::box_h[eye_index]=0;
                 }
             }
             fovea_key_=fovea_want;
             ready_w_=w;ready_h_=h;render_w_=rw;render_h_=rh;context_w_=cw;context_h_=ch;ready_fraction_=f;ready_native_format_=wanted_native_format_.load();
+            fsr4_skip_reason=static_cast<unsigned>(fsr4_skipped);
             if(rebuild_observer) {
                 char text[256]{};
-                std::snprintf(text,sizeof(text),"fsr rebuild #%llu display=%ux%u render=%ux%u context=%ux%u fraction=%.3f fsr4_ok=%d fsr4_failures=%llu in %lld ms",
+                std::snprintf(text,sizeof(text),"fsr rebuild #%llu display=%ux%u render=%ux%u context=%ux%u fraction=%.3f fsr4_ok=%d fsr4_failures=%llu fsr4_skip=%s in %lld ms",
                     static_cast<unsigned long long>(context_builds.load()),w,h,rw,rh,cw,ch,f,(*eyes_)[0].fsr4.valid() && (*eyes_)[1].fsr4.valid()?1:0,
-                    static_cast<unsigned long long>(fsr4_create_failures.load()-fsr4_failures_before),
+                    static_cast<unsigned long long>(fsr4_create_failures.load()-fsr4_failures_before),fsr4_skip_name(fsr4_skipped),
                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-rebuild_start).count()));
                 rebuild_observer(text);
             }
@@ -877,7 +895,7 @@ public:
         invalidate_dlss_sources(true);
         std::lock_guard<std::mutex> lock(mutex_);
         ready=false;++reset_epoch_;
-        dlss_session_end_locked();
+        dlss_session_end_locked();fsr4_gate_.session_end();
         for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();
             e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.mv_srv.reset();e.mv_key=nullptr;e.motion_valid=false;e.rig.reset();e.rig_uav.reset();e.rig_valid=false;e.rig_srv.reset();e.rig_live=false;e.rig_count.reset();e.rig_count_uav.reset();for(auto& s:e.rig_count_staging) s.reset();}
         for(auto& r:receipt_) r.reset();

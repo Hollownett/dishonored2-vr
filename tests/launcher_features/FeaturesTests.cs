@@ -71,10 +71,13 @@ LogCleanupTests.Run(Check); // v1047: the Tools page's "Delete logs" (no build f
     var o = NewBuild(); Features.Apply(o, new[] { old }); Features.Set(o, old, false);   // the user had switched the old diagnostics off: the file no-diagnostics exists
     Features.Apply(o, list);
     Check("old_no_diagnostics_file_is_left_alone_and_diagnostics_stays_off", Has(o, "no-diagnostics") && !Has(o, "diagnostics") && !Features.State(o, list)["diagnostics"].On);
+    // Plan 1.5: off by default for new players; the row's one visible help line leads with the frame-time warning; Launch VR warns while it is on.
+    Check("diagnostics_default_off_and_help_warns_first", !F("diagnostics").Default && F("diagnostics").Help.StartsWith("Costs frame time") && F("diagnostics").Help.Contains("record a bug"));
+    Check("diagnostics_warning_off_without_the_file", !Features.DiagnosticsOn(d) && Features.DiagnosticsWarning.Contains("frame time"));
     Features.Set(d, F("diagnostics"), true);
-    Check("diagnostics_switch_on_writes_the_file", Has(d, "diagnostics") && Features.State(d, list)["diagnostics"].On);
+    Check("diagnostics_switch_on_writes_the_file", Has(d, "diagnostics") && Features.State(d, list)["diagnostics"].On && Features.DiagnosticsOn(d));
     Features.Apply(d, list); Features.Set(d, F("diagnostics"), false);
-    Check("diagnostics_switch_off_removes_the_file", !Has(d, "diagnostics") && !Features.State(d, list)["diagnostics"].On);
+    Check("diagnostics_switch_off_removes_the_file", !Has(d, "diagnostics") && !Features.State(d, list)["diagnostics"].On && !Features.DiagnosticsOn(d));
     var h = NewBuild(); File.WriteAllText(Path.Combine(h, "diagnostics"), ""); Features.Apply(h, list); Features.Apply(h, list);
     Check("handmade_diagnostics_file_is_kept", Has(h, "diagnostics") && Features.State(h, list)["diagnostics"].On);
 }

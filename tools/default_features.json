@@ -435,7 +435,7 @@
    "file": "diagnostics",
    "kind": "enable",
    "label": "Save diagnostic logs (for bug reports)",
-   "help": "Writes the mod's logs, traces and image captures to the artifacts folder for troubleshooting (hundreds of MB per session). Off by default: nothing is recorded, so nothing uses your disk.",
+   "help": "Costs frame time and can cause hitches: turn on only to record a bug, then off again. Writes the mod's logs, traces and image captures to the artifacts folder (hundreds of MB per session). Off by default: nothing is recorded.",
    "default": false
   },
   {
