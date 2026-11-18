@@ -727,7 +727,8 @@ public:
         // v1107: the fovea box each eye wants (zeros = off). Kept while within 4 px of the built one, so float noise never rebuilds.
         std::array<std::array<UINT,4>,2> fovea_want{};std::array<fovea::Box,2> fovea_boxes{};
         if(f<.999f && fovea::published.load() && fovea::half_deg.load()>0 &&
-           ((!fsr4_provider_path.empty() && fsr4_active.load(std::memory_order_relaxed)) || dlss_active.load(std::memory_order_relaxed))) {
+           ((!fsr4_provider_path.empty() && fsr4_active.load(std::memory_order_relaxed)) ||
+            (dlss_active.load(std::memory_order_relaxed) && dlss_fovea_enabled.load(std::memory_order_relaxed)))) { // v1394: DLSS box only with build/dlss-fovea
             const UINT frw=static_cast<UINT>(std::lround(w*f)),frh=static_cast<UINT>(std::lround(h*f));
             bool ok=true;
             for(unsigned eye=0;eye<2;++eye) {

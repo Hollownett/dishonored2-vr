@@ -12202,7 +12202,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"dlss\":{\"provider_found\":" << (dlss_provider_found?"true":"false") << ",\"provider_source\":" << dlss_provider_source << ",\"provider\":\"" << dlss_provider_utf8
         << "\",\"offered\":" << (dlss_offered()?"true":"false") << ",\"adapter_vendor\":" << present_adapter_vendor.load() << ",\"active\":" << (fsr_taa.dlss_active.load()?"true":"false")
         << ",\"quality\":" << (fsr_taa.dlss_quality.load()?"true":"false") << ",\"state\":" << fsr_taa.dlss_state.load() << ",\"jitter_owner\":" << (dlss_jitter_mode.load()?"true":"false") << ",\"jitter_phases\":" << jitter_phases.load()
-        << ",\"evaluations\":" << fsr_taa.dlss_evaluations.load() << ",\"evaluate_failures\":" << fsr_taa.dlss_evaluate_failures.load() << ",\"create_failures\":" << fsr_taa.dlss_create_failures.load()
+        << ",\"preset_hint\":" << d2vr::dlss_preset_hint.load() << ",\"fovea_enabled\":" << (d2vr::dlss_fovea_enabled.load()?"true":"false") << ",\"evaluations\":" << fsr_taa.dlss_evaluations.load() << ",\"evaluate_failures\":" << fsr_taa.dlss_evaluate_failures.load() << ",\"create_failures\":" << fsr_taa.dlss_create_failures.load()
         << ",\"fallbacks\":" << fsr_taa.dlss_fallbacks.load() << ",\"owner_refusals\":" << fsr_taa.dlss_owner_refusals.load() << ",\"owner_status\":" << fsr_taa.dlss_owner_status.load()
         << ",\"features_created\":" << fsr_taa.dlss_features_created.load() << ",\"optimal_queries\":" << fsr_taa.dlss_optimal_queries.load() << ",\"waiting\":" << fsr_taa.dlss_waiting.load() << ",\"owner_rebuilds\":" << fsr_taa.dlss_owner_rebuilds.load()
         << ",\"optimal\":[" << fsr_taa.dlss_optimal_width.load() << ',' << fsr_taa.dlss_optimal_height.load() << "],\"quality_fraction\":" << fsr_taa.dlss_quality_fraction.load()
@@ -18198,6 +18198,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         fsr_taa.fsr4_create_failures=0;fsr_taa.fsr4_dispatches=0;fsr_taa.fsr4_fallbacks=0;fsr_taa.fsr4_create_skips=0;fsr_taa.fsr4_skip_reason=0;
         for(unsigned side=0;side<2;++side) {fsr_taa.eye_upscaler_generation[side]=0;fsr_taa.eye_fsr4_version[side]=0;}
         {   // DLSS provider: the user's nvngx_dlss.dll in the mod home, else build/dlss-dll-path (the DLL or its folder). Never bundled.
+            {std::string preset;std::ifstream knob(root/L"build"/L"dlss-preset");std::getline(knob,preset);d2vr::dlss_preset_hint=d2vr::dlss_preset_from_text(preset);d2vr::dlss_fovea_enabled=fs::exists(root/L"build"/L"dlss-fovea");} // v1394
             std::string knob_bytes;{std::ifstream knob(root/L"build"/L"dlss-dll-path",std::ios::binary);std::getline(knob,knob_bytes);}
             std::wstring knob_text;
             if(!knob_bytes.empty()) {

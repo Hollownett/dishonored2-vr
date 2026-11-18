@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include "temporal_eye_job.hpp"
 #include <array>
 #include <cmath>
@@ -33,6 +34,22 @@
 #endif
 
 namespace d2vr {
+// v1394: NGX render preset hint for DLAA and DLSS Quality (NVSDK_NGX_DLSS_Hint_Render_Preset_*: 5 = E (CNN), 10 = J, 11 = K, 13 = M);
+// 0 leaves NGX's default. Read once from build/dlss-preset (a letter or a number) at session start.
+inline std::atomic<unsigned> dlss_preset_hint{0};
+// v1394 defaults (2026-11-19 sim, RTX 5070, 2246x2419 output, Quality 1497x1612, NGX 310.9.1): preset K 1.44 ms per eye with or
+// without the fovea box, preset E 0.66 ms whole-eye and 1.13 ms foveated (the FSR 3 whole-eye underlay of the box path costs more than
+// the box saves on NVIDIA). So DLSS Quality defaults to preset E and DLAA keeps NGX's default (K); build/dlss-preset overrides both.
+inline constexpr unsigned dlss_quality_default_preset=5; // E
+// v1394: the foveated DLSS box (v1108) only with build/dlss-fovea; whole-eye DLSS by default.
+inline std::atomic<bool> dlss_fovea_enabled{false};
+inline unsigned dlss_preset_from_text(const std::string& t) noexcept {
+    if (t.empty()) return 0;
+    const char c = static_cast<char>(t[0] & ~0x20);
+    if (c >= 'A' && c <= 'O') return static_cast<unsigned>(c - 'A' + 1);
+    unsigned v = 0; for (char d : t) {if (d < '0' || d > '9') break; v = v * 10 + static_cast<unsigned>(d - '0');}
+    return v <= 15 ? v : 0;
+}
 // The vendor macro compares an unsigned mask to a signed enum in clang-cl.
 // Isolate that vendor diagnostic without weakening warnings for our implementation.
 #ifdef _MSC_VER
@@ -470,6 +487,15 @@ public:
             if (ngx_failed(result) || result != NVSDK_NGX_Result_Success || !e.parameters)
                 return abort_pair(duplicate_map && result == NVSDK_NGX_Result_Success ? Reason::duplicate_history : Reason::allocate_failed,
                                   result, static_cast<int>(eye));
+            // v1394: the render preset (build/dlss-preset; 0 = NGX's default, K for Quality/DLAA with the 310 providers). Set on the
+            // feature's own parameter block before create; the 2026-11-19 sim on an RTX 5070 measured the default at 1.44 ms per eye
+            // (1497x1612 -> 2246x2419), above FSR 3 Quality's 0.99 ms.
+            if (const unsigned preset = dlss_preset_hint.load(std::memory_order_relaxed)) {
+                calls_.set_ui(e.parameters, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, preset);
+                calls_.set_ui(e.parameters, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, preset);
+            } else if (desc.quality != Quality::dlaa) {
+                calls_.set_ui(e.parameters, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, dlss_quality_default_preset);
+            }
             NVSDK_NGX_DLSS_Create_Params create{};
             create.Feature.InWidth = render_w(desc); create.Feature.InHeight = render_h(desc);
             create.Feature.InTargetWidth = desc.width; create.Feature.InTargetHeight = desc.height;

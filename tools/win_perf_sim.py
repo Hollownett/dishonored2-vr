@@ -216,6 +216,7 @@ def main():
     ap.add_argument("--sample-delay", type=int, default=15, help="seconds of gameplay before sampling")
     ap.add_argument("--during", help="a tool run once at --sample-delay into gameplay, e.g. 'tools/stack_callers.py {pid} 6'; output in during.txt")
     ap.add_argument("--out", default=str(ART / "perf-night"))
+    ap.add_argument("--game-cvar", action="append", default=[], help="NAME=VALUE appended to dishonored2Config.cfg for this run (restored after)")
     ap.add_argument("--autocontinue", action="store_true", help="also arm the proxy's Enter presses (they repeat while it cannot read a >64 KiB status)")
     a = ap.parse_args()
     if not 10 <= a.seconds <= 120:
@@ -274,6 +275,16 @@ def main():
         for path, text in planned.items():
             path.write_text(text if isinstance(text, str) else text, encoding="utf-8")
             written.append(path)
+        if a.game_cvar:
+            cfg = SAVE_BASE / "dishonored2Config.cfg"
+            with open(cfg, "a", encoding="utf-8") as f:
+                for kv in a.game_cvar:
+                    name, _, value = kv.partition("=")
+                    if not re.fullmatch(r"[A-Za-z0-9_]+", name) or not re.fullmatch(r"[A-Za-z0-9_. -]*", value):
+                        raise SystemExit(f"bad --game-cvar {kv!r}")
+                    f.write(f'\n{name} "{value}"')
+                f.write("\n")
+            out("game cvars appended: " + ", ".join(a.game_cvar))
         out("knobs: " + ", ".join(p.name for p in written) + (" | moved aside: " + ", ".join(s.name for s, _ in moved) if moved else ""))
         (run / "run-args.json").write_text(json.dumps(vars(a), indent=1))
 
