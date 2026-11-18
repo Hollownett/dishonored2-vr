@@ -39,6 +39,7 @@
 #include "command_list_pass_map.hpp"
 #include "render_pass_table.hpp"
 #include "shadow_share.hpp"
+#include "static_shadow_cache.hpp"
 #include "visibility_stamp.hpp"
 
 namespace d2vr {
@@ -61,6 +62,92 @@ private:
     inline static thread_local std::uint64_t current_job_=0;
     inline static std::atomic<std::uint64_t> job_serial_{};
     inline static std::atomic<shadow_share::Runtime*> shadow_share_{};
+    // Plan 2A.1 (docs/STATIC-SHADOW-CACHE.md): observe-only static shadow cache.  Null unless
+    // build/static-shadow-cache existed at session start; it never changes a job.
+    inline static std::atomic<static_shadow_cache::Runtime*> static_cache_{};
+    inline static thread_local static_shadow_cache::JobDraws* cache_draws_=nullptr; // set only during a probed first-view world job
+    inline static thread_local static_shadow_cache::Path cache_path_=static_shadow_cache::Path::none;
+    inline static thread_local ID3D11DepthStencilView* cache_last_dsv_=nullptr;
+    inline static thread_local static_shadow_cache::AtlasRect cache_last_rect_{};
+    inline static thread_local static_shadow_cache::JobDraws cache_job_draws_{};
+    inline static thread_local std::array<static_shadow_cache::LightKey,static_shadow_cache::light_capacity> cache_keys_{};
+    static bool read_u32(std::uintptr_t address,std::uint32_t& value) noexcept {
+        __try {value=*reinterpret_cast<const std::uint32_t*>(address);return true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    // The published records of one light's shadow entry: [entry+0x10] is the record array, each face
+    // is 0x100 bytes and TLFLIGHTCULL copies its first 0x84 bytes (0x2f7710..0x2f7890).
+    static bool hash_light_records(std::uintptr_t info,std::uint32_t records,std::uint64_t& hash) noexcept {
+        unsigned char face[static_shadow_cache::record_bytes];
+        std::uint64_t h=0x84222325cbf29ce4ull;
+        __try {
+            const char* data=*reinterpret_cast<char* const*>(info+0x10);
+            if(!data) return false;
+            const unsigned n=records<static_shadow_cache::max_records?records:static_shadow_cache::max_records;
+            for(unsigned i=0;i<n;++i) {
+                const char* src=data+static_cast<std::size_t>(i)*static_shadow_cache::record_stride;
+                for(unsigned b=0;b<static_shadow_cache::record_bytes;++b) face[b]=static_cast<unsigned char>(src[b]);
+                h=static_shadow_cache::hash_words(face,static_shadow_cache::record_bytes,h+i);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        hash=h;
+        return true;
+    }
+    // First view's TLFLIGHTCULL (after the v1009 capture walk): hand the frame's light key to the cache.
+    void submit_cache_lights(static_shadow_cache::Runtime* cache,shadow_share::Runtime* share,void* view,unsigned count) noexcept {
+        std::uint64_t serial=0;int index=-1;shadow_share::FrameOutcome previous{};
+        if(!share->cache_frame_info(reinterpret_cast<std::uintptr_t>(view),serial,index,previous) || index!=0) return;
+        unsigned keys=0;bool readable=true;
+        for(unsigned i=0;i<count;++i) {
+            const auto& link=light_links_[i];
+            if(!link.info || !link.records) continue;   // not a shadowed (atlas) light this frame
+            if(keys>=static_shadow_cache::light_capacity) {readable=false;break;}
+            static_shadow_cache::LightKey key{};
+            key.light=reinterpret_cast<std::uintptr_t>(link.light);
+            key.records=link.records;
+            if(!hash_light_records(link.info,link.records,key.record_hash)) readable=false;
+            cache_keys_[keys++]=key;
+        }
+        std::uint32_t slices=0;
+        if(!read_u32(base_+static_shadow_cache::parallel_slice_count_rva,slices)) readable=false;
+        cache->submit_lights(serial,cache_keys_.data(),keys,readable,slices,previous);
+    }
+    // A SHADOWS_WORLD / SHADOWS_DYNAMIC job about to run its callback: classify it (parallel slice or
+    // atlas slice) and open the draw probe for the first view's world atlas jobs.
+    struct CacheJob {static_shadow_cache::Runtime* cache{};std::uint64_t serial{};int view_index{-1};static_shadow_cache::Path path{};LARGE_INTEGER start{};};
+    void begin_cache_job(void* item,int pass,void* view,CacheJob& job) noexcept {
+        auto* cache=static_cache_.load(std::memory_order_acquire);
+        auto* share=shadow_share_.load(std::memory_order_acquire);
+        if(!cache || !share || !cache->active()) return;
+        shadow_share::FrameOutcome previous{};
+        if(!share->cache_frame_info(reinterpret_cast<std::uintptr_t>(view),job.serial,job.view_index,previous)) return;
+        std::uint32_t slice=0,slices=0;
+        if(!read_u32(reinterpret_cast<std::uintptr_t>(item)+0xf8,slice) || !read_u32(base_+static_shadow_cache::parallel_slice_count_rva,slices)) return;
+        job.cache=cache;
+        job.path=static_shadow_cache::path_for_slice(slice,slices);
+        if(job.view_index==0 && pass==static_shadow_cache::pass_world && cache->probe()) {
+            cache_job_draws_.begin(job.serial);
+            cache_draws_=&cache_job_draws_;
+            cache_path_=job.path;
+            cache_last_dsv_=nullptr;
+            cache_last_rect_={};
+        }
+        QueryPerformanceCounter(&job.start);
+    }
+    static void end_cache_job(int pass,const CacheJob& job) noexcept {
+        if(!job.cache) return;
+        LARGE_INTEGER end{},frequency{};
+        QueryPerformanceCounter(&end);QueryPerformanceFrequency(&frequency);
+        const auto ticks=static_cast<std::uint64_t>(end.QuadPart-job.start.QuadPart);
+        const std::uint64_t ns=frequency.QuadPart?ticks*1000000000ull/static_cast<std::uint64_t>(frequency.QuadPart):0;
+        if(cache_draws_) {
+            if(cache_path_==static_shadow_cache::Path::atlas) job.cache->merge_draws(*cache_draws_);
+            cache_draws_=nullptr;
+            cache_path_=static_shadow_cache::Path::none;
+            cache_last_dsv_=nullptr;
+        }
+        job.cache->note_job(job.serial,job.view_index,pass,job.path,ns);
+    }
     // v1009: the per-light shadow-map-info link that GATHER_LIGHTS clears and PREPARE sets.
     //   GATHER_LIGHTS 0x31c074: [light+0x1a8] = 0 (rdi)
     //   PREPARE      0x3328ac: [[entry]+0x1a8] = entry   ([entry] is the light node)
@@ -289,6 +376,9 @@ private:
                         for(unsigned i=0;i<count;++i)
                             share->capture_light(reinterpret_cast<std::uintptr_t>(light_links_[i].light),
                                 light_links_[i].info,light_links_[i].records);
+                        // Plan 2A.1: the same walk keys the static shadow cache (observe-only; reads only).
+                        if(auto* cache=static_cache_.load(std::memory_order_acquire); cache && cache->active())
+                            self->submit_cache_lights(cache,share,view,count);
                     } else if(light_action==shadow_share::LightAction::restore) {
                         const unsigned count=collect_light_links(item);
                         saved_light_link_count_=0;
@@ -417,9 +507,15 @@ private:
         current_pass_=pass;
         current_context_=deferred;
         current_view_=view;current_job_=job_serial_.fetch_add(1,std::memory_order_relaxed)+1;VisibilityStamp::next_job();
+        // Plan 2A.1: classify and time the world/dynamic shadow jobs (observe-only, knob-gated).
+        CacheJob cache_job{};
+        if((pass==static_shadow_cache::pass_world || pass==static_shadow_cache::pass_dynamic) &&
+           static_cache_.load(std::memory_order_relaxed))
+            self->begin_cache_job(item,pass,view,cache_job);
         bool result=false;
         __try {result=original_(item);}
         __finally {
+            end_cache_job(pass,cache_job);
             current_pass_=previous_pass;
             current_context_=previous_context;
             current_view_=previous_view;current_job_=previous_job;
@@ -427,6 +523,52 @@ private:
         return result;
     }
 public:
+    // Plan 2A.1 draw probe (build/static-shadow-cache-probe): called by the deferred draw hooks.  Only
+    // a first-view SHADOWS_WORLD job opened by begin_cache_job has cache_draws_ set; everything else
+    // returns on one thread-local load.  Reads the draw's viewport (the light face's atlas rect) and,
+    // when the rect changes, the bound depth target (atlas page, texture description).  No state change.
+    static void cache_probe_draw(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base) noexcept {
+        auto* draws=cache_draws_;
+        if(!draws || !context) return;
+        auto* cache=static_cache_.load(std::memory_order_acquire);
+        if(!cache) return;
+        D3D11_VIEWPORT viewport{};UINT n=1;
+        context->RSGetViewports(&n,&viewport);
+        const auto texel=[](float v) noexcept -> std::uint16_t {return v<=0.f?0:v>=65535.f?65535:static_cast<std::uint16_t>(v+0.5f);};
+        static_shadow_cache::AtlasRect rect{};
+        if(n) {rect.x=texel(viewport.TopLeftX);rect.y=texel(viewport.TopLeftY);rect.w=texel(viewport.Width);rect.h=texel(viewport.Height);}
+        if(!cache_last_dsv_ || rect.x!=cache_last_rect_.x || rect.y!=cache_last_rect_.y || rect.w!=cache_last_rect_.w || rect.h!=cache_last_rect_.h) {
+            ID3D11DepthStencilView* dsv{};
+            context->OMGetRenderTargets(0,nullptr,&dsv);
+            std::uint16_t page=0;
+            if(dsv) {
+                D3D11_DEPTH_STENCIL_VIEW_DESC view_desc{};dsv->GetDesc(&view_desc);
+                if(view_desc.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2DARRAY) page=static_cast<std::uint16_t>(view_desc.Texture2DArray.FirstArraySlice);
+                if(dsv!=cache_last_dsv_) {
+                    ID3D11Resource* resource{};dsv->GetResource(&resource);
+                    if(resource) {
+                        ID3D11Texture2D* texture{};
+                        if(SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&texture))) && texture) {
+                            D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+                            static_shadow_cache::AtlasResource atlas{};
+                            atlas.resource=reinterpret_cast<std::uintptr_t>(resource);
+                            atlas.width=desc.Width;atlas.height=desc.Height;atlas.format=static_cast<std::uint32_t>(desc.Format);
+                            atlas.array_size=desc.ArraySize;atlas.mips=desc.MipLevels;
+                            cache->note_resource(atlas,cache_path_);
+                            texture->Release();
+                        }
+                        resource->Release();
+                    }
+                }
+                cache_last_dsv_=dsv;   // identity only; the reference is released here
+                dsv->Release();
+            }
+            cache_last_rect_=rect;cache_last_rect_.page=page;
+        }
+        rect.page=cache_last_rect_.page;
+        draws->note(rect,count,instances,start,base);
+    }
+    void set_static_shadow_cache(static_shadow_cache::Runtime* cache) noexcept {static_cache_.store(cache,std::memory_order_release);}
     // The pass this thread is recording, and the view the pass renders (0 outside a pass). Read by the draw hooks through
     // ObjectMotion::set_pass_source (src/dxgi_probe.cpp): a view pass's view is one of the eye views, which names the eye exactly.
     static int current_pass() noexcept {return current_pass_;}
