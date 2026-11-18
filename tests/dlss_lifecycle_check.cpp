@@ -38,6 +38,9 @@ struct Fixture {
     NVSDK_NGX_PerfQuality_Value expect_quality = NVSDK_NGX_PerfQuality_Value_DLAA;
     int expect_flags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
     unsigned expect_subrect_w = 64, expect_subrect_h = 64;
+    // v1394: the foveated box feature is created with output subrects and evaluated with input/output subrect bases.
+    bool expect_output_subrects{};
+    unsigned expect_src_x{}, expect_src_y{}, expect_dst_x{}, expect_dst_y{};
     std::atomic<int> entries{0};
     struct Guard {
         Fixture& f;
@@ -135,7 +138,7 @@ struct Fixture {
         Guard g("create"); auto& f = *fixture; const auto eye = f.creation++ % 2;
         assert(c && f.maps.count(p) && create->Feature.InWidth == f.expect_render_w && create->Feature.InHeight == f.expect_render_h);
         assert(create->Feature.InTargetWidth == f.expect_target_w && create->Feature.InTargetHeight == f.expect_target_h);
-        assert(create->Feature.InPerfQualityValue == f.expect_quality && !create->InEnableOutputSubrects);
+        assert(create->Feature.InPerfQualityValue == f.expect_quality && create->InEnableOutputSubrects == f.expect_output_subrects);
         assert(create->InFeatureCreateFlags == f.expect_flags);
         const bool failure = f.fails("create" + std::to_string(eye));
         if ((!failure && !f.null_on_success && f.null_operation != "create" + std::to_string(eye)) || (failure && f.out_on_failure)) {
@@ -159,7 +162,10 @@ struct Fixture {
         assert(e->InRenderSubrectDimensions.Width == f.expect_subrect_w && e->InRenderSubrectDimensions.Height == f.expect_subrect_h);
         assert(e->InPreExposure == 1 && e->InExposureScale == 1 && !e->pInExposureTexture);
         assert(!e->pInTransparencyMask && !e->pInBiasCurrentColorMask && !e->pInMotionVectors3D);
-        assert(e->InColorSubrectBase.X == 0 && e->InOutputSubrectBase.Y == 0);
+        assert(e->InColorSubrectBase.X == f.expect_src_x && e->InColorSubrectBase.Y == f.expect_src_y);
+        assert(e->InDepthSubrectBase.X == f.expect_src_x && e->InDepthSubrectBase.Y == f.expect_src_y);
+        assert(e->InMVSubrectBase.X == f.expect_src_x && e->InMVSubrectBase.Y == f.expect_src_y);
+        assert(e->InOutputSubrectBase.X == f.expect_dst_x && e->InOutputSubrectBase.Y == f.expect_dst_y);
         for (int spin = 0; spin < 8; ++spin) std::this_thread::yield();
         return f.fails("evaluate") ? bad : ok;
     }
@@ -592,10 +598,42 @@ void quality_dimensions_and_subrects() {
     }
 }
 }
+// v1394 (plan item 1.1): the foveated DLSS box writes into a region of the whole-eye output. NGX rejected every such evaluate
+// with 0xBAD00005 because the feature was created without InEnableOutputSubrects (RTX 5070 lab, dlss_rtx_gpu_check).
+void foveated_box_output_subrects() {
+    {   // The box feature: Quality 48x48 -> 64x64, created with output subrects, evaluated at its src/dst offsets.
+        Fixture f; auto u = f.owner(); auto d = Fixture::desc();
+        d.render_width = d.render_height = 48; d.quality = U::Quality::quality; d.mv_low_resolution = true; d.motion.jittered = true;
+        d.output_subrects = true;
+        f.expect_render_w = f.expect_render_h = 48; f.expect_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+        f.expect_flags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
+        f.expect_subrect_w = f.expect_subrect_h = 48; f.expect_output_subrects = true;
+        assert(Fixture::prepare(u, d) && f.creation == 2); auto lease = u.lease();
+        auto in = f.eval(); in.motion_contract = d.motion;
+        in.src_x = 8; in.src_y = 4; in.dst_x = 16; in.dst_y = 8; in.output_region = true;
+        f.expect_src_x = 8; f.expect_src_y = 4; f.expect_dst_x = 16; f.expect_dst_y = 8;
+        f.validation->resources[3].shape.width = f.validation->resources[3].shape.height = 96; // the whole-eye output holds dst + target
+        assert(U::evaluate(lease, in) && f.eval_count == 1);
+        f.validation->resources[3].shape.width = 79; // dst 16 + target 64 > 79: refused before the SDK
+        assert(!U::evaluate(lease, in) && f.eval_count == 1);
+        f.validation->resources[3].shape.width = 96; f.validation->resources[0].shape.width = 55; // colour < src 8 + render 48
+        assert(!U::evaluate(lease, in) && f.eval_count == 1);
+        f.validation->resources[0].shape.width = 64;
+        // The same feature without output subrects is a different create contract: a new pair, created without the flag.
+        auto whole = d; whole.output_subrects = false; f.expect_output_subrects = false;
+        assert(Fixture::prepare(u, whole) && f.creation == 4 && u.ready());
+        u.disable(); assert(U::confirm_gpu_retirement(lease)); lease = {}; U::collect_retired();
+    }
+    {   // Whole-eye features (DLAA and the non-box Quality) keep the old contract: no output subrects, zero bases, exact output.
+        Fixture f; auto u = f.owner(); assert(Fixture::prepare(u)); auto lease = u.lease();
+        auto in = f.eval(); assert(U::evaluate(lease, in) && f.eval_count == 1);
+        u.disable(); assert(U::confirm_gpu_retirement(lease)); lease = {}; U::collect_retired();
+    }
+}
 int main() {
     static_assert(static_cast<int>(NVSDK_NGX_PerfQuality_Value_DLAA) == 5, "pinned SDK DLAA ABI");
     failure_cleanup(); reasons_and_validation(); histories_and_retirement();
     evaluation_failures_and_invalid_inputs(); bounded_quarantine(); shared_core_and_concurrency(); incompatible_shared_owner(); aliases_across_live_generations(); repeated_prepare_context_validation(); cleanup_failures_are_once();
-    retire_keeps_core(); session_end_cycles(); optimal_settings(); quality_dimensions_and_subrects();
+    retire_keeps_core(); session_end_cycles(); optimal_settings(); quality_dimensions_and_subrects(); foveated_box_output_subrects();
     std::cout << "dlss_lifecycle_check: passed (injected CPU calls only)\n";
 }

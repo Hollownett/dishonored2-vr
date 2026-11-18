@@ -221,6 +221,7 @@ private:
     // std::terminate inside the game's command stream.
     DlssFallback dlss_fallback_;
     DlssRefusalStreak dlss_refusals_;
+    DlssFoveaRetry dlss_fovea_retry_;      // v1394: a failed foveated (box) evaluation retries once as a whole-eye feature
     DlssRetirementLedger dlss_ledger_;
     DlssEyeUpscaler dlss_;                 // production owner: official SDK calls and signed-provider validation
     DlssEyeUpscaler::Lease dlss_lease_;    // the active pair; empty while off, pending or failed
@@ -304,7 +305,7 @@ private:
             dlss_ledger_.retire();
         },[&] {if(dlss_lease_) dlss_orphan_locked(std::move(dlss_lease_));dlss_lease_={};dlss_ledger_.abandon_outstanding();dlss_ledger_.retire();}); // no room to track it: keep the lease to abandon, never strand
         dlss_isolated_locked([&] {dlss_.retire();}); // the NGX Core stays initialized for the next pair
-        dlss_desc_valid_=false;dlss_scratch_.reset();
+        dlss_desc_valid_=false;dlss_box_feature=false;dlss_scratch_.reset();
         dlss_release_locked();
     }
     // Device/context change or session end: outstanding EVENTs are abandoned (the GPU work is dead or long submitted)
@@ -380,13 +381,18 @@ private:
         DlssEyeUpscaler::Desc d{};
         d.width=w;d.height=h;d.render_width=rw;d.render_height=rh;
         // v1107 foveated DLSS: one feature pair at eye 0's box size (the eyes' boxes mirror); each eye passes its own offsets.
-        const bool fovea_dlss=upscale && (*eyes_)[0].fovea_box && (*eyes_)[1].fovea_box && fovea::half_deg.load()>0;
+        // v1394: the box feature writes into a region of the whole-eye output (Eval::output_region), which NGX accepts only from a
+        // feature created with InEnableOutputSubrects (without it every box evaluate failed with 0xBAD00005 on RTX). After a failed box
+        // evaluation (DlssFoveaRetry) DLSS runs whole-eye features for the rest of the session.
+        const bool fovea_dlss=upscale && dlss_fovea_retry_.fovea_allowed() && (*eyes_)[0].fovea_box && (*eyes_)[1].fovea_box && fovea::half_deg.load()>0;
         if(fovea_dlss) {
             const auto& b=(*eyes_)[0];
             d.width=std::min(b.fovea_x.display,w);d.height=std::min(b.fovea_y.display,h);
             d.render_width=std::min<UINT>(static_cast<UINT>(std::lround(double(d.width)*rw/w)),rw);
             d.render_height=std::min<UINT>(static_cast<UINT>(std::lround(double(d.height)*rh/h)),rh);
-        }d.quality=quality?DlssEyeUpscaler::Quality::quality:DlssEyeUpscaler::Quality::dlaa;
+        }
+        d.output_subrects=fovea_dlss && (d.width<w || d.height<h);
+        d.quality=quality?DlssEyeUpscaler::Quality::quality:DlssEyeUpscaler::Quality::dlaa;
         d.colour=d.output=*colour_format;
         // Motion vectors: the engine renders colour, depth and motion into the top-left render subrect of its full-size
         // targets (dynamic resolution), so the motion field is render-sized content in a display-sized texture; the
@@ -416,14 +422,15 @@ private:
             const auto status=dlss_.status();++dlss_create_failures;dlss_core_live_=true;dlss_fail_locked(status.reason,status.result);return;
         }
         dlss_lease_=dlss_.lease();dlss_ledger_.activate(dlss_lease_.generation());dlss_core_live_=true;
-        dlss_desc_=d;dlss_desc_valid_=true;dlss_scratch_=std::make_shared<int>(0);dlss_frame_={};dlss_previous_jitter_={};
+        dlss_desc_=d;dlss_desc_valid_=true;dlss_box_feature=d.output_subrects;dlss_scratch_=std::make_shared<int>(0);dlss_frame_={};dlss_previous_jitter_={};
         for(auto& e:*eyes_) e.reset=true;
         ++dlss_features_created;dlss_fallback_.note_prepare(true);dlss_publish_state_locked();
     }
     static bool dlss_same_desc(const DlssEyeUpscaler::Desc& a,const DlssEyeUpscaler::Desc& b) noexcept {
         return a.width==b.width && a.height==b.height && a.render_width==b.render_width && a.render_height==b.render_height &&
             a.quality==b.quality && a.colour==b.colour && a.output==b.output && a.device_generation==b.device_generation &&
-            a.motion==b.motion && a.colour_contract==b.colour_contract && a.inverted_depth==b.inverted_depth && a.mv_low_resolution==b.mv_low_resolution;
+            a.motion==b.motion && a.colour_contract==b.colour_contract && a.inverted_depth==b.inverted_depth && a.mv_low_resolution==b.mv_low_resolution &&
+            a.output_subrects==b.output_subrects;
     }
     // Session end (stop thread, hooks drained): NO NGX or context call may happen here, the game's render thread
     // still owns the immediate context (releasing features from this thread faulted DXVK's submission thread in a real
@@ -435,7 +442,7 @@ private:
             dlss_ledger_.retire();dlss_ledger_.abandon_outstanding();
         },[&] {if(dlss_lease_) dlss_orphan_locked(std::move(dlss_lease_));dlss_lease_={};dlss_ledger_.retire();dlss_ledger_.abandon_outstanding();}); // the orphan slot holds it until the next release
         dlss_desc_valid_=false;dlss_scratch_.reset();dlss_facade_dirty_=true;
-        dlss_fallback_.session_end();dlss_refusals_=DlssRefusalStreak{};dlss_optimal_for_w_=dlss_optimal_for_h_=0;dlss_publish_state_locked();
+        dlss_fallback_.session_end();dlss_refusals_=DlssRefusalStreak{};dlss_fovea_retry_.session_end();dlss_optimal_for_w_=dlss_optimal_for_h_=0;dlss_publish_state_locked();
     }
     static DXGI_FORMAT depth_srv(DXGI_FORMAT f) noexcept {
         switch(f) {
@@ -531,6 +538,9 @@ public:
     std::atomic<std::uint64_t> dlss_evaluations{},dlss_evaluate_failures{},dlss_create_failures{},dlss_fallbacks{},dlss_owner_refusals{},dlss_features_created{},dlss_optimal_queries{},dlss_waiting{},dlss_owner_rebuilds{};
     std::atomic<unsigned> dlss_state{},dlss_last_reason{},dlss_owner_status{},dlss_optimal_width{},dlss_optimal_height{};
     std::atomic<int> dlss_last_result{};
+    std::atomic<bool> dlss_box_feature{false};             // v1394: the active DLSS feature is the foveated box (output subrects)
+    std::atomic<unsigned> dlss_fovea_retries{},dlss_fovea_retry_reason{}; // v1394: box failures retried as whole-eye DLSS (0 or 1 per session)
+    std::atomic<int> dlss_fovea_retry_result{};
     std::atomic<float> dlss_quality_fraction{dlss_mode::default_quality_fraction}; // engine render fraction for DLSS Quality (NGX optimal settings)
     std::atomic<float> dlss_range_low{0.f},dlss_range_high{0.f}; // NGX's accepted render-size range as engine fractions (0 = not queried yet): bounds the Upscaler scale for DLSS
     bool dlss_engaged() const noexcept {const auto s=dlss_state.load(std::memory_order_relaxed);return s==static_cast<unsigned>(DlssFallback::State::pending) || s==static_cast<unsigned>(DlssFallback::State::active);}
@@ -989,7 +999,7 @@ private:
             static_cast<std::uint32_t>((ev.frame-1)%dlss_desc_.jitter.phase_count),dlss_desc_.jitter.phase_count,false};
         ev.motion_contract=dlss_desc_.motion;ev.colour_contract=dlss_desc_.colour_contract;
         ev.frame_time_ms=dt;ev.discontinuity=e.reset || previous_generation!=dlss_mode::generation;ev.scratch_owner=dlss_scratch_;
-        if(job.upscale && dlss_desc_.width<ready_w_ && e.fovea_box) { // v1107: the box of a foveated DLSS feature, into the FSR 3 whole eye
+        if(job.upscale && dlss_desc_.output_subrects && e.fovea_box) { // v1107: the box of a foveated DLSS feature, into the FSR 3 whole eye
             const double sx=double(render_w_)/ready_w_,sy=double(render_h_)/ready_h_;
             ev.dst_x=std::min(e.fovea_x.dst,ready_w_-dlss_desc_.width);ev.dst_y=std::min(e.fovea_y.dst,ready_h_-dlss_desc_.height);
             ev.src_x=std::min<unsigned>(static_cast<unsigned>(std::lround(ev.dst_x*sx)),render_w_-dlss_desc_.render_width);
@@ -1016,7 +1026,16 @@ private:
         if(recorded!=D3D11TemporalOwner::Status::ok && recorded!=D3D11TemporalOwner::Status::callback_failed) dlss_owner_status=static_cast<unsigned>(recorded);
         if(!evaluated) {
             ++dlss_evaluate_failures;e.reset=true;
-            dlss_fail_locked(result.reason==DlssEyeUpscaler::Reason::none?DlssEyeUpscaler::Reason::invalid_context:result.reason,result.result);
+            const auto reason=result.reason==DlssEyeUpscaler::Reason::none?DlssEyeUpscaler::Reason::invalid_context:result.reason;
+            if(dlss_fovea_retry_.note_failure(dlss_desc_.output_subrects,static_cast<unsigned>(reason),static_cast<int>(result.result))) {
+                // v1394 safety net: the foveated box failed. Retire it and rebuild a whole-eye feature on the next prepare (pending,
+                // so both eyes take the FSR path until then); only a failure of that feature parks DLSS for the session.
+                dlss_fovea_retry_reason=static_cast<unsigned>(reason);dlss_fovea_retry_result=static_cast<int>(result.result);
+                dlss_fovea_retries=dlss_fovea_retry_.retries();
+                dlss_retire_locked();dlss_fallback_.note_rebuild();dlss_publish_state_locked();
+                return false;
+            }
+            dlss_fail_locked(reason,result.result);
             return false;
         }
         ++dlss_evaluations;dlss_previous_jitter_[eye_index]={jx,jy};
@@ -1274,13 +1293,13 @@ private:
         bool fsr3_whole=false;
         if(dlss_fallback_.should_evaluate() && dlss_lease_) {
             if(job.upscale) {const D3D11_BOX active{0,0,0,render_w_,render_h_,1};c->CopySubresourceRegion(e.colour_in.p,0,0,0,0,job.colour.p,0,&active);}
-            if(job.upscale && dlss_desc_valid_ && dlss_desc_.width<w && e.fovea_box && e.upscaled.p) { // v1107: FSR 3 under the DLSS box
+            if(job.upscale && dlss_desc_valid_ && dlss_desc_.output_subrects && e.fovea_box && e.upscaled.p) { // v1107: FSR 3 under the DLSS box
                 auto in3=in;in3.colour=e.colour_in.p;in3.output=e.upscaled.p;in3.render_w=render_w_;in3.render_h=render_h_;
                 in3.reset=e.reset || !e.fsr3_whole_last;
                 fsr3_whole=e.fsr.dispatch(c,in3);
                 if(!fsr3_whole) ++fovea::failures[static_cast<std::size_t>(job.eye)];
             }
-            if(!(job.upscale && dlss_desc_valid_ && dlss_desc_.width<w && e.fovea_box) || fsr3_whole) {
+            if(!(job.upscale && dlss_desc_valid_ && dlss_desc_.output_subrects && e.fovea_box) || fsr3_whole) {
                 dl=dlss_dispatch_locked(c,job,e,in,dt,previous_generation);
                 if(dl && fsr3_whole) ++fovea::dispatches[static_cast<std::size_t>(job.eye)];
             }

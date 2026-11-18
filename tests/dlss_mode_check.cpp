@@ -212,8 +212,33 @@ static void provider_lookup() {
     expect(is_dlss_provider_name(L"a\\nvngx_dlss.dll") && is_dlss_provider_name(L"NvNgx_DLSS.dll") && !is_dlss_provider_name(L"nvngx_dlss.dll.bak") && !is_dlss_provider_name(L"nvngx.dll"),"provider name");
 }
 
+// v1394 safety net (plan item 1.1): a failed foveated box evaluation retries once as whole-eye DLSS, driven together with the
+// fallback machine the way FsrTaa::dlss_dispatch_unguarded drives them.
+static void fovea_retry() {
+    using d2vr::DlssFallback;using d2vr::DlssFoveaRetry;using S=DlssFallback::State;
+    const int invalid_parameter=static_cast<int>(0xBAD00005u);
+    {
+        DlssFallback fb;DlssFoveaRetry retry;
+        expect(retry.fovea_allowed() && retry.retries()==0,"a session starts with the fovea allowed");
+        fb.select(true);fb.note_prepare(true); // the box feature evaluates
+        if(retry.note_failure(true,27,invalid_parameter)) fb.note_rebuild();else fb.note_evaluate(false,27,invalid_parameter);
+        expect(!retry.fovea_allowed() && retry.retries()==1 && retry.last_reason()==27 && retry.last_result()==invalid_parameter,"the first box failure drops the fovea");
+        expect(fb.state()==S::pending && fb.failures()==0,"the session is not failed: a whole-eye feature is rebuilt");
+        fb.note_prepare(true);expect(fb.state()==S::active,"the whole-eye feature evaluates");
+        if(retry.note_failure(false,27,1)) fb.note_rebuild();else fb.note_evaluate(false,27,1);
+        expect(fb.state()==S::failed && fb.failures()==1 && retry.retries()==1,"a whole-eye failure after the retry fails the session");
+        retry.session_end();fb.session_end();
+        expect(retry.fovea_allowed() && retry.retries()==1,"a new session may use the fovea again (the count is kept)");
+    }
+    {
+        DlssFoveaRetry retry;
+        expect(!retry.note_failure(false,27,1) && retry.fovea_allowed(),"a whole-eye failure never retries and keeps the fovea setting");
+        expect(retry.note_failure(true,27,1) && !retry.note_failure(true,27,1) && retry.retries()==1,"only one retry per session");
+    }
+}
+
 int main() {
-    jitter_sequence();modes();fallback_machine();provider_lookup();
-    if(!failures) std::printf("PASS: DLSS jitter sequence, mode rules, fallback state machine and provider lookup\n");
+    jitter_sequence();modes();fallback_machine();fovea_retry();provider_lookup();
+    if(!failures) std::printf("PASS: DLSS jitter sequence, mode rules, fallback state machine, fovea retry and provider lookup\n");
     return failures?1:0;
 }
