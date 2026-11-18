@@ -7,7 +7,10 @@ the caller found at [RSP] (exact for syscall stubs), so waits and yields are vis
 Usage: python tools/sample_threads.py <pid> [seconds=5] [hz=500] [top=25]
 """
 import bisect, collections, ctypes, ctypes.wintypes as w, os, sys, time
-import pefile
+try:
+    import pefile
+except ImportError:  # 2026-11-19: no pefile on this PC; a minimal export-table reader below does the same job
+    pefile = None
 
 k32 = ctypes.WinDLL('kernel32', use_last_error=True)
 psapi = ctypes.WinDLL('psapi', use_last_error=True)
@@ -81,11 +84,46 @@ def modules(hp):
     return sorted(mods)
 
 
+def pe_exports(path):
+    """(rva, name) of every named export of a PE64 file, without pefile."""
+    import struct
+    data = open(path, 'rb').read()
+    pe = struct.unpack_from('<I', data, 0x3c)[0]
+    sections, opt_size = struct.unpack_from('<H', data, pe + 6)[0], struct.unpack_from('<H', data, pe + 20)[0]
+    opt = pe + 24
+    exp_rva, exp_size = struct.unpack_from('<II', data, opt + 112)  # PE32+: data directory 0
+    table = [struct.unpack_from('<IIII', data, opt + opt_size + 40 * i + 8) for i in range(sections)]  # vsize, va, rawsize, rawptr
+
+    def off(rva):
+        for vsize, va, rawsize, rawptr in table:
+            if va <= rva < va + max(vsize, rawsize):
+                return rva - va + rawptr
+        raise ValueError(hex(rva))
+    if not exp_rva:
+        return []
+    e = off(exp_rva)
+    n_funcs, n_names, funcs, names, ords = struct.unpack_from('<IIIII', data, e + 20)
+    out = []
+    for i in range(n_names):
+        name_rva = struct.unpack_from('<I', data, off(names) + 4 * i)[0]
+        ordinal = struct.unpack_from('<H', data, off(ords) + 2 * i)[0]
+        func = struct.unpack_from('<I', data, off(funcs) + 4 * ordinal)[0]
+        if exp_rva <= func < exp_rva + exp_size:
+            continue  # forwarder
+        name = data[off(name_rva):data.index(b'\x00', off(name_rva))].decode(errors='replace')
+        out.append((func, name))
+    return sorted(out)
+
+
 def exports(mods):
     out = {}
     for b, sz, name in mods:
         if name.lower() in SYSTEM:
-            pe = pefile.PE(os.path.join(os.environ['SystemRoot'], 'System32', name), fast_load=True)
+            path = os.path.join(os.environ['SystemRoot'], 'System32', name)
+            if pefile is None:
+                out[name.lower()] = pe_exports(path)
+                continue
+            pe = pefile.PE(path, fast_load=True)
             pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
             out[name.lower()] = sorted((e.address, (e.name or b'?').decode()) for e in pe.DIRECTORY_ENTRY_EXPORT.symbols)
     return out

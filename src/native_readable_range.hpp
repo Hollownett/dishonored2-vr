@@ -38,20 +38,46 @@ inline bool native_region_readable(const MEMORY_BASIC_INFORMATION& r) noexcept {
     const auto p=r.Protect&0xff;
     return p==PAGE_READONLY || p==PAGE_READWRITE || p==PAGE_WRITECOPY || p==PAGE_EXECUTE_READ || p==PAGE_EXECUTE_READWRITE || p==PAGE_EXECUTE_WRITECOPY;
 }
+// v1394 (2026-11-19 sim profile, RTX 5070 + Ryzen 5 5600X, diagnostics off): the cache still missed often enough that
+// native_readable_range_cached's VirtualQuery was 11.4 % of the render thread's samples (plus read_self_raw 1.9 %), the largest
+// mod cost on the CPU critical path. The engine heaps are committed regions of tens to hundreds of MB, but the direct-mapped table
+// files a region under ONE 64 KB block, so every other block of the same region missed once per TTL. Now:
+//   - a miss in the direct slot first scans the last 32 distinct readable regions (round robin) and refills the slot on a hit;
+//   - 2048 direct slots (was 1024);
+//   - readable regions are trusted 2.5-3.5 s (was 0.8-1.2 s) and unreadable ones 200 ms (was 50 ms). SEH in read_self_raw still
+//     covers an unmap inside the TTL and native_readable_range_forget drops a verdict that faulted, from the slots and the list.
+inline constexpr std::uint64_t native_region_readable_ttl_ms=2500,native_region_readable_stagger_ms=1000,native_region_unreadable_ttl_ms=200;
 struct NativeRegionCache {
     struct Entry {std::uintptr_t begin{},end{};std::uint64_t until{};bool exec{},readable{};};
-    Entry entries[1024]{};
-    static std::size_t slot(std::uintptr_t a) noexcept {return static_cast<std::size_t>(a>>16)&1023u;}
-    // The entry holding `a`: unreadable whatever n is, readable when the n bytes stay inside its region.
-    const Entry* find(std::uintptr_t a,std::size_t n,std::uint64_t now) const noexcept {
-        const auto& e=entries[slot(a)];
-        return a>=e.begin && a<e.end && now<e.until && (!e.readable || n<=e.end-a)?&e:nullptr;
+    static constexpr std::size_t slots=2048,recent_count=32;
+    Entry entries[slots]{};
+    Entry recent[recent_count]{};unsigned recent_next{};
+    std::uint64_t queries{},recent_hits{}; // status/lab counters (per thread)
+    static std::size_t slot(std::uintptr_t a) noexcept {return static_cast<std::size_t>(a>>16)&(slots-1);}
+    static bool holds(const Entry& e,std::uintptr_t a,std::size_t n,std::uint64_t now) noexcept {
+        return a>=e.begin && a<e.end && now<e.until && (!e.readable || n<=e.end-a);
     }
-    // `a` is the queried address: the region is filed under that address's block.
+    // The entry holding `a`: unreadable whatever n is, readable when the n bytes stay inside its region.
+    const Entry* find(std::uintptr_t a,std::size_t n,std::uint64_t now) noexcept {
+        auto& e=entries[slot(a)];
+        if(holds(e,a,n,now)) return &e;
+        for(const auto& r:recent) if(r.readable && holds(r,a,n,now)) {e=r;++recent_hits;return &e;}
+        return nullptr;
+    }
+    // `a` is the queried address: the region is filed under that address's block, and a readable region in the recent list.
     void add(const MEMORY_BASIC_INFORMATION& r,std::uint64_t now,std::uintptr_t a) noexcept {
         const auto b=reinterpret_cast<std::uintptr_t>(r.BaseAddress);const bool readable=native_region_readable(r);
-        entries[slot(a)]={b,b+r.RegionSize,now+(readable?800+((a>>16)*37)%400:50),
+        const Entry e{b,b+r.RegionSize,now+(readable?native_region_readable_ttl_ms+((a>>16)*37)%native_region_readable_stagger_ms:native_region_unreadable_ttl_ms),
             r.State==MEM_COMMIT && (r.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0,readable};
+        entries[slot(a)]=e;
+        if(readable && r.RegionSize>(std::size_t{1}<<16)) {
+            for(auto& old:recent) if(old.begin==e.begin) {old=e;return;}
+            recent[recent_next++%recent_count]=e;
+        }
+    }
+    void forget(std::uintptr_t a) noexcept {
+        entries[slot(a)]={};
+        for(auto& r:recent) if(a>=r.begin && a<r.end) r={};
     }
 };
 inline NativeRegionCache& native_region_cache() noexcept {thread_local NativeRegionCache cache;return cache;}
@@ -61,7 +87,7 @@ inline bool native_readable_range_cached(std::uintptr_t address,std::size_t size
     auto& cache=native_region_cache();
     if(const auto* e=cache.find(address,size,now_ms)) return e->readable;
     for(auto at=address,end=address+size;at<end;) {
-        MEMORY_BASIC_INFORMATION region{};
+        MEMORY_BASIC_INFORMATION region{};++cache.queries;
         if(VirtualQuery(reinterpret_cast<const void*>(at),&region,sizeof region)!=sizeof region) return false;
         const auto base=reinterpret_cast<std::uintptr_t>(region.BaseAddress);
         if(region.RegionSize>highest-base || base+region.RegionSize<=at) return false;
@@ -75,15 +101,15 @@ inline bool native_readable_range_cached(std::uintptr_t address,std::size_t size
 // retried every frame for the next ~1 s: each retry is a handled access violation (60 per session in the v1040 record, all one address).
 inline void native_readable_range_forget(std::uintptr_t address,std::size_t size) noexcept {
     auto& cache=native_region_cache();
-    cache.entries[NativeRegionCache::slot(address)]={};
-    if(size) cache.entries[NativeRegionCache::slot(address+size-1)]={};
+    cache.forget(address);
+    if(size) cache.forget(address+size-1);
 }
 // Committed executable page (return-address / vtable target checks in hot hooks).
 inline bool native_executable_cached(std::uintptr_t at) noexcept {
     if(!at) return false;
     const auto now=GetTickCount64();auto& cache=native_region_cache();
     if(const auto* e=cache.find(at,1,now)) return e->exec;
-    MEMORY_BASIC_INFORMATION info{};
+    MEMORY_BASIC_INFORMATION info{};++cache.queries;
     if(VirtualQuery(reinterpret_cast<const void*>(at),&info,sizeof info)!=sizeof info) return false;
     cache.add(info,now,at);
     return info.State==MEM_COMMIT && (info.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0;
