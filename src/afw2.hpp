@@ -10,11 +10,13 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace d2vr {
 // v1187: a texel moves by its own vector from this object motion (render px over the eye's two ticks): entity vectors are exact since
@@ -59,13 +61,15 @@ inline Afw2Rigid afw2_rigid(const StaleParallax& p,const WarpFov& from,const War
 class Afw2Pass {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     Ptr<ID3D11Device> device_;Ptr<ID3D11DeviceContext> context_;
-    enum Stage {motion,repair,splat,origins,crack,fill,fresh_splat,scatter,scatter_write,decide,stages};
+    enum Stage {motion,repair,splat,origins,crack,fill,fresh_splat,scatter,scatter_write,decide,fill_steps,stages};
     std::array<Ptr<ID3D11ComputeShader>,stages> cs_{};
     Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_;
     Ptr<ID3D11Buffer> constants_;Ptr<ID3D11SamplerState> sampler_;
     Ptr<ID3D11RasterizerState> raster_;Ptr<ID3D11DepthStencilState> depth_;
     struct Buffer {Ptr<ID3D11Buffer> b;Ptr<ID3D11ShaderResourceView> srv;Ptr<ID3D11UnorderedAccessView> uav;};
     std::array<Buffer,2> motion_{},keys_{},landed_{},origins_{},near_{};Buffer fresh_keys_{},holes_{},votes_{},decisions_{},tiles_{},stats_{};Ptr<ID3D11Buffer> fill_args_;Ptr<ID3D11Buffer> holes_read_;
+    Ptr<ID3D11UnorderedAccessView> fill_args_uav_;   // (plan 3.2c: FillSteps writes the per-pass arguments)
+    std::array<Ptr<ID3D11Buffer>,10> fill_pass_;      // (plan 3.2c: each fill pass's constants, FillPass b1, made once)
     UINT gw_{},gh_{},fw_{},fh_{};
 public:
     static constexpr int profile_stages=10;
@@ -137,8 +141,14 @@ public:
         context_->Unmap(st.Get(),0);return r;
     }
     std::array<float,4*48> last_constants{};                  // tools: the constant buffer of the last run (replay dumps it)
+    // tools (stale_warp_replay STALE_REPLAY_HW: each stage timed alone, a GPU sync between): called at each stage mark (code 0-10, the
+    // profile's) and before each fill pass (1000 + its step); null in the game
+    void (*stage_hook)(void* ctx,int code){};void* stage_hook_ctx{};
     int rig_order{},rig_debug{};                                // v1190: inside the rig target, 0 this eye's kept rig first, 1 the fresh eye's first (tools)
     inline static std::atomic<int> untargeted_lands{1};        // v1312: class-251 held texels land without the rig target (build/no-untargeted-lands: 0)
+    // plan 3.2c: the jump-flood fill starts at the power of two this frame's holes need (Crack measures, FillSteps decides on the GPU;
+    // the passes above get no groups) instead of always at 512 (build/no-afw2-fill-bound: 0, every pass as before)
+    inline static std::atomic<int> fill_bound{1};
     explicit Afw2Pass(ID3D11Device* device);
     // Holes left after the fill on the last pass (reads back and waits: tools and the lab only).
     std::uint32_t holes() {
@@ -146,6 +156,27 @@ public:
         const D3D11_BOX first{0,0,0,4,1,1};context_->CopySubresourceRegion(holes_read_.Get(),0,0,0,0,holes_.b.Get(),0,&first);
         D3D11_MAPPED_SUBRESOURCE m{};checked(context_->Map(holes_read_.Get(),0,D3D11_MAP_READ,0,&m),"holes read");
         const auto n=*static_cast<const std::uint32_t*>(m.pData);context_->Unmap(holes_read_.Get(),0);return n;
+    }
+    // plan 3.2c (tools only: waits): the farthest seed any filled texel took on the last pass (texels; its landed source).
+    double fill_reach() {
+        D3D11_BUFFER_DESC d{};landed_[1].b->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
+        Ptr<ID3D11Buffer> st;checked(device_->CreateBuffer(&d,nullptr,&st),"landed read-back");context_->CopyResource(st.Get(),landed_[1].b.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};checked(context_->Map(st.Get(),0,D3D11_MAP_READ,0,&m),"landed read");
+        const auto* v=static_cast<const std::uint32_t*>(m.pData);double reach=0;
+        for(UINT y=0;y<gh_;++y) for(UINT x=0;x<gw_;++x) {
+            const std::uint32_t l=v[y*gw_+x];if(!(l&0x80000000u)) continue;
+            reach=std::max(reach,std::hypot(double(l&0x7fff)-x,double((l>>15)&0x7fff)-y));
+        }
+        context_->Unmap(st.Get(),0);return reach;
+    }
+    // (debug, tools only: waits) the target texels the last pass left empty after the fill, packed x | y << 16, at most `max`
+    std::vector<std::uint32_t> unfilled(std::size_t max) {
+        D3D11_BUFFER_DESC d{};keys_[1].b->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
+        Ptr<ID3D11Buffer> st;checked(device_->CreateBuffer(&d,nullptr,&st),"keys read-back");context_->CopyResource(st.Get(),keys_[1].b.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};checked(context_->Map(st.Get(),0,D3D11_MAP_READ,0,&m),"keys read");
+        const auto* v=static_cast<const std::uint32_t*>(m.pData);std::vector<std::uint32_t> r;
+        for(UINT y=0;y<gh_ && r.size()<max;++y) for(UINT x=0;x<gw_ && r.size()<max;++x) if(!v[y*gw_+x]) r.push_back(x|(y<<16));
+        context_->Unmap(st.Get(),0);return r;
     }
     // The 8x8 tiles of the target grid that held a hole after the splat (the fill runs there only) and all tiles (tools only: waits).
     std::array<std::uint32_t,2> hole_tiles() {
@@ -190,9 +221,13 @@ cbuffer Afw : register(b0) {
     float4 layersOn;   // carried, left, right on; still (identical cameras)
     float4 display;    // output w, h, 1/w, 1/h
     float4 validRect;  // kept u, v max, fresh u, v max
-    float4 fillStep;   // x step (texels), y last pass, z the camera's sideways step in texels per inverse metre, w the near-mover gate (px)
+    float4 fillStep;   // x, y unused (plan 3.2c: the step and the last pass are FillPass b1), z the camera's sideways step in texels per inverse metre, w the near-mover gate (px)
     float4 rigMode;    // x the rig target (t15) is bound, y colour order inside it (0: this eye's kept rig first, 1: the fresh eye's first), w (v1312) class-251 held texels land without the target
+    float4 fillBound;  // (plan 3.2c) x the fill's bound is on (Crack measures, FillSteps decides)
 }
+// plan 3.2c: per fill pass, made once (no constant update between the passes): x step (texels), y the last pass, z it reads the second
+// buffers (where the crack wrote near)
+cbuffer FillPass : register(b1) {float4 fillPass;}
 Texture2D keptColour : register(t0); Texture2D<float> keptDepth : register(t1);
 Texture2D freshColour : register(t2); Texture2D<float> freshDepth : register(t3);
 Texture2D<float4> keptMotion : register(t4); Texture2D<float4> freshMotion : register(t5);
@@ -214,6 +249,8 @@ StructuredBuffer<uint2> decisionsIn : register(t16); RWStructuredBuffer<uint2> d
 AppendStructuredBuffer<uint> tilesOut : register(u4);
 // v1197 cost: the crack writes landed into both fill buffers (no copy; it does not read it)
 RWStructuredBuffer<uint> landedOut0 : register(u0); StructuredBuffer<uint> tilesIn : register(t12);
+// plan 3.2c: the fill's dispatch arguments ([0] the hole tile count, then one (groups, 1, 1) per pass, step 512 first; FillSteps writes)
+RWByteAddressBuffer fillArgsOut : register(u0);
 // motion flags (w)
 static const uint kConfirmed=1,kRig=2,kMoving=4,kDrop=8,kSky=16,kOutside=128,kHeld=256,kOwn=512,kNoTarget=1024;   // kOwn: a rig texel moved by its own rig motion; kNoTarget (v1312): a held texel of class 251 (never in the rig target)
 // key low bits
@@ -660,8 +697,40 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
     const uint l=Pack(i,false)|(seed?kSeed:0);const uint2 nr=uint2(asuint(key!=0?0.0:1e9),asuint(key!=0?((key&kKeyRig)?-KeyZ(key):KeyZ(key)):1e30));
     keysOut[at]=key;landedOut[at]=l;landedOut0[at]=l;originsOut[at]=origin;nearOut[at]=nr;   // (near: only hole tiles read it, the fill writes those: one buffer)
     if(key==0) {uint was;InterlockedOr(holesOut[1+Tile(i)],1,was);if(was==0) tilesOut.Append(Tile(i));}   // (v1197: the fill's tile list)
+    // plan 3.2c: what the fill must reach this frame (FillSteps). A hole texel: the smallest radius r (1, 2, 4 .. 256) at which one of its
+    // 8 directions meets a reached texel (a seed lies on that line within r * sqrt 2) -> [10], the largest; none within 256: 512. With the
+    // rig target bound the fill takes no rig seed and nothing passes through the rig: where the nearest reached texels are all the rig's (a
+    // hole the rig closes in, or the rig and the image edge: sim dump 5, under the arm on the bottom row) only the 512 .. 256 jumps reached
+    // a seed before 3.2c, so 512 too. A seed: its 1/z -> [9], the largest (the BOUND's sideways-step term). (Read before the atomic: most
+    // texels change nothing.)
+    if(fillBound.x>0) {
+        if(key==0) {
+            uint r=512;
+            [loop] for(uint s=1;s<=256 && r==512;s*=2) {
+                bool world=false,rig=false;
+                [unroll] for(int n=0;n<8;++n) {
+                    const int2 j=i+int2(n<3?n-1:n==3?-1:n==4?1:n-6,n<3?-1:n<5?0:1)*int(s);
+                    if(all(j>=0) && all(j<int2(grid.xy))) {const uint k=keysIn[Index(j)];if(k!=0) {if(rigMode.x>0 && (k&kKeyRig)) rig=true;else world=true;}}
+                }
+                if(world) r=s;else if(rig) break;
+            }
+            if(r>handVotes[10]) InterlockedMax(handVotes[10],r);
+        } else if(seed) {const uint v=asuint(1/KeyZ(key));if(v>handVotes[9]) InterlockedMax(handVotes[9],v);}
+    }
 }
-// Fill (jump flood, steps fillStep.x decreasing to 1): an empty or filled texel takes, among itself and its 8 neighbours fillStep.x
+// plan 3.2c FillSteps (one thread, after the crack): the fill starts at the smallest power of two S with S >= R, so its reach 2S-1 is about
+// twice R, the farthest seed the fill's BOUND can take: 2 * nearest + 2 + the sideways-step parallax + the largest motion (Motion's [8]),
+// nearest <= [10] * sqrt 2. The passes above S get no groups ([11] = S: the first pass run reads the crack's near, Fill). A hole no
+// probe crossed within 256 texels, or one the rig closes in: 512, every pass (as before 3.2c).
+[numthreads(1,1,1)] void FillSteps() {
+    const uint count=fillArgsOut.Load(0);
+    const float reach=2*1.4142136*float(handVotes[10])+2+fillStep.z*asfloat(handVotes[9])+float(handVotes[8]);
+    uint start=1;
+    [loop] while(start<512 && float(start)<reach) start*=2;
+    handVotes[11]=start;
+    [unroll] for(uint k=0;k<10;++k) fillArgsOut.Store3(12+12*k,uint3((512u>>k)<=start?count:0,1,1));
+}
+// Fill (jump flood, steps fillPass.x decreasing to 1): an empty or filled texel takes, among itself and its 8 neighbours fillPass.x
 // apart that are seeds or filled, the FARTHEST surface (smallest key): an uncovered strip is the background's, stretched from its edge.
 // v1197 cost: dispatched over the tiles that hold a hole only (the crack's list; DispatchIndirect): a tile without holes has the same
 // texels in both buffers already
@@ -670,12 +739,16 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
     const int2 i=int2((tile%across)*8+t.x,(tile/across)*8+t.y);
     if(any(i>=int2(grid.xy))) return;
     const uint at=Index(i);
-    uint key=keysIn[at],landed=landedIn[at],origin=originsIn[at];const uint2 nr=nearIn[at];float nearest=asfloat(nr.x),zfore=abs(asfloat(nr.y));bool fore_rig=asfloat(nr.y)<0;
+    uint key=keysIn[at],landed=landedIn[at],origin=originsIn[at];uint2 nr=nearIn[at];
+    // (plan 3.2c: the passes FillSteps skipped wrote nothing; keys, landed and origins are the crack's in both buffers, near only in the
+    // second: the first pass run reads it from there, its own output buffer when that is the second, before writing it)
+    if(fillBound.x>0 && fillPass.z<0.5 && uint(fillPass.x)==handVotesIn[11]) nr=nearOut[at];
+    float nearest=asfloat(nr.x),zfore=abs(asfloat(nr.y));bool fore_rig=asfloat(nr.y)<0;
     if(key==0 || (landed&kFilled)) {
         // v1191: the nearest seed that lies BEHIND the nearest surface around the hole (the foreground that uncovered it, the player's rig
         // included); without one, the nearest seed (a crack within one surface). v1185-v1190 took the farthest seed in reach: swing 7 filled
         // the place a sleeve left with a courtyard wall 10 m away instead of the ground right above it
-        const int s=int(fillStep.x);
+        const int s=int(fillPass.x);
         float z=key==0?0:KeyZ(key),d=key==0?1e9:length(float2(Unpack(landed)-i));
         uint ks[8],ls[8],os[8];
         [unroll] for(int n=0;n<8;++n) {                           // the candidates, and the nearest seed any of them reached
@@ -709,7 +782,7 @@ float KeyZ(uint key) {return (key&~kKeyFlags)<=kSkyKey?1e30:1/asfloat(key&~kKeyF
         }
     }
     keysOut[at]=key;landedOut[at]=landed;originsOut[at]=origin;nearOut[at]=uint2(asuint(nearest),asuint(fore_rig?-zfore:zfore));
-    if(fillStep.y>0 && key==0) InterlockedAdd(holesOut[0],1);
+    if(fillPass.y>0 && key==0) InterlockedAdd(holesOut[0],1);
 }
 // FreshSplat (rig_from_fresh, v1173): while a hand moves, the fresh eye's rig texels splatted into the target grid on their own keys (the
 // resolve shows them only where nothing of this eye's own lies as near)
@@ -1019,7 +1092,7 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
             throw std::runtime_error(std::string("AFW2 shader ")+entry+": "+(errors?std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()):"compile failed"));
         return binary;
     };
-    const char* entries[stages]{"Motion","Repair","Splat","Origins","Crack","Fill","FreshSplat","Scatter","ScatterWrite","Decide"};
+    const char* entries[stages]{"Motion","Repair","Splat","Origins","Crack","Fill","FreshSplat","Scatter","ScatterWrite","Decide","FillSteps"};
     for(int s=0;s<stages;++s) {const auto b=compile(entries[s],"cs_5_0");checked(device_->CreateComputeShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&cs_[s]),"compute shader");}
     {const auto b=compile("ResolveVS","vs_5_0");checked(device_->CreateVertexShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&vs_),"vertex shader");}
     {const auto b=compile("ResolvePS","ps_5_0");checked(device_->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&ps_),"pixel shader");}
@@ -1030,8 +1103,19 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;checked(device_->CreateRasterizerState(&r,&raster_),"rasterizer");
     D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthFunc=D3D11_COMPARISON_ALWAYS;checked(device_->CreateDepthStencilState(&ds,&depth_),"depth state");
     votes_=buffer(60,4);stats_=buffer(4,4);
-    {D3D11_BUFFER_DESC a{};a.ByteWidth=12;a.Usage=D3D11_USAGE_DEFAULT;a.MiscFlags=D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
-     const UINT one[3]{0,1,1};D3D11_SUBRESOURCE_DATA i{one,0,0};checked(device_->CreateBuffer(&a,&i,&fill_args_),"fill arguments");}
+    {   // [0] the hole tile count (CopyStructureCount; every pass without the bound), then (plan 3.2c) one (groups, 1, 1) per pass, FillSteps
+        D3D11_BUFFER_DESC a{};a.ByteWidth=12*11;a.Usage=D3D11_USAGE_DEFAULT;a.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+        a.MiscFlags=D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS|D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        UINT args[33]{};for(int k=0;k<11;++k) {args[k*3+1]=1;args[k*3+2]=1;}
+        D3D11_SUBRESOURCE_DATA i{args,0,0};checked(device_->CreateBuffer(&a,&i,&fill_args_),"fill arguments");
+        D3D11_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=DXGI_FORMAT_R32_TYPELESS;u.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=33;u.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+        checked(device_->CreateUnorderedAccessView(fill_args_.Get(),&u,&fill_args_uav_),"fill arguments write view");
+    }
+    for(int k=0;k<10;++k) {   // pass k: step 512 >> k; the first reads the second buffers (the crack's), then they alternate
+        const float pass[4]{float(512>>k),k==9?1.f:0.f,k%2==0?1.f:0.f,0};
+        D3D11_BUFFER_DESC b{};b.ByteWidth=16;b.Usage=D3D11_USAGE_IMMUTABLE;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA i{pass,0,0};checked(device_->CreateBuffer(&b,&i,&fill_pass_[k]),"fill pass constants");
+    }
     D3D11_BUFFER_DESC h{};h.ByteWidth=4;h.Usage=D3D11_USAGE_STAGING;h.CPUAccessFlags=D3D11_CPU_ACCESS_READ;h.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;h.StructureByteStride=4;
     checked(device_->CreateBuffer(&h,nullptr,&holes_read_),"holes read-back");
 }
@@ -1065,10 +1149,11 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     put(L.carried?1:0,L.hand[0]?1:0,L.hand[1]?1:0,still?1:0);
     put(width,height,1./width,1./height);
     {const double u=1-std::clamp(L.border[0],0.,.25),v=1-std::clamp(L.border[1],0.,.25);put(u,v,u,v);}
-    const std::size_t step_at=at;put(0,0,std::hypot(TK.t[0],TK.t[1])*kw/(std::tan(kf.right)-std::tan(kf.left)),mover_px);
+    put(0,0,std::hypot(TK.t[0],TK.t[1])*kw/(std::tan(kf.right)-std::tan(kf.left)),mover_px);
     put(rig_target && kept_rig && fresh_rig?1:0,rig_order,rig_debug,untargeted_lands.load(std::memory_order_relaxed));   // (the rig target needs the masks: its colour comes from rig texels)
-    const auto upload=[&](double step,bool last) {c[step_at]=float(step);c[step_at+1]=last?1.f:0.f;context_->UpdateSubresource(constants_.Get(),0,nullptr,c.data(),0,0);};
-    upload(0,false);
+    const bool bound=fill_bound.load(std::memory_order_relaxed)!=0;
+    put(bound?1:0,0,0,0);
+    context_->UpdateSubresource(constants_.Get(),0,nullptr,c.data(),0,0);
     last_constants=c;
     ID3D11Buffer* cb=constants_.Get();context_->CSSetConstantBuffers(0,1,&cb);context_->PSSetConstantBuffers(0,1,&cb);
     ID3D11SamplerState* sm=sampler_.Get();context_->PSSetSamplers(0,1,&sm);
@@ -1093,7 +1178,7 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
         }
         if(!p.waiting) {probe=&p;probe_next_=(probe_next_+1)%probes_.size();context_->Begin(p.disjoint.Get());}
     }
-    const auto mark=[&](int n) {if(probe) context_->End(probe->ts[n].Get());};
+    const auto mark=[&](int n) {if(probe) context_->End(probe->ts[n].Get());if(stage_hook) stage_hook(stage_hook_ctx,n);};
     mark(0);
     const UINT zero[4]{};
     // 1 motion, 2 repair (0 -> 1)
@@ -1116,8 +1201,9 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     const bool fresh_hands=hands && (L.hand_moving[0] || L.hand_moving[1]);
     if(fresh_hands || motions) {bind({nullptr,nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,nullptr,fresh_keys_.uav.Get()});go(fresh_splat,fw,fh);}
     mark(6);
-    // 5 crack (0 -> 1), 6 fill: jump flood 32 .. 1 (ping-pong)
-    bind({nullptr,keys_[0].srv.Get(),nullptr,origins_[0].srv.Get()},{landed_[0].uav.Get(),keys_[1].uav.Get(),landed_[1].uav.Get(),origins_[1].uav.Get(),nullptr,holes_.uav.Get(),nullptr,near_[1].uav.Get()});
+    // 5 crack (0 -> 1), 6 fill: jump flood 512 .. 1 (ping-pong; plan 3.2c: from the step this frame's holes need)
+    bind({nullptr,keys_[0].srv.Get(),nullptr,origins_[0].srv.Get()},{landed_[0].uav.Get(),keys_[1].uav.Get(),landed_[1].uav.Get(),origins_[1].uav.Get(),nullptr,holes_.uav.Get(),
+                                                                      bound?votes_.uav.Get():nullptr,near_[1].uav.Get()});   // (plan 3.2c: the crack measures the fill's reach)
     {ID3D11UnorderedAccessView* t=tiles_.uav.Get();const UINT empty=0;context_->CSSetUnorderedAccessViews(4,1,&t,&empty);}   // (the tile list starts empty)
     go(crack,kw,kh);
     bind({},{});
@@ -1125,13 +1211,22 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     context_->CopyResource(keys_[0].b.Get(),keys_[1].b.Get());   // (the crack reads these two around each texel: copied)
     context_->CopyResource(origins_[0].b.Get(),origins_[1].b.Get());
     mark(7);
-    int from=1;
-    for(int step=512;step>=1;step/=2) {      // ponytail: 10 passes cover a hole 1023 texels across (v1197: over the hole tiles only); a GPU-side step bound if the fill still costs
-        upload(step,step==1);
+    // plan 3.2c: the start step from this frame's holes (FillSteps writes each pass's groups: none above it). Every pass is still issued
+    // (the CPU does not know the step): a skipped one costs an empty indirect dispatch.
+    if(bound) {
+        if(stage_hook) stage_hook(stage_hook_ctx,999);
+        ID3D11UnorderedAccessView* u[7]{fill_args_uav_.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,votes_.uav.Get()};context_->CSSetUnorderedAccessViews(0,7,u,nullptr);
+        context_->CSSetShader(cs_[fill_steps].Get(),nullptr,0);context_->Dispatch(1,1,1);
+        bind({},{});
+    }
+    int from=1;UINT pass=0;
+    for(int step=512;step>=1;step/=2,++pass) {      // ponytail: 10 passes cover a hole 1023 texels across (v1197: over the hole tiles only)
+        if(stage_hook) stage_hook(stage_hook_ctx,1000+step);
+        {ID3D11Buffer* b=fill_pass_[pass].Get();context_->CSSetConstantBuffers(1,1,&b);}   // (plan 3.2c: step, last, from: made once)
         const int to=1-from;
         bind({nullptr,keys_[from].srv.Get(),landed_[from].srv.Get(),origins_[from].srv.Get(),tiles_.srv.Get(),votes_.srv.Get(),near_[from].srv.Get()},
              {nullptr,keys_[to].uav.Get(),landed_[to].uav.Get(),origins_[to].uav.Get(),nullptr,holes_.uav.Get(),nullptr,near_[to].uav.Get()});
-        context_->CSSetShader(cs_[fill].Get(),nullptr,0);context_->DispatchIndirect(fill_args_.Get(),0);
+        context_->CSSetShader(cs_[fill].Get(),nullptr,0);context_->DispatchIndirect(fill_args_.Get(),bound?12+12*pass:0);
         from=to;
     }
     mark(8);

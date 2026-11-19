@@ -1663,6 +1663,7 @@ static void hands_still() {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // (a crash leaves every line it printed)
+    if (const char* b = std::getenv("AFW2_FILL_BOUND")) Afw2Pass::fill_bound = std::atoi(b);  // plan 3.2c A/B (default: on)
     if (argc > 1 && std::strcmp(argv[1], "afw2") == 0) {gpu_afw2_full();gpu_afw2(); std::puts("PASS: afw2"); return 0;}  // v1177: the AFW2 cases alone
     math();
     gpu();

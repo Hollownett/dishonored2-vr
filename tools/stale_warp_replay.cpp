@@ -14,8 +14,15 @@
 // (mean absolute RGB levels), K kept, X next, R rebuilt; PNG sheets (kept | off | on | next | F off-on: green on better, red worse) and a
 // path map from a debug build of the same shader source (REPLAY_PATHS, text hooks applied here only): green M1 own shading, cyan M1 edge carried, yellow M1
 // fresh colour, blue M3, red M2-cleared (a kept mover's old place, shown by the fallbacks), grey the rest.
+//
+// STALE_REPLAY_HW=N (with STALE_REPLAY_AFW2=1): the default hardware adapter instead of WARP, and after each dump's AFW v2 replay N more
+// passes with every stage in its own timestamp bracket and a GPU sync (event query, spin) before and after it (Afw2Pass::stage_hook; the
+// fill pass by pass): the median ms per stage; then N passes as the game issues them (no syncs: the pass's own timestamps) for the total.
+// STALE_REPLAY_FILL_BOUND=0|1: Afw2Pass::fill_bound (plan 3.2c: the fill's start step from this frame's holes; 0: always 512); the
+// "afw2 fill:" line gives its terms, the step and the farthest seed the fill took. STALE_REPLAY_HOLES=1: the texels left empty after it.
 #define _CRT_SECURE_NO_WARNINGS  // std::getenv
 #include "../src/stale_eye_warp.hpp"
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <iterator>
@@ -28,6 +35,7 @@
 #include <vector>
 #pragma comment(lib,"d3d11.lib")
 #pragma comment(lib,"d3dcompiler.lib")
+#pragma comment(lib,"dxgi.lib")
 using namespace d2vr;
 using Microsoft::WRL::ComPtr;
 #define CHECK(x) do { if(!(x)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); std::exit(1); } } while(0)
@@ -193,6 +201,49 @@ float4 WarpPS(Vertex v) : SV_TARGET {
 }
 )";
 }
+// STALE_REPLAY_HW: per-stage brackets (Afw2Pass::stage_hook). Each hook call closes the open bracket, waits for the GPU to go idle and
+// opens the next stage's (mark 7, the fill as a whole, opens none: each fill pass has its own; mark 10 ends the pass).
+struct StageTimer {
+    ID3D11Device* device{}; ID3D11DeviceContext* context{}; ComPtr<ID3D11Query> idle;
+    struct Bracket {std::string label; ComPtr<ID3D11Query> disjoint, begin, end;};
+    std::vector<Bracket> brackets; std::size_t used{}; bool open{};
+    std::map<std::string, std::vector<double>> ms; std::vector<std::string> order;
+    void sync() {context->End(idle.Get()); BOOL done = FALSE; while (context->GetData(idle.Get(), &done, sizeof done, 0) != S_OK || !done) {}}
+    void close() {if (open) {auto& b = brackets[used - 1]; context->End(b.end.Get()); context->End(b.disjoint.Get()); open = false;}}
+    void start(const std::string& label) {
+        if (used == brackets.size()) {
+            Bracket b; D3D11_QUERY_DESC q{D3D11_QUERY_TIMESTAMP_DISJOINT, 0}; CHECK(SUCCEEDED(device->CreateQuery(&q, &b.disjoint)));
+            q.Query = D3D11_QUERY_TIMESTAMP; CHECK(SUCCEEDED(device->CreateQuery(&q, &b.begin))); CHECK(SUCCEEDED(device->CreateQuery(&q, &b.end)));
+            brackets.push_back(std::move(b));
+        }
+        auto& b = brackets[used++]; b.label = label; context->Begin(b.disjoint.Get()); context->End(b.begin.Get()); open = true;
+    }
+    static void hook(void* self, int code) {
+        auto& t = *static_cast<StageTimer*>(self);
+        t.close(); t.sync();
+        if (code >= 1000) {char s[32]; std::snprintf(s, sizeof s, "fill %d", code - 1000); t.start(s);}
+        else if (code == 999) t.start("fill bound");   // plan 3.2c FillSteps
+        else if (code < Afw2Pass::profile_stages && code != 7) t.start(Afw2Pass::stage_names[code]);
+    }
+    void add(const std::string& label, double v) {if (!ms.count(label)) order.push_back(label); ms[label].push_back(v);}
+    void collect() {   // after a pass: its brackets, and per pass the fill's passes together and the sum of all
+        close(); sync();
+        double fill = 0, sum = 0; int fills = 0;
+        for (std::size_t i = 0; i < used; ++i) {
+            auto& b = brackets[i]; D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{}; UINT64 t0{}, t1{};
+            while (context->GetData(b.disjoint.Get(), &dj, sizeof dj, 0) != S_OK) {}
+            while (context->GetData(b.begin.Get(), &t0, sizeof t0, 0) != S_OK) {}
+            while (context->GetData(b.end.Get(), &t1, sizeof t1, 0) != S_OK) {}
+            if (dj.Disjoint || !dj.Frequency) continue;
+            const double v = double(t1 - t0) * 1000.0 / double(dj.Frequency);
+            add(b.label, v); sum += v; if (!b.label.compare(0, 5, "fill ")) {fill += v; fills += b.label != "fill bound";}
+        }
+        add("fill", fill); add("fill passes", fills); add("sum", sum);
+        used = 0;
+    }
+    void reset() {ms.clear(); order.clear(); used = 0; open = false;}
+};
+static double median(std::vector<double> v) {if (v.empty()) return 0; std::sort(v.begin(), v.end()); return v[v.size() / 2];}
 struct Box {int x{}, y{}, w{}, h{};};
 static Box box_of(const Json& j) {return {static_cast<int>(j.at(0)), static_cast<int>(j.at(1)), static_cast<int>(j.at(2)), static_cast<int>(j.at(3))};}
 
@@ -212,12 +263,20 @@ int main(int argc, char** argv) {
         CHECK(!probe.empty());
     }
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
-    CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+    const int hw_reps = std::getenv("STALE_REPLAY_HW") ? std::max(1, std::atoi(std::getenv("STALE_REPLAY_HW"))) : 0;
+    CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, hw_reps ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+    {
+        ComPtr<IDXGIDevice> dx; ComPtr<IDXGIAdapter> adapter; DXGI_ADAPTER_DESC d{};
+        if (SUCCEEDED(device.As(&dx)) && SUCCEEDED(dx->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&d))) std::fprintf(stderr, "adapter: %ls\n", d.Description);
+    }
+    StageTimer timer; timer.device = device.Get(); timer.context = context.Get();
+    {D3D11_QUERY_DESC q{D3D11_QUERY_EVENT, 0}; CHECK(SUCCEEDED(device->CreateQuery(&q, &timer.idle)));}
     StaleEyeWarp warp(device.Get());
     // v1190 STALE_REPLAY_RIG_ORDER=0|1: inside the rig target, this eye's kept rig first (0) or the fresh eye's first (1)
     warp.afw2 = std::make_unique<Afw2Pass>(device.Get());
     if (const char* o = std::getenv("STALE_REPLAY_RIG_ORDER")) warp.afw2->rig_order = std::atoi(o);
     if (const char* u = std::getenv("STALE_REPLAY_UNTARGETED")) Afw2Pass::untargeted_lands = std::atoi(u);   // v1312 A/B
+    if (const char* b = std::getenv("STALE_REPLAY_FILL_BOUND")) Afw2Pass::fill_bound = std::atoi(b);
     ComPtr<ID3D11PixelShader> shipped = pixel_of(warp), paths;
     {
         const std::string src = path_variant(shader_source("src/stale_eye_warp.hpp"));
@@ -418,10 +477,13 @@ int main(int argc, char** argv) {
             if (!ab_afw2) layers.rig_motion_rules = ab_rig_motion ? variant : true;
             layers.motion_rules = rules;
             const auto t0 = std::chrono::steady_clock::now();
-            auto c = crop(warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
-                                     motion ? StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleMotion{},
-                                     motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleMotion{},
-                                     masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}, rig_target_in));
+            const auto pass = [&]() {
+                return warp.apply(kept_t.Get(), id, &layers, {kd_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)}, fresh_t.Get(), {fd_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)},
+                                  motion ? StaleMotion{km_t.Get(), static_cast<UINT>(kdw), static_cast<UINT>(kdh)} : StaleMotion{},
+                                  motion ? StaleMotion{fm_t.Get(), static_cast<UINT>(fdw), static_cast<UINT>(fdh)} : StaleMotion{},
+                                  masks ? kept_rig : StaleRig{}, masks ? fresh_rig : StaleRig{}, rig_target_in);
+            };
+            auto c = crop(pass());
             std::fprintf(stderr, "  dump %d rules %s, masks %s%s: %.1f s\n", n, rules ? "on" : "off", masks ? "on" : "off", layers.afw2 ? ", AFW2" : "", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
             if (layers.afw2 && warp.afw2 && rt_t && std::getenv("STALE_REPLAY_RIGSRC")) {  // v1190: the rig pixels' sources (-rigsrc.rgba, red/40)
                 warp.afw2->rig_debug = 1;
@@ -432,16 +494,50 @@ int main(int argc, char** argv) {
                 warp.afw2->rig_debug = 0;
                 std::ofstream(out + "/stale-warp-" + std::to_string(n) + "-rigsrc.rgba", std::ios::binary).write(reinterpret_cast<const char*>(src.data()), static_cast<std::streamsize>(src.size()));
             }
+            if (layers.afw2 && warp.afw2 && hw_reps) timer.sync();   // (the hardware runs ahead: the profile's read-back gives up after 200 tries)
             if (layers.afw2 && warp.afw2 && warp.afw2->profile_wait()) {  // v1191: per-pass time (WARP: relative only)
                 std::printf("      afw2 passes ms:"); double sum = 0;
                 for (int k = 0; k < Afw2Pass::profile_stages; ++k) {std::printf(" %s %.1f", Afw2Pass::stage_names[k], warp.afw2->stage_ms[k]); sum += warp.afw2->stage_ms[k];}
                 std::printf(" | total %.1f\n", sum);
             }
             if (layers.afw2 && warp.afw2) {const auto t = warp.afw2->hole_tiles(); std::printf("      afw2: %u target texels left empty after the fill; hole tiles %u of %u\n", warp.afw2->holes(), t[0], t[1]);}
+            if (layers.afw2 && warp.afw2) {   // plan 3.2c: the fill's reach terms (Crack, Motion) and start step (FillSteps), and the farthest seed it took
+                const auto v = warp.afw2->votes(); float inv_z; std::memcpy(&inv_z, &v[9], 4);
+                std::printf("      afw2 fill: bound %s, hole probe r %u, seed 1/z max %.2f x side step %.2f, motion %u px, start step %u; farthest seed taken %.1f texels\n",
+                            Afw2Pass::fill_bound ? "on" : "off", v[10], inv_z, warp.afw2->last_constants[40 * 4 + 2], v[8], v[11], warp.afw2->fill_reach());
+                if (std::getenv("STALE_REPLAY_HOLES")) {   // (debug) the texels left empty: render-grid position and the kept rig mask there
+                    std::printf("      afw2 unfilled:");
+                    for (const auto p : warp.afw2->unfilled(64)) {
+                        const int x = p & 0xffff, y = p >> 16, lx = x - kdb.x, ly = y - kdb.y;
+                        const bool in = lx >= 0 && ly >= 0 && lx < kdb.w && ly < kdb.h;
+                        std::printf(" (%d,%d k%d)", x, y, in && rig ? int(kr[static_cast<std::size_t>(ly) * kdb.w + lx]) : -1);
+                    }
+                    std::printf("\n");
+                }
+            }
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 votes (confirmed/refuted): head %u/%u left %u/%u right %u/%u; hands moving %d %d, masks %d\n", v[2], v[3], v[4], v[5], v[6], v[7], int(layers.hand_moving[0]), int(layers.hand_moving[1]), int(masks));}
             if (layers.afw2 && warp.afw2) std::ofstream(out + "/stale-warp-" + std::to_string(n) + "-afw-constants.f32", std::ios::binary).write(reinterpret_cast<const char*>(warp.afw2->last_constants.data()), sizeof warp.afw2->last_constants);   // tools: the AFW constants (layers, cameras)
             if (layers.afw2 && warp.afw2) {const auto v = warp.afw2->votes(); std::printf("      afw2 outline votes on/off: held head %u/%u left %u/%u right %u/%u; arm head %u/%u left %u/%u right %u/%u; target %u/%u\n", v[20], v[21], v[22], v[23], v[24], v[25], v[12], v[13], v[14], v[15], v[16], v[17], v[26], v[27]);}
             if (layers.afw2 && warp.afw2) {const auto r = warp.afw2->rig_stats_wait(); std::printf("      afw2 rig stats: target %s, %u sampled target px, %u to the world (%.1f %%)\n", r[0] == 1 ? "used" : r[0] == 2 ? "IGNORED" : "none", r[1], r[2], r[1] ? 100.0 * r[2] / r[1] : 0.0);}
+            if (layers.afw2 && warp.afw2 && hw_reps) {   // STALE_REPLAY_HW: each stage alone on the hardware adapter, then the pass as the game issues it
+                auto& a = *warp.afw2;
+                for (int k = 0; k < 5; ++k) pass();   // (warm-up: clocks, caches, first-use costs)
+                timer.sync(); a.profile_wait();
+                timer.reset(); a.profile = false; a.stage_hook = &StageTimer::hook; a.stage_hook_ctx = &timer;
+                for (int k = 0; k < hw_reps; ++k) {pass(); timer.collect();}
+                a.stage_hook = nullptr; a.stage_hook_ctx = nullptr; a.profile = true;
+                std::vector<double> totals, fills;
+                for (int k = 0; k < hw_reps; ++k) {
+                    pass(); timer.sync();
+                    if (a.profile_wait()) {double s = 0; for (const double v : a.stage_ms) s += v; totals.push_back(s); fills.push_back(a.stage_ms[7]);}
+                }
+                std::printf("      hw ms (median of %d), each stage alone:", hw_reps);
+                for (const auto& l : timer.order) if (l.compare(0, 5, "fill ") && l != "fill passes" && l != "sum") std::printf(" %s %.3f", l.c_str(), median(timer.ms[l]));
+                std::printf(" | sum %.3f | as issued (no syncs): total %.3f, fill %.3f\n", median(timer.ms["sum"]), median(totals), median(fills));
+                std::printf("      hw fill passes (%.0f):", median(timer.ms["fill passes"]));
+                for (const auto& l : timer.order) if (!l.compare(0, 5, "fill ") && l != "fill passes") std::printf(" %s %.3f", l.c_str() + 5, median(timer.ms[l]));
+                std::printf("\n");
+            }
             return c;
         };
         const auto on = run(true), off = run(false);
