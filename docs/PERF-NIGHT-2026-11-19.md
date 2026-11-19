@@ -96,20 +96,22 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
   account picker. Steam's own auto-login account is the save owner (the account signed in all night), so at 04:08 I restarted it with
   `-login <that account>` (its remembered token, no password) and it signed in; nothing else was changed. The saves and
   `dishonored2Config.cfg` match the last verified backup byte for byte after every run.
-- **v1403 is installed** in `build/` (v1401 plus dev commands and the opt-in NVIDIA VRS of v1403), with
-  `artifacts/repair-v1403-test-candidate.json`; sim at 2621x2822 DLSS Quality 10.11 / 11.89 ms, 0 exceptions. v1401: v1401 sim: stereo 2621x2822 DLSS Quality 9.96 ms interval, performance-mode
-  rebuild 1.82 ms GPU (v1399 1.92), 0 exceptions. v1399: (the dinput8 proxy loads it), with `artifacts/repair-v1399-test-candidate.json` for the
-  developer-mode launcher (`launcher/dist`; restart it or press Re-check). Sim at your VD setup (2621x2822, DLSS Quality): work p50
-  10.43 / p90 11.84 ms, 0 DLSS failures, 0 exceptions (v1398: 10.14 / 11.61, v1393: 15.06 / 15.82). Earlier builds: v1393 in
-  `build/night/installed/`, v1394-v1398 in `build/night/`; switch with `sh build/night/use.sh <version>` (Git Bash); the proxy needs
+- **v1406 is installed** in `build/` (the proxy loads it), with `artifacts/repair-v1406-test-candidate.json` for the
+  developer-mode launcher (`launcher/dist`; restart it or press Re-check). It is v1403 plus the release-config timing knob and the
+  thinner desktop mirror (section 9). Sim at your VD setup (2621x2822, DLSS Quality), release configuration: work p50 9.43-9.47 ms,
+  p90 11.0-12.6 ms depending on the scene's busy stretches; 0 exceptions, 0 upscaler failures. Earlier builds (v1393 in
+  `build/night/installed/`, v1394-v1405 in `build/night/`) switch with `sh build/night/use.sh <version>` (Git Bash); the proxy needs
   exactly one `d2vr_render_probe_arm_v*.dll` in `build/`, and the launcher picks the highest manifest whose DLL exists.
-- Suggested settings: Anti-aliasing **DLSS Quality**; Save diagnostic logs **off**; Virtual Desktop **90 Hz** (try 80 Hz if it
-  still drops); mod Resolution 1.0 with VD High or Ultra.
+- Suggested settings: Anti-aliasing **DLSS Quality**; Save diagnostic logs **off** (your setup has `build/diagnostics`: it costs
+  ~0.2 ms p50 and 1-2 ms in the worst frames); Virtual Desktop **90 Hz** (try 80 Hz if it still drops); mod Resolution 1.0 with VD
+  High or Ultra; on a 6-core CPU like the 5600X, Shadows / Models / View distance **Very Low** (section 9).
 - Opt-in knobs (files in `build/`): `auto-refresh-rate` (picks 72/80/90 Hz itself), `dlss-preset` containing `K` (DLSS's best
   image, +~1.5 ms GPU), `dlss-fovea` (old foveated DLSS), `governor` (dynamic resolution, FSR modes, GPU-bound only),
   `render-pixel-cap` containing megapixels per eye (e.g. `5.0`: 2621x2822 -> 2155x2320, engine GPU 7.46 -> 6.59 ms in the sim),
   `pass-cpu-timing` (per-pass CPU table in the status), `nvidia-vrs` (NVIDIA foveated shading, v1403; optional text
-  `0.35 0.55 [4x4]`), `afw2-fill-bound` (performance mode), `static-shadow-cache` (+ `-probe`, observe only).
+  `0.35 0.55 [4x4]`), `afw2-fill-bound` (performance mode), `static-shadow-cache` (+ `-probe`, observe only),
+  `desktop-mirror-every` containing 1-8 (default 3; `1` = the desktop window at full rate as before v1406), `frame-timing`
+  (with diagnostics off, writes `xr-frame-timing.csv` only: for timing the release configuration).
 - The status file now says why stereo misses its budget: `perf_governor.performance_mode_advice` = `gpu_bound` (performance mode,
   DLSS Quality or a lower resolution help) or `cpu_bound` (they do not; a lower refresh rate does); the log gets a line on each change.
 - Things to look at: DLSS image (preset E ghosting vs K), Steam Link corners, the 2 s pacer hold, any new crash.
@@ -166,7 +168,7 @@ Measured after Steam was back (04:08-04:55), all in the sim on this PC:
 | 2A.5 NVIDIA VRS | Done, opt-in `nvidia-vrs` (v1403): NVAPI SDK fetched from github.com/NVIDIA/nvapi (MIT) into `third_party/nvapi` (not committed; without it the feature compiles to a stub). Scene passes only, full rate within 35 % of the render height of each eye's optical centre, 2x2 beyond. Sim: FORWARD_WORLD 1.76 -> 1.55 ms GPU, 22816 applications, 0 failures; eye image centre unchanged, periphery slightly coarser. |
 | 2A.4 stencil mask | Not done: ~9 % of FOG/SCREENSHADOWS/POSTPROC (~0.1 ms here) for forcing stencil state into engine passes; GPU-side and small |
 | 2B.1 / 2B.2 second-view CPU | Researched: no-go |
-| 2B.3 mod hooks on the main thread | Done: memory-check cache, `canted_fov` memo (~2 ms -> ~1 ms of mod work on that thread) |
+| 2B.3 mod hooks on the main thread | Done: memory-check cache, `canted_fov` memo (~2 ms -> ~1 ms of mod work on that thread); v1406 desktop mirror on every 3rd headset frame (~0.7 ms per skipped mirror Present, p50 -0.4 to -0.6 ms, section 9) |
 | 2B.4 XR submit off the render thread | Not done: the hook is ~0.85 ms and the runtimes call into the app's D3D11 device in xrEndFrame; risky without the headset |
 | 2C game thread / job count | Measured per pass; `jobs_numThreads` is not a cvar of this build; shadow cvars set live: no effect; no further settings lever |
 | 3.1 automatic performance mode | Advisor done (v1399): the session reports `gpu_bound` / `cpu_bound`; the mode is chosen at session start |
@@ -176,10 +178,50 @@ Measured after Steam was back (04:08-04:55), all in the sim on this PC:
 | 4.3 render-size cap | Done, opt-in `render-pixel-cap` (v1399), sim-verified |
 | 4.4 depth layer | No-go for your runtimes: Virtual Desktop does not stream app depth (its SSW extrapolates from frames and poses on the headset) and SteamVR Motion Smoothing uses motion vectors, not depth. Meta's own runtime would use it. |
 
-What remains open needs the headset: DLSS preset E's image, the Steam Link corners, the pacer hold, `auto-refresh-rate`, a sensible
+What remains open needs the headset (and section 9's limit: the game's own main thread on a 6-core CPU): DLSS preset E's image, the Steam Link corners, the pacer hold, `auto-refresh-rate`, a sensible
 default for `render-pixel-cap`, and whether performance mode's rebuild can be cut to ~1 ms (needs fresh warp dumps from a
 performance-mode session).
 
 Sources for 4.4: [Flight Simulator forum quoting Virtual Desktop's OpenXR developer](https://forums.flightsimulator.com/t/quest-3-new-feature-positional-time-warp/750770),
 [UploadVR on Virtual Desktop SSW](https://uploadvr.com/virtual-desktop-synchronous-spacewarp/),
 [Unity forum on SteamVR Motion Smoothing](https://discussions.unity.com/t/blurry-swimming-image-in-pcvr-quest-3-via-link-built-in-rp-textures-look-fine-nearby-but-look-blurry-and-float-at-5-6m/1682459/7).
+
+## 9. Morning follow-up (07:00-07:50): the slowest 10 % of frames
+
+After v1403 the median frame fit 90 Hz (10.1 ms) but the slowest 10 % did not (11.9 ms against 11.1). Findings:
+
+- **The slow frames are the game's own work.** They come in stretches (busy moments of the scene, 1-9 s), not on a timer; inside
+  them the time between the mod's Present hooks grows (engine gap 10.8 vs 9.1 ms) while the mod's own XR work stays the same. The
+  scene's busy stretches differ from run to run, so two identical runs can differ by 2.6 ms at p90 while their medians agree within
+  ~0.3 ms. Compare medians across runs and p90 only within a run.
+- **Diagnostics cost ~0.2 ms p50 and 1-2 ms at p95/p99** (v1404 dev 10.18 / p95 14.22 / p99 17.31 vs release 9.96 / 13.41 /
+  15.25 ms). New knob `frame-timing` writes the timing log without the rest, so sims can now time the release configuration.
+- **The desktop mirror is the largest mod cost left on the render thread.** Each Present of the game's window costs ~0.7 ms of frame
+  time in the sim (same run, frames with it vs without: 10.04 vs 9.27 ms p50) and the call alone took 0.30 ms p50 in your VD session.
+  v1406 presents it on every 3rd frame during headset gameplay (menus, loads and frames without a submitted layer: every frame).
+  The headset image is unchanged; the desktop window runs at 30 fps at 90 Hz. `build/desktop-mirror-every` with `1` restores the
+  old behaviour. No hang or error from the skipped Presents in 6 runs (the game does not wait on a swapchain latency object).
+- **Very Low presets help a little:** Shadows / Models / View distance at Very Low instead of Low: 9.74 / 11.22 ms vs 9.96 / 11.89
+  (v1404 release).
+- **Dead ends:** the engine's threading is already fully on (`r_schedulerThreadingMode 2`, deferred contexts, `mdnt_multithreaded_updates`
+  and `_start` 1, `r_useAnimBlendJobs` 1, read live with `cvarget`); halving the entity LOD distances (`lod_dist_*`,
+  `mdnt_minDistanceForLod` 25 -> 8 m) set live showed no consistent effect (alternating 6 s A/B, two runs in opposite order:
+  B-A p50 per slot -0.20 ... +0.51, mean ~0). `jobs_numThreads` sits next to the command-line parser in the exe, so it is
+  probably a launch argument; Steam asks the player to confirm custom launch arguments, so it was not tried.
+
+v1406 at your VD setup (2621x2822, DLSS Quality), 4 runs:
+
+| run | p50 | p90 | p95 | over 11.1 ms |
+|---|---|---|---|---|
+| release | 9.47 | 12.62 | 13.77 | 15.6 % |
+| release (repeat) | 9.43 | 11.04 | 12.25 | 9.6 % |
+| release, Very Low presets | 9.47 | 11.27 | 13.27 | 11.0 % |
+| dev (diagnostics on) | 9.63 | 11.03 | 11.73 | 9.4 % |
+
+Release-config medians before v1406: 9.82-10.18 ms (v1404/v1405, 4 runs). Against v1393 (15.06 / 15.82 ms) the frame is ~37 %
+shorter. **Where this leaves 90 Hz on this PC:** the median frame has ~1.6 ms of headroom; 10-15 % of frames in the busiest stretches
+of this scene still take longer than 11.1 ms, and those are the game's own main-thread work (the mod's share of the render thread is now
+~0.7 ms: Present ~0.45 ms with the mirror thinned, DLSS dispatch ~0.27 ms). On a 5600X the remaining options are 80 Hz in the busiest
+areas (`auto-refresh-rate` does that by itself) or Very Low presets; a CPU with ~15 % more single-thread speed (5800X3D, 7600X,
+13600K and newer) should clear the busy stretches too, which is an estimate, not a measurement.
+
