@@ -166,6 +166,7 @@ static HandChainTrace::V trace_v(const d2vr::Vec3& v) {return {v.x,v.y,v.z};}
 #include "cutscene_skip.hpp"
 #include "letterbox_gate.hpp"
 #include "vr_perf_governor.hpp"
+#include "perf_mode_advisor.hpp"
 #include "vr_gestures.hpp"
 #include "native_hud_rect.hpp"
 #include "native_takedown.hpp"
@@ -2513,6 +2514,7 @@ static float upscale_fraction=1;
 // Dynamic resolution (src/vr_perf_governor.hpp): only in the scaled AA modes the player chose (FSR Quality/Balanced),
 // never in native modes; it steps the render fraction down when display slots are missed. Off by default (headset:
 // streaming/compositor hitches, not GPU load, kept flooring FSR Quality at 0.6); build/governor enables it.
+static d2vr::PerfModeAdvisor perf_mode_advisor; // v1399 plan 3.1: why stereo misses its budget (status performance_mode_advice)
 static d2vr::PerfGovernor perf_governor;static bool perf_governor_enabled=true,perf_governor_active=false;static std::uint64_t perf_prev_start_ns{},perf_prev_display{};
 static void reset_perf_governor(int mode) {
     const float f=aa_mode_fraction(mode);perf_governor_active=perf_governor_enabled && d2vr::dlss_mode::governor_eligible(mode,f); // DLSS features are fixed-size
@@ -11973,6 +11975,7 @@ static std::string gpu_passes_status_json() {
 }
 static std::string pass_map_status_json() {return render_pass_map.json();}
 static void clear_gpu_passes() {std::lock_guard<std::mutex> split_lock(frame_split_mutex);gpu_pass_window.clear();}
+static std::string pass_cpu_block_json() {return d2vr::RenderPassMap::cpu_timing_.load()?",\"pass_cpu\":"+d2vr::RenderPassMap::cpu_json(frames.load()):std::string{};} // v1399
 static std::string gpu_passes_block_json() {
     if(!native_gpu_requested) return {};
     return ",\"gpu_passes\":"+gpu_passes_status_json()+",\"pass_map\":"+pass_map_status_json();
@@ -12245,7 +12248,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"lists\":" << native_gpu_summary.lists << ",\"last_list_sum_ms\":" << native_gpu_summary.last_list_sum_ms
         << ",\"last_elapsed_ms\":" << native_gpu_summary.last_elapsed_ms << ",\"dropped_lists\":" << native_gpu_summary.dropped_lists
         << ",\"query_failures\":" << native_gpu_summary.query_failures << ",\"epoch\":" << native_gpu_epoch << ",\"coverage\":\"native command lists; excludes intervening FSR and immediate draws\"}"
-        << gpu_passes_block_json()
+        << gpu_passes_block_json() << pass_cpu_block_json()
         << shadow_share_block_json()
         << ",\"diag_cost\":{\"eye_boundary_ns\":" << diag_eye_boundary_ns.load() << ",\"eye_boundary_calls\":" << diag_eye_boundary_calls.load()
         << ",\"arm_upload_ns\":" << diag_arm_upload_ns.load() << ",\"arm_upload_calls\":" << diag_arm_upload_calls.load()
@@ -12304,7 +12307,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"outcomes\":{\"incomplete\":" << query_outcomes[0] << ",\"empty\":" << query_outcomes[1] << ",\"single\":" << query_outcomes[2]
         << ",\"multiple\":" << query_outcomes[3] << ",\"rejected\":" << query_outcomes[4] << "}}"
         << ",\"native_art_movies\":{\"patched\":" << d2vr::native_art_movie_patched.load() << ",\"rejected\":" << d2vr::native_art_movie_rejected.load() << '}'
-        << ",\"perf_governor\":{\"active\":" << (perf_governor_active?"true":"false") << ",\"scale\":" << perf_governor.scale() << ",\"changes\":" << perf_governor.changes << ",\"cpu_bound_holds\":" << perf_governor.cpu_bound_holds << "}" << ",\"finger_ik\":{\"frames\":" << finger_ik_frames.load() << ",\"avg_us\":" << (finger_ik_frames.load()?finger_ik_ns.load()/1000.0/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"max_us\":" << finger_ik_max_ns.load()/1000.0 << ",\"avg_shapes\":" << (finger_ik_frames.load()?static_cast<double>(finger_ik_shapes.load())/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"posts\":" << finger_probe_posts.load() << ",\"hits\":" << finger_probe_hits.load() << ",\"props\":" << finger_collider_props.load() << ",\"slabs\":" << finger_collider_slabs.load() << ",\"touch\":[" << held_touch_along_dbg.load() << ',' << held_touch_roll_dbg.load() << ',' << held_touches.load() << ',' << held_touch_defaults.load() << ']' << ",\"hold\":[" << held_snap.cylinder_set_frames << ',' << held_snap.gate_fail_frames << ',' << held_cylinder_errors.load() << ',' << held_snap.gate_distance << ',' << finger_thin_holds.load() << ',' << finger_box_holds.load() << ',' << finger_flat_holds.load() << ',' << finger_surface_holds.load() << ']' << ",\"solve_us\":[" << (finger_solve_calls.load()?finger_solve_ns.load()/1000.0/static_cast<double>(finger_solve_calls.load()):0.0) << ',' << finger_solve_max_ns.load()/1000.0 << "],\"geo_max_us\":" << finger_geo_max_ns.load()/1000.0 << ",\"ease_active\":[" << (finger_ease_active[0].load()?1:0) << ',' << (finger_ease_active[1].load()?1:0) << "]" << ",\"probe_hits_world\":" << finger_probe_hits_world.load() << ",\"probe_hits_thin\":" << finger_probe_hits_thin.load() << ",\"thin_props\":" << finger_collider_thin.load() << ",\"probe_casts\":" << finger_probe_casts << ",\"surface\":" << (finger_surface?"true":"false") << [&]{std::ostringstream o;const auto bits=[&](const char* key,const std::array<std::atomic<unsigned>,2>& v) {o<<",\""<<key<<"\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<((v[h].load()>>f)&1u);o<<']';}o<<']';};
+        << ",\"perf_governor\":{\"active\":" << (perf_governor_active?"true":"false") << ",\"scale\":" << perf_governor.scale() << ",\"changes\":" << perf_governor.changes << ",\"cpu_bound_holds\":" << perf_governor.cpu_bound_holds << "}" << ",\"performance_mode_advice\":{\"state\":\"" << d2vr::perf_mode_advice_name(perf_mode_advisor.advice) << "\",\"over_share\":" << perf_mode_advisor.last_over << ",\"gpu_share\":" << perf_mode_advisor.last_gpu_share << ",\"decisions\":" << perf_mode_advisor.decisions << ",\"gpu_windows\":" << perf_mode_advisor.gpu_windows << ",\"cpu_windows\":" << perf_mode_advisor.cpu_windows << "}" << ",\"finger_ik\":{\"frames\":" << finger_ik_frames.load() << ",\"avg_us\":" << (finger_ik_frames.load()?finger_ik_ns.load()/1000.0/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"max_us\":" << finger_ik_max_ns.load()/1000.0 << ",\"avg_shapes\":" << (finger_ik_frames.load()?static_cast<double>(finger_ik_shapes.load())/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"posts\":" << finger_probe_posts.load() << ",\"hits\":" << finger_probe_hits.load() << ",\"props\":" << finger_collider_props.load() << ",\"slabs\":" << finger_collider_slabs.load() << ",\"touch\":[" << held_touch_along_dbg.load() << ',' << held_touch_roll_dbg.load() << ',' << held_touches.load() << ',' << held_touch_defaults.load() << ']' << ",\"hold\":[" << held_snap.cylinder_set_frames << ',' << held_snap.gate_fail_frames << ',' << held_cylinder_errors.load() << ',' << held_snap.gate_distance << ',' << finger_thin_holds.load() << ',' << finger_box_holds.load() << ',' << finger_flat_holds.load() << ',' << finger_surface_holds.load() << ']' << ",\"solve_us\":[" << (finger_solve_calls.load()?finger_solve_ns.load()/1000.0/static_cast<double>(finger_solve_calls.load()):0.0) << ',' << finger_solve_max_ns.load()/1000.0 << "],\"geo_max_us\":" << finger_geo_max_ns.load()/1000.0 << ",\"ease_active\":[" << (finger_ease_active[0].load()?1:0) << ',' << (finger_ease_active[1].load()?1:0) << "]" << ",\"probe_hits_world\":" << finger_probe_hits_world.load() << ",\"probe_hits_thin\":" << finger_probe_hits_thin.load() << ",\"thin_props\":" << finger_collider_thin.load() << ",\"probe_casts\":" << finger_probe_casts << ",\"surface\":" << (finger_surface?"true":"false") << [&]{std::ostringstream o;const auto bits=[&](const char* key,const std::array<std::atomic<unsigned>,2>& v) {o<<",\""<<key<<"\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<((v[h].load()>>f)&1u);o<<']';}o<<']';};
                    bits("blocked",finger_blocked_bits);bits("hyperextended",finger_hyper_bits);o<<",\"tip_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<n<<','<<tip_pen_over[h].load()<<','<<tip_pen_max_slow_um[h].load()/1000.<<','<<tip_pen_max_fast_um[h].load()/1000.<<','<<(n?static_cast<double>(tip_pen_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_um[h].load()/1000.<<','<<tip_pen_palm_um[h].load()/1000.<<','<<tip_pen_blocked[h].load()<<','<<tip_pen_hyper[h].load()<<']';}o<<']';o<<",\"stuck_frames\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<finger_stuck[h][f].load();o<<']';}o<<']';return o.str();}() << ",\"profile\":[" << profile_casts.load() << ',' << profile_hits.load() << ',' << profile_entries.load() << ']'
         << ",\"route\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<(finger_route_hold[i].load()?1:0)<<','<<finger_route_pub[i][0].load()<<','<<finger_route_pub[i][1].load()<<','<<finger_route_pub[i][2].load()<<','<<finger_route_pub[i][3].load()<<']';}return o.str();}() << ']'
         << ",\"bend\":{\"planned\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<planned_bend[i][0].load()<<','<<planned_bend[i][1].load()<<','<<planned_bend[i][2].load()<<','<<planned_bend[i][3].load()<<']';}o<<']';return o.str();}()
@@ -14096,7 +14099,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         if(xr_requested && !xr_recovery_retiring.load() && (game_xr || GetTickCount64()>=xr_retry_tick)) {
                             XrGraphicsScope graphics_scope;
                             if(!game_xr) {
-                                xr_present_thread=GetCurrentThreadId();
+                                xr_present_thread=GetCurrentThreadId();d2vr::RenderPassMap::set_main_thread(xr_present_thread); // v1399 pass_cpu
                                 if(simulated_vr_requested) {
                                     d2vr::simxr::configure(device.Get(),!simulated_gameplay_script_requested);
                                     if(physical_grab_requested && simulated_input_requested && !simulated_gameplay_script_requested) {
@@ -14795,7 +14798,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                          perf_meter.feed(pace,static_cast<std::uint64_t>(t.display_period),missed,hook>waited?hook-waited:0,upscale_fraction);}
                                         if(d2vr::weapon_perf::enabled()) weapon_perf_frame(pace,hook>waited?hook-waited:0);   // v1283 (plan A2)
                                     }
-                                    if(perf_governor_active && perf_governor.feed({work,static_cast<std::uint64_t>(t.display_period),missed,static_cast<std::uint64_t>(std::max<std::int64_t>(0,static_cast<std::int64_t>(t.start_ns)-static_cast<std::int64_t>(present_start_ns)))})) upscale_fraction=perf_governor.scale(); // v1398: + the pre-XR stall (GPU-bound gate) // the 100 ms apply_upscale tick commits it
+                                    if(perf_governor_active && perf_governor.feed({work,static_cast<std::uint64_t>(t.display_period),missed,static_cast<std::uint64_t>(std::max<std::int64_t>(0,static_cast<std::int64_t>(t.start_ns)-static_cast<std::int64_t>(present_start_ns)))})) upscale_fraction=perf_governor.scale(); // v1398: + the pre-XR stall (GPU-bound gate)
+                                    if(!alternate_on()) { // v1399 plan 3.1: stereo frames only; a verdict change is logged once
+                                        const auto before=perf_mode_advisor.advice;
+                                        perf_mode_advisor.feed(work,static_cast<std::uint64_t>(t.display_period),static_cast<std::uint64_t>(std::max<std::int64_t>(0,static_cast<std::int64_t>(t.start_ns)-static_cast<std::int64_t>(present_start_ns))));
+                                        if(perf_mode_advisor.advice!=before) {char line[160];std::snprintf(line,sizeof line,"performance-mode advice: %s (over budget %.0f %% of frames, %.0f %% of those GPU-bound)",
+                                            d2vr::perf_mode_advice_name(perf_mode_advisor.advice),perf_mode_advisor.last_over*100,perf_mode_advisor.last_gpu_share*100);note_recoverable(line);}
+                                    } // the 100 ms apply_upscale tick commits it
                                     // Frame split: queued here, fed after the desktop Present so the hook span is complete.
                                     split_prev_enter_ns=frame_split_prev_enter_ns.exchange(present_start_ns);
                                     split_gpu_ns=native_gpu_requested && native_gpu_prepared?static_cast<std::uint64_t>(std::max(0.,native_gpu_summary.last_list_sum_ms)*1e6):0;
@@ -15058,7 +15067,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
-                                     << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
+                                     << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier << ",\"render_pixel_cap_mp\":" << d2vr::render_pixel_cap.load()/1e6
                                      << ",\"game_render_size\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
                                      << ",\"game_source_size\":[" << game_xr->source_eye_sizes[0].width << ',' << game_xr->source_eye_sizes[0].height << ']'
                                      << ",\"eye_source_pending\":" << game_xr->eye_source_pending
@@ -18139,6 +18148,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         fsr_taa.diagnostic_finished_user=nullptr;
         native_hud_art_capture.observer=render_perf_requested.load()?d2vr::NativeHudChildCapture::Observer{nullptr,&render_perf_hud_begin,&render_perf_span_end}:d2vr::NativeHudChildCapture::Observer{};
         native_hud_art_bounds.observer=render_perf_requested.load()?d2vr::NativeArtBounds::Observer{nullptr,&render_perf_bounds_begin,&render_perf_span_end}:d2vr::NativeArtBounds::Observer{};
+        d2vr::RenderPassMap::cpu_timing_enable(fs::exists(root/L"build"/L"pass-cpu-timing"),frames.load()); // v1399 (plan check L2)
+        {double mp=0;std::ifstream knob(root/L"build"/L"render-pixel-cap");if(!(knob>>mp) || !(mp>=1 && mp<=40)) mp=0;d2vr::render_pixel_cap=mp*1e6;} // v1399 plan 4.3, opt-in
         native_gpu_requested=!render_perf_requested.load() && fs::exists(root/L"build"/L"native-gpu-timing");native_gpu_prepared=false;native_gpu_summary={};native_gpu_config={};native_gpu_epoch=0;
         // v999: the pass map is one MinHook on the engine's deferred job executor.  v1000 also installs
         // it when build/shadow-share is present, because that is where a second-view shadow job is
@@ -18594,7 +18605,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         std::ofstream result(output.always()/L"dxgi-probe-result.json",std::ios::trunc);
         result << "{\"pid\":" << GetCurrentProcessId() << ",\"presents\":" << frames.load() << ",\"valid_camera_poses\":" << valid_poses.load()
                << ",\"frame_split\":" << frame_split_status_json() // same shape as xr-live-status.json: {"adapter":..,"split":..}; the only data a flat run has
-               << gpu_passes_block_json()
+               << gpu_passes_block_json() << pass_cpu_block_json()
                << shadow_share_block_json()
                << ",\"simulated_gameplay_script_requested\":" << (simulated_gameplay_script_requested?"true":"false")
                << ",\"simulated_gameplay_script_segments\":" << simulated_gameplay_script.size()
@@ -18886,7 +18897,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
-               << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier
+               << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier << ",\"render_pixel_cap_mp\":" << d2vr::render_pixel_cap.load()/1e6
                << ",\"eye_antialiasing_requested\":" << (eye_antialiasing_requested?"true":"false")
                << ",\"smaa_eye_passes\":" << xr_antialiased_eyes
                << ",\"vr_settings_layers\":" << xr_settings_layers << ",\"world_ui_layers\":" << xr_world_ui_layers

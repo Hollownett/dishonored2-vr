@@ -17,6 +17,17 @@
 namespace d2vr {
 struct EyeSize {UINT width{},height{};};
 struct ScaledEyeSize {EyeSize size;double requested{},effective{};bool limited{};};
+// v1399 (docs/PERF-PLAN-90HZ-2026-11-19.md 4.3): an optional cap on the pixels per eye, so a headset app's high preset (Virtual Desktop
+// Ultra/Godlike ask for 2496x2688 and more per eye) and the mod's own multiplier cannot stack past what the GPU can render at 90 Hz.
+// build/render-pixel-cap holds megapixels per eye (e.g. 5.0); 0 or no file = off. The capped scale never goes below 0.5 and is reported
+// like any other limit (effective < requested, limited). Opt-in until a headset run judges the sharpness.
+inline std::atomic<double> render_pixel_cap{0};
+inline double capped_multiplier(EyeSize base,double multiplier) noexcept {
+    const double cap=render_pixel_cap.load(std::memory_order_relaxed);
+    if(!(cap>0) || !base.width || !base.height) return multiplier;
+    const double limit=std::sqrt(cap/(static_cast<double>(base.width)*base.height));
+    return std::min(multiplier,std::max(.5,limit));
+}
 inline ScaledEyeSize scaled_eye_size(EyeSize base,double multiplier,EyeSize maximum) {
     if(!base.width || !base.height || !maximum.width || !maximum.height ||
        !std::isfinite(multiplier) || multiplier<.5 || multiplier>2)
@@ -25,7 +36,7 @@ inline ScaledEyeSize scaled_eye_size(EyeSize base,double multiplier,EyeSize maxi
     // scale. Report the effective scale explicitly when either is reached.
     const auto max_width=std::min<UINT>(maximum.width,D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION),
         max_height=std::min<UINT>(maximum.height,D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
-    const auto effective=std::min({multiplier,static_cast<double>(max_width)/base.width,
+    const auto effective=std::min({capped_multiplier(base,multiplier),static_cast<double>(max_width)/base.width,
                                  static_cast<double>(max_height)/base.height});
     if(effective<.5) throw std::runtime_error("Runtime limits cannot support the minimum resolution multiplier");
     const auto width=static_cast<UINT>(std::lround(base.width*effective));

@@ -32,6 +32,9 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <MinHook.h>
+#include <algorithm>
+#include <string>
+#include <vector>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -337,7 +340,65 @@ private:
         if(!address || address<base_) return -1;
         return render_pass_for_callback_rva(address-base_);
     }
+public:
+    // v1399 (plan check L2, docs/ENGINE-CPU-SECOND-VIEW-RESEARCH.md): CPU time of the engine's job items per render pass, EXCLUSIVE of
+    // nested items (a worker that waits runs other items inside), split by the main (Present) thread and the job workers; items of no
+    // render pass (game jobs) go to the last slot. Opt-in: build/pass-cpu-timing (status "pass_cpu"); off, the wrapper is one load.
+    static constexpr unsigned cpu_slots=render_pass_count+1;
+    inline static std::atomic<bool> cpu_timing_{false};
+    inline static std::atomic<unsigned long> main_thread_id_{0};
+    inline static std::atomic<std::uint64_t> cpu_since_frames_{0};
+    inline static std::array<std::atomic<std::uint64_t>,cpu_slots> cpu_main_ticks_{},cpu_worker_ticks_{},cpu_calls_{};
+    inline static thread_local std::uint64_t tl_child_ticks_=0;
+    static void cpu_timing_enable(bool on,std::uint64_t frames_now) noexcept {
+        for(unsigned i=0;i<cpu_slots;++i) {cpu_main_ticks_[i]=0;cpu_worker_ticks_[i]=0;cpu_calls_[i]=0;}
+        cpu_since_frames_=frames_now;cpu_timing_=on;
+    }
+    static void set_main_thread(unsigned long id) noexcept {main_thread_id_.store(id,std::memory_order_relaxed);}
+    static std::uint64_t ticks() noexcept {LARGE_INTEGER c;QueryPerformanceCounter(&c);return static_cast<std::uint64_t>(c.QuadPart);}
+    static int peek_pass(void* item) noexcept {
+        auto* self=instance_;void* callback{};
+        if(!self) return -1;
+        __try {callback=*reinterpret_cast<void**>(static_cast<char*>(item)+0xd8);} __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+        return self->pass_for_callback(callback);
+    }
+    static std::string cpu_json(std::uint64_t frames_now) {
+        LARGE_INTEGER f;QueryPerformanceFrequency(&f);
+        const std::uint64_t base=cpu_since_frames_.load();const double n=frames_now>base?static_cast<double>(frames_now-base):0.;
+        const double k=n>0 && f.QuadPart>0?1000./(static_cast<double>(f.QuadPart)*n):0.; // ticks -> ms per frame
+        struct Row {unsigned slot;double main,worker,calls;};
+        std::vector<Row> rows;double main_total=0,worker_total=0;
+        for(unsigned i=0;i<cpu_slots;++i) {
+            const Row r{i,cpu_main_ticks_[i].load()*k,cpu_worker_ticks_[i].load()*k,n>0?cpu_calls_[i].load()/n:0.};
+            main_total+=r.main;worker_total+=r.worker;
+            if(r.calls>0) rows.push_back(r);
+        }
+        std::sort(rows.begin(),rows.end(),[](const Row& a,const Row& b) {return a.main+a.worker>b.main+b.worker;});
+        std::ostringstream o;o.setf(std::ios::fixed);o.precision(4);
+        o<<"{\"enabled\":"<<(cpu_timing_.load()?"true":"false")<<",\"frames\":"<<static_cast<std::uint64_t>(n)<<",\"main_ms\":"<<main_total<<",\"worker_ms\":"<<worker_total<<",\"passes\":[";
+        for(std::size_t j=0;j<rows.size();++j) {
+            const auto& r=rows[j];
+            o<<(j?",":"")<<"{\"name\":\""<<(r.slot<render_pass_count?render_pass_name(r.slot):"no_pass")<<"\",\"main_ms\":"<<r.main<<",\"worker_ms\":"<<r.worker<<",\"calls\":"<<r.calls<<'}';
+        }
+        o<<"]}";
+        return o.str();
+    }
+private:
     static bool __fastcall execute_hook(void* item) {
+        if(!cpu_timing_.load(std::memory_order_relaxed)) return execute_inner(item);
+        const int pass=peek_pass(item);
+        const std::uint64_t saved=tl_child_ticks_;tl_child_ticks_=0;
+        const std::uint64_t t0=ticks();
+        const bool result=execute_inner(item);
+        const std::uint64_t dt=ticks()-t0;
+        const std::uint64_t own=dt>tl_child_ticks_?dt-tl_child_ticks_:0;
+        tl_child_ticks_=saved+dt; // the parent item sees this one's inclusive time as child time
+        const unsigned slot=pass>=0 && static_cast<unsigned>(pass)<render_pass_count?static_cast<unsigned>(pass):render_pass_count;
+        (GetCurrentThreadId()==main_thread_id_.load(std::memory_order_relaxed)?cpu_main_ticks_:cpu_worker_ticks_)[slot].fetch_add(own,std::memory_order_relaxed);
+        cpu_calls_[slot].fetch_add(1,std::memory_order_relaxed);
+        return result;
+    }
+    static bool execute_inner(void* item) {
         auto* self=instance_;
         if(!self || !original_) return false;
         void* callback{};

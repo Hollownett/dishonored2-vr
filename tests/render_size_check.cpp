@@ -31,6 +31,18 @@ int main() {
         require(larger.size.width==3722 && larger.size.height==3850 && !larger.limited,"120 percent must scale both dimensions");
         const auto smaller=d2vr::scaled_eye_size(density,.75,{4096,4096});
         require(smaller.size.width==2327 && smaller.size.height==2406,"75 percent must decrease both dimensions");
+        { // v1399 plan 4.3: the opt-in per-eye pixel cap scales both dimensions, never below 0.5, and reports the limit; 0 = off
+            d2vr::render_pixel_cap=5e6;
+            const auto capped=d2vr::scaled_eye_size({2621,2822},1.0,{8192,8192});
+            require(capped.limited && capped.effective<1 && static_cast<double>(capped.size.width)*capped.size.height<=5.01e6 &&
+                std::abs(static_cast<double>(capped.size.width)/capped.size.height-2621./2822.)<.002,"pixel cap must scale both dimensions to the cap");
+            const auto under=d2vr::scaled_eye_size({2000,2000},1.0,{8192,8192});
+            require(!under.limited && under.size.width==2000,"a size under the cap must be unchanged");
+            d2vr::render_pixel_cap=1e6;
+            const auto floor=d2vr::scaled_eye_size({2621,2822},1.0,{8192,8192});
+            require(std::abs(floor.effective-.5)<1e-9,"the cap must never go below 0.5");
+            d2vr::render_pixel_cap=0;
+        }
         const auto limited=d2vr::scaled_eye_size(density,2,{4096,4096});
         require(limited.limited && limited.size.height==4096 && limited.size.width<=4096 && limited.effective<2,"Reported scale must reflect the allocation limit");
         // The runtime maximum, not the old 4096 diagnostic bound, caps the scale.
