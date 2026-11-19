@@ -275,3 +275,10 @@ side's jobs on the worker threads were not covered. Finding that interaction nee
 realistic before this is understood. Tools from this: `tools/stack_tree.py` (real call trees), `tools/dump_stacks.py` (all threads once,
 for deadlocks). The one-time ~11 s stalls at the start of every sim's gameplay are the two `StaleEyeWarp` shader compiles (normal).
 
+Follow-up (11:40-11:45, `tools/worker_d3d.py`: real stack walks of every busy thread, v1407 normal run, 45-57 s into gameplay): the
+game side's jobs never reach D3D11/DXGI/the driver, on the main thread (60 walks) or the workers (177 walks); only render jobs (834
+worker walks, 90 of them in D3D11, all through deferred contexts' recording) and the driver's own threads do. So the D3D11 assumption of
+stage 1 holds. The v1410 crash (first-chance access violations at `exe:2c6080` and `exe:2e5b5c`, render-job code, two worker threads,
+then the process died) points elsewhere: the engine's background render tasks (`r_schedulerNoBackground 0`: tasks that outlive the
+render side) or an engine assumption about the state right after Present returns. Both need the job scheduler reverse-engineered.
+
