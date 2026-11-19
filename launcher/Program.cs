@@ -107,6 +107,7 @@ sealed class MainForm : Form
     readonly CheckList featList = new();
     readonly ArtButton featToggle = new("Features", Look.Secondary), restore = new("Restore defaults", Look.Secondary);
     readonly ArtButton dlssButton = new("DLSS file", Look.Secondary);  // full sentence (DlssProvider.Prompt) did not fit; it titles the file picker
+    readonly ArtButton afwButton = new("AFW plugin", Look.Secondary);  // the user's own PDAFWPlugin.dll (AfwProvider); the renderer is the "afw-renderer" feature row
     static readonly (string text, object val)[] AaBase = { ("Off", 0), ("Game TAA (ghosting, not recommended)", 1), ("FSR 3 - native", 2), ("FSR 3 - quality (77%)", 3), ("FSR 3 - balanced (67%)", 4), ("FSR 4 - native", 5), ("FSR 4 - quality (77%)", 6) };
     static readonly (string text, object val)[] AaDlss = { ("DLAA (NVIDIA DLSS)", 7), ("DLSS - quality (NVIDIA DLSS)", 8) };
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
@@ -192,7 +193,8 @@ sealed class MainForm : Form
         featToggle.Click += (_, _) => ShowFeatures(!showFeatures);
         restore.Click += (_, _) => RestoreFeatureDefaults();
         dlssButton.Click += (_, _) => PickDlssProvider();
-        pages[1].Controls.AddRange(new Control[] { options, featList, save, reload, restore, featToggle, dlssButton });
+        afwButton.Click += (_, _) => PickAfwPlugin();
+        pages[1].Controls.AddRange(new Control[] { options, featList, save, reload, restore, featToggle, dlssButton, afwButton });
         pages[1].Painter = PaintSettings;
 
         // ---- Tools page
@@ -448,7 +450,8 @@ sealed class MainForm : Form
         reload.Bounds = new Rectangle(save.Right + S(6), y + (btnH - S(40)) / 2, Math.Max(S(120), reload.Natural), S(40));
         featToggle.Bounds = new Rectangle(reload.Right + S(10), reload.Top, Math.Max(S(150), featToggle.Natural), S(40));
         dlssButton.Bounds = new Rectangle(featToggle.Right + S(10), reload.Top, Math.Max(S(150), Math.Min(dlssButton.Natural, w - featToggle.Right - S(10))), S(40));
-        settingsLast = dlssButton;
+        afwButton.Bounds = new Rectangle(dlssButton.Right + S(10), reload.Top, Math.Max(S(150), Math.Min(afwButton.Natural, w - dlssButton.Right - S(10))), S(40));
+        settingsLast = afwButton;
     }
 
     /// <summary>The DLAA/DLSS Quality rows exist only while an NVIDIA driver and the user's nvngx_dlss.dll are present; the option keeps the user's value.</summary>
@@ -483,6 +486,18 @@ sealed class MainForm : Form
             SetSettingsMsg($"DLSS found in {found.Source["auto: ".Length..]}: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
         }
         catch (Exception) { }  // best effort: manual picking stays available
+    }
+
+    void PickAfwPlugin()
+    {
+        try
+        {
+            using var dialog = new OpenFileDialog { Title = AfwProvider.Prompt, Filter = AfwProvider.DllName + "|" + AfwProvider.DllName, FileName = AfwProvider.DllName, CheckFileExists = true };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var found = AfwProvider.Configure(env.Root, dialog.FileName);
+            SetSettingsMsg($"AFW plugin recorded: {found.Path}. {AfwProvider.Attribution} Turn on \"AFW renderer\" under Features. Applies the next time VR starts.", Ui.Good);
+        }
+        catch (Exception ex) { SetSettingsMsg("AFW plugin not changed: " + ex.Message, Ui.Bad); }
     }
 
     void PickDlssProvider()
@@ -932,7 +947,7 @@ sealed class MainForm : Form
     void ShowFeatures(bool on)
     {
         showFeatures = on;
-        options.Visible = !on; save.Visible = !on; reload.Visible = !on; featList.Visible = on; restore.Visible = on; dlssButton.Visible = !on;
+        options.Visible = !on; save.Visible = !on; reload.Visible = !on; featList.Visible = on; restore.Visible = on; dlssButton.Visible = !on; afwButton.Visible = !on;
         featToggle.Text = on ? "Back to options" : "Features";
         if (on) LoadFeatures(keepPerf: true); else SetSettingsMsg("", Ui.Dim);  // opening the list keeps an unsaved Performance mode choice
         LayoutSettings(); pages[1].Invalidate(true);
@@ -1022,7 +1037,7 @@ sealed class MainForm : Form
             var d = LoadWithDefaultAa();
             prefs = d;
             ApplyToForm(d, null);
-            SetSettingsMsg((File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. The in-game VR menu wins: the launcher shows what the game saved. Changes apply the next time VR starts. " : "No saved file yet; showing defaults. ") + DlssProvider.Status(env.Root), Ui.Dim);
+            SetSettingsMsg((File.Exists(env.SettingsFile) ? "Loaded build\\vr-settings.cfg. The in-game VR menu wins: the launcher shows what the game saved. Changes apply the next time VR starts. " : "No saved file yet; showing defaults. ") + DlssProvider.Status(env.Root) + " " + AfwProvider.Status(env.Root), Ui.Dim);
         }
         catch (Exception ex) { SetSettingsMsg(ex.Message, Ui.Bad); }
         LoadFeatures();

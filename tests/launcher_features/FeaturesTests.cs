@@ -421,6 +421,27 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
     Check("dlss_attribution_present", DlssProvider.Attribution.Contains("NVIDIA DLSS") && DlssProvider.Prompt.Contains(DlssProvider.DllName));
     Check("dlss_available_needs_driver", DlssProvider.Available(root) == DlssProvider.NvidiaDriverPresent());
 }
+{   // AfwProvider: the user's own PDAFWPlugin.dll recorded in build\afw-plugin-path (temp tree only; nothing is copied).
+    var root = Path.Combine(Path.GetTempPath(), "d2vrafw-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Path.Combine(root, "build"));
+    Check("afw_nothing_chosen", AfwProvider.Resolve(root) == null && AfwProvider.Configured(root) == null && AfwProvider.Status(root).Contains("no " + AfwProvider.DllName));
+    var dir = Path.Combine(root, "plugins", "Новая папка"); Directory.CreateDirectory(dir);   // a non-ASCII folder: the knob is UTF-8
+    var dll = Path.Combine(dir, AfwProvider.DllName);
+    bool threw = false; try { AfwProvider.Configure(root, dll); } catch (FileNotFoundException) { threw = true; }
+    Check("afw_configure_requires_existing_dll", threw && !File.Exists(AfwProvider.KnobPath(root)));
+    File.WriteAllBytes(dll, new byte[] { 1, 2, 3 });
+    threw = false; try { AfwProvider.Configure(root, Path.Combine(dir, "nvngx_dlss.dll")); } catch (InvalidDataException) { threw = true; }
+    Check("afw_configure_rejects_other_names", threw);
+    var located = AfwProvider.Configure(root, dll);
+    var bytes = File.ReadAllBytes(AfwProvider.KnobPath(root));
+    Check("afw_configure_writes_utf8_knob", located.Source == "configured" && System.Text.Encoding.UTF8.GetString(bytes) == Path.GetFullPath(dll) + "\n"
+        && !(bytes.Length >= 3 && bytes[0] == 0xEF) && !Directory.GetFiles(Path.Combine(root, "build"), "*.tmp").Any());
+    Check("afw_resolve_configured", AfwProvider.Resolve(root) is { Source: "configured" } r && r.Path == Path.GetFullPath(dll) && AfwProvider.Status(root).Contains(dll));
+    File.WriteAllText(AfwProvider.KnobPath(root), "  \"" + dir + "\"\r\n");   // a quoted folder names its PDAFWPlugin.dll
+    Check("afw_folder_knob_resolves", AfwProvider.Resolve(root)?.Path == Path.GetFullPath(dll));
+    Check("afw_attribution_says_not_included", AfwProvider.Attribution.Contains("not included") && AfwProvider.Prompt.Contains(AfwProvider.DllName));
+    var row = list.FirstOrDefault(f => f.Id == "afw-renderer");
+    Check("afw_renderer_feature_row", row != null && row.File == "afw" && !row.Default);
+}
 {   // DlssFinder: auto-find the user's own DLL in installed Steam games (temp trees only).
     string Tmp() { var d = Path.Combine(Path.GetTempPath(), "d2vrfind-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(d); return d; }
     string Dll(string lib, string rel, byte b = 4) { var f = Path.GetFullPath(Path.Combine(lib, "steamapps", "common", rel, DlssProvider.DllName)); Directory.CreateDirectory(Path.GetDirectoryName(f)!); File.WriteAllBytes(f, new[] { b }); return f; }

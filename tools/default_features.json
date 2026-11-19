@@ -260,6 +260,15 @@
    "main_settings": true
   },
   {
+   "id": "afw-renderer",
+   "file": "afw",
+   "kind": "enable",
+   "label": "AFW renderer: rebuild the other eye with PureDark's plugin (one eye per frame)",
+   "help": "Starts VR with the AFW renderer: the game draws one eye per frame and PureDark's PDAFWPlugin.dll rebuilds the other eye from the fresh eye's colour, depth and motion, instead of performance mode's built-in warp. Needs your own PDAFWPlugin.dll (Options > AFW plugin; it is not included) and an FSR or DLSS anti-aliasing mode; without them the mod falls back to the built-in warp. The in-game VR menu's Renderer row can also switch it. Off by default.",
+   "default": false,
+   "main_settings": true
+  },
+  {
    "id": "alternate-native-taa",
    "file": "no-alternate-native-taa",
    "kind": "disable",

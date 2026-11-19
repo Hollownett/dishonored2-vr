@@ -228,7 +228,11 @@ public:
         HANDLE h=nullptr;if(FAILED(hr=d12_->CreateSharedHandle(fence_.Get(),nullptr,GENERIC_ALL,nullptr,&h))) return fail("fence handle",hr);
         hr=d11_->OpenSharedFence(h,IID_PPV_ARGS(&fence11_));CloseHandle(h);if(FAILED(hr)) return fail("D3D11 shared fence",hr);
         module_=LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        if(!module_) return fail("PDAFWPlugin.dll not found next to Dishonored2.exe",HRESULT_FROM_WIN32(GetLastError()));
+        if(!module_) { // v1413: the path may come from build/afw-plugin-path (the launcher), so name it
+            const DWORD error=GetLastError();std::string where;const int n=WideCharToMultiByte(CP_UTF8,0,path.c_str(),-1,nullptr,0,nullptr,nullptr);
+            if(n>1) {where.resize(static_cast<std::size_t>(n-1));WideCharToMultiByte(CP_UTF8,0,path.c_str(),-1,where.data(),n,nullptr,nullptr);}
+            return fail(("PDAFWPlugin.dll could not be loaded from "+(where.empty()?std::string("next to Dishonored2.exe"):where)).c_str(),HRESULT_FROM_WIN32(error));
+        }
         const auto init=reinterpret_cast<pd::InitDeviceFn>(GetProcAddress(module_,"InitDevice"));
         init_frames_=reinterpret_cast<pd::InitFrameWarpFn>(GetProcAddress(module_,"InitFrameWarp"));
         warp_=reinterpret_cast<pd::EvaluateFrameWarpFn>(GetProcAddress(module_,"EvaluateFrameWarp"));

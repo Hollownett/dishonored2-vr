@@ -14771,9 +14771,23 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     {game_xr->controller_input.left_trigger,game_xr->controller_input.right_trigger},game_dir);
                             }
                             if(game_xr->afw_capture_dir.empty()) game_xr->afw_capture_dir=output_directory.always().wstring();
-                            if(game_xr->afw_plugin_path.empty()) { // AFW renderer: PDAFWPlugin.dll is the user's own copy, next to Dishonored2.exe
-                                wchar_t exe[MAX_PATH]{};GetModuleFileNameW(nullptr,exe,MAX_PATH);
-                                game_xr->afw_plugin_path=(std::filesystem::path(exe).parent_path()/L"PDAFWPlugin.dll").wstring();
+                            if(game_xr->afw_plugin_path.empty()) { // AFW renderer: PDAFWPlugin.dll is the user's own copy (never bundled)
+                                // v1413: build/afw-plugin-path (the launcher's "AFW plugin" picker; one line, a full path) names it; else next to Dishonored2.exe.
+                                std::wstring chosen;
+                                {std::ifstream knob(output_directory.always().parent_path()/L"build"/L"afw-plugin-path",std::ios::binary);std::string line; // UTF-8, as the launcher writes it
+                                 if(knob && std::getline(knob,line)) {
+                                     const auto trim=[](char c) {return c==13 || c==32 || c==34 || c==39 || c==9;}; // CR, space, double and single quote, tab
+                                     while(!line.empty() && trim(line.back())) line.pop_back();
+                                     std::size_t b=0;while(b<line.size() && trim(line[b])) ++b;line=line.substr(b);
+                                     if(line.size()>=3 && static_cast<unsigned char>(line[0])==0xEF && static_cast<unsigned char>(line[1])==0xBB && static_cast<unsigned char>(line[2])==0xBF) line=line.substr(3);
+                                     const int n=line.empty()?0:MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,line.data(),static_cast<int>(line.size()),nullptr,0);
+                                     std::wstring wide(static_cast<std::size_t>(n>0?n:0),L' ');
+                                     if(n>0) MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,line.data(),static_cast<int>(line.size()),wide.data(),n);
+                                     std::error_code ec;const fs::path candidate(wide);
+                                     if(n>0 && candidate.is_absolute() && fs::is_regular_file(candidate,ec)) chosen=candidate.wstring();
+                                 }}
+                                if(chosen.empty()) {wchar_t exe[MAX_PATH]{};GetModuleFileNameW(nullptr,exe,MAX_PATH);chosen=(std::filesystem::path(exe).parent_path()/L"PDAFWPlugin.dll").wstring();}
+                                game_xr->afw_plugin_path=chosen;
                             }
                             game_xr->effective_temporal_aa(temporal_live_mode.load());
                             game_xr->scene_hold=cutscene_hold;game_xr->scene_id=cutscene_count.load(); // G2: this cutscene's hold and its identity
