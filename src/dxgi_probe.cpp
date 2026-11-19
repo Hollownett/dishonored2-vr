@@ -259,9 +259,9 @@ static bool frame_timing_only{};
 // v1405/v1406 (plan 2B.3): during headset gameplay the desktop mirror (the game's own swapchain Present) is presented on every Nth
 // XR frame only; the headset image is not affected. Each mirror Present costs the render thread ~0.7 ms of frame time in the
 // 2026-11-19 sim (frames with it: p50 10.04 ms, without: 9.27 ms, same run) and the call alone 0.30 ms p50 in the user's VD session.
-// Default N=3 (a 30 fps desktop window at 90 Hz); build/desktop-mirror-every with 1..8 overrides it, 1 = every frame (pre-v1406).
-// Menus, loads and any frame without a submitted XR layer present every frame as before.
-static constexpr unsigned desktop_mirror_default=3;
+// v1407 (user, 2026-11-19: "no cut desktop"): the default is every frame again (N=1); build/desktop-mirror-every with 2..8 is opt-in.
+// Menus, loads and any frame without a submitted XR layer present every frame whatever N is.
+static constexpr unsigned desktop_mirror_default=1;
 static std::atomic<unsigned> desktop_mirror_every{desktop_mirror_default};
 static std::atomic<UINT64> desktop_mirror_skips{0};
 static bool diagnostics_off{}; // v1046: = !d2vr::diag::on() (build/diagnostics absent), set once in StartProbe; the old build/no-diagnostics is retired
@@ -599,7 +599,7 @@ static void start_finger_touch_knobs(const fs::path& root,const fs::path& output
     finger_surface=!fs::exists(root/L"build"/L"no-finger-surface");
     finger_probe_casts=fs::exists(root/L"build"/L"finger-probe-3")?3u:finger_probe_casts_default;
     {std::lock_guard<std::mutex> l(finger_touch_status_mutex);finger_touch_status={};}
-    std::ofstream note(output/L"finger-touch.txt",std::ios::trunc);
+    std::ofstream note;if(!output.empty()) note.open(output/L"finger-touch.txt",std::ios::trunc); // v1407: diagnostics off = an empty folder; composing onto it wrote into the game folder
     note<<"knob build/legacy-finger-curl "<<(legacy_finger_curl?"present: fingers keep the controller-value mapping\n":"absent: fingers follow the touch sensors where the runtime has them\n");
     note<<"knob build/no-finger-surface "<<(finger_surface?"absent: free fingers rest on surfaces (G5), ":"present: v609 finger probes, budget and TTL, ")<<"finger_probe_casts "<<finger_probe_casts<<'\n';
     note<<"knob build/legacy-finger-grab "<<(legacy_finger_grab?"present: a held prop, body part or severed limb gets the contact against its own shapes (v638)\n":"absent: a held prop, body part or severed limb is wrapped on one ball in the palm (finger_sphere.hpp)\n");
@@ -2088,7 +2088,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     legacy_instanced_held=fs::exists(root/L"build"/L"legacy-instanced-held");   // v1307
     full_body.legacy_item_lag(fs::exists(root/L"build"/L"legacy-item-lag"));   // v835: attached items read the hand as the previous tick drew it   // v832: arms carried by the body model's yaw, not the camera heading's   // v830: arms from the publication's own (one locate older) sample
     const bool legacy_run_gate=fs::exists(root/L"build"/L"legacy-run-gate");d2vr::hand_servo_legacy_gate.store(legacy_run_gate);   // v613 item 6
-    std::ofstream note(output/L"running-knobs.txt",std::ios::trunc);
+    std::ofstream note;if(!output.empty()) note.open(output/L"running-knobs.txt",std::ios::trunc); // v1407: diagnostics off = an empty folder; composing onto it wrote into the game folder
     note<<"knob build/legacy-arm-root-carry "<<(legacy_carry?"present: arms carry from the last arm-upload root\n":"absent: arms carry from the anchor's root\n");
     note<<"knob build/legacy-hand-stuck "<<(legacy_hand_stuck?"present: strict clamp hold unbounded, a wedged hand body never released\n":"absent: the clamp hold ends after 0.25 s, a wedged hand body is released after 1 s\n");
     note<<"knob build/no-run-root-gate "<<(run_root_gate?"absent: locomotion gate follows player root\n":"present: v613 hand-target gate\n");
@@ -2896,7 +2896,7 @@ static std::uintptr_t hand_body_camera() {
 }
 static void start_hand_body_spike(const fs::path& root,const fs::path& output) {
     std::string text;{std::ifstream knob(root/L"build"/L"hand-body-spike");std::getline(knob,text,'\0');}
-    std::ofstream note(output/L"hand-body-spike.txt",std::ios::trunc);
+    std::ofstream note;if(!output.empty()) note.open(output/L"hand-body-spike.txt",std::ios::trunc); // v1407: see start_hand_body
     note<<"knob build/hand-body-spike read once: \""<<text.substr(0,64)<<"\"\n";
     const auto route=d2vr::parse_spike_route(text);
     if(!route) {note<<"invalid route (expected R1, R2 or R3): spike off\n";return;}
@@ -2910,7 +2910,7 @@ static void start_hand_body_spike(const fs::path& root,const fs::path& output) {
 // thread, no engine call), the release gate is not consulted and the input path is untouched; status says {"enabled":false}.
 static std::atomic<bool> hand_body_requested{false};
 static void start_hand_body(const fs::path& root,const fs::path& output) {
-    std::ofstream note(output/L"hand-body.txt",std::ios::trunc);
+    std::ofstream note;if(!output.empty()) note.open(output/L"hand-body.txt",std::ios::trunc); // v1407: diagnostics off = an empty folder; composing onto it wrote into the game folder
     note<<"knobs read once: build/hand-body present, build/no-hand-body absent\n";
     if(fs::exists(root/L"build"/L"hand-body-spike")) {note<<"build/hand-body-spike exists (the spike owns the shared hooks): hand body off\n";
         d2vr::HandBodyRuntime::note_install_failure("build/hand-body-spike exists");hand_body_requested=false;return;}
