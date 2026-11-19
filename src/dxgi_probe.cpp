@@ -167,6 +167,7 @@ static HandChainTrace::V trace_v(const d2vr::Vec3& v) {return {v.x,v.y,v.z};}
 #include "letterbox_gate.hpp"
 #include "vr_perf_governor.hpp"
 #include "perf_mode_advisor.hpp"
+#include "nv_vrs.hpp"
 #include "vr_gestures.hpp"
 #include "native_hud_rect.hpp"
 #include "native_takedown.hpp"
@@ -2514,6 +2515,14 @@ static float upscale_fraction=1;
 // Dynamic resolution (src/vr_perf_governor.hpp): only in the scaled AA modes the player chose (FSR Quality/Balanced),
 // never in native modes; it steps the render fraction down when display slots are missed. Off by default (headset:
 // streaming/compositor hitches, not GPU load, kept flooring FSR Quality at 0.6); build/governor enables it.
+// v1403 plan 2A.5: NVIDIA VRS foveation (src/nv_vrs.hpp), opt-in build/nvidia-vrs; the scene passes only (FORWARD_WORLD 27, FORWARD_DYNAMIC 28).
+static bool nvidia_vrs_requested=false,nvidia_vrs_tried=false;static d2vr::NvVrs::Config nvidia_vrs_config{};
+static void nvidia_vrs_observer(void* context,int pass,void* view,bool begin) noexcept {
+    if(pass!=27 && pass!=28) return;
+    auto& vrs=d2vr::NvVrs::instance();
+    if(begin) vrs.begin(static_cast<ID3D11DeviceContext*>(context),d2vr::ObjectMotion::eye_of_view(reinterpret_cast<std::uintptr_t>(view)));
+    else vrs.end(static_cast<ID3D11DeviceContext*>(context));
+}
 static d2vr::PerfModeAdvisor perf_mode_advisor; // v1399 plan 3.1: why stereo misses its budget (status performance_mode_advice)
 static d2vr::PerfGovernor perf_governor;static bool perf_governor_enabled=true,perf_governor_active=false;static std::uint64_t perf_prev_start_ns{},perf_prev_display{};
 static void reset_perf_governor(int mode) {
@@ -14757,6 +14766,20 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                             if(fsr_taa.enabled.load()) {ComPtr<ID3D11Device> fsr_device;context->GetDevice(&fsr_device);if(fsr_device) {device_creation_flags=fsr_device->GetCreationFlags();fsr_taa.prepare(fsr_device.Get());}}
                             {ComPtr<ID3D11Device> d;context->GetDevice(&d);if(d) taa_mv_dejitter.prepare(d.Get());}
+                            if(nvidia_vrs_requested) { // v1403: lazy init on an NVIDIA adapter, then the per-eye surfaces follow the render size and optical centre
+                                auto& vrs=d2vr::NvVrs::instance();
+                                if(!nvidia_vrs_tried && present_adapter_vendor.load()==0x10de) {
+                                    nvidia_vrs_tried=true;ComPtr<ID3D11Device> d;context->GetDevice(&d);
+                                    if(d && vrs.init(d.Get(),nvidia_vrs_config)) d2vr::RenderPassMap::pass_observer_.store(&nvidia_vrs_observer,std::memory_order_release);
+                                    note_recoverable(vrs.enabled()?"nvidia-vrs: on":"nvidia-vrs: unavailable on this adapter or driver");
+                                }
+                                if(vrs.enabled()) for(unsigned eye=0;eye<2;++eye) {
+                                    const UINT w=fsr_taa.eye_display_width[eye].load(),h=fsr_taa.eye_display_height[eye].load();
+                                    UINT rw=fsr_taa.eye_render_width[eye].load(),rh=fsr_taa.eye_render_height[eye].load();if(!rw || !rh) {rw=w;rh=h;}
+                                    const bool centred=d2vr::fovea::published.load();
+                                    vrs.update(context.Get(),eye,w,h,rw,rh,centred?d2vr::fovea::centre_x[eye].load():0.f,centred?d2vr::fovea::centre_y[eye].load():0.f);
+                                }
+                            }
                             if(simulated_gameplay_script_requested && authored_camera && owner->mode!=0 && pair_ready &&
                                game_xr->last_authored_camera_layer && game_xr->last_tracked_pair) ++authored_capture_stable_frames;
                             else authored_capture_stable_frames=0;
@@ -15080,7 +15103,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"cached_output_reapplies\":" << cached_output_reapplies.load()
                                      << ",\"cached_output_deferred\":" << cached_output_deferred.load()
                                      << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
-                                     << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
+                                     << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                                      << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier << ",\"render_pixel_cap_mp\":" << d2vr::render_pixel_cap.load()/1e6
@@ -18165,6 +18188,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         native_hud_art_capture.observer=render_perf_requested.load()?d2vr::NativeHudChildCapture::Observer{nullptr,&render_perf_hud_begin,&render_perf_span_end}:d2vr::NativeHudChildCapture::Observer{};
         native_hud_art_bounds.observer=render_perf_requested.load()?d2vr::NativeArtBounds::Observer{nullptr,&render_perf_bounds_begin,&render_perf_span_end}:d2vr::NativeArtBounds::Observer{};
         d2vr::RenderPassMap::cpu_timing_enable(fs::exists(root/L"build"/L"pass-cpu-timing"),frames.load()); // v1399 (plan check L2)
+        {std::ifstream knob(root/L"build"/L"nvidia-vrs");nvidia_vrs_requested=static_cast<bool>(knob);nvidia_vrs_tried=false;nvidia_vrs_config={}; // v1403 plan 2A.5
+         float inner{},outer{};std::string token;if(knob>>inner>>outer && inner>=.1f && inner<=.9f && outer>inner && outer<=1.5f) {nvidia_vrs_config.inner=inner;nvidia_vrs_config.outer=outer;}
+         while(knob>>token) if(token=="4x4") nvidia_vrs_config.quarter=true;}
         {double mp=0;std::ifstream knob(root/L"build"/L"render-pixel-cap");if(!(knob>>mp) || !(mp>=1 && mp<=40)) mp=0;d2vr::render_pixel_cap=mp*1e6;} // v1399 plan 4.3, opt-in
         native_gpu_requested=!render_perf_requested.load() && fs::exists(root/L"build"/L"native-gpu-timing");native_gpu_prepared=false;native_gpu_summary={};native_gpu_config={};native_gpu_epoch=0;
         // v999: the pass map is one MinHook on the engine's deferred job executor.  v1000 also installs
@@ -18912,7 +18938,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"cached_output_restored\":" << (cached_output_restored.load()?"true":"false")
                << ",\"requested_native_output\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
                << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
-                                     << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
+                                     << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
                << ",\"resolution_multiplier_effective\":" << effective_resolution_multiplier << ",\"render_pixel_cap_mp\":" << d2vr::render_pixel_cap.load()/1e6

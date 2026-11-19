@@ -383,10 +383,35 @@ public:
         o<<"]}";
         return o.str();
     }
+public:
+    // v1403: an observer called around every engine job item with its D3D11 (deferred) context, pass and view (NVIDIA VRS uses it to
+    // switch coarse shading on for the scene passes only). Null: nothing is read.
+    using PassObserver=void(*)(void* context,int pass,void* view,bool begin);
+    inline static std::atomic<PassObserver> pass_observer_{};
+    static void peek_job(void* item,int& pass,void*& context,void*& view) noexcept {
+        auto* self=instance_;void* callback{};
+        if(!self) return;
+        __try {
+            callback=*reinterpret_cast<void**>(static_cast<char*>(item)+0xd8);
+            if(void* wrapper=*reinterpret_cast<void**>(static_cast<char*>(item)+0x108)) context=*reinterpret_cast<void**>(wrapper);
+            view=*reinterpret_cast<void**>(static_cast<char*>(item)+0x70);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {return;}
+        pass=self->pass_for_callback(callback);
+    }
 private:
     static bool __fastcall execute_hook(void* item) {
-        if(!cpu_timing_.load(std::memory_order_relaxed)) return execute_inner(item);
-        const int pass=peek_pass(item);
+        const PassObserver observer=pass_observer_.load(std::memory_order_relaxed);
+        if(!cpu_timing_.load(std::memory_order_relaxed)) {
+            if(!observer) return execute_inner(item);
+            int pass=-1;void* context{};void* view{};peek_job(item,pass,context,view);
+            observer(context,pass,view,true);
+            const bool r=execute_inner(item);
+            observer(context,pass,view,false);
+            return r;
+        }
+        int pass=-1;void* observed_context{};void* observed_view{};
+        if(observer) {peek_job(item,pass,observed_context,observed_view);observer(observed_context,pass,observed_view,true);}
+        else pass=peek_pass(item);
         const std::uint64_t saved=tl_child_ticks_;tl_child_ticks_=0;
         const std::uint64_t t0=ticks();
         const bool result=execute_inner(item);
@@ -396,6 +421,7 @@ private:
         const unsigned slot=pass>=0 && static_cast<unsigned>(pass)<render_pass_count?static_cast<unsigned>(pass):render_pass_count;
         (GetCurrentThreadId()==main_thread_id_.load(std::memory_order_relaxed)?cpu_main_ticks_:cpu_worker_ticks_)[slot].fetch_add(own,std::memory_order_relaxed);
         cpu_calls_[slot].fetch_add(1,std::memory_order_relaxed);
+        if(observer) observer(observed_context,pass,observed_view,false);
         return result;
     }
     static bool execute_inner(void* item) {
