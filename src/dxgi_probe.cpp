@@ -18331,7 +18331,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::RigMask::motion=alt_defaults && stale_eye_rig_motion_knob; // v1171 rig motion vectors; v1198 default on, build/no-stale-eye-rig-motion: off (with the warp's rig rules)
         d2vr::SkinMotion::enabled=alt_defaults && !fs::exists(root/L"build"/L"no-stale-eye-skin-motion"); // v1182
         d2vr::Afw2Pass::untargeted_lands=fs::exists(root/L"build"/L"no-untargeted-lands")?0:1;   // v1312
-        d2vr::Afw2Pass::fill_bound=fs::exists(root/L"build"/L"no-afw2-fill-bound")?0:1;   // plan 3.2c: the fill starts at the step this frame's holes need (off: always 512)
+        d2vr::Afw2Pass::fill_bound=fs::exists(root/L"build"/L"afw2-fill-bound")?1:0;   // plan 3.2c, opt-in (coordinator, 2026-11-19): 0.008-0.047 ms saved on 8 dumps, 78 edge pixels changed on one; off = every fill pass from 512 as before
         stale_afw2_knob=alt_defaults && !fs::exists(root/L"build"/L"no-afw2"); // v1184 AFW v2 warp path (src/afw2.hpp); v1216 default on in performance mode, build/no-afw2: off (build/afw2 = no-op)
         alt_shadow_share_knob=fs::exists(root/L"build"/L"alt-shadow-share"); // v1189
         rig_forensics_knob=fs::exists(root/L"build"/L"rig-forensics"); // v1216: GPU copies/read-backs every render, so never on with diagnostics alone

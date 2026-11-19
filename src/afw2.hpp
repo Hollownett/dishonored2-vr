@@ -147,8 +147,8 @@ public:
     int rig_order{},rig_debug{};                                // v1190: inside the rig target, 0 this eye's kept rig first, 1 the fresh eye's first (tools)
     inline static std::atomic<int> untargeted_lands{1};        // v1312: class-251 held texels land without the rig target (build/no-untargeted-lands: 0)
     // plan 3.2c: the jump-flood fill starts at the power of two this frame's holes need (Crack measures, FillSteps decides on the GPU;
-    // the passes above get no groups) instead of always at 512 (build/no-afw2-fill-bound: 0, every pass as before)
-    inline static std::atomic<int> fill_bound{1};
+    // the passes above get no groups) instead of always at 512 (opt-in build/afw2-fill-bound: 1; default 0, every pass from 512 as before)
+    inline static std::atomic<int> fill_bound{0}; // opt-in: build/afw2-fill-bound (the coordinator made it opt-in: ~0.02 ms for 78 changed edge pixels on one dump)
     explicit Afw2Pass(ID3D11Device* device);
     // Holes left after the fill on the last pass (reads back and waits: tools and the lab only).
     std::uint32_t holes() {
