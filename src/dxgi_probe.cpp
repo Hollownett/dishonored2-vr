@@ -2605,6 +2605,13 @@ static std::array<LONG,2> saved_scale{};
 static std::array<XrExtent2Di,2> xr_recommended_eye_sizes{},xr_swapchain_eye_sizes{};
 static std::array<DXGI_FORMAT,2> xr_eye_texture_formats{};
 static std::unique_ptr<d2vr::GameXr> game_xr;
+// v1420: the spacewarp submit thread's xrBeginFrame/xrEndFrame touch the game's immediate context (GameXr::dxgi_gate): the game's own
+// DXGI Present never runs beside them
+static HRESULT gated_present(IDXGISwapChain* chain,UINT interval,UINT flags) {
+    std::unique_lock<std::mutex> gate;
+    if(game_xr) gate=std::unique_lock<std::mutex>(game_xr->dxgi_gate());
+    return original_present(chain,interval,flags);
+}
 // Native hands phase 1 (docs/NATIVE-HANDS-PLAN.md): grab and release pulses scaled by the held mass (hand_feel.hpp). build/no-hand-feel: the old fixed grab pulse.
 static bool hand_weapon_contact_enabled=true;static std::atomic<UINT64> hand_weapon_contacts{},hand_weapon_clashes{};static bool hand_feel_enabled=true;static std::atomic<UINT64> fist_closed_fast{},fist_near{},fist_sent{},fist_armed_fast{};static std::atomic<float> fist_peak{},held_kg_peak{},move_scale_min{1.f};static std::array<double,2> grab_was_kg{};static std::array<unsigned,2> grab_wait{};
 static void hand_feel_grab_pulses() {
@@ -2673,6 +2680,7 @@ static d2vr::PendingViews<d2vr::WarpPlaySpace> alt_play; // v1184: the play spac
 // hands them and the depth copies to GameXr, which generates the frames in between.
 static bool spacewarp_knob=false,spacewarp_always_knob=false;
 static double spacewarp_palm_reach_knob=0;static bool spacewarp_no_held_far_knob=false,spacewarp_tint_held_knob=false; // v1418 diagnostics (GameXr fields)
+static bool spacewarp_no_thread_knob=false; // v1420: build/spacewarp-no-thread = submit generated frames at the next Present (v1419)
 static std::array<d2vr::SpacewarpWeaponLocal,2> spacewarp_weapons{};static std::mutex spacewarp_weapons_mutex; // v1419: Setup writes, Present hands to GameXr
 static bool stale_afw2_knob=false; // v1184: build/afw2; v1216: default on in performance mode, build/no-afw2
 static bool rig_forensics_knob=false; // v1216: build/rig-forensics (RigMask draw-time probe, rig-dump-*.bin, image-skin log; off even with diagnostics)
@@ -13923,7 +13931,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     d2vr::AsyncPresent::instance().wait(); // v1408: a frame whose game side did not run (loads) still never overlaps two Presents
     d2vr::CrossEyeHistory::present(); // v1187: the census labels GPU-ordered events with the render they execute in
     d2vr::CrashOperation operation("native Present/OpenXR");
-    if(xr_graphics_active) return original_present(chain,interval,flags);
+    if(xr_graphics_active) return gated_present(chain,interval,flags);
     auto selected=game_chain.load(std::memory_order_acquire);
     if(!selected && capturing.load() && !(flags&DXGI_PRESENT_TEST)) {
         DXGI_SWAP_CHAIN_DESC candidate{};
@@ -13951,7 +13959,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                 } catch(...) {record_callback_error("Replacement graphics owner could not retire on its Present thread");}
             }
         }
-        return original_present(chain,interval,flags);
+        return gated_present(chain,interval,flags);
     }
     RenderPerfPresentExit perf_present_exit;
     const auto present_start_ns=d2vr::GameXr::cpu_time_ns();
@@ -14082,7 +14090,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                     gpu_render_thread.store(GetCurrentThreadId(),std::memory_order_release);
                     if(paired_requested) {
                         std::unique_lock<std::mutex> xr_lock(log_mutex);
-                        if(!capturing.load()) {xr_lock.unlock();return original_present(chain,interval,flags);}
+                        if(!capturing.load()) {xr_lock.unlock();return gated_present(chain,interval,flags);}
                         ComPtr<ID3D11Texture2D> completed_left,completed_right;
                         const auto views=native_views();
                         const auto gameplay=game_logic_mask()==2;
@@ -14170,7 +14178,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);
                         if(game_xr) {game_xr->spacewarp_enabled=spacewarp_knob && !alternate_on();game_xr->spacewarp_always=spacewarp_always_knob;
                             game_xr->spacewarp_palm_reach=spacewarp_palm_reach_knob;game_xr->spacewarp_held_far=!spacewarp_no_held_far_knob;game_xr->spacewarp_tint_held=spacewarp_tint_held_knob;
-                            if(spacewarp_knob) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);game_xr->spacewarp_weapon=spacewarp_weapons;}}
+                            if(spacewarp_knob) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);game_xr->spacewarp_weapon=spacewarp_weapons;}
+                            game_xr->spacewarp_thread=!spacewarp_no_thread_knob;}
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
                             if(const auto cameras=alt_cameras.take(number))
                                 for(UINT e=0;e<2;++e) if(cameras->mask&(1u<<e)) game_xr->record_rendered_camera(e,cameras->view[e],number);
@@ -14311,6 +14320,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     simulated_input_start=GetTickCount64();simulated_initial_pause=game_logic_mask()==4;simulated_load_confirm.reset();
                                     if(taa_capture_csv.is_open()) taa_capture_after_tick=simulated_input_start+4000;
                                 }
+                                d2vr::GameXr::d3d_protection_wanted=spacewarp_knob && !spacewarp_no_thread_knob && !alternate_on(); // v1420
                                 game_xr=std::make_unique<d2vr::GameXr>(device.Get(),desc.BufferDesc.Width,desc.BufferDesc.Height,
                                     desc.BufferDesc.Format,openxr_loader_path().c_str(),controller_requested,head_requested,eye_antialiasing_requested,
                                     controller_requested && head_requested,requested_resolution_multiplier,
@@ -17296,7 +17306,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         capturing.load() && timing_gameplay && game_xr && game_xr->last_layer_submitted && !(flags&DXGI_PRESENT_TEST) &&
         !async_present_violated.load(std::memory_order_relaxed) && d2vr::AsyncPresent::instance().start(original_present); // v1408/v1410
     auto result=mirror_skip?S_OK:present_async?d2vr::AsyncPresent::instance().kick(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced),desktop_xr_paced):
-        original_present(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced));
+        gated_present(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced));
     if(mirror_skip) desktop_mirror_skips.fetch_add(1,std::memory_order_relaxed);
     if(desktop_xr_paced && result==DXGI_ERROR_WAS_STILL_DRAWING) {result=S_OK;++desktop_mirror_drops;}
     {
@@ -17932,6 +17942,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_palm_reach_knob=reach && (reach>>metres) && metres>=.02 && metres<=.5?metres:0;
                 spacewarp_no_held_far_knob=fs::exists(root/L"build"/L"spacewarp-no-held-far");
                 spacewarp_tint_held_knob=fs::exists(root/L"build"/L"spacewarp-tint-held");
+                spacewarp_no_thread_knob=fs::exists(root/L"build"/L"spacewarp-no-thread");
             }
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose

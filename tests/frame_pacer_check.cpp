@@ -175,6 +175,24 @@ int main() {
      for(int i=0;i<1000 && unlocked_after<0;++i) {t+=8'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);if(pacer.k==1) unlocked_after=(t-locked_at)/1e9;}
      std::printf("v1419 unlock after that lock: %.2f s (min hold %.1f s)\n",unlocked_after,pacer.min_hold_ns/1e9);
      require(unlocked_after>=pacer.min_hold_ns/1e9,"the short lock hold also shortened the unlock hold");}
+    // v1420 fast_lock (spacewarp): a scene that turns heavy (9 ms -> 14 ms frames) locks on the frames that miss, not seconds later;
+    // a heavy moment of 25-30 ms frames (past two periods) locks too instead of restarting the window; plain light play never locks.
+    {d2vr::FramePacer pacer;pacer.fast_lock=true;pacer.lock_hold_ns=500'000'000;pacer.min_hold_ns=5'000'000'000;
+     std::int64_t t=1'000'000'000;
+     for(int i=0;i<300;++i) {t+=9'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);}
+     require(pacer.k==1 && pacer.locks==0,"fast_lock: light 9 ms frames locked");
+     const auto heavy_at=t;int frames=0;
+     while(pacer.k==1 && frames<200) {t+=14'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);++frames;}
+     std::printf("v1420 fast lock: 9 -> 14 ms frames locked after %d frames (%.0f ms)\n",frames,(t-heavy_at)/1e6);
+     require(pacer.k==2 && frames<=3,"fast_lock did not lock on the first missed slots");
+     d2vr::FramePacer spike;spike.fast_lock=true;t=1'000'000'000;
+     for(int i=0;i<300;++i) {t+=9'000'000;spike.update(t,0,t+50'000'000,11'111'111,true);}
+     frames=0;while(spike.k==1 && frames<200) {t+=(frames%2?25'000'000:30'000'000);spike.update(t,0,t+50'000'000,11'111'111,true);++frames;}
+     std::printf("v1420 fast lock: 25-30 ms frames locked after %d frames\n",frames);
+     require(spike.k==2 && frames<=3,"fast_lock: frames past two periods restarted the window instead of locking");
+     d2vr::FramePacer plain;t=1'000'000'000;   // without fast_lock the v985 rule holds: 30 ms frames never lock
+     for(int i=0;i<300;++i) {t+=30'000'000;plain.update(t,0,t+50'000'000,11'111'111,true);}
+     require(plain.k==1,"without fast_lock frames past two periods locked the plain cadence");}
     // rebase(): a new refresh rate restarts the period and the cadence but keeps the status counters.
     {d2vr::FramePacer pacer;std::int64_t t=1'000'000'000;
      for(int i=0;i<200;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);}

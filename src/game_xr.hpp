@@ -70,6 +70,8 @@
 #include <memory>
 #include <chrono>
 #include <mutex>
+#include <condition_variable>
+#include <thread>
 #include <sstream>
 #include <fstream>
 
@@ -309,6 +311,26 @@ private:
     // v1418: each eye's previous real frame for the held-far-part rule (SpacewarpParams::prev_on): its depth (a copy: FsrTaa's is rewritten
     // every frame), the game camera, the drawn grips and which hands were drawn, that render's depth terms, FOV and rectangle, its frame
     struct SwPrev {bool valid{};std::uint64_t frame{};SwRigid S;std::array<SwRigid,2> grips{};unsigned hand_bits{};double m10{},m11{};std::array<double,4> tan{};UINT width{},height{};};
+    // v1420 (docs/SPACEWARP-PLAN-2026-11-19.md section 14; user, headset v1419: "move the frame generation to its own thread so it does
+    // not fall behind"): the generated frame's own submit thread. The Present thread draws the generated frame right after the real
+    // xrEndFrame, releases its images and posts it here; this thread waits for its slot, begins and ends it, however long the game then
+    // takes for its next frame (v1419: 4578 of 10851 generated frames were dropped because the next Present came too late to submit them).
+    // The next Present collects the result before its own frame calls, so the two threads' xrWaitFrame/BeginFrame/EndFrame never overlap
+    // and keep their order. Only xrWaitFrame, xrBeginFrame and xrEndFrame run here; every swapchain call stays on the Present thread.
+    struct SwJob {
+        enum State {idle,posted,taken,done};
+        State state{idle};
+        XrTime target{},period{};XrSpace space{};
+        std::array<XrCompositionLayerProjectionView,2> views{};std::vector<XrCompositionLayerQuad> quads;
+        bool submitted{},late_slot{},rejected{},fault{};XrResult result{XR_SUCCESS};XrFrameState handed{XR_TYPE_FRAME_STATE};const char* what="";
+        std::int64_t waited_ns{},ended_ns{};  // when the thread's wait returned and its frame ended (status: how far ahead of the next Present)
+    };
+    std::mutex sw_job_mutex_;std::condition_variable sw_job_cv_;SwJob sw_job_;std::thread sw_thread_;bool sw_quit_{};
+    // v1420: VDXR's xrBeginFrame/xrEndFrame call the game's immediate context (GPU timer queries, a fence Signal; VirtualDesktop-OpenXR
+    // frame.cpp, d3d11_native.cpp, gpu_timers.h: single, state-free calls; copies and shaders run on its own device and thread). From the
+    // submit thread they are made safe by D3D11 multithread protection (each immediate-context call serialized), and by this gate, held by
+    // the thread around its xrBeginFrame..xrEndFrame and by the Present hook around the game's own DXGI Present (dxgi_probe gated_present).
+    std::mutex sw_dxgi_gate_;bool sw_thread_checked_{},sw_thread_ok_{};
     std::array<SwPrev,2> sw_prev_{};std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> sw_prev_depth_{};std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2> sw_prev_srv_{};
     bool sw_pending_{};XrTime sw_target_time_{};
     // the layer each eye's image went out with this Present (the straight view of a canted render: game_xr v808), and whether the generated
@@ -2214,7 +2236,9 @@ public:
          <<",\"not_kept_why\":\""<<spacewarp_not_kept_why<<"\",\"captures\":"<<spacewarp_captures_saved
          <<",\"presents\":"<<spacewarp_presents<<",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"gated\":"<<spacewarp_gated
          <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes
-         <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot<<"}}";
+         <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
+         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")
+         <<",\"thread_frames\":"<<spacewarp_thread_frames<<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg<<"}}";
         return o.str();
     }
     // The spacewarp counters for xr-live-status.json without diagnostics (the headset test's evidence)
@@ -2226,7 +2250,9 @@ public:
          <<",\"unusable\":"<<spacewarp_unusable<<",\"failures\":"<<spacewarp_failures<<",\"skip\":\""<<spacewarp_skip
          <<"\",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"not_kept\":"<<spacewarp_not_kept<<",\"not_kept_why\":\""<<spacewarp_not_kept_why
          <<"\",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"held_far_eyes\":"<<spacewarp_held_far_eyes
-         <<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot<<'}';
+         <<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
+         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"thread_frames\":"<<spacewarp_thread_frames
+         <<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"cuts\":"<<spacewarp_cuts<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg<<'}';
         return o.str();
     }
     // Spacewarp (docs/SPACEWARP-PLAN-2026-11-19.md section 10; knob build/spacewarp, true stereo only, set by dxgi_probe.cpp every
@@ -2238,6 +2264,14 @@ public:
     // v1419: why generated frames were late: the game frame came back too near the real frame's slot (late_wait), or the runtime's wait
     // already gave a later slot (late_slot); and generated eyes with a weapon body (weapon_eyes)
     std::uint64_t spacewarp_late_wait{},spacewarp_late_slot{},spacewarp_weapon_eyes{};
+    bool spacewarp_thread{true};  // v1420: submit generated frames from their own thread (build/spacewarp-no-thread: the v1419 path)
+    const char* spacewarp_thread_why="";bool spacewarp_mt_was{};  // v1420: why the thread is not used; whether the device was protected already
+    double spacewarp_cut_m{},spacewarp_cut_deg{};  // v1420 diagnostics: the play-space step of the last locomotion cut
+    std::mutex& dxgi_gate() noexcept {return sw_dxgi_gate_;}
+    // v1420: set by the probe before it constructs a GameXr: spacewarp with its submit thread is wanted. The constructor then switches D3D11
+    // multithread protection on (VDXR or the simulator only), before the probe installs its context hooks (spacewarp_thread_ready_).
+    inline static bool d3d_protection_wanted{};
+    std::uint64_t spacewarp_thread_frames{},spacewarp_thread_lead_us{};  // v1420: frames the thread submitted; their last lead on the next Present (us)
     std::array<SpacewarpWeaponLocal,2> spacewarp_weapon{};  // v1419: each hand's weapon body (dxgi_probe, every Present)
     // v1418 diagnostics (dxgi_probe, build knobs): a palm reach other than hand_own_radius (spacewarp-palm-reach, metres; 0 = default: the
     // sim check shrinks it so the moving hand itself must be found by the held-far-part rule), the rule off (spacewarp-no-held-far), and
@@ -2530,6 +2564,18 @@ public:
             checked(api<PFN_xrGetSystemProperties>("xrGetSystemProperties",instance_)(instance_,system,&system_properties),"Read XR texture limits");
             xr_system_name=system_properties.systemName; // PSVR2 triggers (psvr2_triggers.hpp): which headset
             try {XrInstanceProperties ip{};ip.type=XR_TYPE_INSTANCE_PROPERTIES;if(XR_SUCCEEDED(api<PFN_xrGetInstanceProperties>("xrGetInstanceProperties",instance_)(instance_,&ip))) xr_runtime_name=ip.runtimeName;} catch(const std::exception&) {} // optional: the simulator has no instance properties
+            // v1420: the spacewarp submit thread needs D3D11 multithread protection, and it must be on before the probe installs its context
+            // hooks: they patch the immediate context's methods, and protection swaps those methods (switched on mid-session, the hook registry
+            // met new targets, ran out of bindings and poisoned itself: sim 2026-11-19). The probe installs them after this construction ("the
+            // first GameXr construction/present may alter context dispatch"), so protection is switched on here or not at all.
+            if(d3d_protection_wanted && (xr_runtime_name.empty() || xr_runtime_name.find("VirtualDesktop")!=std::string::npos) && device &&
+               !(device->GetCreationFlags()&D3D11_CREATE_DEVICE_SINGLETHREADED)) {
+                Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;device->GetImmediateContext(&immediate);
+                Microsoft::WRL::ComPtr<ID3D11Multithread> protection;
+                if(immediate && SUCCEEDED(immediate.As(&protection)) && protection) {
+                    spacewarp_mt_was=protection->GetMultithreadProtected()!=FALSE;protection->SetMultithreadProtected(TRUE);
+                }
+            }
             system_maximum_={system_properties.graphicsProperties.maxSwapchainImageWidth,system_properties.graphicsProperties.maxSwapchainImageHeight};
             XrGraphicsRequirementsD3D11KHR requirements{};requirements.type=XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR;
             checked(api<PFN_xrGetD3D11GraphicsRequirementsKHR>("xrGetD3D11GraphicsRequirementsKHR",instance_)(instance_,system,&requirements),"XR device requirements");
@@ -2577,7 +2623,7 @@ public:
         if(width==width_ && height==height_ && format==format_) return false;
         const bool format_changed=format!=format_;
         if(frame_open_) throw std::runtime_error("Cannot resize an open XR frame");
-        release_spacewarp_images_();sw_pending_=false;sw_colour_={};sw_colour_srv_={};  // spacewarp: a generated frame would name the old swapchains
+        drain_spacewarp_();release_spacewarp_images_();sw_pending_=false;sw_colour_={};sw_colour_srv_={};  // spacewarp: a generated frame would name the old swapchains
         for(auto& prev:sw_prev_) prev.valid=false;
         if(!width || !height || width>system_maximum_.width || height>system_maximum_.height ||
            width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
@@ -2822,7 +2868,7 @@ public:
                 const SwPlay* old=nullptr;SwRigid newer=O;bool cut=false;
                 for(unsigned k=0;k<3 && hist[k].valid && hist[k].frame+1+k==alternate_frame;++k) {
                     const auto step=newer*hist[k].O.inverse();
-                    if(step.step()>=.5 || step.angle()>=25*3.14159265358979/180) {cut=true;break;}
+                    if(step.step()>=.5 || step.angle()>=25*3.14159265358979/180) {cut=true;spacewarp_cut_m=step.step();spacewarp_cut_deg=step.angle()*180/3.14159265358979;break;}
                     newer=hist[k].O;old=&hist[k];
                 }
                 if(cut) {++spacewarp_cuts;for(auto& h:hist) h={};old=nullptr;}
@@ -2923,9 +2969,108 @@ public:
             sw_quads_.clear();
             for(uint32_t k=0;k<real.layerCount;++k) if(real.layers[k] && real.layers[k]->type==XR_TYPE_COMPOSITION_LAYER_QUAD)
                 sw_quads_.push_back(*reinterpret_cast<const XrCompositionLayerQuad*>(real.layers[k]));  // the same images: their last release
-            sw_target_time_=slot_time;sw_pending_=true;++spacewarp_generated;spacewarp_skip="";
+            sw_target_time_=slot_time;++spacewarp_generated;spacewarp_skip="";
+            if(spacewarp_thread && spacewarp_thread_ready_()) {release_spacewarp_images_();post_spacewarp_job_();}  // v1420: its own thread submits it in its slot
+            else sw_pending_=true;
         } catch(const XrSessionFault&) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="session fault";
         } catch(...) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="exception";}
+    }
+    // v1420: may the generated frame go to the submit thread? Only on runtimes whose frame calls are known to make single, state-free
+    // immediate-context calls (VDXR, research 2026-11-19; the in-DLL simulator, which makes none: no runtime name), and only when the
+    // constructor switched multithread protection on (never here: see d3d_protection_wanted). Decided once per GameXr; otherwise the v1419
+    // path (submit at the next Present).
+    bool spacewarp_thread_ready_() {
+        if(sw_thread_checked_) return sw_thread_ok_;
+        sw_thread_checked_=true;sw_thread_ok_=false;
+        if(!xr_runtime_name.empty() && xr_runtime_name.find("VirtualDesktop")==std::string::npos) {spacewarp_thread_why="runtime";return false;}
+        Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+        if(!device || (device->GetCreationFlags()&D3D11_CREATE_DEVICE_SINGLETHREADED)) {spacewarp_thread_why="single-threaded device";return false;}
+        Microsoft::WRL::ComPtr<ID3D11Multithread> protection;
+        if(FAILED(context_.As(&protection)) || !protection) {spacewarp_thread_why="no ID3D11Multithread";return false;}
+        if(!protection->GetMultithreadProtected()) {spacewarp_thread_why="not protected at start";return false;}
+        spacewarp_thread_why="";return sw_thread_ok_=true;
+    }
+    // v1420: hand the generated frame (sw_views_, sw_quads_, sw_target_time_; its images already released) to the submit thread
+    void post_spacewarp_job_() {
+        drain_spacewarp_();  // none in flight: present() collects before it generates (a safety net only)
+        {std::lock_guard<std::mutex> l(sw_job_mutex_);
+         sw_job_=SwJob{};sw_job_.state=SwJob::posted;sw_job_.target=sw_target_time_;sw_job_.period=pacer_.base>0?pacer_.base:frame_.predictedDisplayPeriod;
+         sw_job_.space=local_;sw_job_.views=sw_views_;sw_job_.quads=sw_quads_;
+         if(!sw_thread_.joinable()) {sw_quit_=false;sw_thread_=std::thread([this] {spacewarp_thread_main_();});}}
+        sw_job_cv_.notify_all();
+    }
+    void spacewarp_thread_main_() noexcept {
+        std::unique_lock<std::mutex> l(sw_job_mutex_);
+        for(;;) {
+            sw_job_cv_.wait(l,[&] {return sw_quit_ || sw_job_.state==SwJob::posted;});
+            if(sw_quit_) return;
+            sw_job_.state=SwJob::taken;
+            SwJob job=sw_job_;  // the layers this thread submits (the views below point into this copy)
+            l.unlock();
+            try {
+                XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};XrFrameState slot{XR_TYPE_FRAME_STATE};
+                job.result=xrWaitFrame(session_,&wait,&slot);job.waited_ns=cpu_time_ns();
+                if(XR_FAILED(job.result)) {job.fault=xr_result_session_fatal(job.result);job.rejected=!job.fault;job.what="wait failed";}
+                else if(slot.predictedDisplayTime>job.target+job.period/2) {job.late_slot=true;job.handed=slot;}  // the real frame's slot: its wait
+                else {
+                    std::lock_guard<std::mutex> gate(sw_dxgi_gate_);  // never beside the game's DXGI Present
+                    XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+                    job.result=xrBeginFrame(session_,&begin);
+                    // a waited frame that could not be begun leaves the runtime waiting on it: a session fault (as v1393 for the real frame)
+                    if(XR_FAILED(job.result)) {job.fault=true;job.what="begin failed";}
+                    else {
+                        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+                        projection.space=job.space;projection.viewCount=2;projection.views=job.views.data();
+                        std::array<const XrCompositionLayerBaseHeader*,12> list{};uint32_t n=0;
+                        list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+                        for(const auto& q:job.quads) if(n<list.size()) list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);
+                        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=slot.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+                        end.layerCount=n;end.layers=list.data();
+                        job.result=xrEndFrame(session_,&end);job.ended_ns=cpu_time_ns();
+                        if(XR_SUCCEEDED(job.result)) job.submitted=true;
+                        else {job.fault=xr_result_session_fatal(job.result);job.rejected=!job.fault;job.what="frame rejected";}
+                    }
+                }
+            } catch(...) {job.fault=true;job.what="exception";}
+            l.lock();
+            sw_job_.submitted=job.submitted;sw_job_.late_slot=job.late_slot;sw_job_.rejected=job.rejected;sw_job_.fault=job.fault;
+            sw_job_.result=job.result;sw_job_.handed=job.handed;sw_job_.what=job.what;sw_job_.waited_ns=job.waited_ns;sw_job_.ended_ns=job.ended_ns;
+            sw_job_.state=SwJob::done;
+            sw_job_cv_.notify_all();
+        }
+    }
+    // v1420, at the next Present before its frame calls: wait for the thread's frame (its slot is before this one) and take its result.
+    // true = the thread's wait came back at the real frame's slot and is the real frame's (frame_).
+    bool collect_spacewarp_() {
+        std::unique_lock<std::mutex> l(sw_job_mutex_);
+        if(sw_job_.state==SwJob::idle) return false;
+        if(sw_job_.state==SwJob::posted) {sw_job_.state=SwJob::idle;++spacewarp_late;++spacewarp_late_wait;return false;}  // never started
+        sw_job_cv_.wait(l,[&] {return sw_job_.state==SwJob::done;});  // its xrWaitFrame returns at its slot, as the real frame's own would
+        const SwJob job=sw_job_;sw_job_.state=SwJob::idle;
+        l.unlock();
+        const auto now=cpu_time_ns();
+        if(job.fault) {++spacewarp_failures;spacewarp_skip=job.what;throw XrSessionFault(std::string("Spacewarp thread: ")+job.what+" "+std::to_string(job.result));}
+        if(job.rejected) {++spacewarp_failures;spacewarp_skip=job.what;return false;}
+        if(job.late_slot) {frame_=job.handed;++spacewarp_late;++spacewarp_late_slot;return true;}
+        if(job.submitted) {++spacewarp_submitted;++spacewarp_thread_frames;if(job.ended_ns && now>job.ended_ns) spacewarp_thread_lead_us=static_cast<std::uint64_t>((now-job.ended_ns)/1000);}
+        return false;
+    }
+    // v1420: no thread frame in flight from here on (resize, a fault, close): wait out a running one, drop one not started. A wait the
+    // thread handed back (late slot) is dropped too: the next xrWaitFrame then follows a waited, never begun frame, as after any fault.
+    void drain_spacewarp_() noexcept {
+        try {
+            std::unique_lock<std::mutex> l(sw_job_mutex_);
+            if(sw_job_.state==SwJob::taken) sw_job_cv_.wait(l,[&] {return sw_job_.state!=SwJob::taken;});
+            sw_job_.state=SwJob::idle;
+        } catch(...) {}
+    }
+    void stop_spacewarp_thread_() noexcept {
+        try {
+            drain_spacewarp_();
+            {std::lock_guard<std::mutex> l(sw_job_mutex_);sw_quit_=true;}
+            sw_job_cv_.notify_all();
+            if(sw_thread_.joinable()) sw_thread_.join();
+        } catch(...) {}
     }
     // At the next Present, before the real frame: the generated frame in its own slot. true = the runtime is already at the real
     // frame's slot, and this xrWaitFrame (in frame_) is the real frame's.
@@ -3005,6 +3150,7 @@ public:
     // runtime keeps getting frames and SteamVR / Steam Link never see the app leave VR. Throws only when the runtime says the session is gone.
     void abandon_frame() {
         if(!session_) return;
+        drain_spacewarp_();  // v1420: the submit thread's frame first (its frame calls must not overlap this one's)
         ContextState::Scope graphics_scope(graphics_state_);
         for(std::size_t i=0;i<leases_.size();++i) if(!self_managed_chain_(leases_[i].chain)) settle_lease_(leases_[i].chain); // index: settle never adds leases
         if(!frame_open_) return;
@@ -3022,6 +3168,7 @@ public:
         if(XR_FAILED(ended) && xr_result_session_fatal(ended)) checked(ended,"End abandoned XR frame");
     }
     void close() noexcept {
+        stop_spacewarp_thread_();  // v1420: before the session and its swapchains go
         PalmSaver::process().flush_for(200); // a fit confirmed just before stop reaches the disk (bounded wait)
         ContextState::Scope graphics_scope(graphics_state_);
         // Production polls ready_to_close on the owner Present thread first.
@@ -3164,7 +3311,7 @@ public:
         auto stage_start=cpu_time_ns();
         // Spacewarp: the frame generated after the last real one goes into its own slot first (counted as idle, like the pacing sleep).
         // If the runtime is already at the real frame's slot, that wait is the real frame's.
-        const bool spacewarp_waited=submit_spacewarp_();
+        const bool spacewarp_waited=collect_spacewarp_() || submit_spacewarp_();  // v1420: the thread's frame, else (no thread) the v1419 path
         if(!spacewarp_waited) {
             frame_={};frame_.type=XR_TYPE_FRAME_STATE;
             if(const auto wake=pacer_.wake(cpu_time_ns())) { // v841: sleep to the locked cadence (the bulk on a high-resolution timer, the rest spun)
@@ -3190,6 +3337,7 @@ public:
         pacer_.decide_percent=spacewarp_paced && !spacewarp_always?80u:50u;
         pacer_.min_hold_ns=spacewarp_paced?5'000'000'000:FramePacer::default_min_hold_ns;
         pacer_.lock_hold_ns=spacewarp_paced?500'000'000:-1;
+        pacer_.fast_lock=spacewarp_paced;  // v1420: lock on the first missed slots, keep slow frames in the window
         const auto waited_ns=cpu_time_ns();
         pacer_.update(waited_ns,timing.wait_ns,frame_.predictedDisplayTime,frame_.predictedDisplayPeriod,steady_pacing && !alternate_enabled);
         update_refresh_rate_(waited_ns,timing.wait_ns); // plan 1.6: no-op unless build/auto-refresh-rate and the runtime offers rates

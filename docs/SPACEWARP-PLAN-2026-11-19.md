@@ -449,3 +449,49 @@ the Blink hand a body (`weapon_eyes` 4), the final one none (`weapon_eyes` 0); l
 **To test (headset):** swing the sword (also in a reverse grip), aim the pistol and the crossbow while moving the hand, and note whether
 Auto now engages soon enough. Then `artifacts/xr-live-status.json` `spacewarp`: `weapon_eyes` should be most generated eyes while armed,
 and `late_wait` vs `late_slot` says which kind the late frames are.
+
+## 14. The generated frame's own thread, and an instant Auto (v1420, 2026-11-19)
+
+**Report (v1419 headset):** weapons fine now. "Move the frame generation to its own thread so it does not fall behind": when a heavy
+moment starts, low fps shows for some seconds; generation should start at once. The session's counters: 10851 generated, 5710
+submitted, **5141 late (47 %)**, of them 4578 `late_wait` (the next Present came too late to submit) and 563 `late_slot`; 10 locks.
+So in heavy moments spacewarp was on but half its frames never reached the headset: the user saw ~45 fps.
+
+**Research (VDXR source, OpenXR spec; agent report 2026-11-19).** VirtualDesktop-OpenXR, default mode: xrAcquire/Wait/ReleaseSwapchainImage
+make no D3D11 calls (release only records the index; the image is taken at xrEndFrame); xrWaitFrame makes none; xrBeginFrame and
+xrEndFrame make single, state-free calls on the app's immediate context (GPU timer queries, `ID3D11DeviceContext4::Signal` of a shared
+fence); copies, shaders and the OVR submit run on VDXR's own device and thread. The spec lets xrWaitFrame/BeginFrame/EndFrame run on
+another thread if they are ordered. So a submit thread is safe on VDXR with D3D11 multithread protection (not as-is: a data race), and
+not known to be safe on SteamVR (closed; its OpenVR base queues work on the app's device).
+
+**Design.**
+- The Present thread draws the generated frame right after the real xrEndFrame (as before), releases its images at once and posts the
+  layers to the submit thread; that thread waits for the slot (xrWaitFrame), begins and ends the frame, however long the game then
+  takes for its next frame. The next Present collects the result before its own frame calls, so the two threads' frame calls never
+  overlap and keep their order; a wait that already came back at the real frame's slot is handed to the real frame (as v1419).
+- Only on VDXR (runtime name "VirtualDesktop...") and the in-DLL simulator (no runtime name), on a device that is not single-threaded,
+  with multithread protection switched on in the GameXr constructor (`d3d_protection_wanted`, set by the probe from the knobs). Not
+  later: protection swaps the immediate context's methods, and the probe's context hooks patch those methods. The first build switched
+  it on at the first generated frame; the hook registry (`gpu_dispatch_bindings.hpp`) met new targets, ran out of its four bindings per
+  method and poisoned itself ("registry poisoned; restart process" on every frame, sim 2026-11-19). The probe installs its context
+  hooks after the first GameXr construction ("may alter context dispatch"), so they bind the protected methods from the start.
+  Otherwise, or with `build/spacewarp-no-thread`, the v1419 path. The thread's xrBeginFrame..xrEndFrame and the game's own DXGI Present share a gate (`GameXr::dxgi_gate`,
+  `dxgi_probe.cpp gated_present`).
+- Drained before resize, abandon_frame and close; stopped in close.
+- Auto, instant: `FramePacer::fast_lock` (spacewarp) locks as soon as two of the last three frames missed their slot, and frames past two
+  periods are kept (clamped) instead of restarting the work window (a heavy moment kept restarting it: no lock for seconds).
+- Status: `thread`, `thread_why`, `mt_was`, `thread_frames`, `thread_lead_us` (how long before the next Present the thread's frame was
+  ended), `cut_m`/`cut_deg` (the play-space step of the last locomotion cut).
+
+Lab: frame_pacer_check (9 -> 14 ms frames lock after 2 frames; 25-30 ms frames lock after 2 frames instead of restarting; the plain
+cadence still never locks on them). Sim, the user's latest save (a heavy scene, ~22 ms frames, pistol in the left hand), back to back:
+without the thread 1865 generated, **80 submitted**, 1784 late (96 %); with it 2022 generated, **2021 submitted, 0 late**.
+
+With protection at construction (final v1420), same save back to back: thread 1814 generated, 1813 submitted, 0 late, 0 failures, no
+registry poison; without 2174 / 101 / 2072 late. The game's CPU time between Presents p50 11.2 ms (thread, protected) vs 12.6 ms
+(without): no protection cost visible. `cuts` (locomotion not extrapolated: a play-space step of 0.5 m or 25 deg between two real
+frames) varies by session in this save (0-1180, also without the thread); the last one was a 0.76 m step.
+
+**To test (headset):** Spacewarp Auto; walk into heavy scenes and fights. Spacewarp should engage within a few frames and the frame
+rate should stay at 90 (VD's overlay). Then `artifacts/xr-live-status.json` `spacewarp`: `thread` true, `thread_frames` close to
+`generated`, `late` near 0. If the game misbehaves with the thread (crash, stalls), `build/spacewarp-no-thread` restores v1419.

@@ -32,6 +32,12 @@ struct FramePacer {
     // interpolation kicks in a little late"): the generated frames come back as soon as the full rate is lost, and only leaving half rate
     // waits min_hold_ns, so the cadence still cannot flip-flop faster than that pair of holds.
     std::int64_t lock_hold_ns{-1};
+    // v1420 (user, headset v1419: "when a heavy moment starts I still see low fps for some seconds; it should start right away"):
+    // fast_lock (spacewarp) locks as soon as two of the last three frames missed their slot (work above one period), without waiting for
+    // the percentile of the window; and a frame longer than two periods is kept (clamped) instead of restarting the window. The v985 restart
+    // keeps a menu from locking the plain cadence in gameplay; with spacewarp, half rate in a heavy moment is the point, and in gameplay
+    // after a menu half rate costs nothing (the frames in between are generated).
+    bool fast_lock{};
     std::int64_t base{};                 // refresh period: the shortest runtime period seen
     int k{1};
     std::int64_t target{},prev_ret{},prev_display{},shifted_at{},changed_at{}; // changed_at: ret of the last cadence change (0: none)
@@ -75,8 +81,8 @@ struct FramePacer {
     // After xrWaitFrame: ret = its return time; idle = this frame's pacing sleep + xrWaitFrame wait.
     void update(std::int64_t ret,std::int64_t idle,std::int64_t display,std::int64_t runtime_period,bool enabled) noexcept {
         if(runtime_period>0 && runtime_period>min_period && (!base || runtime_period<base)) base=runtime_period;
-        if(!enabled || !base) {const auto b=base;const auto hold=min_hold_ns,lock_hold=lock_hold_ns;const auto floor=min_period;const auto lt=lock_tenths,ut=unlock_tenths;const auto dp=decide_percent;
-            *this=FramePacer{};base=b;min_hold_ns=hold;lock_hold_ns=lock_hold;min_period=floor;lock_tenths=lt;unlock_tenths=ut;decide_percent=dp;return;}
+        if(!enabled || !base) {const auto b=base;const auto hold=min_hold_ns,lock_hold=lock_hold_ns;const auto floor=min_period;const auto lt=lock_tenths,ut=unlock_tenths;const auto dp=decide_percent;const bool fl=fast_lock;
+            *this=FramePacer{};base=b;min_hold_ns=hold;lock_hold_ns=lock_hold;min_period=floor;lock_tenths=lt;unlock_tenths=ut;decide_percent=dp;fast_lock=fl;return;}
         active=true;++frames;
         const bool held_unlock=changed_at && ret-changed_at<min_hold_ns;
         const bool held_lock=changed_at && ret-changed_at<(lock_hold_ns>=0?lock_hold_ns:min_hold_ns);
@@ -88,6 +94,7 @@ struct FramePacer {
             // or a hitch runs far past that, and on 2026-11-04 such frames (30-60 ms) filled the window and locked the cadence to
             // half rate during play. Reject them and restart the estimate, so the cadence follows the scene, not the last menu.
             if(work>0 && work<=base*2) add_work(work);
+            else if(fast_lock && work>0) add_work(base*2);  // v1420: a slow frame is the heavy moment itself
             else work_count_=work_next_=0;
         }
         bool want_lock=false,want_unlock=false;
@@ -101,6 +108,11 @@ struct FramePacer {
             const auto median=work_percentile(decide_percent);
             want_lock=k==1 && median*tenths>base*lock_tenths;
             want_unlock=k==2 && median*tenths<base*unlock_tenths;
+        }
+        if(fast_lock && !miss_lock && k==1 && !want_lock && work_count_>=3) {  // v1420: two of the last three frames missed their slot
+            unsigned missed=0;
+            for(unsigned i=1;i<=3;++i) missed+=work_[(work_next_+work_window-i)%work_window]>base;
+            want_lock=missed>=2;
         }
         if((want_lock && held_lock) || (want_unlock && held_unlock)) ++held_frames;
         else if(want_lock) {k=2;++locks;}
