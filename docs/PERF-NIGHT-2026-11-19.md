@@ -109,9 +109,16 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
 - The governor (dynamic resolution) needs a GPU-time signal first: on this PC most missed frames are CPU-bound, and a miss-driven
   governor would lower resolution for nothing.
 - The CPU floor (~9.5 ms on the 5600X) is now mostly the game's own main thread: game code ~45 %, waits on its own jobs and the
-  driver. Levers left: the engine's job count (`jobs_numThreads` and `r_schedulerThreadingMode` exist, untested: Steam stopped
-  launching before the test), sharing per-view CPU passes between the eyes (plan 2B.1), or replaying eye 1's command lists for eye 2
-  (2B.2, research spike first).
+  driver. **The second eye is not where the CPU goes** (`docs/ENGINE-CPU-SECOND-VIEW-RESEARCH.md`): one engine view vs two changed
+  engine time by ~0.24 ms, executing eye 2's lists costs ~0.08 ms on NVIDIA, and per-draw matrices are written inside the recorded
+  lists, so 2B.2 (replay eye 1's lists) is a no-go and 2B.1 is a no-go for the culling/gather/tile passes. The mod's own Present
+  hook (~1.0 ms on that thread) is now a bigger CPU target than the second view. Levers left: the hook, the engine's job count
+  (`jobs_numThreads`, `r_schedulerThreadingMode` exist; untested because Steam stopped launching), and a per-pass CPU timer to find
+  the game's own hot passes (live check L2 in that doc).
 - NVIDIA VRS (plan 2A.5) needs the NVAPI SDK (a download: ask first).
 - Static shadow cache: run the live checks C1-C8 in `docs/STATIC-SHADOW-CACHE.md` before enabling anything.
-- Performance mode quality (Dying Light VR AFW ideas): not started; it does not lower the CPU floor on this PC.
+- Performance mode (`docs/PERFORMANCE-MODE-AFW-COMPARISON.md`): its rebuild costs 2.04 ms GPU at 2246x2419, ~2.8x Dying Light
+  VR's per output pixel, so the single view nets only ~0.34 ms GPU here. It pays only on GPU-bound PCs, and only after the warp is
+  cut to ~1 ms. Top changes: per-stage GPU timing and cheaper warp stages; exact motion for held items (the root of the v1320-v1327
+  crossbow doubling); an edge ring for hand/weapon outlines; a general stale-surface test; the lens-mask stamp in that mode (it
+  never runs there today). The automatic switch (plan 3.1) should key on GPU load, not missed frames.
