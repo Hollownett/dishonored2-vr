@@ -93,3 +93,22 @@ removed the edge cracks. Static pairs are about one point worse than the held fr
 bias, no pixel offset, equal detail), not reconstruction error. Remaining known artefact: the first frames after a history reset (load
 fade-in) can show a doubled weapon until the plugin's history fills. A simulator is not a headset: comfort, latency and the real
 compositor are untested.
+
+## Merged into this codebase (2026-11-19, branch `feat/indurhra-afw-psvr2-imgui`, build v1411; not installed)
+
+Cherry-picked on top of v1410 (the v1407 line plus the opt-in experiments) with the author kept: `c57a06f`, `ae5932f`, `cb6265e`,
+plus merge fixes in `8230061`. Conflicts were small: teardown lines, the lab build list (ours kept, their ImGui link line taken) and a
+status line (both field sets kept). Two merge-level fixes: `vr_menu_imgui.hpp`'s row helper takes `std::wstring_view` (our
+`temporal_aa_text()` returns `std::wstring`), and three `vr_settings_check` assertions expect preferences version 12 (the fork's
+own test still expected 11). Build: `build/compile-night2.cmd <ver>` (links Dear ImGui and d3d12.lib); PSVR2 helper:
+`build/night/psvr2-bridge.cmd` -> `build/night/dvr_psvr2_bridge.exe`.
+
+Sim (2026-11-19 12:10-12:30, release config, 2621x2822, DLSS Quality): no exceptions and a clean session end, but **v1411 is
+~3.7 ms slower than v1407** in native stereo (p50 13.2-13.7 vs 9.50 ms; the same machine and save, v1407 re-measured right after).
+`build/native-classic` does not change it (13.4 ms). The extra time is the engine's own render work (the render job graph 46 -> 64 %
+of the main thread); GPU passes that grew: UPDATE_NPC_DECALS 0.10 -> 1.61 ms, IGGY_FULLSCREEN 0.28 -> 1.11 ms, DEPTHPASS 1.50 -> 2.07 ms,
+SHADOWS_WORLD 0.17 -> 0.65 ms. Cause not found yet; next: build each of the three commits and bisect.
+
+Not testable here: `PDAFWPlugin.dll` is not on this PC (the AFW row reports it missing and falls back to the built-in warp), and PSVR2
+triggers need SteamVR with a PlayStation VR2 plus `Dishonored2\DVR_psvr2\dvr_psvr2_bridge.exe` and PSVR2Toolkit's
+`psvr2_toolkit_capi_loader.dll` next to it (the launcher does not install them).
