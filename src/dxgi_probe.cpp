@@ -17860,9 +17860,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 }
             }
             d2vr::psvr2::runtime().enabled=!fs::exists(root/L"build"/L"no-psvr2-triggers"); // PSVR2 left adaptive trigger (SteamVR + PS VR2 only) // knob: AFW renderer (development runs without saved settings)
-            // Sessions start alternate-capable so the Renderer row switches live (Native = both eyes every frame); build/native-classic keeps
-            // upstream's paired start for Native (then only a restart reaches Alternate/AFW).
-            if(fs::exists(root/L"build"/L"alternate-eye") || renderer_preference>=1 || !fs::exists(root/L"build"/L"native-classic")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites); the VR menu's Renderer row asks for it too
+            // v1412 (2026-11-19 sim: an alternate-capable session renders Native through the mono-view path, both eyes unshared - no
+            // shadow share, no paired skips - 13.4 ms against 9.5 ms paired): Native starts paired again, as before the merge. A session
+            // starts alternate-capable (every renderer live) only when it is asked for: build/alternate-eye (the launcher's performance
+            // mode), a saved Alternate/AFW renderer, or build/renderer-live. Performance mode with no renderer chosen in the VR menu means
+            // Alternate eye. build/native-classic is now the default and has no effect.
+            const bool performance_knob=fs::exists(root/L"build"/L"alternate-eye");
+            if(performance_knob && renderer_preference==0) renderer_preference=1;
+            if(performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live")) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites); the VR menu's Renderer row asks for it too
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
                 else {alt_eye_state=2;note_recoverable("alternate-eye needs head-tracked paired XR with native eye capture; staying paired");}
             }
