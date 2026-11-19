@@ -495,3 +495,35 @@ frames) varies by session in this save (0-1180, also without the thread); the la
 **To test (headset):** Spacewarp Auto; walk into heavy scenes and fights. Spacewarp should engage within a few frames and the frame
 rate should stay at 90 (VD's overlay). Then `artifacts/xr-live-status.json` `spacewarp`: `thread` true, `thread_frames` close to
 `generated`, `late` near 0. If the game misbehaves with the thread (crash, stalls), `build/spacewarp-no-thread` restores v1419.
+
+## 15. v1420 headset: 84-90 fps; a crash; arm freezes while moving (v1421, 2026-11-19)
+
+**Report (v1420 headset, Quest 2 over VDXR):** frame rate steady at 84-90 fps ("brilliant"); the session crashed after ~5 minutes; while
+walking or running, an arm "freezes for a second" mid-swing (as if a controller lost tracking), then comes back.
+Status at 21:19:00: 9488 generated, 9486 submitted, 1 late (`late_slot`), 0 failures, thread on, 4 locks / 3 unlocks.
+
+**The crash: no evidence left.** No Application Error / WER report, no new local dump (LocalDumps works for this game: dumps from the
+morning exist), no System event (no TDR), VDXR's own log stops at session start; the mod's crash observer only records with diagnostics.
+The process ended abruptly within seconds of 21:19:00. v1420 is the first build that calls into VD's runtime from two threads: the
+submit thread's xrWaitFrame/BeginFrame/EndFrame could run beside the Present thread's xrPollEvent / xrEndSession (session events are
+handled before the old collect point), and beside controller vibrations, which dxgi_probe asks for in the middle of a frame (weapon and
+hand contacts); VD's LibOVRRT has crashed on haptics before (GameXr::pulse comment). Not proven, but every such overlap is removed:
+- the Present thread collects the thread's frame at the very start of present(), before any OpenXR call of that Present (events,
+  xrEndSession, overlays, input, haptics, the real frame): the thread runs only while the game works outside the hook;
+- `pulse` only queues; present() applies the vibrations right after the collect;
+- the thread body cannot terminate the process (every path caught; a thread that stops on an error is replaced at the next post);
+- no endless waits: the collect gives up after 1 s (that Present makes no OpenXR call and the game runs on; `stuck` counts them), and
+  drain/stop after 2 s (stop then detaches the thread instead of hanging the game's exit);
+- a wait the thread handed to the real frame survives an early return of present() (it must be begun before the next xrWaitFrame).
+
+**The arm freeze: cause not known yet.** The mod draws a hand where its own rules put it: the wall clamp, the arm's reach clamp, the
+physical hand body (only in contact, within 10 cm), the game's authored arm animation (a slash presses the game's attack), and nowhere
+when the runtime reports no valid grip pose. The sim (always tracked, no wild swings) shows none of them while running. The always-written
+status now carries what the next headset session needs: `hands` (per grip: samples, `invalid` = no valid pose, `invalid_longest_ms`,
+`inferred` = valid but not optically tracked) and `arms` (gameplay frames, frames an authored clip owned each arm, attack presses,
+wall-clamp contact frames, reach-clamped frames, snapbacks, weapon contact frames, and which pose each hand was drawn at).
+
+Sim (v1421, run_hands, no diagnostics: the headset's status mode): 1393 of 1394 generated frames submitted, 0 late, 0 stuck; the
+`hands`/`arms` blocks are written. **Next headset session:** reproduce the freeze (walk/run and swing), then read `hands.invalid` /
+`invalid_longest_ms` (the runtime lost the grip), `arms.authored` and `attack_presses` (the game's attack animation took the arm),
+`arms.reach_clamped` / `clamp_contact` (the mod held the hand at the arm's reach or a surface), `hand_visual` (the physics body drawn).

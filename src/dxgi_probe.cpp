@@ -1883,6 +1883,7 @@ static bool attachment_pose_installed=false;
 // the render's GPU skin copy). Per slot (0/1 arm, 2 body): the model and whether its last upload submitted the plain tracked palette (only those
 // are rewritten: hidden, contact or native palettes stay the upload's).
 static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame (v1214: declared before the arm upload hook)
+static std::array<std::atomic<std::uint64_t>,2> authored_arm_frames{};static std::atomic<std::uint64_t> arm_owner_frames{}; // v1421 status: gameplay frames, and those an authored clip or state owned each arm
 struct ImageSkinSlot {std::atomic<std::uintptr_t> model{};std::atomic<int> kind{};std::atomic<bool> uploading{};};   // v864 kind: 0 keep the upload, 1 tracked palette, 2 contact raw palette
 static std::array<ImageSkinSlot,3> image_skin_slots{};
 // v1247 arm slip (weapon_draw_place.hpp HandLock::slip): each rig model's frame at the eye Setup (the frontend that composes the render's camera and
@@ -10134,6 +10135,7 @@ void prepare_head_view(void* view) noexcept {
             const auto native_ownership=d2vr::fullbody::ownership(avatar_states,hands_authored);
             const unsigned authored_hands=(hands_authored?3u:0u) | (native_ownership.arm[0]>0?1u:0u) | (native_ownership.arm[1]>0?2u:0u);
             authored_arm_bits.store(authored_hands,std::memory_order_relaxed); // dual wield: an authored clip (takedown, finisher) gets the native weapons back
+            if(game_logic_mask()==2) {arm_owner_frames.fetch_add(1,std::memory_order_relaxed);for(unsigned side=0;side<2;++side) if(authored_hands>>side&1u) authored_arm_frames[side].fetch_add(1,std::memory_order_relaxed);} // v1421
             if(!avatar_pose_gate.load(std::memory_order_acquire) || game_xr->state!=XR_SESSION_STATE_FOCUSED ||
                game_xr->last_action_sync!=XR_SUCCESS) native_interaction_aim.clear_door_contact();
             if(avatar_pose_gate.load(std::memory_order_acquire) && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->last_action_sync==XR_SUCCESS) {
@@ -15273,6 +15275,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     brief << "{\"gameplay\":" << (game_logic_mask()==2?"true":"false") << ",\"logic_mask\":" << published_logic.load()
                                           << ",\"game_layers_submitted\":" << xr_submitted
                                           << ",\"spacewarp\":" << (game_xr && spacewarp_knob?game_xr->spacewarp_brief_json():std::string("null")) // headset evidence without diagnostics
+                                          << ",\"hands\":" << (game_xr?game_xr->hands_brief_json():std::string("null")) // v1421: grip tracking, and who drove the arms
+                                          << ",\"arms\":{\"frames\":" << arm_owner_frames.load() << ",\"authored\":[" << authored_arm_frames[0].load() << ',' << authored_arm_frames[1].load()
+                                          << "],\"attack_presses\":" << attack_intent.presses()
+                                          // v1421: what held a drawn hand back (the wall clamp, the arm's reach, a snap back), which pose it was drawn at, the blade's world contacts
+                                          << ",\"clamp_contact\":[" << hand_clamp_status[0].contact_frames.load() << ',' << hand_clamp_status[1].contact_frames.load()
+                                          << "],\"reach_clamped\":[" << hand_clamp_status[0].reach_clamped.load() << ',' << hand_clamp_status[1].reach_clamped.load()
+                                          << "],\"snapbacks\":[" << hand_clamp_status[0].snapbacks.load() << ',' << hand_clamp_status[1].snapbacks.load()
+                                          << "],\"weapon_contact_frames\":" << weapon_contact_frames.load() << ",\"hand_visual\":" << hand_visual_stats.json() << '}' 
                                           << ",\"diagnostics\":false}\n";
                                     status_writer.post(output_directory.always()/L"xr-live-status.json",brief.str(),false,&status_file_failed);
                                 } else {

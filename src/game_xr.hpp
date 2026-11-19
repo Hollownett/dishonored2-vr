@@ -331,6 +331,12 @@ private:
     // submit thread they are made safe by D3D11 multithread protection (each immediate-context call serialized), and by this gate, held by
     // the thread around its xrBeginFrame..xrEndFrame and by the Present hook around the game's own DXGI Present (dxgi_probe gated_present).
     std::mutex sw_dxgi_gate_;bool sw_thread_checked_{},sw_thread_ok_{};
+    // v1421: the thread's wait came back at the real frame's slot: this Present's real frame uses it (kept across an early return: a waited
+    // frame must be begun before the next xrWaitFrame, or that one blocks for good); whether the thread is running
+    bool sw_handed_{};XrFrameState sw_handed_frame_{XR_TYPE_FRAME_STATE};std::atomic<bool> sw_thread_alive_{false};
+    // v1421: controller vibrations asked for between Presents, applied inside present() while the submit thread is idle (VD's runtime has
+    // crashed in LibOVRRT on haptics before: see pulse)
+    struct PendingPulse {bool on{};float amplitude{},seconds{};};std::mutex pulse_mutex_;std::array<PendingPulse,2> pending_pulses_{};
     std::array<SwPrev,2> sw_prev_{};std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> sw_prev_depth_{};std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2> sw_prev_srv_{};
     bool sw_pending_{};XrTime sw_target_time_{};
     // the layer each eye's image went out with this Present (the straight view of a canted render: game_xr v808), and whether the generated
@@ -1831,6 +1837,14 @@ private:
         // Requiring TRACKED made the hand vanish and reset the hand's target (blinking prompts).
         constexpr XrSpaceLocationFlags required=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
         for(UINT side=0;side<2;++side) if((grip_locations[side].locationFlags&required)==required) grip_tracked_hands|=1u<<side;
+        {const auto now=GetTickCount64();  // v1421 status
+         for(UINT side=0;side<2;++side) {
+             ++grip_samples[side];const auto flags=grip_locations[side].locationFlags;
+             if((flags&required)!=required) {
+                 ++grip_invalid_samples[side];if(!grip_invalid_since_[side]) grip_invalid_since_[side]=now;
+                 grip_invalid_longest_ms[side]=std::max(grip_invalid_longest_ms[side],now-grip_invalid_since_[side]);
+             } else {grip_invalid_since_[side]=0;if(!(flags&XR_SPACE_LOCATION_POSITION_TRACKED_BIT)) ++grip_inferred_samples[side];}
+         }}
         if(grip_tracked_hands)grip_pose_tick_=GetTickCount64();
         refresh_interaction_profiles();
         // Buttons/sticks are independent actions. A missing grip pose must not
@@ -1922,7 +1936,18 @@ public:
     using SettingsCompositionObserver=void (*)(ID3D11Texture2D*,ID3D11Texture2D*,const SettingsMenuLayout::Rect&);
     SettingsCompositionObserver observe_settings_composition{};
     // Short controller vibration; ignored when unfocused or unsupported.
+    // v1421: queued; present() applies it after the spacewarp submit thread's frame (no runtime call beside the thread's frame calls)
     void pulse(unsigned side,float amplitude,float seconds) noexcept {
+        if(side>1) return;
+        try {std::lock_guard<std::mutex> l(pulse_mutex_);auto& p=pending_pulses_[side];
+             if(!p.on || amplitude>p.amplitude) {p.amplitude=amplitude;p.seconds=seconds;}p.on=true;} catch(...) {}
+    }
+    void flush_pulses_() noexcept {
+        std::array<PendingPulse,2> due{};
+        try {std::lock_guard<std::mutex> l(pulse_mutex_);due=pending_pulses_;pending_pulses_={};} catch(...) {return;}
+        for(unsigned side=0;side<2;++side) if(due[side].on) apply_pulse_(side,due[side].amplitude,due[side].seconds);
+    }
+    void apply_pulse_(unsigned side,float amplitude,float seconds) noexcept {
         // Only a currently tracked controller: VD's runtime crashed (null+8 in LibOVRRT) three times
         // on the render thread; vibrating an asleep/untracked controller is the suspected trigger.
         if(!haptic_action_ || side>1 || state!=XR_SESSION_STATE_FOCUSED || !running_ || !(grip_tracked_hands&(1u<<side))) return;
@@ -2252,7 +2277,7 @@ public:
          <<"\",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"held_far_eyes\":"<<spacewarp_held_far_eyes
          <<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
          <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"thread_frames\":"<<spacewarp_thread_frames
-         <<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"cuts\":"<<spacewarp_cuts<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg<<'}';
+         <<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"stuck\":"<<spacewarp_stuck<<",\"cuts\":"<<spacewarp_cuts<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg<<'}';
         return o.str();
     }
     // Spacewarp (docs/SPACEWARP-PLAN-2026-11-19.md section 10; knob build/spacewarp, true stereo only, set by dxgi_probe.cpp every
@@ -2267,6 +2292,18 @@ public:
     bool spacewarp_thread{true};  // v1420: submit generated frames from their own thread (build/spacewarp-no-thread: the v1419 path)
     const char* spacewarp_thread_why="";bool spacewarp_mt_was{};  // v1420: why the thread is not used; whether the device was protected already
     double spacewarp_cut_m{},spacewarp_cut_deg{};  // v1420 diagnostics: the play-space step of the last locomotion cut
+    std::uint64_t spacewarp_stuck{};  // v1421: Presents that skipped their XR frame because the thread's frame had not come back within 1 s
+    // v1421 (user, headset v1420: "while walking or running the arm freezes for a second as I swing it, then comes back"): per grip, the
+    // focused input samples, those without a valid pose (the hand is then not driven), the longest such run, and those valid but only
+    // inferred (not optically tracked)
+    std::array<std::uint64_t,2> grip_samples{},grip_invalid_samples{},grip_inferred_samples{};std::array<std::uint64_t,2> grip_invalid_longest_ms{};
+    std::array<std::uint64_t,2> grip_invalid_since_{};
+    std::string hands_brief_json() const {
+        std::ostringstream o;
+        o<<"{\"samples\":["<<grip_samples[0]<<','<<grip_samples[1]<<"],\"invalid\":["<<grip_invalid_samples[0]<<','<<grip_invalid_samples[1]
+         <<"],\"invalid_longest_ms\":["<<grip_invalid_longest_ms[0]<<','<<grip_invalid_longest_ms[1]<<"],\"inferred\":["<<grip_inferred_samples[0]<<','<<grip_inferred_samples[1]<<"]}";
+        return o.str();
+    }
     std::mutex& dxgi_gate() noexcept {return sw_dxgi_gate_;}
     // v1420: set by the probe before it constructs a GameXr: spacewarp with its submit thread is wanted. The constructor then switches D3D11
     // multithread protection on (VDXR or the simulator only), before the probe installs its context hooks (spacewarp_thread_ready_).
@@ -2996,16 +3033,21 @@ public:
         {std::lock_guard<std::mutex> l(sw_job_mutex_);
          sw_job_=SwJob{};sw_job_.state=SwJob::posted;sw_job_.target=sw_target_time_;sw_job_.period=pacer_.base>0?pacer_.base:frame_.predictedDisplayPeriod;
          sw_job_.space=local_;sw_job_.views=sw_views_;sw_job_.quads=sw_quads_;
-         if(!sw_thread_.joinable()) {sw_quit_=false;sw_thread_=std::thread([this] {spacewarp_thread_main_();});}}
+         if(!sw_thread_alive_) {
+             if(sw_thread_.joinable()) sw_thread_.join();  // a thread that stopped on an error
+             sw_quit_=false;sw_thread_alive_=true;sw_thread_=std::thread([this] {spacewarp_thread_main_();});
+         }}
         sw_job_cv_.notify_all();
     }
     void spacewarp_thread_main_() noexcept {
+        try {
         std::unique_lock<std::mutex> l(sw_job_mutex_);
         for(;;) {
             sw_job_cv_.wait(l,[&] {return sw_quit_ || sw_job_.state==SwJob::posted;});
-            if(sw_quit_) return;
+            if(sw_quit_) {sw_thread_alive_=false;return;}
             sw_job_.state=SwJob::taken;
-            SwJob job=sw_job_;  // the layers this thread submits (the views below point into this copy)
+            SwJob job;
+            try {job=sw_job_;} catch(...) {sw_job_.fault=true;sw_job_.what="job copy failed";sw_job_.state=SwJob::done;sw_job_cv_.notify_all();continue;}
             l.unlock();
             try {
                 XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};XrFrameState slot{XR_TYPE_FRAME_STATE};
@@ -3038,38 +3080,48 @@ public:
             sw_job_.state=SwJob::done;
             sw_job_cv_.notify_all();
         }
+        } catch(...) {  // a lock or condition-variable failure: hand back what is in flight and stop (the next post starts a new thread)
+            try {std::lock_guard<std::mutex> l(sw_job_mutex_);if(sw_job_.state==SwJob::taken) {sw_job_.fault=true;sw_job_.what="thread error";sw_job_.state=SwJob::done;}} catch(...) {}
+            sw_job_cv_.notify_all();
+        }
+        sw_thread_alive_=false;
     }
-    // v1420, at the next Present before its frame calls: wait for the thread's frame (its slot is before this one) and take its result.
-    // true = the thread's wait came back at the real frame's slot and is the real frame's (frame_).
-    bool collect_spacewarp_() {
+    // v1420, at the start of the next Present, before any of its OpenXR calls (v1421: also before its events, overlays, input and
+    // haptics): wait for the thread's frame (its slot is before this one) and take its result. 0: nothing to hand on; 1: the thread's wait
+    // came back at the real frame's slot and is the real frame's (sw_handed_frame_); 2: the thread's frame has not come back within 1 s (its
+    // xrWaitFrame still blocks: a sleeping headset): this Present makes no OpenXR call at all and the game runs on.
+    int collect_spacewarp_() {
         std::unique_lock<std::mutex> l(sw_job_mutex_);
-        if(sw_job_.state==SwJob::idle) return false;
-        if(sw_job_.state==SwJob::posted) {sw_job_.state=SwJob::idle;++spacewarp_late;++spacewarp_late_wait;return false;}  // never started
-        sw_job_cv_.wait(l,[&] {return sw_job_.state==SwJob::done;});  // its xrWaitFrame returns at its slot, as the real frame's own would
+        if(sw_job_.state==SwJob::idle) return 0;
+        if(sw_job_.state==SwJob::posted) {sw_job_.state=SwJob::idle;++spacewarp_late;++spacewarp_late_wait;return 0;}  // never started
+        if(!sw_job_cv_.wait_for(l,std::chrono::seconds(1),[&] {return sw_job_.state==SwJob::done;})) return 2;
         const SwJob job=sw_job_;sw_job_.state=SwJob::idle;
         l.unlock();
         const auto now=cpu_time_ns();
         if(job.fault) {++spacewarp_failures;spacewarp_skip=job.what;throw XrSessionFault(std::string("Spacewarp thread: ")+job.what+" "+std::to_string(job.result));}
-        if(job.rejected) {++spacewarp_failures;spacewarp_skip=job.what;return false;}
-        if(job.late_slot) {frame_=job.handed;++spacewarp_late;++spacewarp_late_slot;return true;}
+        if(job.rejected) {++spacewarp_failures;spacewarp_skip=job.what;return 0;}
+        if(job.late_slot) {sw_handed_frame_=job.handed;sw_handed_=true;++spacewarp_late;++spacewarp_late_slot;return 1;}
         if(job.submitted) {++spacewarp_submitted;++spacewarp_thread_frames;if(job.ended_ns && now>job.ended_ns) spacewarp_thread_lead_us=static_cast<std::uint64_t>((now-job.ended_ns)/1000);}
-        return false;
+        return 0;
     }
     // v1420: no thread frame in flight from here on (resize, a fault, close): wait out a running one, drop one not started. A wait the
     // thread handed back (late slot) is dropped too: the next xrWaitFrame then follows a waited, never begun frame, as after any fault.
-    void drain_spacewarp_() noexcept {
+    // v1421: bounded (2 s): a thread whose xrWaitFrame does not come back must not hang a resize, a fault or the game's exit. false: still
+    // in flight.
+    bool drain_spacewarp_() noexcept {
         try {
             std::unique_lock<std::mutex> l(sw_job_mutex_);
-            if(sw_job_.state==SwJob::taken) sw_job_cv_.wait(l,[&] {return sw_job_.state!=SwJob::taken;});
-            sw_job_.state=SwJob::idle;
-        } catch(...) {}
+            if(sw_job_.state==SwJob::taken && !sw_job_cv_.wait_for(l,std::chrono::seconds(2),[&] {return sw_job_.state!=SwJob::taken;})) return false;
+            sw_job_.state=SwJob::idle;sw_handed_=false;
+            return true;
+        } catch(...) {return false;}
     }
     void stop_spacewarp_thread_() noexcept {
         try {
-            drain_spacewarp_();
+            const bool drained=drain_spacewarp_();
             {std::lock_guard<std::mutex> l(sw_job_mutex_);sw_quit_=true;}
             sw_job_cv_.notify_all();
-            if(sw_thread_.joinable()) sw_thread_.join();
+            if(sw_thread_.joinable()) {if(drained) sw_thread_.join();else sw_thread_.detach();}  // stuck in the runtime: let it go
         } catch(...) {}
     }
     // At the next Present, before the real frame: the generated frame in its own slot. true = the runtime is already at the real
@@ -3265,6 +3317,10 @@ public:
         native_object_art_masks_={};native_wrist_art_shown_={};
         authored_camera=scene_render && authored_camera;
         if(!authored_camera) authored_panel_.reset();
+        // v1421: the spacewarp submit thread's frame first: from here to the end of this Present the thread is idle, so no OpenXR call of the
+        // Present thread (events, xrEndSession, overlays, input, haptics, the real frame) ever runs beside the thread's frame calls
+        if(collect_spacewarp_()==2) {++spacewarp_stuck;return;}
+        flush_pulses_();
         XrEventDataBuffer event{};event.type=XR_TYPE_EVENT_DATA_BUFFER;
         XrResult result{};
         while((result=xrPollEvent(instance_,&event))==XR_SUCCESS) {
@@ -3302,6 +3358,7 @@ public:
         }
         if(result!=XR_EVENT_UNAVAILABLE) checked(result,"Poll game XR events");
         if(!running_ || exit_requested) {
+            if(!running_) sw_handed_=false;  // v1421: the session ended: a wait the thread handed on is void
             controller_input={};views_valid_=false;rendered_mask_=0;
             settings_.calibration_status(avatar_calibration_.synchronize(reference_epoch(),false));
             return;
@@ -3311,7 +3368,9 @@ public:
         auto stage_start=cpu_time_ns();
         // Spacewarp: the frame generated after the last real one goes into its own slot first (counted as idle, like the pacing sleep).
         // If the runtime is already at the real frame's slot, that wait is the real frame's.
-        const bool spacewarp_waited=collect_spacewarp_() || submit_spacewarp_();  // v1420: the thread's frame, else (no thread) the v1419 path
+        bool spacewarp_waited=false;  // v1420/v1421: the thread's handed wait (collected at the start), else (no thread) the v1419 path
+        if(sw_handed_) {frame_=sw_handed_frame_;sw_handed_=false;spacewarp_waited=true;}
+        else spacewarp_waited=submit_spacewarp_();
         if(!spacewarp_waited) {
             frame_={};frame_.type=XR_TYPE_FRAME_STATE;
             if(const auto wake=pacer_.wake(cpu_time_ns())) { // v841: sleep to the locked cadence (the bulk on a high-resolution timer, the rest spun)
