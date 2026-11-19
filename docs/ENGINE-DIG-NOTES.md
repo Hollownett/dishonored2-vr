@@ -71,6 +71,11 @@ The two crash sites:
 
 **Leading hypothesis.** The scheduler keeps **background tasks** (`r_schedulerNoBackground 0`: "background workers … tasks not required for the frame finish") running on the workers after the render side returns. Some of them, Iggy/GDraw UI work among them, use the **D3D11 immediate context**. That is safe in the unmodified game because the main thread leaves the immediate context idle during its game side. An asynchronous Present in that same window breaks the assumption.
 
+**Caveat found later (12:40):** `build/alternate-eye` (the launcher's performance mode) was switched on at 10:28, during the user's
+play session, so every async-Present run above (10:43-11:40) ran in **performance mode** (one eye per frame, the AFW2 rebuild), not
+paired stereo. Retest in paired stereo (`win_perf_sim.py --disable alternate-eye`) before drawing conclusions; the crash may be specific
+to the alternate-eye path. Always check `build/` for knobs the launcher may have added before comparing runs across a session.
+
 Lessons:
 - Never wait inside a D3D11 callback; it may hold the device lock.
 - Not every frame passes every main-loop call; the render-side entry `458c0` is the only reliable pre-GPU point.
