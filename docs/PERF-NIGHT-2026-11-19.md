@@ -208,6 +208,10 @@ After v1403 the median frame fit 90 Hz (10.1 ms) but the slowest 10 % did not (1
   `mdnt_minDistanceForLod` 25 -> 8 m) set live showed no consistent effect (alternating 6 s A/B, two runs in opposite order:
   B-A p50 per slot -0.20 ... +0.51, mean ~0). `jobs_numThreads` sits next to the command-line parser in the exe, so it is
   probably a launch argument; Steam asks the player to confirm custom launch arguments, so it was not tried.
+  Also no effect: the engine's frame-rate target `com_FPSTargeted` 60 -> 90 with `com_FPSAcceptable` 55 -> 80 (same alternating A/B,
+  per-slot B-A p50 -0.41 ... +0.17, mean ~-0.1 ms). No physics-step rhythm either: frame times correlate over many frames (busy
+  stretches), with no peak at a fixed period except the mirror's every-3rd-frame step. The busiest stretch of this save falls at the
+  same time in every run (38-50 s into gameplay, p90 ~14 ms whatever the setting): a scripted world event, the game's own simulation.
 
 v1406 at your VD setup (2621x2822, DLSS Quality), 4 runs:
 
