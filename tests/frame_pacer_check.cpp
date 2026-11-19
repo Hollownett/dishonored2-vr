@@ -163,6 +163,18 @@ int main() {
      for(int i=0;i<400 && locked_after<0;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);if(pacer.k==2) locked_after=(t-1'000'000'000)/1e9;}
      std::printf("1.6 lock after a fresh unlock: %.2f s\n",locked_after);
      require(locked_after>=2.0 && locked_after<=2.5,"a sustained heavy scene did not lock within the hold plus one frame window");}
+    // v1419 (spacewarp: "kicks in a little late"): with a short lock hold the same scene locks within ~0.5 s of a fresh unlock, while an
+    // unlock right after a lock still waits the full hold.
+    {d2vr::FramePacer pacer;pacer.lock_hold_ns=500'000'000;pacer.update(1'000'000'000,0,1'050'000'000,11'111'111,true);
+     pacer.changed_at=1'000'000'000;pacer.k=1;
+     std::int64_t t=1'000'000'000;double locked_after=-1;
+     for(int i=0;i<400 && locked_after<0;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);if(pacer.k==2) locked_after=(t-1'000'000'000)/1e9;}
+     std::printf("v1419 lock after a fresh unlock with a 0.5 s lock hold: %.2f s\n",locked_after);
+     require(locked_after>=0.5 && locked_after<=0.8,"the short lock hold did not let a heavy scene lock within ~0.5 s");
+     const auto locked_at=t;double unlocked_after=-1;
+     for(int i=0;i<1000 && unlocked_after<0;++i) {t+=8'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);if(pacer.k==1) unlocked_after=(t-locked_at)/1e9;}
+     std::printf("v1419 unlock after that lock: %.2f s (min hold %.1f s)\n",unlocked_after,pacer.min_hold_ns/1e9);
+     require(unlocked_after>=pacer.min_hold_ns/1e9,"the short lock hold also shortened the unlock hold");}
     // rebase(): a new refresh rate restarts the period and the cadence but keeps the status counters.
     {d2vr::FramePacer pacer;std::int64_t t=1'000'000'000;
      for(int i=0;i<200;++i) {t+=18'000'000;pacer.update(t,0,t+50'000'000,11'111'111,true);}

@@ -175,6 +175,23 @@ int main() {
             const auto img1=run(device.Get(),context.Get(),pass,still,p);
             check(img1.b(39,31)>128,"a blade the previous frame shows still is not taken (still and moved look alike)");
         }
+        {   // 10. v1419: a weapon body. A blade (columns 50..53, 0.65-0.75 m from the palm: past every reach) lies on the hand's weapon
+            // segment; with no previous frame at all it still follows the hand like the hand itself. A thing beside it (rows 40..43, off the
+            // segment) stays.
+            const auto box=[](unsigned x,unsigned y,unsigned x0,unsigned x1,unsigned y0,unsigned y1) {return x>=x0 && x<=x1 && y>=y0 && y<=y1;};
+            Scene s;
+            s.distance=[box](unsigned x,unsigned y) {return box(x,y,26,33,26,33) || box(x,y,50,53,30,33) || box(x,y,50,53,40,43)?1.f:3.f;};
+            s.object=[box](unsigned x,unsigned y) {return box(x,y,26,33,26,33) || box(x,y,50,53,30,33) || box(x,y,50,53,40,43);};
+            d2vr::SpacewarpParams p{};p.hand_on={true,false};p.hand[0].t={.125,0,0};p.rig_near=.5;
+            const double centre=(30.0/N)*2-1;p.palm[0]={centre,-centre,-1,.22};
+            const double tx=(51.5/N)*2-1,ty=1-(31.5/N)*2;   // the blade's centre ray at 1 m
+            p.weapon[0]={centre,-centre,-1,tx+.06,ty,-1,.05};  // from the palm out to just past the blade, 5 cm around
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            check(img.b(55,31)>128 && img.b(51,31)<64,"weapon body: the blade 0.7 m out moved 4 texels right with the hand, no previous frame needed");
+            check(img.b(51,41)>128 && img.b(56,41)<64,"weapon body: the thing beside the blade, off the segment, stayed");
+            d2vr::SpacewarpParams none=p;none.weapon={};const auto img0=run(device.Get(),context.Get(),pass,s,none);
+            check(img0.b(51,31)>128 && img0.b(55,31)<64,"without the weapon body the same blade stays (the v1418 rule has no previous frame here)");
+        }
         {   // 6. sky only, the camera turned: every pixel is a direction (rotation-only look-up)
             Scene s;s.distance=[](unsigned,unsigned) {return 0.f;};
             const double a=std::atan(.25);d2vr::SpacewarpParams p{};p.m={std::cos(a),0,std::sin(a),0,1,0,-std::sin(a),0,std::cos(a)};

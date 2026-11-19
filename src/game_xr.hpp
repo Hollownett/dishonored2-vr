@@ -2213,7 +2213,8 @@ public:
          <<",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"skip\":\""<<spacewarp_skip<<"\",\"not_kept\":"<<spacewarp_not_kept
          <<",\"not_kept_why\":\""<<spacewarp_not_kept_why<<"\",\"captures\":"<<spacewarp_captures_saved
          <<",\"presents\":"<<spacewarp_presents<<",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"gated\":"<<spacewarp_gated
-         <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<"}}";
+         <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes
+         <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot<<"}}";
         return o.str();
     }
     // The spacewarp counters for xr-live-status.json without diagnostics (the headset test's evidence)
@@ -2224,7 +2225,8 @@ public:
          <<",\"generated\":"<<spacewarp_generated<<",\"submitted\":"<<spacewarp_submitted<<",\"late\":"<<spacewarp_late
          <<",\"unusable\":"<<spacewarp_unusable<<",\"failures\":"<<spacewarp_failures<<",\"skip\":\""<<spacewarp_skip
          <<"\",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"not_kept\":"<<spacewarp_not_kept<<",\"not_kept_why\":\""<<spacewarp_not_kept_why
-         <<"\",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<'}';
+         <<"\",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"held_far_eyes\":"<<spacewarp_held_far_eyes
+         <<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot<<'}';
         return o.str();
     }
     // Spacewarp (docs/SPACEWARP-PLAN-2026-11-19.md section 10; knob build/spacewarp, true stereo only, set by dxgi_probe.cpp every
@@ -2233,6 +2235,10 @@ public:
     bool spacewarp_enabled{},spacewarp_always{};
     std::uint64_t spacewarp_generated{},spacewarp_submitted{},spacewarp_late{},spacewarp_unusable{},spacewarp_failures{},spacewarp_cuts{};
     std::uint64_t spacewarp_held_far_eyes{};  // v1418: generated eyes that had their previous real frame (the held-far-part rule on)
+    // v1419: why generated frames were late: the game frame came back too near the real frame's slot (late_wait), or the runtime's wait
+    // already gave a later slot (late_slot); and generated eyes with a weapon body (weapon_eyes)
+    std::uint64_t spacewarp_late_wait{},spacewarp_late_slot{},spacewarp_weapon_eyes{};
+    std::array<SpacewarpWeaponLocal,2> spacewarp_weapon{};  // v1419: each hand's weapon body (dxgi_probe, every Present)
     // v1418 diagnostics (dxgi_probe, build knobs): a palm reach other than hand_own_radius (spacewarp-palm-reach, metres; 0 = default: the
     // sim check shrinks it so the moving hand itself must be found by the held-far-part rule), the rule off (spacewarp-no-held-far), and
     // the pixels it took tinted (spacewarp-tint-held)
@@ -2853,6 +2859,19 @@ public:
                     grips_now[side]=sw_from_world_camera({g.position.x,g.position.y,g.position.z},
                         {{{g.basis[0].x,g.basis[0].y,g.basis[0].z},{g.basis[1].x,g.basis[1].y,g.basis[1].z},{g.basis[2].x,g.basis[2].y,g.basis[2].z}}});
                 }
+                // v1419: each hand's weapon body, from its drawn grip in this render into source camera coordinates, widened by 4 cm (the
+                // collision model against the drawn mesh)
+                bool weapon_here=false;
+                for(unsigned side=0;side<2;++side) {
+                    const auto& w=spacewarp_weapon[side];
+                    if(!w.valid || !(cam.hand_bits>>side&1u)) continue;
+                    const auto& g=cam.hands[side];
+                    const auto to_source=[&](const std::array<double,3>& l) {
+                        const Vec3 x=g.position+g.basis[0]*l[0]+g.basis[1]*l[1]+g.basis[2]*l[2];return Si.apply({x.x,x.y,x.z});};
+                    const auto a=to_source(w.a),b=to_source(w.b);
+                    p.weapon[side]={a[0],a[1],a[2],b[0],b[1],b[2],w.radius+.04};weapon_here=true;
+                }
+                if(weapon_here) ++spacewarp_weapon_eyes;
                 const auto& prev=sw_prev_[eye];
                 p.debug_tint_held=spacewarp_tint_held;
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
@@ -2914,10 +2933,10 @@ public:
         if(!sw_pending_) {release_spacewarp_images_();return false;}
         sw_pending_=false;
         if(!spacewarp_enabled || alternate_enabled || !pacer_.active || pacer_.k<2) {release_spacewarp_images_();return false;}
-        if(pacer_.target && cpu_time_ns()>pacer_.target-pacer_.base/2) {release_spacewarp_images_();++spacewarp_late;return false;}  // too near the real frame's slot
+        if(pacer_.target && cpu_time_ns()>pacer_.target-pacer_.base/2) {release_spacewarp_images_();++spacewarp_late;++spacewarp_late_wait;return false;}  // too near the real frame's slot
         XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};XrFrameState slot{XR_TYPE_FRAME_STATE};
         try {checked(xrWaitFrame(session_,&wait,&slot),"Wait spacewarp frame");} catch(...) {release_spacewarp_images_();throw;}
-        if(slot.predictedDisplayTime>sw_target_time_+pacer_.base/2) {release_spacewarp_images_();frame_=slot;++spacewarp_late;return true;}
+        if(slot.predictedDisplayTime>sw_target_time_+pacer_.base/2) {release_spacewarp_images_();frame_=slot;++spacewarp_late;++spacewarp_late_slot;return true;}
         XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
         if(const auto began=xrBeginFrame(session_,&begin);XR_FAILED(began)) {release_spacewarp_images_();throw XrSessionFault("Begin spacewarp frame: "+std::to_string(began));}
         frame_open_=true;
@@ -3164,10 +3183,13 @@ public:
         // Auto (headset 2026-11-19: "switching on and off in the wrong places"): the rule reads the 80th percentile of the frame's work
         // (the frames that miss are the slow ones; the median hovered at the threshold) and every change is held at least 5 s.
         const bool spacewarp_paced=spacewarp_enabled && !alternate_enabled;
-        pacer_.lock_tenths=spacewarp_paced?(spacewarp_always?0:10):FramePacer::default_lock_tenths;
+        // v1419 (user, headset v1418: "kicks in a little late"): Auto locks at 0.9 periods of work (80th percentile) and 0.5 s after an
+        // unlock; it still leaves half rate only below 0.8 periods and 5 s after a lock
+        pacer_.lock_tenths=spacewarp_paced?(spacewarp_always?0:9):FramePacer::default_lock_tenths;
         pacer_.unlock_tenths=spacewarp_paced?(spacewarp_always?0:8):FramePacer::default_unlock_tenths;
         pacer_.decide_percent=spacewarp_paced && !spacewarp_always?80u:50u;
         pacer_.min_hold_ns=spacewarp_paced?5'000'000'000:FramePacer::default_min_hold_ns;
+        pacer_.lock_hold_ns=spacewarp_paced?500'000'000:-1;
         const auto waited_ns=cpu_time_ns();
         pacer_.update(waited_ns,timing.wait_ns,frame_.predictedDisplayTime,frame_.predictedDisplayPeriod,steady_pacing && !alternate_enabled);
         update_refresh_rate_(waited_ns,timing.wait_ns); // plan 1.6: no-op unless build/auto-refresh-rate and the runtime offers rates

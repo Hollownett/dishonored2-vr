@@ -28,6 +28,10 @@ namespace d2vr {
 struct FramePacer {
     static constexpr std::int64_t default_min_hold_ns=2'000'000'000;
     std::int64_t min_hold_ns{default_min_hold_ns}; // the lab sets 0 to reproduce the pre-hold behaviour
+    // v1419: the hold before a LOCK (half rate) that follows a change; -1 = min_hold_ns. Spacewarp sets it short (user, headset v1418: "the
+    // interpolation kicks in a little late"): the generated frames come back as soon as the full rate is lost, and only leaving half rate
+    // waits min_hold_ns, so the cadence still cannot flip-flop faster than that pair of holds.
+    std::int64_t lock_hold_ns{-1};
     std::int64_t base{};                 // refresh period: the shortest runtime period seen
     int k{1};
     std::int64_t target{},prev_ret{},prev_display{},shifted_at{},changed_at{}; // changed_at: ret of the last cadence change (0: none)
@@ -71,10 +75,11 @@ struct FramePacer {
     // After xrWaitFrame: ret = its return time; idle = this frame's pacing sleep + xrWaitFrame wait.
     void update(std::int64_t ret,std::int64_t idle,std::int64_t display,std::int64_t runtime_period,bool enabled) noexcept {
         if(runtime_period>0 && runtime_period>min_period && (!base || runtime_period<base)) base=runtime_period;
-        if(!enabled || !base) {const auto b=base;const auto hold=min_hold_ns;const auto floor=min_period;const auto lt=lock_tenths,ut=unlock_tenths;const auto dp=decide_percent;
-            *this=FramePacer{};base=b;min_hold_ns=hold;min_period=floor;lock_tenths=lt;unlock_tenths=ut;decide_percent=dp;return;}
+        if(!enabled || !base) {const auto b=base;const auto hold=min_hold_ns,lock_hold=lock_hold_ns;const auto floor=min_period;const auto lt=lock_tenths,ut=unlock_tenths;const auto dp=decide_percent;
+            *this=FramePacer{};base=b;min_hold_ns=hold;lock_hold_ns=lock_hold;min_period=floor;lock_tenths=lt;unlock_tenths=ut;decide_percent=dp;return;}
         active=true;++frames;
-        const bool held=changed_at && ret-changed_at<min_hold_ns;
+        const bool held_unlock=changed_at && ret-changed_at<min_hold_ns;
+        const bool held_lock=changed_at && ret-changed_at<(lock_hold_ns>=0?lock_hold_ns:min_hold_ns);
         const int k_before=k;
         const bool on_grid=k>1 && target && ret>=target && ret-target<base/2;
         if(prev_ret) {
@@ -97,7 +102,7 @@ struct FramePacer {
             want_lock=k==1 && median*tenths>base*lock_tenths;
             want_unlock=k==2 && median*tenths<base*unlock_tenths;
         }
-        if((want_lock || want_unlock) && held) ++held_frames;
+        if((want_lock && held_lock) || (want_unlock && held_unlock)) ++held_frames;
         else if(want_lock) {k=2;++locks;}
         else if(want_unlock) {k=1;++unlocks;if(miss_lock) score=0;}
         if(k!=k_before) changed_at=ret;

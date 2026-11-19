@@ -2673,6 +2673,7 @@ static d2vr::PendingViews<d2vr::WarpPlaySpace> alt_play; // v1184: the play spac
 // hands them and the depth copies to GameXr, which generates the frames in between.
 static bool spacewarp_knob=false,spacewarp_always_knob=false;
 static double spacewarp_palm_reach_knob=0;static bool spacewarp_no_held_far_knob=false,spacewarp_tint_held_knob=false; // v1418 diagnostics (GameXr fields)
+static std::array<d2vr::SpacewarpWeaponLocal,2> spacewarp_weapons{};static std::mutex spacewarp_weapons_mutex; // v1419: Setup writes, Present hands to GameXr
 static bool stale_afw2_knob=false; // v1184: build/afw2; v1216: default on in performance mode, build/no-afw2
 static bool rig_forensics_knob=false; // v1216: build/rig-forensics (RigMask draw-time probe, rig-dump-*.bin, image-skin log; off even with diagnostics)
 static std::array<d2vr::WorldTrackedPose,2> warp_grips{};static unsigned warp_grip_bits{};
@@ -11261,6 +11262,33 @@ void prepare_head_view(void* view) noexcept {
                 }
                 native_grab.discover_contacts(); // the registry scan, off the physics thread
             }
+            if(spacewarp_knob) { // v1419: each hand's weapon body for spacewarp (the weapon collision model's: the sword's blade line, a gun's
+                // barrel along its drawn frame), relative to the grip drawn this frame, so the generated frame moves the whole weapon with the hand
+                unsigned armed{};{std::lock_guard<std::mutex> l(hand_state_mutex);armed=hand_loadout_bits(hand_weapon_bits);}
+                std::array<d2vr::SpacewarpWeaponLocal,2> bodies{};
+                for(unsigned side=0;side<2;++side) {
+                    if(!(hands.hands>>side&1u) || !(armed>>side&1u) || native_grab.holding(side)) continue;
+                    const auto& g=hands.grips[side];
+                    const unsigned extra=static_cast<unsigned>(arm_copy_now(side));
+                    const bool sword=(side==sword_arm_now() && !extra) || extra==static_cast<unsigned>(d2vr::arm::Held::guard_sword);
+                    d2vr::Vec3 a{},b{};double radius{};
+                    // A gun only for a real gun: the slot-1 hand with a pistol or crossbow equipped, or a dual-wield gun copy. A power (Blink...)
+                    // is "armed" too, and authored_gun_frame / gun_shape fall back to a pistol's frame and a default barrel for it: no body there.
+                    bool gun=d2vr::arm::is_gun(static_cast<d2vr::arm::Held>(extra));
+                    if(!gun && !extra && side==d2vr::arm::slot1_arm_of(arm_pack.load(std::memory_order_relaxed))) {
+                        std::lock_guard<std::mutex> l(hand_state_mutex);const std::string n(left_equip_name);
+                        gun=n=="Gun" || n.find("istol")!=std::string::npos || n.find("rossbow")!=std::string::npos;
+                    }
+                    if(sword) {a=g.position;b=g.position+d2vr::sword_blade_axis(g,sword_reversed.load())*sword_blade_length;radius=sword_blade_body_radius;}
+                    else if(gun && gun_drawn_frame[side]) {const auto& gf=*gun_drawn_frame[side];const auto shape=gun_shape(side);
+                        a=gf.position;b=gf.position+d2vr::unit(gf.basis[0])*shape[2];radius=shape[3];}
+                    else continue;
+                    if(!d2vr::finite(a) || !d2vr::finite(b) || !std::isfinite(radius) || radius<0) continue;
+                    const auto local=[&](const d2vr::Vec3& x) {const auto d=x-g.position;return std::array<double,3>{d2vr::dot(d,g.basis[0]),d2vr::dot(d,g.basis[1]),d2vr::dot(d,g.basis[2])};};
+                    bodies[side]={true,local(a),local(b),radius};
+                }
+                std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);spacewarp_weapons=bodies;
+            }
             warp_grips=hands.grips;warp_grip_bits=hands.hands; // v802: the hands as drawn this frame (stale-eye warp: did they hold still?)
             if(d2vr::sim_pose_hold::on.load()) {std::lock_guard<std::mutex> l(hand_stages_mutex);auto& st=hand_stage_slot(alt_display); // v1193 diagnostic
                 for(unsigned side=0;side<2;++side) st.hand[side][5]=hands.grips[side].position;st.head_origin=head_origin.position;st.hand_centre=hand_centre;st.centre=centre;}
@@ -14141,7 +14169,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             for(UINT slot_eye=0;slot_eye<2;++slot_eye) if(alt_slot->mask&(1u<<slot_eye))
                                 game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);
                         if(game_xr) {game_xr->spacewarp_enabled=spacewarp_knob && !alternate_on();game_xr->spacewarp_always=spacewarp_always_knob;
-                            game_xr->spacewarp_palm_reach=spacewarp_palm_reach_knob;game_xr->spacewarp_held_far=!spacewarp_no_held_far_knob;game_xr->spacewarp_tint_held=spacewarp_tint_held_knob;}
+                            game_xr->spacewarp_palm_reach=spacewarp_palm_reach_knob;game_xr->spacewarp_held_far=!spacewarp_no_held_far_knob;game_xr->spacewarp_tint_held=spacewarp_tint_held_knob;
+                            if(spacewarp_knob) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);game_xr->spacewarp_weapon=spacewarp_weapons;}}
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
                             if(const auto cameras=alt_cameras.take(number))
                                 for(UINT e=0;e<2;++e) if(cameras->mask&(1u<<e)) game_xr->record_rendered_camera(e,cameras->view[e],number);

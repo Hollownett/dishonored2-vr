@@ -82,4 +82,7 @@ inline SpacewarpEyeMotion spacewarp_eye_motion(const SwRigid& S,const SwRigid& V
     return m;
 }
 inline SpacewarpRigid to_pass(const SwRigid& r) {return {r.r,r.t};}
+// v1419: a hand's weapon body for spacewarp (dxgi_probe: the weapon collision model's visible blade line or gun barrel), in the drawn grip's
+// frame (forward, left, up; metres): the segment a-b and its radius. valid false: that hand holds no weapon.
+struct SpacewarpWeaponLocal {bool valid{};std::array<double,3> a{},b{};double radius{};};
 } // namespace d2vr

@@ -408,3 +408,44 @@ too: generated hands sit on the real frame's place, along ratio 0.00); the sim c
 
 **To test (headset):** Spacewarp Auto or Always; swing the sword, aim the pistol and crossbow while moving the hand. The tips should no
 longer double. Still possible: very slow motions keep a little doubling (see Limits); a wall the weapon touches may move with it.
+
+## 13. Weapon bodies and a faster Auto (v1419, 2026-11-19)
+
+**Report (v1418 headset):** the weapon is much more stable, but there is still some ghosting and the sword's tip still doubles a lot;
+"make the weapon interpolate the way the arms do". Auto engages a little late. Everything else good. The session's counters:
+5067 generated, 4288 submitted, 779 late (15 %), the v1418 rule on for every generated eye, 5 locks / 5 unlocks.
+
+**Cause of the tip.** The mod's own sword model (`dxgi_probe.cpp` `sword_blade_length`, the weapon collision line: "the sword's visible
+tip is .63 m out") is 0.65 m from the grip along its forward axis (reversed in a reverse grip). v1418's rule ended 0.5 m from the palm,
+so the outer part of the blade was never the hand's.
+
+**Fix.**
+- Weapon bodies: at Setup, next to the drawn grips the cameras record, `dxgi_probe.cpp` takes each armed hand's body from the weapon
+  collision model (the sword: the grip along `sword_blade_axis` x 0.65 m, radius 2 cm; a pistol or crossbow, or a dual-wield gun copy:
+  its drawn gun frame along the barrel, `gun_shape` length and radius) in the grip's own frame. GameXr places it on each eye's drawn grip
+  (`spacewarp_weapon`), widened by 4 cm, and the pass gives a hand everything within its body unconditionally (`WeaponHand`), exactly as
+  within its palm's reach: the whole weapon moves with the hand, no previous frame needed. A power (Blink...) counts as "armed" and
+  `authored_gun_frame` falls back to a pistol frame for it: no body there (sim: caught before shipping).
+- The previous-frame rule stays for what the bodies miss (a crossbow's bow, a prop): its reach is now 0.8 m, and the hand's own test
+  allows 1.5 cm per metre from the palm.
+- Auto: locks at 0.9 periods of 80th-percentile work (was 1.0) and only 0.5 s after an unlock (`FramePacer::lock_hold_ns`; leaving half
+  rate still waits 5 s and needs < 0.8 periods).
+- Status: `weapon_eyes` (generated eyes with a weapon body), `late_wait` (the game frame came back too near the real slot) and
+  `late_slot` (the runtime's wait already gave a later slot), so the next headset run tells which kind the 15 % late are.
+
+Lab: spacewarp_pass_check test 10 (a blade 0.7 m out follows the hand with no previous frame; a thing beside it stays; without the body
+it stays); frame_pacer_check (lock 0.50 s after an unlock with the short lock hold; the unlock still waits the full hold).
+
+**Late frames (not fixed here).** A generated frame is submitted at the next Present, so it is on time only when the game's frame work
+leaves the main thread back before its slot. At the user's ~9.5 ms p50 / 11-12.6 ms p90 work, about every sixth game frame takes longer
+than a period and its generated frame is dropped; the runtime then shows the real frame again for that slot, which reads as a stutter
+of whatever moves (the sword tip most). The fix is the XR frame thread of section 3; it needs the D3D11 immediate context shared safely
+with the game's render thread, and is the next step if `late_wait` dominates.
+
+**Sim (v1419, headset FOV, Auto, sword_draw_sweep; the sim save holds no weapon, so the bodies themselves are not visible there):** 0
+failures; tinted captures at the normal reach show no pixel taken by either rule (empty hands, floor, forearms); the first build gave
+the Blink hand a body (`weapon_eyes` 4), the final one none (`weapon_eyes` 0); late 3.5 %, all `late_wait`.
+
+**To test (headset):** swing the sword (also in a reverse grip), aim the pistol and the crossbow while moving the hand, and note whether
+Auto now engages soon enough. Then `artifacts/xr-live-status.json` `spacewarp`: `weapon_eyes` should be most generated eyes while armed,
+and `late_wait` vs `late_slot` says which kind the late frames are.

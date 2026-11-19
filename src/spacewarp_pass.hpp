@@ -6,6 +6,7 @@
 //   rig texel (rig mask nonzero) within a drawn palm's reach: that hand's rigid motion (the controller's change since the render);
 //   v1418, a held thing's far part (a sword's blade, a gun's barrel: past the palm's reach, within hand_far of it, ahead of the grip) that
 //   the previous real frame confirms moved with that hand and did not stand still in the world: that hand's rigid motion too;
+//   v1419, anything within a hand's weapon body (the sword's .65 m blade line, a gun's barrel: SpacewarpParams::weapon): that hand's motion;
 //   other rig texel: its own motion texture if it has one (w >= 0.5 px), else the rest-of-rig rigid motion (the play space's step);
 //   world texel with object motion (w >= mover_px, 3 px): its motion texture's world displacement times `motion_share`;
 //   still world: not moved (exact parallax from the camera change alone); sky (depth 0): a direction, turned only.
@@ -64,9 +65,16 @@ struct SpacewarpParams {
     // hand's last step puts the point (prev_hand: source camera -> the previous frame's camera, the point carried back with the hand) and
     // not where it would be had it stood still in the world (prev_world). A wall or a table near the hand is confirmed still and stays; an
     // NPC that does not move with the hand is not the hand's. prev_tan, prev_m10/m11: that render's FOV and depth terms. Off: palm reach only.
-    bool prev_on{};double hand_far{.5},hand_back{-.12};std::array<double,4> prev_tan{};double prev_m10{},prev_m11{};
+    // v1419 (headset on v1418: the sword's tip still doubled): the mod's sword blade is .65 m from the grip (dxgi_probe sword_blade_length),
+    // past v1418's .5 m; hand_far is now .8 m, and the hand's own test allows .015 m per metre from the palm (a few tenths of a degree
+    // between the drawn grip and the drawn weapon), the still-world test stays exact.
+    bool prev_on{};double hand_far{.8},hand_back{-.12};std::array<double,4> prev_tan{};double prev_m10{},prev_m11{};
     SpacewarpRigid prev_world{};std::array<SpacewarpRigid,2> prev_hand{};std::array<bool,2> prev_hand_on{};std::array<std::array<double,4>,2> grip{};
     bool debug_tint_held{};  // v1418 diagnostics (build/spacewarp-tint-held): pixels whose texel the held-far-part rule gave a hand are tinted magenta
+    // v1419: each hand's weapon body in source camera coordinates: a (xyz), b (xyz), radius (0: none). Everything within it is that hand's,
+    // unconditionally, like its palm's reach: the weapon follows the hand the way the hand does (user, headset v1418: "make the weapon
+    // interpolate the same way as the arms").
+    std::array<std::array<double,7>,2> weapon{};
 };
 
 class SpacewarpPass {
@@ -87,6 +95,7 @@ private:
         float CM[3][4],colour_tan[4];                         // the colour image's camera (rows of colour_m) and FOV
         float PW[3][4],PH0[3][4],PH1[3][4],prev_tan[4],prev_terms[4],prev_grid[4],grip0[4],grip1[4];  // v1418; terms: m10, m11, hand_far, hand_back
         std::uint32_t prev_flags[4];                          // v1418: on, hand0, hand1
+        float wa0[4],wb0[4],wa1[4],wb1[4];                    // v1419: the weapon bodies (wa.w: radius, 0 none)
     };
     static_assert(sizeof(Constants)%16==0,"constant buffer size");
     struct Grid {Ptr<ID3D11Texture2D> t;Ptr<ID3D11UnorderedAccessView> u;Ptr<ID3D11ShaderResourceView> s;};
@@ -106,6 +115,7 @@ cbuffer Sw : register(b0) {
     float4 M[3]; float4 C; float4 W2S[3]; float4 H0[3]; float4 H1[3]; float4 RR[3]; float4 palm0; float4 palm1;
     uint4 flags; float4 outSize; uint4 step; float4 CM[3]; float4 colourTan;
     float4 PW[3]; float4 PH0[3]; float4 PH1[3]; float4 prevTan; float4 prevTerms; float4 prevGrid; float4 grip0; float4 grip1; uint4 prevFlags;
+    float4 wa0; float4 wb0; float4 wa1; float4 wb1;
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> motionTex : register(t1);
@@ -133,10 +143,10 @@ float3 SourcePoint(uint2 t) {return Ray(srcTan,(float2(t)+.5)*grid.zw)*Ahead(dep
 // v1418: does the previous real frame's depth show a surface at P carried by R into that frame's camera? 1 yes, 0 no, -1 outside that
 // image. Yes: P's distance there within 0.5 % + 3 mm of one of the 2 x 2 texels around it, or within their range where they lie on one
 // smooth surface (a slope between texels), never across an edge.
-int PrevShows(float4 R[3],float3 P) {
+int PrevShows(float4 R[3],float3 P,float slack) {
     const float3 q=Rigid(R,P); float2 s;
     if(!ToImage(prevTan,q,s) || any(s<0) || any(s>=1)) return -1;
-    const int2 o=int2(floor(s*prevGrid.xy-.5));const float z=-q.z,tol=.005*z+.003;
+    const int2 o=int2(floor(s*prevGrid.xy-.5));const float z=-q.z,tol=.005*z+.003+slack;
     float lo=1e30,hi=0;bool hit=false;
     [unroll] for(int k=0;k<4;++k) {
         const int2 c=clamp(o+int2(k&1,k>>1),int2(0,0),int2(prevGrid.xy)-1);
@@ -151,19 +161,28 @@ int FarHand(float3 P,float d0,float d1) {
     if(prevFlags.x==0u) return -1;
     const bool zero=d0<=d1; const float ds=zero?d0:d1;
     if(ds>prevTerms.z || ds<=(zero?palm0.w:palm1.w)) return -1;
+    const float slack=.015*ds;  // v1419: the drawn weapon vs the drawn grip, a few tenths of a degree
     if(zero) {
-        if(flags.x==0u || prevFlags.y==0u || dot(P,grip0.xyz)-grip0.w<prevTerms.w || PrevShows(PH0,P)!=1) return -1;
-        return PrevShows(PW,P)==1?-1:0;
+        if(flags.x==0u || prevFlags.y==0u || dot(P,grip0.xyz)-grip0.w<prevTerms.w || PrevShows(PH0,P,slack)!=1) return -1;
+        return PrevShows(PW,P,0)==1?-1:0;
     }
-    if(flags.y==0u || prevFlags.z==0u || dot(P,grip1.xyz)-grip1.w<prevTerms.w || PrevShows(PH1,P)!=1) return -1;
-    return PrevShows(PW,P)==1?-1:1;
+    if(flags.y==0u || prevFlags.z==0u || dot(P,grip1.xyz)-grip1.w<prevTerms.w || PrevShows(PH1,P,slack)!=1) return -1;
+    return PrevShows(PW,P,0)==1?-1:1;
+}
+// v1419: distance from p to the segment a-b
+float SegmentDistance(float3 p,float3 a,float3 b) {const float3 ab=b-a;const float t=saturate(dot(p-a,ab)/max(dot(ab,ab),1e-12));return distance(p,a+t*ab);}
+// v1419: the hand (0, 1) whose weapon body holds P, else -1
+int WeaponHand(float3 P) {
+    if(flags.x!=0u && wa0.w>0 && SegmentDistance(P,wa0.xyz,wb0.xyz)<=wa0.w) return 0;
+    if(flags.y!=0u && wa1.w>0 && SegmentDistance(P,wa1.xyz,wb1.xyz)<=wa1.w) return 1;
+    return -1;
 }
 // The texel's displacement in source camera metres (the rules in this header's comment)
 float3 Displace(uint2 t,float3 P) {
     const float4 mo=(flags.w&1u)?motionTex[t]:0;
     const float3 motion=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z;
     const float d0=palm0.w>0?distance(P,palm0.xyz):1e9,d1=palm1.w>0?distance(P,palm1.xyz):1e9;
-    const int heldBy=FarHand(P,d0,d1);
+    int heldBy=WeaponHand(P);if(heldBy<0) heldBy=FarHand(P,d0,d1);
     if(heldBy==0) return Rigid(H0,P)-P;
     if(heldBy==1) return Rigid(H1,P)-P;
     // without a rig mask (true stereo): what lies within a drawn palm's reach, or nearer than C.w metres, is the player's rig
@@ -259,7 +278,7 @@ float4 Resolve(Vertex v) : SV_TARGET {
     if(idx==EMPTY || (idx&SKY)) P=MulM(Ray(dstTan,uv));
     else {
         const uint i=idx&INDEX; const uint2 t=uint2(i%uint(grid.x),i/uint(grid.x)); const float3 Ps=SourcePoint(t);
-        if(step.w!=0u) tint=FarHand(Ps,palm0.w>0?distance(Ps,palm0.xyz):1e9,palm1.w>0?distance(Ps,palm1.xyz):1e9)>=0;
+        if(step.w!=0u) tint=WeaponHand(Ps)>=0 || FarHand(Ps,palm0.w>0?distance(Ps,palm0.xyz):1e9,palm1.w>0?distance(Ps,palm1.xyz):1e9)>=0;
         const float3 d=Displace(t,Ps),Pk=MulM(Ray(dstTan,uv)*Z(depthIn[cell]))+C.xyz-d;
         // a filled cell takes the back-projected point only from still parts of the source (its seed and the texel it lands on): the
         // place a mover left shows its seed's colour, never the mover seen again
@@ -323,6 +342,8 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     f4(k.out,out_width,out_height,1.0/out_width,1.0/out_height);k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_held?1u:0u;
     {const auto& cm=p.colour_camera?p.colour_m:std::array<double,9>{1,0,0,0,1,0,0,0,1};const auto& ct=p.colour_camera?p.colour_tan:p.source_tan;
      for(int i=0;i<3;++i) f4(k.CM[i],cm[i*3],cm[i*3+1],cm[i*3+2],0);f4(k.colour_tan,ct[0],ct[1],ct[2],ct[3]);}
+    f4(k.wa0,p.weapon[0][0],p.weapon[0][1],p.weapon[0][2],p.weapon[0][6]);f4(k.wb0,p.weapon[0][3],p.weapon[0][4],p.weapon[0][5],0);  // v1419
+    f4(k.wa1,p.weapon[1][0],p.weapon[1][1],p.weapon[1][2],p.weapon[1][6]);f4(k.wb1,p.weapon[1][3],p.weapon[1][4],p.weapon[1][5],0);
     if(p.prev_on && in.prev_depth && in.prev_width && in.prev_height) {  // v1418
         for(int i=0;i<3;++i) {
             f4(k.PW[i],p.prev_world.r[i*3],p.prev_world.r[i*3+1],p.prev_world.r[i*3+2],p.prev_world.t[i]);
