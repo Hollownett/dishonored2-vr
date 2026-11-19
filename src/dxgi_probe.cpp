@@ -6774,6 +6774,22 @@ static std::string run_test_command(const std::string& line) {
         alt_plan.reset(); // one paired frame refreshes both eyes, then the new parity alternates
         return std::string("altparity ")+(d2vr::alternate_parity_flip.load()?"flip (right eye on even frames)":"normal (left eye on even frames)");
     }
+    if(verb=="cvarget") { // v1402: read a cvar's int and float slots (the same +0x28/+0x2c the cvar command writes)
+        std::string name;if(!(in>>name)) return "usage: cvarget <name>";
+        const auto at=find_cvar(name);if(!at) return "cvar not found: "+name;
+        int value{};float f{};SIZE_T got{};
+        const bool ok=ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(at+0x28),&value,4,&got) && got==4 &&
+            ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(at+0x2c),&f,4,&got) && got==4;
+        return ok?"cvarget "+name+" int="+std::to_string(value)+" float="+std::to_string(f):"cvarget "+name+" read failed";
+    }
+    if(verb=="cvarf") { // v1402: set a cvar from a float (int slot = truncated)
+        std::string name;float f{};if(!(in>>name>>f)) return "usage: cvarf <name> <float>";
+        const auto at=find_cvar(name);if(!at) return "cvar not found: "+name;
+        const int value=static_cast<int>(f);SIZE_T written{};
+        const bool ok=WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x28),&value,4,&written) && written==4 &&
+            WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at+0x2c),&f,4,&written) && written==4;
+        return "cvarf "+name+"="+std::to_string(f)+(ok?" ok":" write failed");
+    }
     if(verb=="cvar") {
         std::string name;int value{};if(!(in>>name>>value)) return "usage: cvar <name> <int>";
         const auto at=find_cvar(name);if(!at) return "cvar not found: "+name;

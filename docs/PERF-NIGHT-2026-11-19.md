@@ -142,7 +142,13 @@ Measured after Steam was back (04:08-04:55), all in the sim on this PC:
   (SHADOWS_DYNAMIC 1.9, SHADOWS_WORLD 1.0, casters/prepare ~0.8; sun cascades ~2.0 of it), GATHER_DYN_MODELS 1.0, DEPTHPASS 0.7,
   FORWARD_WORLD 0.7, Iggy UI 0.55, GATHER_UMBRA 0.5, FORWARD_DYNAMIC 0.5, SORT 0.4. Job items total ~2.0 ms on the main thread and
   ~10 ms across the five workers (each ~50 % busy); the main thread's critical path is the engine's own serial work.
-- `jobs_numThreads` 6/10/11 in the config: the busy thread count stays 7 (the setting is not applied) and seven runs show no effect.
+- `jobs_numThreads` 6/10/11 in the config: the busy thread count stays 7 and seven runs show no effect; v1402's `cvarget` shows why:
+  it is not a cvar of this build ("cvar not found").
+- Shadow cvars set LIVE through the mod's command channel (v1402 `cvar`/`cvarf`, within-run A/B against a control run that drifts
+  -0.22 ms p50 / -0.73 ms p90 by itself between the first and the second half): `r_skipShadowModelSort 1` -0.11 / -0.38,
+  `r_shadowSpotAndOmniPartialUpdateDynaSqrDistanceThreshold 144 -> 16` (time-slice local dynamic shadows from 4 m instead of 12 m)
+  -0.11 / -0.24, `r_shadowCullDistance 25 -> 12` -0.22 / -0.46: all inside the control's drift, no effect. Defaults read live:
+  cull distance 25, sun cascades 3, the engine's own shadow cache 12 slices, partial-update distance 12 m.
 - `r_shadowParallelSliceCnt 2` and `r_shadowCullDistance 5`: shadow CPU 3.8 ms vs 3.6-3.9 baseline, frame time within the baseline
   spread (9.54-10.05 ms): no lever.
 - Static shadow cache live checks (observe-only prototype): dynamic-shadow lists execute BEFORE the world lists in every frame (the
@@ -160,7 +166,7 @@ Measured after Steam was back (04:08-04:55), all in the sim on this PC:
 | 2B.1 / 2B.2 second-view CPU | Researched: no-go |
 | 2B.3 mod hooks on the main thread | Done: memory-check cache, `canted_fov` memo (~2 ms -> ~1 ms of mod work on that thread) |
 | 2B.4 XR submit off the render thread | Not done: the hook is ~0.85 ms and the runtimes call into the app's D3D11 device in xrEndFrame; risky without the headset |
-| 2C game thread / job count | Measured per pass; `jobs_numThreads` not applied by the engine; no further lever found |
+| 2C game thread / job count | Measured per pass; `jobs_numThreads` is not a cvar of this build; shadow cvars set live: no effect; no further settings lever |
 | 3.1 automatic performance mode | Advisor done (v1399): the session reports `gpu_bound` / `cpu_bound`; the mode is chosen at session start |
 | 3.2 performance-mode cost | 8 warp dumps captured in the sim (05:00); per-stage GPU timing on the RTX 5070 (replay `STALE_REPLAY_HW`): decide 0.38, resolve 0.29-0.34, splat 0.27, crack+copies 0.27, motion 0.19, scatter 0.16, repair 0.09-0.16, fill 0.07-0.11 ms; total ~1.9 ms. Fill bound (c): -0.02 ms, opt-in `afw2-fill-bound` (v1400). Motion tiles (b): Repair, Origins and ScatterWrite only on the 8x8 tiles with motion; byte-identical on all 8 dumps, -0.11 ms in the replay and 1.91 -> 1.82 ms in the game (v1401, kill switch `no-afw2-motion-tiles`). Next: split Decide (0.38 ms) and Repair's vote loop. Canted views (d) are not in the dumps. |
 | 4.1 governor | GPU-bound gate done (v1398), opt-in |

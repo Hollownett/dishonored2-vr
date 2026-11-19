@@ -216,6 +216,7 @@ def main():
     ap.add_argument("--sample-delay", type=int, default=15, help="seconds of gameplay before sampling")
     ap.add_argument("--during", help="a tool run once at --sample-delay into gameplay, e.g. 'tools/stack_callers.py {pid} 6'; output in during.txt")
     ap.add_argument("--out", default=str(ART / "perf-night"))
+    ap.add_argument("--command", action="append", default=[], help="'T LINE': write LINE to artifacts/vr-command.txt T seconds into gameplay (mod test commands, e.g. '30 cvar r_x 1')")
     ap.add_argument("--game-cvar", action="append", default=[], help="NAME=VALUE appended to dishonored2Config.cfg for this run (restored after)")
     ap.add_argument("--autocontinue", action="store_true", help="also arm the proxy's Enter presses (they repeat while it cannot read a >64 KiB status)")
     a = ap.parse_args()
@@ -317,6 +318,7 @@ def main():
         out("session started")
         gameplay_at = None
         sampled = False
+        pending_commands = list(a.command)
         deadline = time.time() + a.seconds + 150
         while time.time() < deadline:
             text = proxy_log()
@@ -333,6 +335,14 @@ def main():
                 (run / "threads.txt").write_text(res.stdout + "\n" + res.stderr, encoding="utf-8")
                 sampled = True
                 out("sampling done")
+            if gameplay_at:
+                for c in list(pending_commands):
+                    when, _, line = c.partition(" ")
+                    if time.time() - gameplay_at >= float(when):
+                        with open(ART / "vr-command.txt", "a", encoding="utf-8") as f:
+                            f.write(line + chr(10))
+                        out(f"command at +{when}s: {line}")
+                        pending_commands.remove(c)
             if a.during and gameplay_at and not (run / "during.txt").exists() and time.time() - gameplay_at >= a.sample_delay:
                 cmd = [sys.executable, *[str(ROOT / x) if x.startswith("tools/") else x.replace("{pid}", str(pid)) for x in a.during.split()]]
                 out("during: " + " ".join(cmd))
