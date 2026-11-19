@@ -96,7 +96,8 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
   account picker. Steam's own auto-login account is the save owner (the account signed in all night), so at 04:08 I restarted it with
   `-login <that account>` (its remembered token, no password) and it signed in; nothing else was changed. The saves and
   `dishonored2Config.cfg` match the last verified backup byte for byte after every run.
-- **v1399 is installed** in `build/` (the dinput8 proxy loads it), with `artifacts/repair-v1399-test-candidate.json` for the
+- **v1400 is installed** in `build/` (v1399 plus performance-mode warp changes, below), with
+  `artifacts/repair-v1400-test-candidate.json`. v1399: (the dinput8 proxy loads it), with `artifacts/repair-v1399-test-candidate.json` for the
   developer-mode launcher (`launcher/dist`; restart it or press Re-check). Sim at your VD setup (2621x2822, DLSS Quality): work p50
   10.43 / p90 11.84 ms, 0 DLSS failures, 0 exceptions (v1398: 10.14 / 11.61, v1393: 15.06 / 15.82). Earlier builds: v1393 in
   `build/night/installed/`, v1394-v1398 in `build/night/`; switch with `sh build/night/use.sh <version>` (Git Bash); the proxy needs
@@ -160,7 +161,7 @@ Measured after Steam was back (04:08-04:55), all in the sim on this PC:
 | 2B.4 XR submit off the render thread | Not done: the hook is ~0.85 ms and the runtimes call into the app's D3D11 device in xrEndFrame; risky without the headset |
 | 2C game thread / job count | Measured per pass; `jobs_numThreads` not applied by the engine; no further lever found |
 | 3.1 automatic performance mode | Advisor done (v1399): the session reports `gpu_bound` / `cpu_bound`; the mode is chosen at session start |
-| 3.2 performance-mode quality | Researched; its warp dumps are not on this PC (old Linux rig) and canted views do not run in the sim |
+| 3.2 performance-mode cost | 8 warp dumps captured in the sim (05:00); per-stage GPU timing on the RTX 5070 (replay `STALE_REPLAY_HW`): decide 0.38, resolve 0.29-0.34, splat 0.27, crack+copies 0.27, motion 0.19, scatter 0.16, repair 0.09-0.16, fill 0.07-0.11 ms; total ~1.9 ms. Fill bound (c): -0.02 ms, opt-in `afw2-fill-bound` (v1400). Motion tiles (b): in progress at the time of writing (section 9). Canted views (d) are not in the dumps. |
 | 4.1 governor | GPU-bound gate done (v1398), opt-in |
 | 4.2 defaults | Done: DLSS Quality on RTX (v1398) |
 | 4.3 render-size cap | Done, opt-in `render-pixel-cap` (v1399), sim-verified |
