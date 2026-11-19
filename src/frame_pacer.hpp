@@ -37,19 +37,27 @@ struct FramePacer {
     static constexpr unsigned work_window=32;
     std::array<std::int64_t,work_window> work_{};unsigned work_next_{},work_count_{};
     // Enter/leave thresholds in tenths of a period, integers so the comparison cannot round: enter at >1.4, leave at <1.1.
-    static constexpr std::int64_t tenths=10,lock_tenths=14,unlock_tenths=11;
+    // Spacewarp (docs/SPACEWARP-PLAN-2026-11-19.md section 10) sets its own: half rate as soon as the full rate cannot be held, because
+    // the frames in between are then generated instead of missed; 0/0 holds half rate.
+    static constexpr std::int64_t tenths=10,default_lock_tenths=14,default_unlock_tenths=11;
+    std::int64_t lock_tenths{default_lock_tenths},unlock_tenths{default_unlock_tenths};
     // Before xrWaitFrame: the time to sleep until (0: none).
     std::int64_t wake(std::int64_t now) const noexcept {return active && k>1 && target>now && target-now<=k*base?target:0;}
     // The display period poses are predicted with: the locked cadence while pacing, else the runtime's.
     std::int64_t period(std::int64_t runtime_period) const noexcept {return active && base?k*base:runtime_period;}
     void add_work(std::int64_t ns) noexcept {work_[work_next_]=ns;work_next_=(work_next_+1)%work_window;if(work_count_<work_window) ++work_count_;}
     // Median of the samples collected so far (0 when none). A copy of at most 32 numbers: once per frame.
-    std::int64_t work_median() const noexcept {
+    std::int64_t work_median() const noexcept {return work_percentile(50);}
+    std::int64_t work_percentile(unsigned percent) const noexcept {
         if(!work_count_) return 0;
         std::array<std::int64_t,work_window> copy=work_;
-        std::nth_element(copy.begin(),copy.begin()+work_count_/2,copy.begin()+work_count_);
-        return copy[work_count_/2];
+        const unsigned at=std::min(work_count_-1,work_count_*std::min(percent,100u)/100u);
+        std::nth_element(copy.begin(),copy.begin()+at,copy.begin()+work_count_);
+        return copy[at];
     }
+    // Which percentile of the work window the lock/unlock rule reads: the median by default; spacewarp reads the 80th (the frames
+    // that miss their slot are the slow ones, and a half-rate lock there costs no real frames).
+    unsigned decide_percent{50};
     unsigned locks{},unlocks{},paced_frames{},frames{}; // status: how often the cadence moved, and how much of the session it paced
     unsigned held_frames{}; // status: frames whose rule asked for a change the hold deferred
     // The display refresh rate changed (refresh_rate_policy.hpp): the shortest period seen no longer applies. Restart the period at the
@@ -63,7 +71,8 @@ struct FramePacer {
     // After xrWaitFrame: ret = its return time; idle = this frame's pacing sleep + xrWaitFrame wait.
     void update(std::int64_t ret,std::int64_t idle,std::int64_t display,std::int64_t runtime_period,bool enabled) noexcept {
         if(runtime_period>0 && runtime_period>min_period && (!base || runtime_period<base)) base=runtime_period;
-        if(!enabled || !base) {const auto b=base;const auto hold=min_hold_ns;const auto floor=min_period;*this=FramePacer{};base=b;min_hold_ns=hold;min_period=floor;return;}
+        if(!enabled || !base) {const auto b=base;const auto hold=min_hold_ns;const auto floor=min_period;const auto lt=lock_tenths,ut=unlock_tenths;const auto dp=decide_percent;
+            *this=FramePacer{};base=b;min_hold_ns=hold;min_period=floor;lock_tenths=lt;unlock_tenths=ut;decide_percent=dp;return;}
         active=true;++frames;
         const bool held=changed_at && ret-changed_at<min_hold_ns;
         const int k_before=k;
@@ -84,7 +93,7 @@ struct FramePacer {
                 want_lock=k==1 && score>=60;want_unlock=k==2 && score<=12;
             }
         } else if(work_count_>=work_window/2) { // half a window is enough to judge a scene change (16 frames = 0.35 s at 45 Hz)
-            const auto median=work_median();
+            const auto median=work_percentile(decide_percent);
             want_lock=k==1 && median*tenths>base*lock_tenths;
             want_unlock=k==2 && median*tenths<base*unlock_tenths;
         }

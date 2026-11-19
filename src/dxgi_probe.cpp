@@ -2668,6 +2668,11 @@ static d2vr::AlternateMismatch alt_mismatch_run; // consecutive plan/observation
 static d2vr::PendingViews<XrView> alt_pending;
 static d2vr::PendingViews<d2vr::WarpCamera> alt_cameras; // v796: the game camera of each recorded view and companion (stale-eye parallax)
 static d2vr::PendingViews<d2vr::WarpPlaySpace> alt_play; // v1184: the play space of each, recorded with it (warp_play_space.hpp)
+// Spacewarp (docs/SPACEWARP-PLAN-2026-11-19.md section 10): knob build/spacewarp (text "always": hold half rate). True stereo only (off
+// in performance mode); needs the FSR/DLSS per-eye depth copies. Setup records both eyes' game cameras into alt_cameras, the Present
+// hands them and the depth copies to GameXr, which generates the frames in between.
+static bool spacewarp_knob=false,spacewarp_always_knob=false;
+static double spacewarp_palm_reach_knob=0;static bool spacewarp_no_held_far_knob=false,spacewarp_tint_held_knob=false; // v1418 diagnostics (GameXr fields)
 static bool stale_afw2_knob=false; // v1184: build/afw2; v1216: default on in performance mode, build/no-afw2
 static bool rig_forensics_knob=false; // v1216: build/rig-forensics (RigMask draw-time probe, rig-dump-*.bin, image-skin log; off even with diagnostics)
 static std::array<d2vr::WorldTrackedPose,2> warp_grips{};static unsigned warp_grip_bits{};
@@ -6856,6 +6861,14 @@ static std::string run_test_command(const std::string& line) {
         std::ostringstream o;o<<"psvr2 enabled "<<p.enabled.load()<<" runtime \""<<(game_xr?game_xr->xr_runtime_name:std::string())<<"\" system \""<<(game_xr?game_xr->xr_system_name:std::string())
             <<"\" helper "<<p.helper_running()<<" status "<<p.status()<<" left "<<d2vr::psvr2::name(p.last()[0])<<" right "<<d2vr::psvr2::name(p.last()[1])<<" changes "<<p.profile_changes.load();
         return o.str();
+    }
+    if(verb=="spacewarp") { // spacewarp capture N: N triples of eye 0 (real, generated from it, next real) as sw-capture-NN-*.rgba (afw_capture_dir)
+        std::string v;in>>v;
+        if(v=="capture" && game_xr) {
+            int n=4;in>>n;if(game_xr->afw_capture_dir.empty()) game_xr->afw_capture_dir=output_directory.always().wstring();
+            game_xr->spacewarp_capture_requested=std::clamp(n,1,32);
+        }
+        return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
     if(verb=="afw") { // AFW renderer: afw [on|off|status] | afw tune <threshold|jitter|gap|reset> <value>
         std::string v;in>>v;auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();
@@ -11732,6 +11745,8 @@ void prepare_head_view(void* view) noexcept {
                 XrView recorded=game_xr->rendered_view(sync_eye,fov,(mono || cant)?&rendered_orientation:nullptr);
                 if(mono) recorded.pose.position=xr_eye.pose.position;
                 alt_pending.record(alt_display,static_cast<int>(sync_eye),recorded,game_xr->pose_epoch(),game_xr->tracking_prediction_time(),game_xr->locate_cpu_time());
+                if(spacewarp_knob && !mono && !authored_camera) // spacewarp: the game camera this eye renders (and the drawn hands), for its frame in between
+                    alt_cameras.record(alt_display,static_cast<int>(sync_eye),{world,(*optical)[10],(*optical)[11],warp_grips,warp_grip_bits,warp_palms},game_xr->pose_epoch(),0,0);
                 if(alt_pose_trace_on()) alt_pose_trace_setup(alt_display,static_cast<int>(sync_eye),recorded,position,basis);
             }
         } else if(mono) { // the one image serves both projection layers: same centre pose, same (union) FOV, so rendered_mask_ reaches 3
@@ -14125,6 +14140,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         if((alternate_on() || layer_pose_sync_on()) && pair_ready && alt_slot && game_xr) // the promoted views are this Present's rendered views: the layer of each refreshed eye carries them
                             for(UINT slot_eye=0;slot_eye<2;++slot_eye) if(alt_slot->mask&(1u<<slot_eye))
                                 game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);
+                        if(game_xr) {game_xr->spacewarp_enabled=spacewarp_knob && !alternate_on();game_xr->spacewarp_always=spacewarp_always_knob;
+                            game_xr->spacewarp_palm_reach=spacewarp_palm_reach_knob;game_xr->spacewarp_held_far=!spacewarp_no_held_far_knob;game_xr->spacewarp_tint_held=spacewarp_tint_held_knob;}
+                        if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
+                            if(const auto cameras=alt_cameras.take(number))
+                                for(UINT e=0;e<2;++e) if(cameras->mask&(1u<<e)) game_xr->record_rendered_camera(e,cameras->view[e],number);
+                            for(UINT e=0;e<2;++e) {UINT dw{},dh{};if(const auto depth=fsr_taa.eye_depth(static_cast<int>(e),dw,dh)) game_xr->stale_eye_depth(e,depth.Get(),dw,dh,number);}
+                        }
                         if(alternate_on() && pair_ready && alt_slot && game_xr && alt_fresh>=0) { // v792: the stale eye's view at the fresh eye's Setup
                             const auto other=static_cast<UINT>(1-alt_fresh);
                             if(alt_slot->companion_mask&(1u<<other)) game_xr->stale_eye_target(other,alt_slot->companion[other],number);
@@ -15210,7 +15232,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(!diag_status) {
                                     std::ostringstream brief;
                                     brief << "{\"gameplay\":" << (game_logic_mask()==2?"true":"false") << ",\"logic_mask\":" << published_logic.load()
-                                          << ",\"game_layers_submitted\":" << xr_submitted << ",\"diagnostics\":false}\n";
+                                          << ",\"game_layers_submitted\":" << xr_submitted
+                                          << ",\"spacewarp\":" << (game_xr && spacewarp_knob?game_xr->spacewarp_brief_json():std::string("null")) // headset evidence without diagnostics
+                                          << ",\"diagnostics\":false}\n";
                                     status_writer.post(output_directory.always()/L"xr-live-status.json",brief.str(),false,&status_file_failed);
                                 } else {
                                 // The HUD census keeps its findings on disk while playing (a closed game never runs disable()).
@@ -17871,6 +17895,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                      else if(mode.rfind("turn",0)==0) {double deg=.5;if(mode.size()>5 && mode[4]=='=') try {deg=std::stod(mode.substr(5));} catch(...) {}
                          stale_warp_dump_knob.turn_deg=deg>=0 && deg<=180?deg:.5;} // v1177
                  }}}
+            { // spacewarp (plan section 10): the file's text "always" holds half rate; empty or "auto" switches with the frame's work
+                std::ifstream knob(root/L"build"/L"spacewarp");spacewarp_knob=static_cast<bool>(knob);std::string mode;
+                spacewarp_always_knob=spacewarp_knob && (knob>>mode) && mode=="always";
+                // v1418 diagnostics: the palm reach in metres (0.02..0.5; else the default), the held-far-part rule off, its pixels tinted
+                std::ifstream reach(root/L"build"/L"spacewarp-palm-reach");double metres=0;
+                spacewarp_palm_reach_knob=reach && (reach>>metres) && metres>=.02 && metres<=.5?metres:0;
+                spacewarp_no_held_far_knob=fs::exists(root/L"build"/L"spacewarp-no-held-far");
+                spacewarp_tint_held_knob=fs::exists(root/L"build"/L"spacewarp-tint-held");
+            }
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
             stale_eye_warp_knob=!fs::exists(root/L"build"/L"no-stale-eye-warp"); // v792: warp the stale eye to the fresh eye's head pose
             stale_eye_motion_knob=!fs::exists(root/L"build"/L"no-stale-eye-motion"); // v1151: motion textures + mover rules (design 2026-11-11)

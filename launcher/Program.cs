@@ -100,7 +100,8 @@ sealed class MainForm : Form
 
     // settings
     readonly OptionList options = new();
-    readonly Option res, aa, perf, hud, turn, snap, smooth, mirror, sharp, hint, crosshair, recenter, cutscenes;
+    readonly Option res, aa, perf, spacewarp, hud, turn, snap, smooth, mirror, sharp, hint, crosshair, recenter, cutscenes;
+    int loadedPerf, loadedSpacewarp;  // the Performance mode / Spacewarp values shown after the last load: on Save the one the user changed wins
     readonly ArtButton save = new("Save", Look.Primary), reload = new("Reload", Look.Secondary);
     string settingsMsg = ""; Color settingsMsgColor = Ui.Dim;
     // settings: the Features view (default-on features, each switchable; changes are written at once)
@@ -113,6 +114,7 @@ sealed class MainForm : Form
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
     static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 200% + SMAA - maximum clarity", 11);
+    const string SpacewarpHelp = "When the game cannot hold the headset's frame rate, it runs at half rate and the mod generates every frame in between from the last real one (its depth, your head and controller motion, your walking and turning). Auto switches when a frame takes longer than one display period; Always holds half rate. Needs an FSR or DLSS anti-aliasing mode and Performance mode Off. Turn off Virtual Desktop's Synchronous Spacewarp. Experimental, not yet tested in a headset.";
     const string PerfHelp = "Draws one eye per frame for a higher frame rate. Note: it can show some visual artifacts, mostly around moving hands and objects. On with AFW rebuilds the other eye with PureDark's PDAFWPlugin.dll (your own copy, not included: AFW plugin button below) and needs an FSR or DLSS anti-aliasing mode; without the plugin it uses the built-in warp.";
     const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLSS Quality on NVIDIA RTX with DLSS (DLAA is sharper and slower), FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
     readonly List<Feature> shownFeatures = new();  // the Features page rows, in order (main-settings features have none)
@@ -162,7 +164,8 @@ sealed class MainForm : Form
         { IsSlider = true, Min = 50, Max = 200, Step = 5, Page = 25, Format = v => (v / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "x" };
         aa = new Option("Anti-aliasing", AaHelp, AaBase);
         RefreshDlssChoices();
-        perf = new Option("Performance mode", PerfHelp, ("Off", 0), ("On (built-in warp)", 1), ("On with AFW (PureDark plugin)", 2));  // alternate-eye (+ afw for 2), written on Save through the Features path
+        perf = new Option("Performance mode", PerfHelp, ("Off", 0), ("On (built-in warp)", 1), ("On with AFW (PureDark plugin)", 2));  // alternate-eye (+ afw for 2) through the Features path and the saved renderer, written on Save
+        spacewarp = new Option("Spacewarp", SpacewarpHelp, ("Off", 0), ("Auto", 1), ("Always (half rate)", 2));  // build\spacewarp: none / empty / "always", written on Save
         sharp = new Option("Sharpening", "Contrast-adaptive sharpening after upscaling.", ("Off", 0.0), ("Low", .25), ("Medium", .5), ("High", .75), ("Max", 1.0));
         hud = new Option("HUD size", "How large the game HUD is drawn around the centre of your view.", ("55% (centre)", 55), ("65% (default)", 65), ("75%", 75), ("85%", 85), ("100% (game layout)", 100), ("125%", 125), ("150%", 150), ("200%", 200));
         mirror = new Option("Monitor view", "What the desktop window mirrors while you play in VR.", ("Right eye", 0), ("Left eye", 1), ("Both eyes", 2), ("Off (fastest)", 3));
@@ -173,7 +176,7 @@ sealed class MainForm : Form
         turn = new Option("Turning", "Right stick turning style. Snap is the comfort-friendly choice.", ("Native (game default)", 0), ("Snap turn", 1), ("Smooth turn", 2));
         snap = new Option("Snap angle", "Degrees per snap step (used by Snap turn).", ("30 degrees", 30.0), ("45 degrees", 45.0), ("90 degrees", 90.0)) { Active = () => Equals(Val<int>(turn), 1) };
         smooth = new Option("Smooth speed", "Turn speed for Smooth turn.", ("45 deg/s (slow)", 45.0), ("90 deg/s", 90.0), ("120 deg/s (fast)", 120.0)) { Active = () => Equals(Val<int>(turn), 2) };
-        options.Rows.AddRange(new object[] { "DISPLAY", res, aa, perf, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth, "CUTSCENES", recenter, cutscenes });
+        options.Rows.AddRange(new object[] { "DISPLAY", res, aa, perf, spacewarp, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth, "CUTSCENES", recenter, cutscenes });
         options.Selected = 1;
         options.SelectionChanged += () => pages[1].Invalidate(new Rectangle(0, options.Bottom, pages[1].Width, pages[1].Height - options.Bottom));
         save.Click += (_, _) => SaveSettings(); reload.Click += (_, _) => LoadSettings();
@@ -976,9 +979,18 @@ sealed class MainForm : Form
             var st = Features.State(FeatureBuild, features);
             for (int i = 0; i < shownFeatures.Count; i++) featList.Rows[i].SetSilently(st[shownFeatures[i].Id].On);
             if (!keepPerf && features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf)
-            {   // AFW (2) = performance mode + the afw-renderer row (buildfw)
+            {   // AFW (2) = performance mode + the afw-renderer row (build\afw). With those knobs off, the renderer the VR menu saved: 1 or 2
+                // also starts performance mode (dxgi_probe.cpp), so the row shows what the game will run.
                 bool afw = features.FirstOrDefault(f => f.Id == "afw-renderer") is { } af && st[af.Id].On;
-                Select(perf, st[pf.Id].On ? (afw ? 2 : 1) : 0, "");
+                Select(perf, st[pf.Id].On ? (afw ? 2 : 1) : prefs.Renderer, "");
+                loadedPerf = Val<int>(perf);
+            }
+            if (!keepPerf)
+            {   // build\spacewarp: absent = Off, the text "always" = Always, anything else = Auto
+                var file = env.P("build", "spacewarp");
+                string text = ""; try { if (File.Exists(file)) text = File.ReadAllText(file).Trim(); } catch (IOException) { }
+                Select(spacewarp, !File.Exists(file) ? 0 : text == "always" ? 2 : 1, "");
+                loadedSpacewarp = Val<int>(spacewarp);
             }
             RefreshAaNote();
             if (showFeatures) SetSettingsMsg("Each switch is saved at once. It applies the next time VR starts.", Ui.Dim);
@@ -1053,7 +1065,12 @@ sealed class MainForm : Form
     {
         base.OnActivated(e);
         if (options == null || res == null || crosshair == null || recenter == null || cutscenes == null) return;
-        try { var d = LoadWithDefaultAa(); ApplyToForm(d, prefs); prefs = d; }
+        try
+        {
+            var d = LoadWithDefaultAa(); ApplyToForm(d, prefs); prefs = d;
+            // Performance mode (the saved renderer and its knobs) and Spacewarp follow too, unless edited here and not yet saved
+            if (perf != null && spacewarp != null && Val<int>(perf) == loadedPerf && Val<int>(spacewarp) == loadedSpacewarp) LoadFeatures();
+        }
         catch (Exception ex) { SetSettingsMsg(ex.Message, Ui.Bad); }
     }
 
@@ -1072,6 +1089,7 @@ sealed class MainForm : Form
         e.SnapDeg = Val<double>(snap); e.SmoothDps = Val<double>(smooth); e.Mirror = Val<int>(mirror); e.Sharpness = Val<double>(sharp);
         e.Hint = Val<int>(hint); e.Crosshair = Val<int>(crosshair);
         e.ScriptedRecenter = Val<int>(recenter); e.CutsceneMode = Val<string>(cutscenes);
+        e.Renderer = Val<int>(perf);  // the saved renderer follows Performance mode (it starts performance mode on its own)
         return e;
     }
 
@@ -1079,17 +1097,31 @@ sealed class MainForm : Form
     {
         try
         {
+            // Spacewarp needs both eyes every frame; performance mode draws one. If both are on, the row changed since the last load wins
+            // (Spacewarp when both or neither changed).
+            int perfChoice = Val<int>(perf), swChoice = Val<int>(spacewarp); string note = "";
+            if (perfChoice >= 1 && swChoice >= 1)
+            {
+                if (swChoice != loadedSpacewarp || perfChoice == loadedPerf) { Select(perf, 0, ""); perfChoice = 0; note = " Performance mode turned off: spacewarp needs both eyes drawn every frame."; }
+                else { Select(spacewarp, 0, ""); swChoice = 0; note = " Spacewarp turned off: it does not run in performance mode."; }
+            }
             var merged = Prefs.Merge(prefs, ReadForm(), Prefs.Load(env.SettingsFile));
             merged.Save(env.SettingsFile);
             prefs = merged;
             ApplyToForm(merged, null);
-            var perfChoice = Val<int>(perf);
+            if (features.FirstOrDefault(f => f.Id == "spacewarp") is { } sw)
+            {
+                if (Features.State(FeatureBuild, features)[sw.Id].On != (swChoice >= 1)) Features.Set(FeatureBuild, sw, swChoice >= 1);
+                if (swChoice >= 1) File.WriteAllText(env.P("build", "spacewarp"), swChoice == 2 ? "always" : "");
+            }
+            if (swChoice >= 1 && merged.TemporalAa is < 2 or > 8) note += " Spacewarp needs an FSR or DLSS anti-aliasing mode; with the current one it does nothing.";
+            loadedPerf = perfChoice; loadedSpacewarp = swChoice;
             if (features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf && Features.State(FeatureBuild, features)[pf.Id].On != (perfChoice >= 1))
                 Features.Set(FeatureBuild, pf, perfChoice >= 1);
             if (features.FirstOrDefault(f => f.Id == "afw-renderer") is { } af && Features.State(FeatureBuild, features)[af.Id].On != (perfChoice == 2))
                 Features.Set(FeatureBuild, af, perfChoice == 2);
             if (perfChoice == 2 && AfwProvider.Resolve(env.Root) == null) { PickAfwPlugin(); return; } // AFW without a plugin: ask for it now
-            SetSettingsMsg("Saved. " + (Env.Game() != null ? "Restart VR (Stop, then Launch) to apply." : "Applies on next launch."), Ui.Good);
+            SetSettingsMsg("Saved." + note + " " + (Env.Game() != null ? "Restart VR (Stop, then Launch) to apply." : "Applies on next launch."), Ui.Good);
         }
         catch (Exception ex) { SetSettingsMsg("Not saved: " + ex.Message, Ui.Bad); }
     }

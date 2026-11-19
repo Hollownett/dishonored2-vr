@@ -262,3 +262,149 @@ python tools/win_perf_sim.py --name sw0a-walk2 --scenario head_turn_walk --disab
 python tools/win_perf_sim.py --name sw0a-run --scenario run_hands --disable afw --knob diagnostics --knob "stale-warp-dump=0 2 8 full camera=20"
 python tools/win_perf_sim.py --name sw0a-sword --scenario sword_sweep --disable afw --knob diagnostics --knob "stale-warp-dump=0 1.5 8 full moving=20"
 ```
+
+## 10. Real spacewarp, first version (v1416, 2026-11-19)
+
+**Design change: no XR thread.** Section 3's XR thread was replaced by a smaller design that the code map (session, swapchains, overlays:
+all on the game's Present thread and device) and the timing allow. At half rate the main thread already idles ~10 ms per game frame
+in the pacer, and right after a real frame is submitted the GPU is free. So, inside `GameXr::present()`:
+
+1. After the real frame's `xrEndFrame`, `generate_spacewarp_` builds the next slot's frame from it: both eyes' final images (kept by
+   `keep_spacewarp_eye_` before their release, overlays included so nothing drawn into the eye flickers), the per-eye depth copies, the
+   game cameras. It acquires each eye swapchain's next image, draws the generated eye into it (`SpacewarpPass`) and releases it, and keeps
+   the layers: the generated projection plus the real frame's quads (OpenXR shows a quad's last released image).
+2. At the next Present, before the pacing sleep, `submit_spacewarp_` waits for the in-between slot and submits that frame. If the
+   runtime is already at the real frame's slot, or the main thread came back too late (less than half a period before the real frame's
+   wake), the generated frame is dropped (counted `late`) and that wait serves the real frame.
+
+No second device, thread or shared texture; every overlay path is unchanged. The cost of this simplicity: a generated frame is on time
+only when the game's frame work leaves the main thread back in the hook before its slot (work up to about one period plus the runtime's
+slack). The XR thread stays the fallback if headset tests show too many late frames.
+
+**Pieces.**
+- `src/spacewarp_pass.hpp`: the GPU pass (D3D11 compute plus one full-screen pixel shader). The rules are 0a's: each hand by its rigid
+  motion, the rest of the rig by the play space's step, world movers by the motion texture, the still world by parallax, the sky by
+  rotation; then Splat (depth test as `InterlockedMax` on 1/z), Crack, Fill (the farthest of the first surfaces in 8 directions), and
+  Resolve (cell depth back into the source image, bilinear in linear light, sRGB encoding for a UNORM target). Without a rig mask (true
+  stereo) the rig is what lies within a drawn palm's reach (0.22 m) or nearer than 0.5 m. Lab: `tests/spacewarp_pass_check.cpp` (WARP,
+  13 checks).
+- `src/spacewarp_math.hpp`: the cameras. Play space O = S V^-1 (game camera S, tracked view V), locomotion = the change of O over the last
+  three real frames scaled to one slot, head and grips = their tracked change from the image's own predicted time to one slot later. In
+  source camera coordinates: target = L (V^-1 dV V), hand = L (V^-1 dG V), rest = L. Lab: `tests/spacewarp_math_check.cpp`.
+- `src/game_xr.hpp`: keep / generate / submit as above. Pacer thresholds while spacewarp is on: half rate above 1.0 period of work,
+  full rate below 0.8 (`FramePacer::lock_tenths`/`unlock_tenths`, defaults unchanged otherwise); the knob text `always` holds half rate.
+  Status under `pacer.spacewarp`: generated, submitted, late, unusable (+ `skip` reason), failures, cuts, `play_mismatch_mm` (the two
+  eyes' play spaces apart: a check of the camera/view pairing), not_kept (+ why), presents, gameplay_presents, gated, captures.
+- `src/dxgi_probe.cpp`: knob `build/spacewarp` (true stereo only; ignored in performance mode); Setup records both eyes' game cameras
+  in true stereo; Present hands cameras and FSR/DLSS depth copies to GameXr; console `spacewarp capture N` (diagnostics) saves eye 0
+  triples (real, generated, next real) for `tools/spacewarp_capture_sheet.py` and `tools/spacewarp_capture_shift.py`.
+- Launcher: feature row `spacewarp` in `tools/default_features.json` (off by default, shown only when the DLL contains the knob).
+
+**Sim results** (v1416, `build/spacewarp` = `always`, performance mode and `afw` moved aside, saves verified unchanged, v1413 put back
+after every run):
+- Every eligible gameplay frame got a generated frame: e.g. 223 generated of 282 gameplay Presents, the rest accounted for (47 without
+  an eye pair yet, 11 missing input, 1 authored camera); 8-11 % of generated frames came back late; 0 failures, 0 runtime rejections.
+- `play_mismatch_mm` 0.001-0.005: both eyes give the same play space, so the camera and view conventions hold.
+- Walking and running straight (`run_hands`), phase correlation over 256 px tiles: the generated frame moves along the real motion
+  (perpendicular part 0.01-0.03 of it) by 0.19-0.68 of the next real step (expected 0.5) with a three-frame average velocity. The
+  scatter follows the game's own uneven steps and the run's acceleration (the step doubled within two frames). The last step alone gave
+  0.33-0.91.
+- The head's own change cannot be checked in the sim: the simulated runtime returns the current pose for any requested time. On a real
+  runtime it comes from the runtime's prediction, and the compositor's reprojection corrects head rotation anyway.
+- Found on the way: at half rate the real images' head poses are predicted about two slots past their display slot (the locate horizon,
+  `locate_periods` x the locked period). The generated frame now predicts one slot after the image's own time, so it never turns back
+  between two real frames.
+
+**Not known yet (headset):** whether generated frames land in their slots on VDXR and SteamVR (`late` share), how they look and feel,
+the pass's GPU time on the RTX 5070 (estimate ~1 ms per eye), and false "rig" near walls (anything within 0.5 m follows the player).
+NPCs and other movers are not extrapolated in true stereo (no motion texture there yet), and the eye overlays (reticle, wheel) are warped
+with the scene instead of being redrawn.
+
+**To try it in the headset:** the launcher (launcher/dist, v1416 embedded) has a **Spacewarp** row on its Settings page, under Performance mode: Off / Auto / Always (half rate), written to `build/spacewarp` on Save. Spacewarp and Performance mode exclude each other: on Save the row changed last wins and the other is turned off. Use an FSR or DLSS anti-aliasing mode (Save warns otherwise) and turn off Virtual Desktop's SSW. Back: Spacewarp Off, or `build/night/use.sh 1413`.
+
+**Launcher settings fix (same build).** The launcher read and wrote settings-file version 11 while the mod has written version 12 since the AFW merge (v1411: the VR menu's Renderer row). Reading a game-saved file failed, so the form showed defaults, and Save aborted ("Not saved") because it re-reads the file to merge. `launcher/Prefs.cs` now reads and writes version 12 with the renderer. The Performance mode row also writes that renderer and shows it: a saved renderer of 1 or 2 starts performance mode even without `build/alternate-eye` (dxgi_probe.cpp), so the launcher showed Off while the game ran AFW. Launcher tests: 199 pass (the 7 that failed before were stale: version 10/11 expectations, an old default-off list, a locale-dependent size string).
+
+## 11. First headset test and v1417 (2026-11-19)
+
+**Report.** Auto and Always (half rate): doubled images almost all the time; Auto seemed to switch on and off at the wrong places;
+motion felt about as smooth as 90 fps, but Virtual Desktop's frame-rate overlay did not show 90.
+
+**Cause 1: the generated frame used the wrong camera (constant doubling).** The headset eyes are rendered canted (v808: turned,
+symmetric frustum) and resampled to the straight view before submission (`uncant_`). The image in the swapchain and its layer pose are
+the straight view; depth, the game camera S and the tracked view V are the canted render's. v1416 read the swapchain image as if it were
+the canted render and submitted the generated eye with the canted pose and FOV: every generated frame was turned and stretched by the
+cant, so even standing still it differed from the real frame. Shown as real/generated/real alternating at 90 Hz, that is a double image.
+The sim never saw it, because its symmetric default FOV is never canted.
+- Fix (`game_xr.hpp`, `spacewarp_pass.hpp`): each kept eye also keeps its layer (pose Vimg, FOV). The output camera is Vimg moved by
+  the head and the play space, `L V^-1 dV Vimg` in source coordinates, with the layer's FOV; the pass reads colour through Vimg's camera
+  (`colour_camera`, `colour_m` = rotation of `V^-1 Vimg`, `colour_tan`) while depth stays the canted render's; the generated layer is
+  submitted with `dV Vimg` and the layer FOV. Uncanted, Vimg == V and this is v1416.
+- Hole cells: the back-projected point is used wherever the source sees it at that depth (`Seen`: within 2 %); for filled cells only
+  when both the seed and the texel it lands on are still. Otherwise the cell's own source point.
+- Lab: `tests/spacewarp_pass_check.cpp` 15 checks; the new canted case (straight output from a canted source with a colour camera) is
+  exact, and 37 levels off without the colour camera.
+- Sim with the headset's FOV (`build/sim-fov` = `-0.698 0.942 0.768 -0.960`, 1608 eyes uncanted, Always): standing still the generated
+  frame equals the real one, 0.05-0.09 levels apart (|G-R|); 792 generated, 729 submitted, 63 late, 0 failures.
+
+**Cause 2 (probable): the generated images were released early.** v1416 released each generated eye right after drawing it, before
+the generated frame's own `xrEndFrame`. A projection layer names a swapchain, and the runtime shows its last released image. A runtime
+that reads the image when it composes, not when `xrEndFrame` names it, could then show the generated image in the real frame's slot and
+drop a slot, which would also explain a frame counter that does not reach 90. v1417 keeps the generated images acquired until just after
+the generated frame's `xrBeginFrame` (`release_spacewarp_images_`), and releases them in every skip or failure path.
+
+**Auto switching.** Auto now decides on the 80th percentile of the last 32 frames' work instead of the median (the frames that miss
+their slot are the slow ones), and holds each cadence change at least 5 s while spacewarp is on (2 s otherwise). Thresholds unchanged:
+half rate above 1.0 period, full rate below 0.8.
+
+**Evidence from the next headset run.** `artifacts/xr-live-status.json` now always carries `"spacewarp"` (no diagnostics needed):
+`k` (2 = half rate), `work_ms_p50`, `locks`/`unlocks`, `generated`, `submitted`, `late`, `unusable` + `skip`, `failures`,
+`gameplay_presents`, `not_kept` + why, `play_mismatch_mm`. `submitted` close to `generated` and a low `late` share means the generated
+frames reach their slots; if VD's overlay still shows ~45 then, its counter counts only frames whose content it considers new, or VD's
+own SSW is on.
+
+**To test:** launcher/dist (v1417 embedded), Spacewarp Always, then Auto; FSR or DLSS anti-aliasing; Virtual Desktop SSW off.
+
+## 12. Held weapons (v1418, 2026-11-19)
+
+**Report (v1417 headset):** "works quite well"; only weapons double: the tip of the sword, guns and crossbows. The part near the hand is
+fine.
+
+**Cause.** True stereo has no rig mask, so the pass gives a hand's motion only to what lies within its palm's reach (0.22 m). A held
+thing is longer: in the sim dumps with a mask (`D:\d2vr-artifacts\stale-warp-v1415-*`, class 253 held) the held pixels lie 0.22-0.43 m
+from the palm, all ahead of the grip (grip-local forward -0.08..+0.10 m), while the forearm (classes 255/252) lies 0.17-0.33 m behind
+it. Past 0.22 m a blade or barrel was scenery (or, within 0.5 m of the eye, the body's motion), so it stayed behind the moving hand:
+real and generated frames alternated between two places. Performance mode never had this, because its mask marks held draws and
+moves them within 0.45 m.
+
+**Why not the performance-mode mask.** That mask comes from replaying the rig and held draws of the one-view render into a target keyed
+by the scene depth (`rig_mask.hpp`); true stereo renders two views per frame and the replay, the target and the takes are built for one.
+Porting it is engine work. Tested first instead, offline on the dumps' real depth: the image-space walk from a blade texel to its palm
+fails because the palms are often off-screen (the sim's hands are below the view: 0-18 % of the blade found).
+
+**Rule (`spacewarp_pass.hpp` FarHand, `game_xr.hpp` keep_spacewarp_prev_).** A point past its nearest palm's reach and within 0.5 m of
+it, at most 0.12 m behind that hand's grip (the forearm side), is the hand's when the previous real frame of the same eye confirms it:
+its depth there shows a surface where the hand's last step puts the point (drawn grips, world: `S_prev^-1 G_prev G_now^-1 S_now`) and
+not where the point would be had it stood still in the world (`S_prev^-1 S_now`). A test passes within 0.5 % + 3 mm of one of the 2 x 2
+texels around the point (or within their range on one smooth surface). So a wall or a table near the hand is confirmed still and stays,
+an NPC that does not move with the hand is not taken, and a still hand changes nothing. Each eye keeps a copy of its depth (FsrTaa's is
+rewritten every frame: ~22 MB per eye, one GPU copy), its game camera, drawn grips and FOV. Off for the first generated frame after a gap
+(no previous frame). Limits: a weapon that moves less than its own width in one real frame is "confirmed still" where old and new
+overlap, so very slow motions keep up to half that width of doubling; parts hidden in the previous frame keep the old rule.
+Status: `held_far_eyes` (generated eyes with the rule on).
+
+Lab: `tests/spacewarp_pass_check.cpp` test 9 (blade follows, shelf beside the hand stays, a thing behind the grip stays, the palm-owned
+hand unchanged, rule off = v1417, a still previous frame takes nothing); a mutant with the grip gate off fails the forearm check.
+
+**Sim results (v1418, headset FOV, spacewarp Auto as the user left it).** The user's latest save has no sword drawn, and neither the
+scabbard-zone draw nor the B toggle (vetoed by manual equip) drew one in the sim, so no weapon was seen there. The simulated runtime also
+ignores locate times, so the grip step from the source to the target time is zero and hand motion is never extrapolated in the sim (v1417
+too: generated hands sit on the real frame's place, along ratio 0.00); the sim cannot show the weapon fix itself. What it shows:
+- no regression: sword_sweep and the new `tools/linux/scenarios/sword_draw_sweep.py` (hands sweeping 0.75 and ~3.5 m/s), 0 failures,
+  2-2.4 % late, the rule on for 99.9 % of generated eyes (`held_far_eyes` 4696 of 4698);
+- the rule on real game data: with the diagnostic knobs `spacewarp-palm-reach` = 0.05 (so the moving hand itself must be found by the
+  rule) and `spacewarp-tint-held` (taken pixels magenta), the rule took exactly the sweeping right hand (glove and fingers) in every
+  triple where it moved, and not the forearm sleeve (behind the grip), the floor (confirmed still) or the still left hand
+  (`D:\d2vr-artifacts\sw-v1418-tint`). So the drawn grips, the previous depth copy and the cameras line up in the game.
+
+**To test (headset):** Spacewarp Auto or Always; swing the sword, aim the pistol and crossbow while moving the hand. The tips should no
+longer double. Still possible: very slow motions keep a little doubling (see Limits); a wall the weapon touches may move with it.

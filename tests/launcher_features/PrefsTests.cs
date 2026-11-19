@@ -8,20 +8,24 @@ public static class PrefsTests
         Prefs LoadText(string text) { var f = Tmp(); Directory.CreateDirectory(Path.GetDirectoryName(f)!); File.WriteAllText(f, text); return Prefs.Load(f); }
         bool Throws(string text) { try { LoadText(text); return false; } catch (InvalidDataException) { return true; } }
 
-        var rt = new Prefs { Resolution = 1.25, TemporalAa = 5, Hud = 150, Hint = 0, AaChosen = 1, Crosshair = 0, Measurements = new[] { "1", "2", "3", "4", "5" } };
+        var rt = new Prefs { Resolution = 1.25, TemporalAa = 5, Hud = 150, Hint = 0, AaChosen = 1, Crosshair = 0, Renderer = 2, Measurements = new[] { "1", "2", "3", "4", "5" } };
         var f1 = Tmp(); rt.Save(f1); var back = Prefs.Load(f1);
-        check("prefs_v10_roundtrip", File.ReadAllText(f1).StartsWith("10 ") && back.Resolution == 1.25 && back.TemporalAa == 5 && back.Hud == 150 && back.Hint == 0
-            && back.AaChosen == 1 && back.Crosshair == 0 && back.ScriptedRecenter == 1 && back.CutsceneMode == "vr_comfort" && string.Join(",", back.Measurements) == "1,2,3,4,5");
+        // version 12 (src/vr_preferences.hpp writes it; the launcher must read what the game saved, or its form falls back to defaults)
+        check("prefs_v12_roundtrip", File.ReadAllText(f1).StartsWith("12 ") && back.Resolution == 1.25 && back.TemporalAa == 5 && back.Hud == 150 && back.Hint == 0
+            && back.AaChosen == 1 && back.Crosshair == 0 && back.ScriptedRecenter == 1 && back.CutsceneMode == "vr_comfort" && back.Renderer == 2 && string.Join(",", back.Measurements) == "1,2,3,4,5");
 
         var v8 = LoadText("8 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0\n");
         check("prefs_v8_loads_marker_off_crosshair_on", v8.TemporalAa == 7 && v8.Hud == 150 && v8.AaChosen == 0 && v8.Crosshair == 1);
-        check("prefs_rejects_v11", Throws("11 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0 1 vr_full\n"));
+        check("prefs_rejects_v13", Throws("13 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0 1 vr_full 0 0\n"));
+        check("prefs_reads_v11_without_renderer", LoadText("11 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0 1 vr_full 60\n") is { Renderer: 0, UpscalePercent: 60, CutsceneMode: "vr_full" });
+        check("prefs_reads_v12_renderer", LoadText("12 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0 1 vr_full 0 1\n").Renderer == 1
+            && LoadText("12 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0 1 vr_full 0 7\n").Renderer == 0);  // unknown = native stereo, as the DLL reads it
         check("prefs_rejects_short_or_bad_v9", Throws("9 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1\n") && Throws("9 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 2 0\n"));
 
         var v9 = LoadText("9 1.3 1 2 45 120 1 0.25 7 150 1 0 0 0 0 0 1 0\n");
         check("prefs_v9_migrates_keeping_keys_with_new_defaults", v9.TemporalAa == 7 && v9.Hud == 150 && v9.AaChosen == 1 && v9.Crosshair == 0 && v9.ScriptedRecenter == 1 && v9.CutsceneMode == "vr_comfort");
         var f10 = Tmp(); v9.Save(f10);
-        check("prefs_v9_resave_is_v10_and_keeps_keys", File.ReadAllText(f10).StartsWith("10 ") && Prefs.Load(f10).Crosshair == 0 && Prefs.Load(f10).Hud == 150);
+        check("prefs_v9_resave_is_v12_and_keeps_keys", File.ReadAllText(f10).StartsWith("12 ") && Prefs.Load(f10).Crosshair == 0 && Prefs.Load(f10).Hud == 150);
         foreach (var mode in Prefs.CutsceneModes)
         {
             var f = Tmp(); new Prefs { ScriptedRecenter = 0, CutsceneMode = mode }.Save(f); var r = Prefs.Load(f);
@@ -36,6 +40,9 @@ public static class PrefsTests
         check("merge_keeps_game_cutscene_mode", mc.CutsceneMode == "theater" && mc.ScriptedRecenter == 0 && mc.Hud == 100);
         var mu = Prefs.Merge(new Prefs(), new Prefs { CutsceneMode = "vr_full" }, new Prefs { CutsceneMode = "theater" });
         check("merge_takes_user_cutscene_edit", mu.CutsceneMode == "vr_full");
+        check("merge_keeps_game_renderer", Prefs.Merge(new Prefs(), new Prefs { Hud = 100 }, new Prefs { Renderer = 2 }).Renderer == 2);
+        check("merge_takes_user_renderer_edit", Prefs.Merge(new Prefs { Renderer = 1 }, new Prefs { Renderer = 0 }, new Prefs { Renderer = 1 }).Renderer == 0);
+        check("validate_rejects_bad_renderer", new Prefs { Renderer = 3 }.Validate() != "");
 
         var fx = Path.Combine(AppContext.BaseDirectory, "vr-settings-v9.cfg");
         var p = Prefs.Load(fx);
@@ -69,17 +76,19 @@ public static class PrefsTests
         var shown = Prefs.WithDefaultAa(new Prefs(), false, false, true);
         var savedDefault = Prefs.Merge(shown, shown, new Prefs());
         check("merge_saves_the_shown_gpu_default_when_nothing_chosen", savedDefault.TemporalAa == 5 && savedDefault.AaChosen == 1);
-        check("aa_help_notes_performance_mode_only_when_on", Prefs.AaHelpFor("base", false) == "base" && Prefs.AaHelpFor("base", true).Contains("selected AA") && Prefs.AaHelpFor("base", true).EndsWith("base"));
+        check("aa_help_notes_performance_mode_only_when_on", Prefs.AaHelpFor("base", false) == "base" && Prefs.AaHelpFor("base", true).Contains("FSR 3 Native") && Prefs.AaHelpFor("base", true).EndsWith("base"));
         var caps = Tmp(); Directory.CreateDirectory(Path.GetDirectoryName(caps)!);
         File.WriteAllText(caps, "1 4098 0 1\n"); var capsYes = Prefs.Fsr4Supported(caps);
         File.WriteAllText(caps, "1 4318 1 0\n"); var capsNo = Prefs.Fsr4Supported(caps);
         File.WriteAllText(caps, "2 4098 0 1\n"); var capsFuture = Prefs.Fsr4Supported(caps);
         check("fsr4_caps_file_read_from_dll", capsYes && !capsNo && !capsFuture && !Prefs.Fsr4Supported(caps + ".missing"));
 
-        var fx10p = Path.Combine(AppContext.BaseDirectory, "vr-settings-v10.cfg");
-        var f2 = Tmp(); Prefs.Merge(fx10, Prefs.Load(fx10p), Prefs.Load(fx10p)).Save(f2);
-        // Git may check the shared fixture out with CRLF; the writer always emits LF.
+        // A save with no edits writes back what the game saved (version 12, renderer included). Git may check the shared fixture out
+        // with CRLF; the writer always emits LF.
+        var fx12p = Path.Combine(AppContext.BaseDirectory, "vr-settings-v12.cfg"); var fx12 = Prefs.Load(fx12p);
+        var f2 = Tmp(); Prefs.Merge(fx12, Prefs.Load(fx12p), Prefs.Load(fx12p)).Save(f2);
         check("merge_without_edits_equals_disk", File.ReadAllText(f2).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
-            .SequenceEqual(File.ReadAllText(fx10p).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)));
+            .SequenceEqual(File.ReadAllText(fx12p).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)));
+        check("prefs_reads_shared_v12_fixture", fx12.TemporalAa == 6 && fx12.CutsceneMode == "theater" && fx12.UpscalePercent == 60 && fx12.Renderer == 2);
     }
 }

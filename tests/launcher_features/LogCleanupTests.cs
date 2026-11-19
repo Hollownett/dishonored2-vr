@@ -19,7 +19,7 @@ public static class LogCleanupTests
         check("log_cleanup_keeps_launcher_and_mod_files", Kept("repair-v1047-test-candidate.json") && Kept("aa-gpu-caps.txt") && Kept("linux-proxy.log") &&
             Kept("game-art", "pistol.rgba") && Kept("installed-backup", "old.dll") && Kept("ngx", "cache.bin") && LogCleanup.Plan(art).Count == 0);
         check("log_cleanup_missing_folder_plans_nothing", LogCleanup.Plan(Path.Combine(art, "missing")).Count == 0);
-        check("log_cleanup_size_text", LogCleanup.Size(3L << 30) == "3.0 GB" && LogCleanup.Size(5L << 20) == "5 MB");
+        check("log_cleanup_size_text", LogCleanup.Size(3L << 30) == 3.0.ToString("0.0") + " GB" && LogCleanup.Size(5L << 20) == "5 MB");  // the user's number format
         try { Directory.Delete(Path.GetDirectoryName(art)!, true); } catch (IOException) { }
     }
 }

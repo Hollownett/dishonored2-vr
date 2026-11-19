@@ -264,25 +264,29 @@ static Grid splat(const Texels& T, const Fov& f, const Pose& p, const std::vecto
         for (const auto& [i, j] : take) g.c[i] = g.c[j];  // keeps the class: resolved by its depth like its neighbour
         g.cracks += take.size();
     }
-    // holes: each empty cell takes its farthest non-empty 8-neighbour (the background), pass by pass outward
-    std::vector<std::size_t> empty; for (std::size_t i = 0; i < g.c.size(); ++i) if (g.c[i].cls == cell_empty) empty.push_back(i);
-    for (int pass = 0; pass < 512 && !empty.empty(); ++pass) {
-        std::vector<std::pair<std::size_t, std::size_t>> take; std::vector<std::size_t> still;
-        for (const std::size_t i : empty) {
-            const int x = static_cast<int>(i % T.w), y = static_cast<int>(i / T.w); std::size_t best = SIZE_MAX;
-            for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
-                const int nx = x + dx, ny = y + dy; if ((!dx && !dy) || nx < 0 || ny < 0 || nx >= T.w || ny >= T.h) continue;
+    // holes (as src/spacewarp_pass.hpp's Fill): an empty cell looks for the first non-empty cell in 8 directions (up to 48 cells) and
+    // takes the farthest of them, the background behind what moved, never the foreground beside the hole; among seeds within 1 % of the
+    // same depth, the closest. A second pass reaches on from filled cells; what stays empty resolves as a direction.
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<std::pair<std::size_t, std::size_t>> take;
+        static constexpr int dirs[8][2]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}};
+        for (std::size_t i = 0; i < g.c.size(); ++i) {
+            if (g.c[i].cls != cell_empty) continue;
+            const int x = static_cast<int>(i % T.w), y = static_cast<int>(i / T.w); std::size_t best = SIZE_MAX; double bz = 0; int bs = 0;
+            for (const auto& d : dirs) for (int s = 1; s <= 48; ++s) {
+                const int nx = x + d[0] * s, ny = y + d[1] * s; if (nx < 0 || ny < 0 || nx >= T.w || ny >= T.h) break;
                 const std::size_t j = static_cast<std::size_t>(ny) * T.w + nx; const Cell& n = g.c[j];
                 if (n.cls == cell_empty) continue;
-                if (best == SIZE_MAX || n.invz < g.c[best].invz) best = j;
+                const double z = n.invz > 0 ? 1 / n.invz : 1e30;
+                if (best == SIZE_MAX || z > bz * 1.01 || (z >= bz * 0.99 && s < bs)) {best = j; bz = z; bs = s;}
+                break;
             }
-            if (best == SIZE_MAX) still.push_back(i); else take.emplace_back(i, best);
+            if (best != SIZE_MAX) take.emplace_back(i, best);
         }
-        if (take.empty()) break;
         for (const auto& [i, j] : take) {Cell c = g.c[j]; if (c.cls != cell_sky) c.cls = cell_filled; g.c[i] = c;}  // a sky seed stays a direction
-        g.filled += take.size(); empty.swap(still);
+        g.filled += take.size();
     }
-    g.left_empty = empty.size();
+    for (const auto& c : g.c) g.left_empty += c.cls == cell_empty;
     return g;
 }
 // Each display pixel from its cell: its depth back into the kept image (minus the cell's displacement); a filled cell shows its seed's

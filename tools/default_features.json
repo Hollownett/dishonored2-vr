@@ -269,6 +269,16 @@
    "main_settings": true
   },
   {
+   "id": "spacewarp",
+   "file": "spacewarp",
+   "kind": "enable",
+   "label": "Spacewarp: generate every second frame when the game cannot hold the headset's rate (experimental)",
+   "help": "When a frame takes longer than one display period, the game switches to half rate and the mod generates each frame in between from the last real one, using its depth, your head and controller motion and your walking and turning. That halves the game's CPU work per displayed frame. True stereo only (performance mode keeps its own rebuild) and needs an FSR or DLSS anti-aliasing mode. Turn off Virtual Desktop's Synchronous Spacewarp and SteamVR Motion Smoothing while using it. Experimental: not yet tested in a headset. Off by default.",
+   "default": false,
+   "requires_dll_knob": "spacewarp",
+   "main_settings": true
+  },
+  {
    "id": "alternate-native-taa",
    "file": "no-alternate-native-taa",
    "kind": "disable",

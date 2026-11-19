@@ -10,6 +10,7 @@
 #include "frame_pacer.hpp"
 #include "refresh_rate_policy.hpp"
 #include "stale_eye_warp.hpp"
+#include "spacewarp_math.hpp"
 #include "warp_play_space.hpp"
 #include "afw_puredark.hpp"
 #include "vr_menu_imgui.hpp"
@@ -297,6 +298,26 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Query> frame_fence_; // v840: GPU fence after the last xrEndFrame; present() waits on it (one frame in flight)
     bool frame_fence_pending_{};
     FramePacer pacer_; // v841: steady paired cadence and the period poses are predicted with (frame_pacer.hpp)
+    // Spacewarp state (see spacewarp_enabled): the generation pass, each eye's final image of this Present (the generated frame's
+    // source, overlays included so nothing drawn into the eye flickers at half rate), each eye's play space of the last real frame (the
+    // locomotion step), and the generated frame waiting for its slot (its layers: the generated projection and the real frame's quads).
+    std::unique_ptr<SpacewarpPass> sw_pass_;
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> sw_colour_;std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2> sw_colour_srv_;
+    std::array<bool,2> sw_kept_{};bool sw_keep_{};
+    struct SwPlay {bool valid{};SwRigid O;XrTime time{};std::uint64_t frame{};};
+    std::array<std::array<SwPlay,4>,2> sw_play_{};  // per eye the last 4 real frames' play spaces, newest first
+    // v1418: each eye's previous real frame for the held-far-part rule (SpacewarpParams::prev_on): its depth (a copy: FsrTaa's is rewritten
+    // every frame), the game camera, the drawn grips and which hands were drawn, that render's depth terms, FOV and rectangle, its frame
+    struct SwPrev {bool valid{};std::uint64_t frame{};SwRigid S;std::array<SwRigid,2> grips{};unsigned hand_bits{};double m10{},m11{};std::array<double,4> tan{};UINT width{},height{};};
+    std::array<SwPrev,2> sw_prev_{};std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> sw_prev_depth_{};std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2> sw_prev_srv_{};
+    bool sw_pending_{};XrTime sw_target_time_{};
+    // the layer each eye's image went out with this Present (the straight view of a canted render: game_xr v808), and whether the generated
+    // frame's image of each eye is still acquired: it is drawn right after the real frame but released only just before its own xrEndFrame,
+    // so a runtime that takes "the last released image" late can never show it in the real frame's slot (headset 2026-11-19: doubled images)
+    std::array<XrPosef,2> sw_layer_pose_{};std::array<XrFovf,2> sw_layer_fov_{};std::array<bool,2> sw_acquired_{};
+    bool sw_capture_pending_{};int sw_capture_index_{};std::uint64_t sw_capture_frame_{};  // `spacewarp capture`: waiting for the next real image
+    XrCompositionLayerProjection sw_projection_{};std::array<XrCompositionLayerProjectionView,2> sw_views_{};
+    std::vector<XrCompositionLayerQuad> sw_quads_;
     // Plan 1.6: automatic display refresh rate through XR_FB_display_refresh_rate (refresh_rate_policy.hpp), opt-in knob
     // build/auto-refresh-rate. The extension is enabled only with the knob; every change and request is logged to xr-recoveries.log.
     RefreshRatePolicy refresh_;
@@ -2185,9 +2206,42 @@ public:
          <<",\"paced_frames\":"<<pacer_.paced_frames<<",\"frames\":"<<pacer_.frames
          <<",\"work_ms_p50\":"<<(static_cast<double>(pacer_.work_median())/1e6)<<",\"base_ms\":"<<(static_cast<double>(pacer_.base)/1e6)
          <<",\"hold_ms\":"<<(static_cast<double>(pacer_.min_hold_ns)/1e6)<<",\"held_frames\":"<<pacer_.held_frames // plan 1.6
-         <<",\"refresh\":"<<refresh_status_json_()<<'}';
+         <<",\"refresh\":"<<refresh_status_json_()
+         <<",\"spacewarp\":{\"enabled\":"<<(spacewarp_enabled?"true":"false")<<",\"always\":"<<(spacewarp_always?"true":"false")
+         <<",\"generated\":"<<spacewarp_generated<<",\"submitted\":"<<spacewarp_submitted<<",\"late\":"<<spacewarp_late
+         <<",\"unusable\":"<<spacewarp_unusable<<",\"failures\":"<<spacewarp_failures<<",\"cuts\":"<<spacewarp_cuts
+         <<",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"skip\":\""<<spacewarp_skip<<"\",\"not_kept\":"<<spacewarp_not_kept
+         <<",\"not_kept_why\":\""<<spacewarp_not_kept_why<<"\",\"captures\":"<<spacewarp_captures_saved
+         <<",\"presents\":"<<spacewarp_presents<<",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"gated\":"<<spacewarp_gated
+         <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<"}}";
         return o.str();
     }
+    // The spacewarp counters for xr-live-status.json without diagnostics (the headset test's evidence)
+    std::string spacewarp_brief_json() const {
+        std::ostringstream o;
+        o<<"{\"enabled\":"<<(spacewarp_enabled?"true":"false")<<",\"always\":"<<(spacewarp_always?"true":"false")<<",\"k\":"<<pacer_.k
+         <<",\"work_ms_p50\":"<<(static_cast<double>(pacer_.work_median())/1e6)<<",\"locks\":"<<pacer_.locks<<",\"unlocks\":"<<pacer_.unlocks
+         <<",\"generated\":"<<spacewarp_generated<<",\"submitted\":"<<spacewarp_submitted<<",\"late\":"<<spacewarp_late
+         <<",\"unusable\":"<<spacewarp_unusable<<",\"failures\":"<<spacewarp_failures<<",\"skip\":\""<<spacewarp_skip
+         <<"\",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"not_kept\":"<<spacewarp_not_kept<<",\"not_kept_why\":\""<<spacewarp_not_kept_why
+         <<"\",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<'}';
+        return o.str();
+    }
+    // Spacewarp (docs/SPACEWARP-PLAN-2026-11-19.md section 10; knob build/spacewarp, true stereo only, set by dxgi_probe.cpp every
+    // Present): while the pacer holds half rate, the frame between two real ones is generated from the last real frame right after that
+    // one is submitted (spacewarp_pass.hpp, into the eye swapchains) and submitted at the next Present, before the real frame.
+    bool spacewarp_enabled{},spacewarp_always{};
+    std::uint64_t spacewarp_generated{},spacewarp_submitted{},spacewarp_late{},spacewarp_unusable{},spacewarp_failures{},spacewarp_cuts{};
+    std::uint64_t spacewarp_held_far_eyes{};  // v1418: generated eyes that had their previous real frame (the held-far-part rule on)
+    // v1418 diagnostics (dxgi_probe, build knobs): a palm reach other than hand_own_radius (spacewarp-palm-reach, metres; 0 = default: the
+    // sim check shrinks it so the moving hand itself must be found by the held-far-part rule), the rule off (spacewarp-no-held-far), and
+    // the pixels it took tinted (spacewarp-tint-held)
+    double spacewarp_palm_reach{};bool spacewarp_held_far{true},spacewarp_tint_held{};
+    double spacewarp_play_mismatch_mm{};  // the two eyes' play spaces (camera * view^-1) apart: a check of the camera/view pairing
+    const char* spacewarp_skip="";       // why the last real frame got no generated frame (status)
+    std::uint64_t spacewarp_not_kept{};const char* spacewarp_not_kept_why="";  // gameplay Presents that could not feed a generated frame, and why
+    std::uint64_t spacewarp_presents{},spacewarp_gameplay_presents{},spacewarp_gated{};  // Presents with spacewarp on; of them gameplay; gameplay ones that drew no eyes
+    std::atomic<int> spacewarp_capture_requested{0};std::uint64_t spacewarp_captures_saved{};  // command `spacewarp capture N` (afw_capture_dir)
     void record_rendered_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {rendered_cameras_[eye]=camera;rendered_camera_frame_[eye]=frame;}}
     void stale_eye_target_camera(UINT eye,const WarpCamera& camera,std::uint64_t frame) noexcept {if(eye<2) {stale_target_cameras_[eye]=camera;stale_target_camera_frame_[eye]=frame;}}
     // v1184: the play spaces recorded with those cameras (same frames); kept follows the kept camera. play_space(eye) = {kept, target} of the
@@ -2517,6 +2571,8 @@ public:
         if(width==width_ && height==height_ && format==format_) return false;
         const bool format_changed=format!=format_;
         if(frame_open_) throw std::runtime_error("Cannot resize an open XR frame");
+        release_spacewarp_images_();sw_pending_=false;sw_colour_={};sw_colour_srv_={};  // spacewarp: a generated frame would name the old swapchains
+        for(auto& prev:sw_prev_) prev.valid=false;
         if(!width || !height || width>system_maximum_.width || height>system_maximum_.height ||
            width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
             throw std::runtime_error("Game eye size exceeds XR texture limits");
@@ -2626,6 +2682,254 @@ public:
         record={rendered_views_[eye],alternate_frame,pose_epoch(),true,rendered_display_times_[eye],rendered_locate_cpu_times_[eye]};
         kept_cameras_[eye]=rendered_cameras_[eye];kept_camera_valid_[eye]=rendered_camera_frame_[eye]==alternate_frame; // v796
         kept_play_[eye]=rendered_play_[eye];kept_play_[eye].valid=kept_play_[eye].valid && kept_camera_valid_[eye]; // v1184
+    }
+    // ---- spacewarp (see spacewarp_enabled) ----
+    static DXGI_FORMAT sw_typeless_(DXGI_FORMAT f) noexcept {
+        switch(f) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:case DXGI_FORMAT_R8G8B8A8_TYPELESS:return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:case DXGI_FORMAT_B8G8R8A8_TYPELESS:return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+        default:return f;
+        }
+    }
+    static DXGI_FORMAT sw_srgb_(DXGI_FORMAT f) noexcept {  // an 8-bit image read or written in linear light; other formats as they are
+        switch(sw_typeless_(f)) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        default:return f;
+        }
+    }
+    // The eye's final image of this Present (after its overlays), before its swapchain image is released: the generated frame's source.
+    void keep_spacewarp_eye_(UINT eye,ID3D11Texture2D* image,const XrCompositionLayerProjectionView& layer) noexcept {
+        try {
+            sw_layer_pose_[eye]=layer.pose;sw_layer_fov_[eye]=layer.fov;
+            D3D11_TEXTURE2D_DESC d{};image->GetDesc(&d);const auto typeless=sw_typeless_(d.Format);
+            if(sw_colour_[eye]) {D3D11_TEXTURE2D_DESC h{};sw_colour_[eye]->GetDesc(&h);if(h.Width!=d.Width || h.Height!=d.Height || h.Format!=typeless) {sw_colour_[eye].Reset();sw_colour_srv_[eye].Reset();}}
+            if(!sw_colour_[eye]) {
+                Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+                D3D11_TEXTURE2D_DESC k=d;k.Format=typeless;k.Usage=D3D11_USAGE_DEFAULT;k.BindFlags=D3D11_BIND_SHADER_RESOURCE;k.CPUAccessFlags=0;k.MiscFlags=0;
+                if(FAILED(device->CreateTexture2D(&k,nullptr,&sw_colour_[eye]))) return;
+                D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=sw_srgb_(d.Format);v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
+                if(FAILED(device->CreateShaderResourceView(sw_colour_[eye].Get(),&v,&sw_colour_srv_[eye]))) {sw_colour_[eye].Reset();return;}
+            }
+            context_->CopyResource(sw_colour_[eye].Get(),image);sw_kept_[eye]=true;
+            if(eye==0 && sw_capture_pending_) {  // `spacewarp capture`: the real image after the generated one completes the triple
+                sw_capture_pending_=false;
+                if(alternate_frame==sw_capture_frame_+1) {
+                    wchar_t n[64];swprintf_s(n,L"sw-capture-%02d-next",sw_capture_index_);afw_capture_save_(sw_colour_[0].Get(),n);
+                    ++sw_capture_index_;++spacewarp_captures_saved;--spacewarp_capture_requested;
+                }
+            }
+        } catch(...) {}
+    }
+    // After the real frame's xrEndFrame: the frame for the next display slot, from this one (both eyes, into their swapchains, released),
+    // and its layers. Any missing input skips it (the runtime then shows the real frame again, as without spacewarp).
+    // v1418: this real frame's depth, game camera and drawn grips become the eye's previous frame for the next generated one
+    void keep_spacewarp_prev_(UINT eye,const SwRigid& S,const std::array<SwRigid,2>& grips,const WarpCamera& cam,const XrFovf& fov) noexcept {
+        auto& prev=sw_prev_[eye];prev.valid=false;
+        try {
+            ID3D11Texture2D* const source=stale_depth_[eye].Get();if(!source) return;
+            D3D11_TEXTURE2D_DESC d{};source->GetDesc(&d);
+            if(d.SampleDesc.Count!=1 || (d.Format!=DXGI_FORMAT_R32_TYPELESS && d.Format!=DXGI_FORMAT_R32_FLOAT)) return;
+            D3D11_TEXTURE2D_DESC have{};if(sw_prev_depth_[eye]) sw_prev_depth_[eye]->GetDesc(&have);
+            if(!sw_prev_depth_[eye] || have.Width!=d.Width || have.Height!=d.Height || have.Format!=d.Format || have.MipLevels!=d.MipLevels || have.ArraySize!=d.ArraySize) {
+                sw_prev_depth_[eye].Reset();sw_prev_srv_[eye].Reset();
+                D3D11_TEXTURE2D_DESC n=d;n.Usage=D3D11_USAGE_DEFAULT;n.BindFlags=D3D11_BIND_SHADER_RESOURCE;n.CPUAccessFlags=0;n.MiscFlags=0;
+                Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+                if(FAILED(device->CreateTexture2D(&n,nullptr,&sw_prev_depth_[eye]))) {sw_prev_depth_[eye].Reset();return;}
+                D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R32_FLOAT;v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
+                if(FAILED(device->CreateShaderResourceView(sw_prev_depth_[eye].Get(),&v,&sw_prev_srv_[eye]))) {sw_prev_depth_[eye].Reset();sw_prev_srv_[eye].Reset();return;}
+            }
+            context_->CopyResource(sw_prev_depth_[eye].Get(),source);  // after this eye's pass on the same context: the pass read the old copy
+            prev.S=S;prev.grips=grips;prev.hand_bits=cam.hand_bits;prev.m10=cam.m10;prev.m11=cam.m11;
+            prev.tan={std::tan(fov.angleLeft),std::tan(fov.angleRight),std::tan(fov.angleUp),std::tan(fov.angleDown)};
+            prev.width=stale_depth_width_[eye];prev.height=stale_depth_height_[eye];prev.frame=alternate_frame;prev.valid=true;
+        } catch(...) {prev.valid=false;}
+    }
+    void release_spacewarp_images_() noexcept {
+        for(UINT eye=0;eye<2;++eye) if(sw_acquired_[eye]) {
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            if(XR_FAILED(xrReleaseSwapchainImage(chains_[eye],&release))) ++spacewarp_failures;
+            sw_acquired_[eye]=false;
+        }
+    }
+    void generate_spacewarp_(const XrFrameEndInfo& real) noexcept {
+        release_spacewarp_images_();sw_pending_=false;
+        const auto skip=[&](const char* why) {release_spacewarp_images_();spacewarp_skip=why;++spacewarp_unusable;};
+        if(!sw_keep_) return;
+        if(!sw_kept_[0] || !sw_kept_[1]) return skip("no eye image");
+        for(UINT eye=0;eye<2;++eye)
+            if(rendered_camera_frame_[eye]!=alternate_frame || stale_depth_frame_[eye]!=alternate_frame || !stale_depth_[eye]) return skip("no camera or depth");
+        try {
+            if(!sw_pass_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);sw_pass_=std::make_unique<SpacewarpPass>(device.Get());}
+            // display: this real frame's slot; target: the next one. source: the time this image's head and hands were predicted for (the
+            // locate horizon can put it past `display`); the head and grip changes run from there to the target.
+            // The head and hands of the generated frame are predicted one slot after the real image's own prediction (target_time), the
+            // way every real image is predicted ahead of its slot (the locate horizon): measured 2026-11-19 in the sim, a target at
+            // `display + period` came before the image's own head time and the generated frame turned back between two real frames.
+            const XrTime period=pacer_.base>0?pacer_.base:frame_.predictedDisplayPeriod;
+            const XrTime display=frame_.predictedDisplayTime,slot_time=display+period;
+            const XrTime source_time=rendered_display_times_[0]>0?rendered_display_times_[0]:display,target_time=source_time+period;
+            if(!(display>0) || !(period>0)) return skip("display times");
+            // the head and both grips at the source and the target time, located now (one consistent pair each)
+            std::array<std::array<XrView,2>,2> at{};
+            for(int k=0;k<2;++k) {
+                XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};locate.viewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                locate.displayTime=k?target_time:source_time;locate.space=local_;
+                XrViewState located{XR_TYPE_VIEW_STATE};for(auto& v:at[k]) {v={};v.type=XR_TYPE_VIEW;}uint32_t count{};
+                if(XR_FAILED(xrLocateViews(session_,&locate,&located,2,&count,at[k].data())) || count!=2 ||
+                   (located.viewStateFlags&(XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT))!=(XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT))
+                    return skip("views not located");
+            }
+            std::array<SwRigid,2> grip_step{};
+            for(unsigned side=0;side<2;++side) {
+                std::array<XrSpaceLocation,2> g{};bool ok=hand_spaces_[0][side]!=XR_NULL_HANDLE;
+                for(int k=0;k<2 && ok;++k) {
+                    g[k]={XR_TYPE_SPACE_LOCATION};
+                    ok=XR_SUCCEEDED(xrLocateSpace(hand_spaces_[0][side],local_,k?target_time:source_time,&g[k])) &&
+                       (g[k].locationFlags&(XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT))==(XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT);
+                }
+                if(ok) grip_step[side]=sw_from_pose(g[1].pose)*sw_from_pose(g[0].pose).inverse();  // an untracked grip holds still
+            }
+            std::array<SwRigid,2> play{};
+            for(UINT eye=0;eye<2;++eye) {
+                const auto& cam=rendered_cameras_[eye].pose;
+                const SwRigid S=sw_from_world_camera({cam.position.x,cam.position.y,cam.position.z},
+                    {{{cam.basis[0].x,cam.basis[0].y,cam.basis[0].z},{cam.basis[1].x,cam.basis[1].y,cam.basis[1].z},{cam.basis[2].x,cam.basis[2].y,cam.basis[2].z}}});
+                play[eye]=S*sw_from_pose(rendered_views_[eye].pose).inverse();
+            }
+            {const auto d=play[0]*play[1].inverse();spacewarp_play_mismatch_mm=d.step()*1000;}  // one play space for both eyes, if the pairing holds
+            for(UINT eye=0;eye<2;++eye) {
+                const auto& cam=rendered_cameras_[eye];const auto& view=rendered_views_[eye];
+                const SwRigid S=sw_from_world_camera({cam.pose.position.x,cam.pose.position.y,cam.pose.position.z},
+                    {{{cam.pose.basis[0].x,cam.pose.basis[0].y,cam.pose.basis[0].z},{cam.pose.basis[1].x,cam.pose.basis[1].y,cam.pose.basis[1].z},
+                      {cam.pose.basis[2].x,cam.pose.basis[2].y,cam.pose.basis[2].z}}});
+                const SwRigid V=sw_from_pose(view.pose);const SwRigid& O=play[eye];
+                // the play space's step since this eye's last real frame, scaled by slots: the target is one slot after this frame, the last
+                // real frame was (display - last display) before it (two slots at half rate: half the step). A cut (teleport, snap turn,
+                // load) is not extrapolated.
+                SwRigid locomotion;
+                // velocity over the last three real frames (the game's own steps are uneven: 2026-11-19 sim, half of the last step alone
+                // came to 0.33-0.91 of the next one)
+                auto& hist=sw_play_[eye];
+                if(!(hist[0].valid && hist[0].frame+1==alternate_frame)) for(auto& h:hist) h={};  // a gap: start over
+                // every single step is checked for a cut (teleport, snap turn, load): one in the window resets it
+                const SwPlay* old=nullptr;SwRigid newer=O;bool cut=false;
+                for(unsigned k=0;k<3 && hist[k].valid && hist[k].frame+1+k==alternate_frame;++k) {
+                    const auto step=newer*hist[k].O.inverse();
+                    if(step.step()>=.5 || step.angle()>=25*3.14159265358979/180) {cut=true;break;}
+                    newer=hist[k].O;old=&hist[k];
+                }
+                if(cut) {++spacewarp_cuts;for(auto& h:hist) h={};old=nullptr;}
+                if(old && display>old->time)
+                    locomotion=(O*old->O.inverse()).power(std::clamp(static_cast<double>(slot_time-display)/static_cast<double>(display-old->time),0.,1.));
+                for(unsigned k=3;k>0;--k) hist[k]=hist[k-1];
+                hist[0]={true,O,display,alternate_frame};
+                const SwRigid head=sw_from_pose(at[1][eye].pose)*sw_from_pose(at[0][eye].pose).inverse();
+                const auto motion=spacewarp_eye_motion(S,V,locomotion,head,grip_step);
+                SpacewarpParams p{};
+                const auto tans=[](const XrFovf& f) {return std::array<double,4>{std::tan(f.angleLeft),std::tan(f.angleRight),std::tan(f.angleUp),std::tan(f.angleDown)};};
+                // The submitted image is the straight view of a canted render (v808: the same eye position, the cant turned back off, the
+                // runtime's FOV) while depth, the game camera S and V are the canted render's: the image's own camera is the layer's pose
+                // Vimg. The output is Vimg moved by the head and the play space, L V^-1 dV Vimg in source coordinates, and colour is read
+                // through Vimg (the pass's colour camera). Uncanted, Vimg == V and this is the v1416 frame.
+                const SwRigid Vimg=sw_from_pose(sw_layer_pose_[eye]);const XrFovf image_fov=sw_layer_fov_[eye];
+                const SwRigid output_camera=motion.rest*(V.inverse()*head*Vimg),image_in_source=V.inverse()*Vimg;
+                p.source_tan=tans(view.fov);p.target_tan=tans(image_fov);p.m10=cam.m10;p.m11=cam.m11;p.m=output_camera.r;p.c=output_camera.t;
+                p.colour_camera=true;p.colour_m=image_in_source.r;p.colour_tan=tans(image_fov);
+                const auto Si=S.inverse();
+                for(unsigned side=0;side<2;++side) {
+                    if(!(cam.hand_bits>>side&1u)) continue;
+                    const Vec3 palm=length(cam.palms[side])>1e-6?cam.palms[side]:cam.hands[side].position;
+                    const auto pc=Si.apply({palm.x,palm.y,palm.z});
+                    p.palm[side]={pc[0],pc[1],pc[2],spacewarp_palm_reach>0?spacewarp_palm_reach:hand_own_radius};p.hand[side]=to_pass(motion.hand[side]);p.hand_on[side]=true;
+                }
+                p.rest=to_pass(motion.rest);p.rest_on=true;p.rig_near=.5;  // no rig mask in true stereo: within arm's reach is the rig
+                // v1418: the drawn grips (world; the camera convention, only their changes and forward axes are used) and this eye's previous
+                // real frame: what a hand holds past its palm's reach (a sword's blade, a gun's barrel) follows the hand when that frame shows it
+                // moved with the hand and did not stand still in the world
+                std::array<SwRigid,2> grips_now{};
+                for(unsigned side=0;side<2;++side) {
+                    const auto& g=cam.hands[side];
+                    grips_now[side]=sw_from_world_camera({g.position.x,g.position.y,g.position.z},
+                        {{{g.basis[0].x,g.basis[0].y,g.basis[0].z},{g.basis[1].x,g.basis[1].y,g.basis[1].z},{g.basis[2].x,g.basis[2].y,g.basis[2].z}}});
+                }
+                const auto& prev=sw_prev_[eye];
+                p.debug_tint_held=spacewarp_tint_held;
+                if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
+                    p.prev_on=true;p.prev_tan=prev.tan;p.prev_m10=prev.m10;p.prev_m11=prev.m11;
+                    const auto Pi=prev.S.inverse();p.prev_world=to_pass(Pi*S);
+                    for(unsigned side=0;side<2;++side) if((cam.hand_bits&prev.hand_bits)>>side&1u) {
+                        p.prev_hand[side]=to_pass(Pi*prev.grips[side]*grips_now[side].inverse()*S);p.prev_hand_on[side]=true;
+                        const auto g=Si*grips_now[side];  // the grip in source camera coordinates; its forward axis is minus the third column
+                        const double fx=-g.r[2],fy=-g.r[5],fz=-g.r[8];
+                        p.grip[side]={fx,fy,fz,fx*g.t[0]+fy*g.t[1]+fz*g.t[2]};
+                    }
+                    ++spacewarp_held_far_eyes;
+                }
+                Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
+                Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
+                {D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R32_FLOAT;v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
+                 if(FAILED(device->CreateShaderResourceView(stale_depth_[eye].Get(),&v,&depth))) return skip("depth view");}
+                SpacewarpInputs in{sw_colour_srv_[eye].Get(),depth.Get(),nullptr,nullptr,stale_depth_width_[eye],stale_depth_height_[eye]};
+                if(p.prev_on) {in.prev_depth=sw_prev_srv_[eye].Get();in.prev_width=prev.width;in.prev_height=prev.height;}
+                XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};uint32_t index{};
+                checked(xrAcquireSwapchainImage(chains_[eye],&acquire,&index),"Acquire spacewarp eye");
+                XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                bool drawn=false;
+                try {
+                    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=1'000'000'000;
+                    const auto ready=xrWaitSwapchainImage(chains_[eye],&wait);checked(ready,"Wait spacewarp eye");
+                    if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Spacewarp eye wait timed out");
+                    ID3D11Texture2D* target=images_[eye].at(index).texture;D3D11_TEXTURE2D_DESC td{};target->GetDesc(&td);
+                    D3D11_RENDER_TARGET_VIEW_DESC rv{};rv.Format=sw_srgb_(td.Format);rv.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+                    p.encode_srgb=rv.Format==td.Format && (td.Format==DXGI_FORMAT_R8G8B8A8_UNORM || td.Format==DXGI_FORMAT_B8G8R8A8_UNORM);  // typed UNORM: encode ourselves
+                    if(p.encode_srgb) rv.Format=td.Format;
+                    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+                    if(SUCCEEDED(device->CreateRenderTargetView(target,&rv,&rtv))) drawn=sw_pass_->run(context_.Get(),in,p,rtv.Get(),width_,height_);
+                    if(drawn && eye==0 && spacewarp_capture_requested.load()>0 && !afw_capture_dir.empty()) {  // `spacewarp capture`
+                        wchar_t n[64];swprintf_s(n,L"sw-capture-%02d-",sw_capture_index_);
+                        afw_capture_save_(sw_colour_[0].Get(),std::wstring(n)+L"real");afw_capture_save_(target,std::wstring(n)+L"generated");
+                        sw_capture_pending_=true;sw_capture_frame_=alternate_frame;
+                    }
+                } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
+                sw_acquired_[eye]=true;  // released just before the generated frame's xrEndFrame (submit_spacewarp_)
+                if(!drawn) return skip("pass refused");
+                sw_views_[eye]={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+                sw_views_[eye].pose=sw_to_pose(head*Vimg);sw_views_[eye].fov=image_fov;
+                keep_spacewarp_prev_(eye,S,grips_now,cam,view.fov);
+                sw_views_[eye].subImage.swapchain=chains_[eye];
+                sw_views_[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
+            }
+            sw_projection_={XR_TYPE_COMPOSITION_LAYER_PROJECTION};sw_projection_.space=local_;sw_projection_.viewCount=2;sw_projection_.views=sw_views_.data();
+            sw_quads_.clear();
+            for(uint32_t k=0;k<real.layerCount;++k) if(real.layers[k] && real.layers[k]->type==XR_TYPE_COMPOSITION_LAYER_QUAD)
+                sw_quads_.push_back(*reinterpret_cast<const XrCompositionLayerQuad*>(real.layers[k]));  // the same images: their last release
+            sw_target_time_=slot_time;sw_pending_=true;++spacewarp_generated;spacewarp_skip="";
+        } catch(const XrSessionFault&) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="session fault";
+        } catch(...) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="exception";}
+    }
+    // At the next Present, before the real frame: the generated frame in its own slot. true = the runtime is already at the real
+    // frame's slot, and this xrWaitFrame (in frame_) is the real frame's.
+    bool submit_spacewarp_() {
+        if(!sw_pending_) {release_spacewarp_images_();return false;}
+        sw_pending_=false;
+        if(!spacewarp_enabled || alternate_enabled || !pacer_.active || pacer_.k<2) {release_spacewarp_images_();return false;}
+        if(pacer_.target && cpu_time_ns()>pacer_.target-pacer_.base/2) {release_spacewarp_images_();++spacewarp_late;return false;}  // too near the real frame's slot
+        XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};XrFrameState slot{XR_TYPE_FRAME_STATE};
+        try {checked(xrWaitFrame(session_,&wait,&slot),"Wait spacewarp frame");} catch(...) {release_spacewarp_images_();throw;}
+        if(slot.predictedDisplayTime>sw_target_time_+pacer_.base/2) {release_spacewarp_images_();frame_=slot;++spacewarp_late;return true;}
+        XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
+        if(const auto began=xrBeginFrame(session_,&begin);XR_FAILED(began)) {release_spacewarp_images_();throw XrSessionFault("Begin spacewarp frame: "+std::to_string(began));}
+        frame_open_=true;
+        release_spacewarp_images_();  // now: the runtime has the real frame; the generated images become the eyes' last released ones
+        std::array<const XrCompositionLayerBaseHeader*,12> list{};uint32_t n=0;
+        list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&sw_projection_);
+        for(const auto& q:sw_quads_) if(n<list.size()) list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=slot.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        end.layerCount=n;end.layers=list.data();
+        const auto ended=xrEndFrame(session_,&end);frame_open_=false;
+        if(XR_FAILED(ended)) {if(xr_result_session_fatal(ended)) checked(ended,"Submit spacewarp frame");++spacewarp_failures;spacewarp_skip="frame rejected";return false;}
+        ++spacewarp_submitted;return false;
     }
     // perf-mono-view diagnostic: the one engine view sits at the midpoint of the two eye poses, faces their mean orientation and
     // covers both eyes' FOV (the union), so the one image is valid for both projection layers (flat, no stereo depth).
@@ -2837,18 +3141,33 @@ public:
             return;
         }
         prepare_overlays();
-        XrFrameWaitInfo wait{};wait.type=XR_TYPE_FRAME_WAIT_INFO;frame_={};frame_.type=XR_TYPE_FRAME_STATE;
+        XrFrameWaitInfo wait{};wait.type=XR_TYPE_FRAME_WAIT_INFO;
         auto stage_start=cpu_time_ns();
-        if(const auto wake=pacer_.wake(stage_start)) { // v841: sleep to the locked cadence (the bulk on a high-resolution timer, the rest spun)
-            static thread_local const HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
-            for(auto remaining=wake-cpu_time_ns();remaining>0;remaining=wake-cpu_time_ns()) {
-                LARGE_INTEGER due{};due.QuadPart=-(remaining-1'000'000)/100;
-                if(remaining>1'500'000 && timer && SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)) WaitForSingleObject(timer,50); else SwitchToThread();
+        // Spacewarp: the frame generated after the last real one goes into its own slot first (counted as idle, like the pacing sleep).
+        // If the runtime is already at the real frame's slot, that wait is the real frame's.
+        const bool spacewarp_waited=submit_spacewarp_();
+        if(!spacewarp_waited) {
+            frame_={};frame_.type=XR_TYPE_FRAME_STATE;
+            if(const auto wake=pacer_.wake(cpu_time_ns())) { // v841: sleep to the locked cadence (the bulk on a high-resolution timer, the rest spun)
+                static thread_local const HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+                for(auto remaining=wake-cpu_time_ns();remaining>0;remaining=wake-cpu_time_ns()) {
+                    LARGE_INTEGER due{};due.QuadPart=-(remaining-1'000'000)/100;
+                    if(remaining>1'500'000 && timer && SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)) WaitForSingleObject(timer,50); else SwitchToThread();
+                }
             }
+            checked(xrWaitFrame(session_,&wait,&frame_),"Wait game XR frame");
         }
-        checked(xrWaitFrame(session_,&wait,&frame_),"Wait game XR frame");
         timing.waited=true;timing.wait_ns=cpu_time_ns()-stage_start; // includes the pacing sleep: the governor counts both as idle
         pacer_.miss_lock=pacer_miss_lock;
+        // Spacewarp's own cadence rule: half rate as soon as the frame's work exceeds a period (the frames in between are generated, not
+        // missed), full rate again below 0.8; `always` holds half rate. Without spacewarp the pacer's defaults (1.4 / 1.1).
+        // Auto (headset 2026-11-19: "switching on and off in the wrong places"): the rule reads the 80th percentile of the frame's work
+        // (the frames that miss are the slow ones; the median hovered at the threshold) and every change is held at least 5 s.
+        const bool spacewarp_paced=spacewarp_enabled && !alternate_enabled;
+        pacer_.lock_tenths=spacewarp_paced?(spacewarp_always?0:10):FramePacer::default_lock_tenths;
+        pacer_.unlock_tenths=spacewarp_paced?(spacewarp_always?0:8):FramePacer::default_unlock_tenths;
+        pacer_.decide_percent=spacewarp_paced && !spacewarp_always?80u:50u;
+        pacer_.min_hold_ns=spacewarp_paced?5'000'000'000:FramePacer::default_min_hold_ns;
         const auto waited_ns=cpu_time_ns();
         pacer_.update(waited_ns,timing.wait_ns,frame_.predictedDisplayTime,frame_.predictedDisplayPeriod,steady_pacing && !alternate_enabled);
         update_refresh_rate_(waited_ns,timing.wait_ns); // plan 1.6: no-op unless build/auto-refresh-rate and the runtime offers rates
@@ -3111,6 +3430,8 @@ public:
         gates.continuity_usable=continuity_.usable();gates.have_sources=sources_hold;
         gates.tracked_ok=!world_scene || (!tracked_gameplay_required_ && !authored_scene_render) || tracked_pair_();
         gates.alternate_ok=alt_kept_ok_(authored_camera || settings_.open());
+        if(spacewarp_enabled) {++spacewarp_presents;if(gameplay) ++spacewarp_gameplay_presents;}
+        if(spacewarp_enabled && gameplay && !(gates.continuity_usable && gates.have_sources && gates.tracked_ok && gates.alternate_ok)) ++spacewarp_gated;
         if(gates.continuity_usable && gates.have_sources && gates.tracked_ok && gates.alternate_ok) {
             std::array<ID3D11Texture2D*,2> sources{left,right};bool menu_band_ready=false;
             if(settings_.open()) {update_settings_image(pointer);++settings_layers;}
@@ -3129,6 +3450,15 @@ public:
                 if(!mirror_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);mirror_=std::make_unique<DesktopMirror>(device.Get());}
                 // Composed off-screen: the right eye's source may be this backbuffer.
                 if(mirror_rects[0] || mirror_rects[1]) mirror_->begin(desktop_desc.Width,desktop_desc.Height,desktop_desc.Format);
+            }
+            // Spacewarp: this Present's eyes are the next generated frame's source while the pacer holds half rate in true-stereo gameplay
+            sw_keep_=spacewarp_enabled && !alternate_enabled && pacer_.active && pacer_.k>1 && gameplay && world_scene && !authored_camera &&
+                !authored_scene_render && !settings_.open() && tracked_pair_();
+            sw_kept_={false,false};
+            if(spacewarp_enabled && gameplay && !sw_keep_) {
+                ++spacewarp_not_kept;
+                spacewarp_not_kept_why=alternate_enabled?"performance mode":!pacer_.active?"pacer off":pacer_.k<2?"full rate":!world_scene?"no world scene":
+                    authored_camera?"authored camera":settings_.open()?"settings open":!tracked_pair_()?"no tracked pair":"other";
             }
             for(UINT pass=0;pass<2;++pass) {
                 // v798: alternate-eye processes the fresh eye first, so the stale eye's warp can take near content from its kept image
@@ -3474,6 +3804,7 @@ public:
                 if(composite_note && observe_note_composition)observe_note_composition(eye,images_[eye].at(index).texture,layers[eye],*note_panel_);
                 if(observe_final_eye && world_scene)observe_final_eye(eye,images_[eye].at(index).texture);
                 if(eye==0 && !world_scene) gates.band_ready=menu_band_ready=copy_menu_band(images_[0].at(index).texture);
+                if(sw_keep_) keep_spacewarp_eye_(eye,images_[eye].at(index).texture,layers[eye]);  // the final image, overlays included, and its layer
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
                 {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}
             }
@@ -3597,7 +3928,9 @@ public:
                 }
             }
         }
-        if(const auto ended=xrEndFrame(session_,&end);XR_FAILED(ended)) {
+        bool real_frame_ended=false;
+        if(const auto ended=xrEndFrame(session_,&end);XR_SUCCEEDED(ended)) real_frame_ended=true;
+        else {
             // SteamVR fails single frames with layer errors ("compositor failed EndFrame()"): drop that frame instead of recreating the
             // session (the user sees SteamVR home). The layer dump goes to xr-recoveries.log either way.
             // v1393: any code that leaves the session usable drops only that frame (a Steam Link hitch can fail frames with other codes,
@@ -3619,8 +3952,11 @@ public:
                     throw XrSessionFault(name+": "+std::to_string(ended)+" (every frame rejected for 3 s)");
             }
             ++end_frame_rejections;if(observe_frame_rejection) observe_frame_rejection((name+": "+std::to_string(ended)+" (frame dropped)").c_str());
-        } else end_frame_rejected_run_=0;
+        }
+        if(real_frame_ended) end_frame_rejected_run_=0;
         frame_open_=false;
+        // Spacewarp: the next slot's frame from this one, while the GPU is free and this frame's depth is still in place
+        if(sw_keep_) {if(real_frame_ended && real_layers) generate_spacewarp_(end);else {sw_pending_=false;spacewarp_skip="real frame not shown";++spacewarp_unusable;}}
         if(gpu_queue_limit && context_) {
             if(!frame_fence_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT,0};device->CreateQuery(&desc,&frame_fence_);}
             if(frame_fence_) {context_->End(frame_fence_.Get());frame_fence_pending_=true;}
