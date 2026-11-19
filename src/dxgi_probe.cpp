@@ -253,6 +253,17 @@ static HMODULE module{};
 static PresentFn original_present{};
 static std::ofstream xr_timing_csv,present_timing_csv;
 static d2vr::FrameTimingQueue frame_timing_queue;
+// v1404 (measurement): build/frame-timing with diagnostics off writes xr-frame-timing.csv only, so a sim can time the release
+// configuration (no other diagnostic file, no image capture, no trace).
+static bool frame_timing_only{};
+// v1405/v1406 (plan 2B.3): during headset gameplay the desktop mirror (the game's own swapchain Present) is presented on every Nth
+// XR frame only; the headset image is not affected. Each mirror Present costs the render thread ~0.7 ms of frame time in the
+// 2026-11-19 sim (frames with it: p50 10.04 ms, without: 9.27 ms, same run) and the call alone 0.30 ms p50 in the user's VD session.
+// Default N=3 (a 30 fps desktop window at 90 Hz); build/desktop-mirror-every with 1..8 overrides it, 1 = every frame (pre-v1406).
+// Menus, loads and any frame without a submitted XR layer present every frame as before.
+static constexpr unsigned desktop_mirror_default=3;
+static std::atomic<unsigned> desktop_mirror_every{desktop_mirror_default};
+static std::atomic<UINT64> desktop_mirror_skips{0};
 static bool diagnostics_off{}; // v1046: = !d2vr::diag::on() (build/diagnostics absent), set once in StartProbe; the old build/no-diagnostics is retired
 static std::atomic<bool> frame_timing_write_failed{};
 static std::atomic<bool> xr_status_write_failed{};
@@ -392,12 +403,14 @@ static void flush_frame_timing(bool final=false) noexcept {
     static_assert(d2vr::frame_timing_columns(xr_timing_header)==d2vr::FrameTimingRecord{}.xr.size());
     static_assert(d2vr::frame_timing_columns(present_timing_header)==d2vr::FrameTimingRecord{}.present.size());
     if(final)frame_timing_queue.stop();
-    if(!d2vr::diag::on() || frame_timing_write_failed.load())return; // v1046: no rows, no rotation while off
+    if((!d2vr::diag::on() && !frame_timing_only) || frame_timing_write_failed.load())return; // v1046: no rows, no rotation while off (v1404: unless build/frame-timing)
     try {
         const auto write=[&](std::ofstream& stream,const auto& row,UINT64& samples,const wchar_t* name,const char* header) {
+            if(!stream.is_open()) return; // v1404: frame-timing-only mode has no present-boundaries log
             if(samples && samples%20'000==0) {
-                stream.close();const auto current=output_directory/(std::wstring(name)+L".csv");
-                const auto previous=output_directory/(std::wstring(name)+L"-previous.csv");
+                const auto path=[&](const wchar_t* suffix) {const auto file=std::wstring(name)+suffix;return frame_timing_only?output_directory.always()/file:output_directory/file;};
+                stream.close();const auto current=path(L".csv");
+                const auto previous=path(L"-previous.csv");
                 fs::remove(previous);fs::rename(current,previous);stream.open(current,std::ios::trunc);stream<<header;
                 if(name==std::wstring(L"xr-frame-timing"))++xr_timing_rotations;
             }
@@ -12017,7 +12030,7 @@ static const char* clip_source_name(int source) noexcept {
     switch(source) {case 1:return "captured";case 2:return "sampled";case 3:return "fallback";default:return "none";}
 }
 std::string feedback_status_json() {    std::ostringstream out;
-    out<<",\"desktop_mirror_drops\":"<<desktop_mirror_drops.load();
+    out<<",\"desktop_mirror_drops\":"<<desktop_mirror_drops.load()<<",\"desktop_mirror_every\":"<<desktop_mirror_every.load()<<",\"desktop_mirror_skips\":"<<desktop_mirror_skips.load(); // v1404
     out<<",\"spyglass\":{\"mode\":\""<<(spyglass_scope_enabled?"scope":spyglass_lens_enabled?"lens":"native")<<"\",\"scope\":{\"m\":"<<spyglass_scope_m.load()<<",\"views\":"<<spyglass_scope_views.load()
        <<",\"resets\":"<<spyglass_scope_resets.load()<<",\"shown\":"<<(game_xr?game_xr->spyglass_scope_mag:0.f)<<",\"draws\":"<<(game_xr?game_xr->spyglass_scope_draws:0)
        <<",\"failures\":"<<(game_xr?game_xr->spyglass_scope_failures:0)<<"},\"enabled\":"<<(spyglass_lens_enabled?"true":"false")<<",\"frames\":"<<spyglass_frames.load()<<",\"base_fov_x\":"<<spyglass_zoom.base()
@@ -17066,7 +17079,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         if(auto* split_context=gpu_game_context.load(std::memory_order_acquire)) {d2vr::mod_gpu_timer().finish_frame(split_context);d2vr::mod_gpu_timer().poll(split_context);}
     }
     const auto desktop_start_ns=d2vr::GameXr::cpu_time_ns();
-    auto result=original_present(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced));
+    static unsigned mirror_phase{};
+    const unsigned mirror_every=desktop_mirror_every.load(std::memory_order_relaxed);
+    const bool mirror_skip=mirror_every>1 && xr_requested && capturing.load() && timing_gameplay && game_xr && game_xr->last_layer_submitted &&
+        !(flags&DXGI_PRESENT_TEST) && (++mirror_phase%mirror_every)!=0;
+    auto result=mirror_skip?S_OK:original_present(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced));
+    if(mirror_skip) desktop_mirror_skips.fetch_add(1,std::memory_order_relaxed);
     if(desktop_xr_paced && result==DXGI_ERROR_WAS_STILL_DRAWING) {result=S_OK;++desktop_mirror_drops;}
     {
         const auto split_exit_ns=d2vr::GameXr::cpu_time_ns();
@@ -17132,7 +17150,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     if(measure_present) {
         const auto end_ns=d2vr::GameXr::cpu_time_ns();
         previous_desktop_present_ns=end_ns-desktop_start_ns;previous_present_end_ns=end_ns;
-        if(timing_present && d2vr::diag::on() && !frame_timing_write_failed.load()) {
+        if(timing_present && (d2vr::diag::on() || frame_timing_only) && !frame_timing_write_failed.load()) { // v1404: or build/frame-timing
             const auto readback=capture_before!=std::array<UINT64,6>{xr_transfer_mask,xr_menu_transfer_mask,
                 settings_transfer_captured?1u:0u,mono_captured?1u:0u,stereo_captured?1u:0u,native_hud_art_readbacks};
             frame_timing_record.present={static_cast<std::int64_t>(timing_present),present_start_ns,frame_xr_end_ns,desktop_start_ns,end_ns,
@@ -17239,6 +17257,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         output=root/L"artifacts";
         // v1046: the one diagnostics switch, read before any writer: build/diagnostics (the launcher's "Save diagnostic logs"); off = no diagnostic file, no formatting for one.
         d2vr::diag::set(fs::exists(root/L"build"/L"diagnostics"));diagnostics_off=!d2vr::diag::on();
+        frame_timing_only=diagnostics_off && fs::exists(root/L"build"/L"frame-timing"); // v1404
         d2vr::weapon_perf::on.store(d2vr::diag::on(),std::memory_order_relaxed);   // v1283 (plan A1-A4): the near-path timers, binder reasons, refused samples, weapon-perf.csv
         {std::error_code ec;fs::create_directories(output.always(),ec);} // functional files (settings answers, status, aa caps, probe result) live here either way
         output_directory=output.always();recovery_log_path=output/L"xr-recoveries.log";
@@ -17746,6 +17765,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         wide_elision_knob_applied.store(wide_elision_knob,std::memory_order_relaxed);
         if(!wide_census_requested) {d2vr::WideStateCensus::disable();wide_state.set_owner_ready(false);remove_wide_census_observers();}
         temporal_eye::diagnostic_capture_enabled=fs::exists(root/L"build"/L"diagnostic-capture");
+        if(xr_requested && frame_timing_only) { // v1404: the frame timing log alone, for release-configuration timing
+            xr_timing_csv.open(output_directory.always()/L"xr-frame-timing.csv",std::ios::trunc);
+            if(xr_timing_csv) xr_timing_csv << xr_timing_header;
+        }
         if(xr_requested && !diagnostics_off) {
             present_timing_csv.open(output/L"present-boundaries.csv",std::ios::trunc);
             if(d2vr::diag::on() && (!present_timing_csv)) throw std::runtime_error("Cannot open Present boundary timing log");
@@ -18188,6 +18211,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         native_hud_art_capture.observer=render_perf_requested.load()?d2vr::NativeHudChildCapture::Observer{nullptr,&render_perf_hud_begin,&render_perf_span_end}:d2vr::NativeHudChildCapture::Observer{};
         native_hud_art_bounds.observer=render_perf_requested.load()?d2vr::NativeArtBounds::Observer{nullptr,&render_perf_bounds_begin,&render_perf_span_end}:d2vr::NativeArtBounds::Observer{};
         d2vr::RenderPassMap::cpu_timing_enable(fs::exists(root/L"build"/L"pass-cpu-timing"),frames.load()); // v1399 (plan check L2)
+        {std::ifstream knob(root/L"build"/L"desktop-mirror-every");unsigned n=desktop_mirror_default;if(knob && !(knob>>n)) n=desktop_mirror_default; // v1406: absent or empty = the default
+            desktop_mirror_every.store(std::clamp(n,1u,8u),std::memory_order_relaxed);}
         {std::ifstream knob(root/L"build"/L"nvidia-vrs");nvidia_vrs_requested=static_cast<bool>(knob);nvidia_vrs_tried=false;nvidia_vrs_config={}; // v1403 plan 2A.5
          float inner{},outer{};std::string token;if(knob>>inner>>outer && inner>=.1f && inner<=.9f && outer>inner && outer<=1.5f) {nvidia_vrs_config.inner=inner;nvidia_vrs_config.outer=outer;}
          while(knob>>token) if(token=="4x4") nvidia_vrs_config.quarter=true;}
