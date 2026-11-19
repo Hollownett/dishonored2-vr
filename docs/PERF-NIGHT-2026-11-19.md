@@ -48,6 +48,8 @@ Sim of exactly that setup (2621x2822, "DLSS Quality" selected):
 | CPU | Memory-validity cache keeps big engine regions: VirtualQuery 11.4 % -> ~2 % of the main thread | `native_readable_range.hpp` | ~0.4 ms p50, ~0.65 ms p90 (section 4) |
 | CPU | `canted_fov` memoised (was recomputed several times per eye per frame, 1.4 % of the main thread) | `canted_fov.hpp` | lab (v1397) |
 | GPU | DLSS Quality defaults to render preset E (CNN) and whole-eye DLSS on NVIDIA; DLAA keeps NGX's default (K) | `dlss_eye_upscaler.hpp`, `fsr_taa.hpp` | 0.66 ms per eye vs 1.44 (K) and 0.99 (FSR 3 Quality) |
+| 4.2 | First start picks DLSS Quality on RTX (was DLAA); launcher preselection and help text match | `aa_first_start.hpp`, `launcher/Prefs.cs`, `launcher/Program.cs` | labs (v1398) |
+| 4.1 | Opt-in governor steps down only when GPU-bound (pre-XR stall), never on CPU-bound misses | `vr_perf_governor.hpp`, `dxgi_probe.cpp` | lab (v1398) |
 | 2A.1 | Static shadow cache: design + observe-only prototype behind `build/static-shadow-cache` (counts only, skips nothing) | `docs/STATIC-SHADOW-CACHE.md`, `static_shadow_cache*.hpp` | needs live checks C1-C8 |
 
 Upscaler GPU cost per eye at 2246x2419 output (sim, RTX 5070, NGX 310.9.1):
@@ -89,16 +91,19 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
 
 ## 6. Testing in the headset
 
-- **Steam is waiting on a dialog.** At 03:01 a launch stopped at "SynchronizingCloud: syncfailed" (Steam's own log; its stats request
-  failed at the same moment, so most likely a short network drop). Steam queues every later launch behind that prompt. Steam's
-  cloud check at 03:16 lists every Dishonored 2 save as in sync, and the saves on disk match the last verified backup byte for
-  byte. Choose Retry Sync in that prompt.
-- **v1397 is installed** in `build/` (the dinput8 proxy loads it): v1396 plus the `canted_fov` memo (lab-tested; v1397 itself could
-  not be sim-run because of the Steam prompt; v1396 ran ~10 sims). v1393 is kept in `build/night/installed/`, v1394-v1396 in
-  `build/night/`. Switch: `sh build/night/use.sh 1396` or `sh build/night/use.sh 1393` (Git Bash); the proxy needs exactly one
-  `d2vr_render_probe_arm_v*.dll` in `build/`. `artifacts/repair-v1397-test-candidate.json` names v1397 for the developer-mode
-  launcher (`launcher/dist`); restart the launcher (or Re-check) so it picks it up. With v1393 swapped back, the launcher falls back to
-  the v1393 manifest by itself (the v1397 manifest's DLL is then missing).
+- **Steam needs you to sign in.** At 03:01 a launch stopped at "SynchronizingCloud: syncfailed" (Steam's own log; its stats request
+  failed at the same moment: a short network drop; Steam reconnected at 03:16 and lists every Dishonored 2 save as in sync). That
+  prompt held every later launch, so at 03:51 I restarted the Steam client (`steam.exe -shutdown`, then `-silent`) to clear it. Steam
+  then stopped at its account picker (three remembered accounts) instead of signing in by itself, and I did not pick one (a wrong
+  account once let Steam Cloud empty the save folder). Pick your account in Steam before playing. The saves and
+  `dishonored2Config.cfg` on disk match the last verified backup byte for byte.
+- **v1398 is installed** in `build/` (the dinput8 proxy loads it): v1396 (~10 sims) plus the `canted_fov` memo (v1397), the
+  first-start DLSS Quality default and the governor's GPU-bound gate (v1398). v1397 and v1398 are lab-tested only (the RTX DLSS lab
+  passes on the RTX 5070); Steam blocked sim runs from 03:01. v1393 is kept in `build/night/installed/`, v1394-v1397 in `build/night/`.
+  Switch: `sh build/night/use.sh 1396` (last sim-verified) or `sh build/night/use.sh 1393` (Git Bash); the proxy needs exactly one
+  `d2vr_render_probe_arm_v*.dll` in `build/`. `artifacts/repair-v1398-test-candidate.json` names v1398 for the developer-mode launcher
+  (`launcher/dist`); restart the launcher (or Re-check) so it picks it up. Swapping another DLL in, the launcher falls back to the
+  highest manifest whose DLL exists (v1397 and v1393 manifests are there too).
 - Suggested settings: Anti-aliasing **DLSS Quality**; Save diagnostic logs **off**; Virtual Desktop **90 Hz** (try 80 Hz if it
   still drops); mod Resolution 1.0 with VD High or Ultra.
 - Opt-in knobs (empty files in `build/`): `auto-refresh-rate` (picks 72/80/90 Hz itself), `dlss-preset` containing `K` (DLSS's best
@@ -108,8 +113,9 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
 ## 7. Not done / next
 
 - Headset verification of all of the above.
-- The governor (dynamic resolution) needs a GPU-time signal first: on this PC most missed frames are CPU-bound, and a miss-driven
-  governor would lower resolution for nothing.
+- The governor (dynamic resolution, plan 4.1): v1398 gates its down steps on a GPU-bound signal (pre-XR stall > 1 ms; CPU-bound
+  misses are counted in `perf_governor.cpu_bound_holds`). It stays opt-in (`build/governor`) and FSR-only until a headset run: DLSS
+  needs its feature created at the maximum size with a per-frame render subrect, else every step rebuilds the feature.
 - The CPU floor (~9.5 ms on the 5600X) is now mostly the game's own main thread: game code ~45 %, waits on its own jobs and the
   driver. **The second eye is not where the CPU goes** (`docs/ENGINE-CPU-SECOND-VIEW-RESEARCH.md`): one engine view vs two changed
   engine time by ~0.24 ms, executing eye 2's lists costs ~0.08 ms on NVIDIA, and per-draw matrices are written inside the recorded
@@ -124,3 +130,23 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
   cut to ~1 ms. Top changes: per-stage GPU timing and cheaper warp stages; exact motion for held items (the root of the v1320-v1327
   crossbow doubling); an edge ring for hand/weapon outlines; a general stale-surface test; the lens-mask stamp in that mode (it
   never runs there today). The automatic switch (plan 3.1) should key on GPU load, not missed frames.
+
+## 8. Plan status
+
+| Phase | Status | What blocks the rest |
+|---|---|---|
+| 0 Measurement | Done in the sim (R0-R6, A/Bs, thread profiles); the planned interleaved A/B did not run | Steam (sign-in) |
+| 1.1-1.6 | Done: code, labs, sim (1.1-1.3); labs (1.4, 1.6) | Headset check |
+| 2A.1 static shadow cache | Design + observe-only prototype | Live checks C1-C8 need the game |
+| 2A.2 shadow cvars, 2A.3-2A.5 | Not started (2A.5 needs the NVAPI SDK, a download) | Game; your OK for the SDK |
+| 2B.1 / 2B.2 second-view CPU | Researched: no-go (the second view costs ~0.24 ms of CPU) | - |
+| 2B.3 mod hooks on the main thread | Done for the biggest two (memory-check cache, canted_fov memo) | - |
+| 2B.4, 2C | Not started; `jobs_numThreads` / `r_schedulerThreadingMode` test prepared (`win_perf_sim.py --game-cvar`) | Game |
+| 3.1 automatic performance mode | Not started: the mode is chosen at session start, and it only pays on GPU-bound PCs after the warp is cut to ~1 ms | 3.2 first |
+| 3.2 performance-mode quality | Researched (`docs/PERFORMANCE-MODE-AFW-COMPARISON.md`), not implemented | Sim/headset to verify warp changes |
+| 4.1 governor | Gate implemented, opt-in | Headset run |
+| 4.2 defaults | Done (DLSS Quality on RTX) | - |
+| 4.3 render-size cap, 4.4 depth layer | Not started (both change what the headset shows; need a headset to judge) | Headset |
+
+First things to run once Steam is signed in (each ~3 min, `tools/win_perf_sim.py`): v1398 at 2621x2822 DLSS Quality (confirm the
+v1396 result), then `--game-cvar jobs_numThreads=10` and `=6` against no cvar at 0.5x (the CPU floor).
