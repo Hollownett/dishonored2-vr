@@ -221,7 +221,7 @@ v1406 at your VD setup (2621x2822, DLSS Quality), 4 runs:
 Release-config medians before v1406: 9.82-10.18 ms (v1404/v1405, 4 runs). Against v1393 (15.06 / 15.82 ms) the frame is ~37 %
 shorter. **Where this leaves 90 Hz on this PC:** the median frame has ~1.6 ms of headroom; 10-15 % of frames in the busiest stretches
 of this scene still take longer than 11.1 ms, and those are the game's own main-thread work (the mod's share of the render thread is now
-~0.7 ms: Present ~0.45 ms with the mirror thinned, DLSS dispatch ~0.27 ms). On a 5600X the remaining options are 80 Hz in the busiest
+~0.8 ms: the Present hook 0.52 ms p50 with the mirror thinned, DLSS's CPU side ~0.27 ms). On a 5600X the remaining options are 80 Hz in the busiest
 areas (`auto-refresh-rate` does that by itself) or Very Low presets; a CPU with ~15 % more single-thread speed (5800X3D, 7600X,
 13600K and newer) should clear the busy stretches too, which is an estimate, not a measurement.
 
