@@ -30,7 +30,7 @@ inline std::string menu_utf8(const std::wstring& w) {
 struct VrMenuRow {std::string name,value;double slider{-1};std::string help;};
 // The 14 rows in panel order (mirrors settings_panel_image.hpp).
 inline std::array<VrMenuRow,settings_row_count> vr_menu_rows(const VrSettings& s,double effective,UINT width,UINT height) {
-    const auto split=[](const wchar_t* all,double slider,const char* help) {
+    const auto split=[](std::wstring_view all,double slider,const char* help) { // merge 2026-11-19: temporal_aa_text() returns std::wstring since v1298
         const std::wstring a(all);const auto at=a.find(L": ");
         return VrMenuRow{menu_utf8(a.substr(0,at)),at==std::wstring::npos?std::string():menu_utf8(a.substr(at+2)),slider,help};};
     char scale[32];std::snprintf(scale,sizeof scale,"%.1fx",s.requested());

@@ -500,7 +500,7 @@ int main() {
         {VrPreferences d;require(d.antialiasing && d.temporal_aa==2 && d.hud_percent==65 && d.controls_hint && d.sharpness==.5 && d.mirror==MirrorMode::right_eye,"VrPreferences defaults differ");}
         const auto preference_file=std::filesystem::path("build/vr-settings-test.cfg");
         save_preferences(preference_file,{1.3,true,{TurnControl::Mode::smooth,45,120},MirrorMode::left_eye,.75,0,65,true});
-        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==11,"Saved preferences are not version 11");}
+        {std::ifstream raw(preference_file);int version{};raw>>version;require(version==12,"Saved preferences are not version 12");}
         const auto saved=load_preferences(preference_file);
         require(saved && saved->resolution==1.3 && saved->antialiasing && saved->turning.mode==TurnControl::Mode::smooth &&
             saved->turning.smooth_degrees_per_second==120 && saved->mirror==MirrorMode::left_eye && saved->sharpness==.75 && !saved->temporal_aa &&
@@ -562,7 +562,7 @@ int main() {
                     {VrPreferences d;require(!d.aa_chosen && d.crosshair,"VrPreferences defaults for the v9 fields differ");}
                     for(const bool chosen:{false,true}) for(const bool cross:{false,true}) {
                         auto v9=dlss;v9.temporal_aa=7;v9.aa_chosen=chosen;v9.crosshair=cross;save_preferences(preference_file,v9);
-                        {std::ifstream header(preference_file);int version{};header>>version;require(version==11,"save_preferences did not write version 11");}
+                        {std::ifstream header(preference_file);int version{};header>>version;require(version==12,"save_preferences did not write version 12");}
                         const auto back=load_preferences(preference_file);require(back && back->aa_chosen==chosen && back->crosshair==cross && back->temporal_aa==7,"v9 fields did not round trip");
                     }
                     const auto fixture=load_preferences(std::filesystem::path(__FILE__).parent_path()/"fixtures"/"vr-settings-v9.cfg");
@@ -600,7 +600,7 @@ int main() {
                     const auto old=load_preferences(preference_file);require(old && old->upscale_percent==0 && old->temporal_aa==6 && old->cutscene_mode==CutsceneMode::theater,"A v10 file did not load as no custom scale");
                     for(const int percent:{0,50,60,77,100}) {
                         auto v11=dlss;v11.temporal_aa=6;v11.upscale_percent=percent;save_preferences(preference_file,v11);
-                        {std::ifstream header(preference_file);int version{};header>>version;require(version==11,"v11 save wrote another version");}
+                        {std::ifstream header(preference_file);int version{};header>>version;require(version==12,"re-saving a v11 file did not write version 12");}
                         const auto back=load_preferences(preference_file);require(back && back->upscale_percent==percent && back->temporal_aa==6,"The upscaler scale did not round trip");
                         require(std::filesystem::file_size(preference_file)<=512,"A v11 file exceeds the 512 byte format limit");
                     }
