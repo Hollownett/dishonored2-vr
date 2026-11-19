@@ -118,3 +118,21 @@ Alternate/AFW in one session now needs `build/renderer-live` or a start in perfo
 Not testable here: `PDAFWPlugin.dll` is not on this PC (the AFW row reports it missing and falls back to the built-in warp), and PSVR2
 triggers need SteamVR with a PlayStation VR2 plus `Dishonored2\DVR_psvr2\dvr_psvr2_bridge.exe` and PSVR2Toolkit's
 `psvr2_toolkit_capi_loader.dll` next to it (the launcher does not install them).
+
+## Built-in warp vs PureDark AFW (2026-11-19, simulator)
+
+Setup: v1414 (the built-in warp now feeds the same `afw capture` triples), the user's current save, performance mode, DLSS Quality,
+scenario `head_turn_walk` (walking with the head yawing +-40 degrees), 10 triples per warp captured 32-56 s into gameplay; the
+plugin is PDAFWPlugin.dll SHA256 48D5849F...E5D5 from Indurhra's v0.7.0 release (the user's own test copy, `build/afw-plugin/`, not
+committed). Scored with `tools/afw_compare.py` (rebuilt eye vs the eye's next native frame; "held" = no warp):
+
+| | rebuilt / held, whole eye (median) | hand box | hand ghosting | frame time p50 / p90 |
+|---|---|---|---|---|
+| built-in warp | 0.81 (0.13-1.00) | 0.82 | 0.74 | 9.50 / 11.41 ms |
+| PureDark AFW | 0.83 (0.24-1.00) | 0.82 | 0.71 | 9.60 / 11.78 ms |
+
+A tie within the noise: both remove about a fifth of the no-warp error; ours is a little cheaper. Sheets: `docs/afw-compare/`. The
+scenario moves only the head and the walk; fast hand and weapon motion, NPC motion and disocclusions (where the designs differ) are
+not exercised, and three of ten captures per warp were up to two alternations apart (both warps ~1.00 there). Judge in the headset
+with the VR menu's Renderer row (both are live in a performance-mode session).
+

@@ -3265,6 +3265,12 @@ public:
                         if(stale_warp_->parallax_passes==parallax_before) stale_layers_[eye].reset(); // depth refused: rotation only, the reticle too
                         if(stale_layers_[eye] && observe_stale_warp) observe_stale_warp(eye,sources[eye],processed,fresh_image,kept_depth,fresh_depth,*stale_layers_[eye]);
                         stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;++stale_eye_warps;
+                        if(afw_capture_requested.load()>0 && !afw_capture_.pending && !afw_capture_dir.empty() && processed) { // v1414: the built-in warp's rebuilt eye, for the same capture sheet as AFW
+                            D3D11_TEXTURE2D_DESC d{};processed->GetDesc(&d);d.BindFlags=0;
+                            if(!afw_capture_.rebuilt) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);device->CreateTexture2D(&d,nullptr,&afw_capture_.rebuilt);}
+                            if(!afw_capture_.prev) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);D3D11_TEXTURE2D_DESC k{};alt_kept_[eye]->GetDesc(&k);k.BindFlags=0;device->CreateTexture2D(&k,nullptr,&afw_capture_.prev);}
+                            if(afw_capture_.rebuilt && afw_capture_.prev) {context_->CopyResource(afw_capture_.rebuilt.Get(),processed);context_->CopyResource(afw_capture_.prev.Get(),alt_kept_[eye].Get());afw_capture_.frame=alternate_frame;afw_capture_.eye=eye;afw_capture_.pending=true;}
+                        }
                         }
                     }
                 } catch(const std::exception& e) {stale_warp_failed_=true;stale_warped_frame_[eye]=0;++stale_eye_warp_failures;processed=sources[eye];
