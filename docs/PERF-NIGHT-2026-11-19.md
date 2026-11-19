@@ -96,12 +96,12 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
   account picker. Steam's own auto-login account is the save owner (the account signed in all night), so at 04:08 I restarted it with
   `-login <that account>` (its remembered token, no password) and it signed in; nothing else was changed. The saves and
   `dishonored2Config.cfg` match the last verified backup byte for byte after every run.
-- **v1406 is installed** in `build/` (the proxy loads it), with `artifacts/repair-v1406-test-candidate.json` for the
-  developer-mode launcher (`launcher/dist`; restart it or press Re-check). It is v1403 plus the release-config timing knob and the
-  thinner desktop mirror (section 9). Sim at your VD setup (2621x2822, DLSS Quality), release configuration: work p50 9.43-9.47 ms,
-  p90 11.0-12.6 ms depending on the scene's busy stretches; 0 exceptions, 0 upscaler failures. Earlier builds (v1393 in
-  `build/night/installed/`, v1394-v1405 in `build/night/`) switch with `sh build/night/use.sh <version>` (Git Bash); the proxy needs
-  exactly one `d2vr_render_probe_arm_v*.dll` in `build/`, and the launcher picks the highest manifest whose DLL exists.
+- **v1407 is installed** in `build/` (the proxy loads it), and `launcher/dist/DishonoredVRLauncher.exe` is a standalone v1407 launcher
+  (`build/package-candidate.ps1 -Version 1407`; it installs into `%LOCALAPPDATA%\DishonoredVR`; the v1406 launcher is kept as
+  `DishonoredVRLauncher.before-v1407.exe`). v1407 = v1406 with the desktop window back to every frame (your call: the thinner mirror is
+  opt-in `desktop-mirror-every`) and no stray note files in the game folder with diagnostics off. Release-config sim at your VD setup:
+  p50 9.65-10.18 ms, p90 11.2-14.0 ms (the save's scripted busy stretch). Earlier builds are in `build/night/`; switch with
+  `sh build/night/use.sh <version>`.
 - Suggested settings: Anti-aliasing **DLSS Quality**; Save diagnostic logs **off** (your setup has `build/diagnostics`: it costs
   ~0.2 ms p50 and 1-2 ms in the worst frames); Virtual Desktop **90 Hz** (try 80 Hz if it still drops); mod Resolution 1.0 with VD
   High or Ultra; on a 6-core CPU like the 5600X, Shadows / Models / View distance **Very Low** (section 9).
@@ -110,7 +110,7 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
   `render-pixel-cap` containing megapixels per eye (e.g. `5.0`: 2621x2822 -> 2155x2320, engine GPU 7.46 -> 6.59 ms in the sim),
   `pass-cpu-timing` (per-pass CPU table in the status), `nvidia-vrs` (NVIDIA foveated shading, v1403; optional text
   `0.35 0.55 [4x4]`), `afw2-fill-bound` (performance mode), `static-shadow-cache` (+ `-probe`, observe only),
-  `desktop-mirror-every` containing 1-8 (default 3; `1` = the desktop window at full rate as before v1406), `frame-timing`
+  `desktop-mirror-every` containing 2-8 (the desktop window on every Nth headset frame; ~0.7 ms per skipped Present), `frame-timing`
   (with diagnostics off, writes `xr-frame-timing.csv` only: for timing the release configuration).
 - The status file now says why stereo misses its budget: `perf_governor.performance_mode_advice` = `gpu_bound` (performance mode,
   DLSS Quality or a lower resolution help) or `cpu_bound` (they do not; a lower refresh rate does); the log gets a line on each change.
@@ -198,9 +198,9 @@ After v1403 the median frame fit 90 Hz (10.1 ms) but the slowest 10 % did not (1
   15.25 ms). New knob `frame-timing` writes the timing log without the rest, so sims can now time the release configuration.
 - **The desktop mirror is the largest mod cost left on the render thread.** Each Present of the game's window costs ~0.7 ms of frame
   time in the sim (same run, frames with it vs without: 10.04 vs 9.27 ms p50) and the call alone took 0.30 ms p50 in your VD session.
-  v1406 presents it on every 3rd frame during headset gameplay (menus, loads and frames without a submitted layer: every frame).
-  The headset image is unchanged; the desktop window runs at 30 fps at 90 Hz. `build/desktop-mirror-every` with `1` restores the
-  old behaviour. No hang or error from the skipped Presents in 6 runs (the game does not wait on a swapchain latency object).
+  v1406 presented it on every 3rd frame during headset gameplay; at your request v1407 keeps every frame by default and the
+  thinner mirror is opt-in (`build/desktop-mirror-every` 2-8; menus, loads and frames without a submitted layer always present).
+  No hang or error from skipped Presents in 6 runs (the game does not wait on a swapchain latency object).
 - **Very Low presets help a little:** Shadows / Models / View distance at Very Low instead of Low: 9.74 / 11.22 ms vs 9.96 / 11.89
   (v1404 release).
 - **Dead ends:** the engine's threading is already fully on (`r_schedulerThreadingMode 2`, deferred contexts, `mdnt_multithreaded_updates`
@@ -233,4 +233,16 @@ of this scene still take longer than 11.1 ms, and those are the game's own main-
 ~0.8 ms: the Present hook 0.52 ms p50 with the mirror thinned, DLSS's CPU side ~0.27 ms). On a 5600X the remaining options are 80 Hz in the busiest
 areas (`auto-refresh-rate` does that by itself) or Very Low presets; a CPU with ~15 % more single-thread speed (5800X3D, 7600X,
 13600K and newer) should clear the busy stretches too, which is an estimate, not a measurement.
+
+### Engine follow-up (09:45-10:10)
+
+- **More engine job workers would not help.** The engine sizes its pool itself: it reads the CPU topology
+  (`GetLogicalProcessorInformation`, resolved at run time) and then WRITES `jobs_numThreads` (a cvar-system call with the computed
+  count), so the cvar is an output; 5 workers on the 6-core 5600X. A joint-state profile (every thread sampled in the same round)
+  shows why more would not pay: while the main thread waits on engine jobs, usually 1-3 of the 5 workers run (0:13 %, 1:22 %, 2:31 %,
+  3:16 %, 4:10 %, 5:4 %): the waits are dependency chains, not a worker shortage.
+- **The engine's own timing print is compiled out.** `com_speeds 1` ("all / spin / game / sync / rfr / GPU") with `com_logFile 2`,
+  set both from the config and live (accepted), writes no `qconsole.log`: the retail build has no console log.
+- The mod's body/hand features cost ~0.1 ms (R3), the main thread runs ~77 % of the time on the game's serial work, and no engine
+  function exceeds ~3 % of its samples. What is left on the engine side is reverse-engineering and changing the game's own simulation.
 
