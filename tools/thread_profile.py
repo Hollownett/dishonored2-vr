@@ -64,6 +64,8 @@ def main():
     where = collections.defaultdict(collections.Counter)
     bymod = collections.defaultdict(collections.Counter)
     mod_hits = collections.defaultdict(collections.Counter)
+    # leaf: the running non-system address (module+offset), or the first non-system caller of a system frame (waits, driver)
+    leaf = collections.defaultdict(collections.Counter)
     marks = collections.defaultdict(set)
     total = collections.Counter()
     end = time.perf_counter() + secs
@@ -103,6 +105,9 @@ def main():
                         mod_hits[tid][v - m[0]] += 1
                         break
                 bymod[tid][("wait in " + owner) if waiting else ("run in " + running_in)] += 1
+                at = ctx.Rip if rip_mod and rip_mod[2].lower() not in SYSTEM else (callers[0] if callers else ctx.Rip)
+                am = find(at)
+                leaf[tid][("wait:" if waiting else "") + (f"{am[2]}+{at - am[0]:x}" if am else "?")] += 1
                 total[tid] += 1
             finally:
                 k32.ResumeThread(h)
@@ -112,7 +117,8 @@ def main():
     import json
     present = [t for t in handles if "present-hook" in marks[t]]
     dump = {"total": {str(t): total[t] for t in handles}, "cpu_ms": {str(t): cpu[t] for t in handles}, "present": [str(t) for t in present],
-            "mod_hits": {str(t): {hex(k): n for k, n in c.items()} for t, c in mod_hits.items()}}
+            "mod_hits": {str(t): {hex(k): n for k, n in c.items()} for t, c in mod_hits.items()},
+            "leaf": {str(t): dict(c) for t, c in leaf.items()}}
     (Path(sys.argv[5]) if len(sys.argv) > 5 else Path("thread-profile.json")).write_text(json.dumps(dump))
     print(f"{rounds} rounds over {secs:.1f}s")
     order = sorted(handles, key=lambda t: (-("present-hook" in marks[t]), -cpu[t]))

@@ -212,6 +212,11 @@ After v1403 the median frame fit 90 Hz (10.1 ms) but the slowest 10 % did not (1
   per-slot B-A p50 -0.41 ... +0.17, mean ~-0.1 ms). No physics-step rhythm either: frame times correlate over many frames (busy
   stretches), with no peak at a fixed period except the mirror's every-3rd-frame step. The busiest stretch of this save falls at the
   same time in every run (38-50 s into gameplay, p90 ~14 ms whatever the setting): a scripted world event, the game's own simulation.
+- **Main-thread profile, busy (38-48 s) vs calm (18-28 s) stretch** (`tools/thread_profile.py` now also saves each thread's leaf
+  addresses; grouped per function with the exe's `.pdata`): no single engine function stands out in the busy stretch; the extra time
+  is spread over many game functions plus D3D11 calls (6.6 -> 9.4 % of samples). The mod's real CPU on that thread is the Present
+  hook (0.52 ms p50), DLSS's CPU side (~0.27 ms) and its guarded reads of game memory (~5 % of samples, ~4,200 reads per frame
+  through a VirtualQuery-backed cache). Cutting the reads could save ~0.3 ms at most; the busy stretch needs ~3 ms.
 
 v1406 at your VD setup (2621x2822, DLSS Quality), 4 runs:
 
