@@ -96,8 +96,8 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
   account picker. Steam's own auto-login account is the save owner (the account signed in all night), so at 04:08 I restarted it with
   `-login <that account>` (its remembered token, no password) and it signed in; nothing else was changed. The saves and
   `dishonored2Config.cfg` match the last verified backup byte for byte after every run.
-- **v1401 is installed** in `build/` (v1399 plus the performance-mode warp changes of v1400/v1401, section 8), with
-  `artifacts/repair-v1401-test-candidate.json`. v1401 sim: stereo 2621x2822 DLSS Quality 9.96 ms interval, performance-mode
+- **v1403 is installed** in `build/` (v1401 plus dev commands and the opt-in NVIDIA VRS of v1403), with
+  `artifacts/repair-v1403-test-candidate.json`; sim at 2621x2822 DLSS Quality 10.11 / 11.89 ms, 0 exceptions. v1401: v1401 sim: stereo 2621x2822 DLSS Quality 9.96 ms interval, performance-mode
   rebuild 1.82 ms GPU (v1399 1.92), 0 exceptions. v1399: (the dinput8 proxy loads it), with `artifacts/repair-v1399-test-candidate.json` for the
   developer-mode launcher (`launcher/dist`; restart it or press Re-check). Sim at your VD setup (2621x2822, DLSS Quality): work p50
   10.43 / p90 11.84 ms, 0 DLSS failures, 0 exceptions (v1398: 10.14 / 11.61, v1393: 15.06 / 15.82). Earlier builds: v1393 in
@@ -162,7 +162,8 @@ Measured after Steam was back (04:08-04:55), all in the sim on this PC:
 | 2A.1 static shadow cache | Prototype + live checks: no-go as designed (above) |
 | 2A.2 shadow cvars | Tested: no CPU or frame-time effect |
 | 2A.3 more shared GPU passes | Not worth it here: the second view costs ~0.24 ms (CPU) and the GPU is not the limit after the DLSS fix |
-| 2A.4 stencil mask, 2A.5 NVIDIA VRS | Not done: GPU-side levers, the frame is CPU-bound on this PC; VRS needs the NVAPI SDK (a download: your OK) |
+| 2A.5 NVIDIA VRS | Done, opt-in `nvidia-vrs` (v1403): NVAPI SDK fetched from github.com/NVIDIA/nvapi (MIT) into `third_party/nvapi` (not committed; without it the feature compiles to a stub). Scene passes only, full rate within 35 % of the render height of each eye's optical centre, 2x2 beyond. Sim: FORWARD_WORLD 1.76 -> 1.55 ms GPU, 22816 applications, 0 failures; eye image centre unchanged, periphery slightly coarser. |
+| 2A.4 stencil mask | Not done: ~9 % of FOG/SCREENSHADOWS/POSTPROC (~0.1 ms here) for forcing stencil state into engine passes; GPU-side and small |
 | 2B.1 / 2B.2 second-view CPU | Researched: no-go |
 | 2B.3 mod hooks on the main thread | Done: memory-check cache, `canted_fov` memo (~2 ms -> ~1 ms of mod work on that thread) |
 | 2B.4 XR submit off the render thread | Not done: the hook is ~0.85 ms and the runtimes call into the app's D3D11 device in xrEndFrame; risky without the headset |
