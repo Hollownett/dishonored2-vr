@@ -107,7 +107,13 @@ Sim (2026-11-19 12:10-12:30, release config, 2621x2822, DLSS Quality): no except
 ~3.7 ms slower than v1407** in native stereo (p50 13.2-13.7 vs 9.50 ms; the same machine and save, v1407 re-measured right after).
 `build/native-classic` does not change it (13.4 ms). The extra time is the engine's own render work (the render job graph 46 -> 64 %
 of the main thread); GPU passes that grew: UPDATE_NPC_DECALS 0.10 -> 1.61 ms, IGGY_FULLSCREEN 0.28 -> 1.11 ms, DEPTHPASS 1.50 -> 2.07 ms,
-SHADOWS_WORLD 0.17 -> 0.65 ms. Cause not found yet; next: build each of the three commits and bisect.
+SHADOWS_WORLD 0.17 -> 0.65 ms. **Resolved in v1412:** the cause was the merged "sessions start alternate-capable": Native then renders
+both eyes through the mono-view path, without the paired shadow share or second-view skips. The comparison was also confounded:
+the launcher's performance mode (`build/alternate-eye`) had been switched on at 10:28, so the v1407 "baseline" ran in performance mode.
+v1412 starts Native paired again; a session goes alternate-capable only with `build/alternate-eye`, a saved Alternate/AFW renderer, or
+`build/renderer-live`. Same scene, same hour: paired v1407 11.86 / v1412 11.92 ms p50; performance mode v1407 9.50 / v1412 9.55 ms.
+(The scene is the user's 10:36 save, heavier than the morning's, hence the higher paired numbers.) Live switching between Native and
+Alternate/AFW in one session now needs `build/renderer-live` or a start in performance mode.
 
 Not testable here: `PDAFWPlugin.dll` is not on this PC (the AFW row reports it missing and falls back to the built-in warp), and PSVR2
 triggers need SteamVR with a PlayStation VR2 plus `Dishonored2\DVR_psvr2\dvr_psvr2_bridge.exe` and PSVR2Toolkit's
