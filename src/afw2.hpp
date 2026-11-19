@@ -70,6 +70,7 @@ class Afw2Pass {
     std::array<Buffer,2> motion_{},keys_{},landed_{},origins_{},near_{};Buffer fresh_keys_{},holes_{},votes_{},decisions_{},tiles_{},stats_{};Ptr<ID3D11Buffer> fill_args_;Ptr<ID3D11Buffer> holes_read_;
     Ptr<ID3D11UnorderedAccessView> fill_args_uav_;   // (plan 3.2c: FillSteps writes the per-pass arguments)
     std::array<Ptr<ID3D11Buffer>,10> fill_pass_;      // (plan 3.2c: each fill pass's constants, FillPass b1, made once)
+    Buffer motion_tiles_{},motion_flags_{},scatter_tiles_{};Ptr<ID3D11Buffer> motion_args_,scatter_args_;   // (plan 3.2b: Motion's tile list, per tile listed or not, Repair's and Origins' groups)
     UINT gw_{},gh_{},fw_{},fh_{};
 public:
     static constexpr int profile_stages=10;
@@ -107,7 +108,9 @@ private:
         if(gw!=gw_ || gh!=gh_) {
             for(int i=0;i<2;++i) {motion_[i]=buffer(gw*gh,8);keys_[i]=buffer(gw*gh,4);landed_[i]=buffer(gw*gh,4);origins_[i]=buffer(gw*gh,4);near_[i]=buffer(gw*gh,8);}
             fresh_keys_=buffer(gw*gh,4);decisions_=buffer(gw*gh,8);tiles_=buffer(((gw+7)/8)*((gh+7)/8),4,true);holes_=buffer(1+((gw+7)/8)*((gh+7)/8),4);gw_=gw;gh_=gh;
+            motion_tiles_=buffer(((gw+7)/8)*((gh+7)/8),4,true);motion_flags_=buffer(((gw+7)/8)*((gh+7)/8),4);
         }
+        if(fw!=fw_ || fh!=fh_) scatter_tiles_=buffer(((fw+7)/8)*((fh+7)/8),4,true);
         fw_=fw;fh_=fh;
     }
     void target(UINT w,UINT h) {
@@ -149,6 +152,9 @@ public:
     // plan 3.2c: the jump-flood fill starts at the power of two this frame's holes need (Crack measures, FillSteps decides on the GPU;
     // the passes above get no groups) instead of always at 512 (opt-in build/afw2-fill-bound: 1; default 0, every pass from 512 as before)
     inline static std::atomic<int> fill_bound{0}; // opt-in: build/afw2-fill-bound (the coordinator made it opt-in: ~0.02 ms for 78 changed edge pixels on one dump)
+    // plan 3.2b: Repair and Origins over the 8x8 tiles Motion lists (a mover, the rig or a dropped texel in them), ScatterWrite over the
+    // fresh tiles Scatter lists, instead of every tile (build/no-afw2-motion-tiles: 0, every tile as before; the same output either way)
+    inline static std::atomic<int> motion_tiles{1};
     explicit Afw2Pass(ID3D11Device* device);
     // Holes left after the fill on the last pass (reads back and waits: tools and the lab only).
     std::uint32_t holes() {
@@ -188,6 +194,16 @@ public:
         for(std::uint32_t i=1;i<=r[1];++i) r[0]+=v[i]!=0;
         context_->Unmap(st.Get(),0);return r;
     }
+    // plan 3.2b (tools only: waits): the tiles Motion listed on the last pass (Repair and Origins ran there) and all tiles
+    std::array<std::uint32_t,2> motion_tile_count() {
+        std::array<std::uint32_t,2> r{};if(!motion_flags_.b) return r;
+        D3D11_BUFFER_DESC d{};motion_flags_.b->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
+        Ptr<ID3D11Buffer> st;checked(device_->CreateBuffer(&d,nullptr,&st),"motion tiles read-back");context_->CopyResource(st.Get(),motion_flags_.b.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};checked(context_->Map(st.Get(),0,D3D11_MAP_READ,0,&m),"motion tiles read");
+        const auto* v=static_cast<const std::uint32_t*>(m.pData);r[1]=d.ByteWidth/4;
+        for(std::uint32_t i=0;i<r[1];++i) r[0]+=v[i]!=0;
+        context_->Unmap(st.Get(),0);return r;
+    }
     // The look-up votes of the last pass per owner (1 head's rig, 2 left, 3 right): confirmed, refuted (reads back and waits: tools only).
     std::array<std::uint32_t,60> votes() {
         std::array<std::uint32_t,60> v{};if(!votes_.b) return v;
@@ -223,7 +239,7 @@ cbuffer Afw : register(b0) {
     float4 validRect;  // kept u, v max, fresh u, v max
     float4 fillStep;   // x, y unused (plan 3.2c: the step and the last pass are FillPass b1), z the camera's sideways step in texels per inverse metre, w the near-mover gate (px)
     float4 rigMode;    // x the rig target (t15) is bound, y colour order inside it (0: this eye's kept rig first, 1: the fresh eye's first), w (v1312) class-251 held texels land without the target
-    float4 fillBound;  // (plan 3.2c) x the fill's bound is on (Crack measures, FillSteps decides)
+    float4 fillBound;  // (plan 3.2c) x the fill's bound is on (Crack measures, FillSteps decides); (plan 3.2b) y motion tiles (Repair, Origins, ScatterWrite)
 }
 // plan 3.2c: per fill pass, made once (no constant update between the passes): x step (texels), y the last pass, z it reads the second
 // buffers (where the crack wrote near)
@@ -357,14 +373,22 @@ bool ScatterOf(int2 i,out uint at,out uint key,out float3 d) {
     at=Index(k);key=asuint(1/then.z)|1;
     return true;
 }
-[numthreads(8,8,1)] void Scatter(uint3 id : SV_DispatchThreadID) {
-    if(any(id.xy>=uint2(freshGrid.xy))) return;
-    uint at,key;float3 d;if(ScatterOf(int2(id.xy),at,key,d)) InterlockedMax(keysOut[at],key);
-}
-[numthreads(8,8,1)] void ScatterWrite(uint3 id : SV_DispatchThreadID) {
-    if(any(id.xy>=uint2(freshGrid.xy))) return;
+// (plan 3.2b, motion tiles on: Scatter lists the fresh 8x8 tiles with a texel that hands motion over (u4) and ScatterWrite runs there only)
+groupshared uint scatterTileAny;
+[numthreads(8,8,1)] void Scatter(uint3 id : SV_DispatchThreadID,uint3 g : SV_GroupID,uint3 t : SV_GroupThreadID) {
+    if(t.x==0 && t.y==0) scatterTileAny=0;
+    GroupMemoryBarrierWithGroupSync();
     uint at,key;float3 d;
-    if(!ScatterOf(int2(id.xy),at,key,d) || keysIn[at]!=key) return;
+    if(all(id.xy<uint2(freshGrid.xy)) && ScatterOf(int2(id.xy),at,key,d)) {InterlockedMax(keysOut[at],key);scatterTileAny=1;}
+    GroupMemoryBarrierWithGroupSync();
+    if(fillBound.y>0 && t.x==0 && t.y==0 && scatterTileAny!=0) tilesOut.Append(g.y*((uint(freshGrid.x)+7)/8)+g.x);
+}
+[numthreads(8,8,1)] void ScatterWrite(uint3 id : SV_DispatchThreadID,uint3 g : SV_GroupID,uint3 t : SV_GroupThreadID) {
+    int2 f=int2(id.xy);
+    if(fillBound.y>0) {const uint tile=tilesIn[g.x],across=(uint(freshGrid.x)+7)/8;f=int2((tile%across)*8+t.x,(tile/across)*8+t.y);}
+    if(any(f>=int2(freshGrid.xy))) return;
+    uint at,key;float3 d;
+    if(!ScatterOf(f,at,key,d) || keysIn[at]!=key) return;
     // the winner seeds its kept texel and the texels of that surface within 2 (Metro's kSeedRadius: a mover moves as one, and the fresh
     // texel grid does not land on every kept texel of it). Neighbours a winner holds keep their own.
     const int2 c=int2(at%uint(grid.x),at/uint(grid.x));const float ca=KeptAhead(c);
@@ -432,13 +456,30 @@ bool OnFreshOutline(float3 p) {
     else [unroll] for(int n=0;n<8;++n) {float2 dir;sincos(n*0.7853982,dir.y,dir.x);on=on || FreshRigAt(c+int2(round(dir*3)));}
     return on;
 }
+// plan 3.2b motion tiles (fillBound.y; build/no-afw2-motion-tiles: off): Motion lists the 8x8 tiles holding a texel with anything but
+// the still world's motion (a mover, the rig, a dropped texel: every texel Repair can change, every texel Origins writes) and Repair
+// and Origins run over those tiles only (DispatchIndirect, as the fill). A tile without one: Motion writes its texels' final motion
+// (motion 1) itself; a listed tile: Repair's input (motion 0), as before. Repair takes a neighbour in an unlisted tile as the still
+// world it is (no read: zero motion, confirmed, the sky where the kept depth has none).
+RWStructuredBuffer<uint2> motionFinalOut : register(u1);   // motion 1 in Motion (the scatter's motion read here too: no read view of it)
+RWStructuredBuffer<uint> motionTileOut : register(u3); StructuredBuffer<uint> motionTileIn : register(t11);   // per tile: 1 listed
+groupshared uint motionTileAny;
+float4 ScatteredIn(uint at) {
+    if(fillBound.y<=0) return MotionIn(at);
+    const uint2 m=motionFinalOut[at];return float4(f16tof32(m.x),f16tof32(m.x>>16),f16tof32(m.y),float(m.y>>16));
+}
+bool StillWorld(float4 m) {const uint w=uint(m.w);return (w==kConfirmed || w==(kSky|kConfirmed)) && !any(m.xyz);}
+// tiles on: the tile's own texel of the listed tiles (group g, thread t), else the dispatch's texel
+int2 TileTexel(uint3 id,uint3 g,uint3 t) {
+    if(fillBound.y<=0) return int2(id.xy);
+    const uint tile=tilesIn[g.x],across=(uint(grid.x)+7)/8;return int2((tile%across)*8+t.x,(tile/across)*8+t.y);
+}
 // Motion: per kept texel the displacement d (kept metres) from the kept tick to the target tick, before the world (camera) map.
-[numthreads(8,8,1)] void Motion(uint3 id : SV_DispatchThreadID) {
-    if(any(id.xy>=uint2(grid.xy))) return;
-    const int2 i=int2(id.xy);float a;const float3 p=KeptPointAt(i,a);
+float4 MotionAt(int2 i) {
+    float a;const float3 p=KeptPointAt(i,a);
     TargetVote(i);
     float3 d=float3(0,0,0);uint w=0;
-    if(a<=0) {PutMotion(Index(i),float4(0,0,0,kSky|kConfirmed));return;}
+    if(a<=0) return float4(0,0,0,kSky|kConfirmed);
     const bool rig=KeptRigAt(i);
     const int owner=Owner(p,rig,rig && flags.x>0 && keptRig.Load(int3(i,0))<253.5/255);
     const float4 own=flags.y>0?keptMotion.Load(int3(i,0)):float4(0,0,0,0);
@@ -452,7 +493,7 @@ bool OnFreshOutline(float3 p) {
         } else {
             // its own vector says still: motion the fresh eye handed over to it (Scatter), confirmed by the chain
             w|=kConfirmed;
-            const float4 sm=flags.y>0?MotionIn(Index(i)):float4(0,0,0,0);
+            const float4 sm=flags.y>0?ScatteredIn(Index(i)):float4(0,0,0,0);
             if(sm.w>0.5) {float3 c=sm.xyz;if(Chain(p,c,false,true)==1) {d=c;w|=kMoving;}}
             // a near thing that moved with no usable vector (a held prop outside the rig mask: its engine motion is ~300 px off, v1152):
             // the fresh eye no longer sees it here while it shows a mover within 8 texels: it stands down for the fresh eye's (FreshSplat)
@@ -498,7 +539,20 @@ bool OnFreshOutline(float3 p) {
         if(dot(d,d)>0) w|=kMoving;
     }
     if(dot(d,d)>0 && !(w&kDrop)) {const float3 m=p+d;if(m.z>1e-3) InterlockedMax(handVotes[8],uint(length((Project(keptFov,m)-Project(keptFov,p))*grid.xy))+1);}
-    PutMotion(Index(i),float4(d,w));
+    return float4(d,w);
+}
+[numthreads(8,8,1)] void Motion(uint3 id : SV_DispatchThreadID,uint3 g : SV_GroupID,uint3 t : SV_GroupThreadID) {
+    if(t.x==0 && t.y==0) motionTileAny=0;
+    GroupMemoryBarrierWithGroupSync();
+    const bool inside=all(id.xy<uint2(grid.xy));
+    float4 m=float4(0,0,0,0);
+    if(inside) {m=MotionAt(int2(id.xy));if(fillBound.y>0 && !StillWorld(m)) motionTileAny=1;}
+    GroupMemoryBarrierWithGroupSync();
+    const bool listed=motionTileAny!=0;
+    if(fillBound.y>0 && t.x==0 && t.y==0) {const uint tile=g.y*((uint(grid.x)+7)/8)+g.x;motionTileOut[tile]=listed?1:0;if(listed) tilesOut.Append(tile);}
+    if(!inside) return;
+    if(fillBound.y<=0 || listed) PutMotion(Index(int2(id.xy)),m);
+    else motionFinalOut[Index(int2(id.xy))]=uint2(f32tof16(m.x)|(f32tof16(m.y)<<16),f32tof16(m.z)|(uint(m.w)<<16));
 }
 )HLSL" R"HLSL(// v1197 (in-game street 4-9, room 3/4/6/10/12/14/15: the engine's rig target drawn ~290 texels off, as from a camera one IPD beyond the
 // fresh eye; with it trusted, every kept rig texel outside it was dropped and its pixels shown as the world: both hands striped floor): the
@@ -520,9 +574,33 @@ bool TargetOn() {
 // Repair (Metro's warp_repair): an unconfirmed texel takes the nearest confirmed motion of its class and surface within 4 texels (else
 // keeps its own); a confirmed moving texel outvoted by its 5x5 same-surface neighbours (>= 3 voters, fewer than half within a texel of
 // it) takes the motion most of them agree with.
-[numthreads(8,8,1)] void Repair(uint3 id : SV_DispatchThreadID) {
-    if(any(id.xy>=uint2(grid.xy))) return;
-    const int2 i=int2(id.xy);const float4 m=MotionIn(Index(i));const uint w=uint(m.w);
+// (plan 3.2b, motion tiles on: over the listed tiles only, each group its tile and the 4 texels around it in group memory: the motion,
+// a neighbour in a tile Motion did not list the still world it is (no read: zero motion, confirmed, the sky where the kept depth has
+// none), and the kept depth; the searches read only there)
+groupshared uint2 repairMotion[256];groupshared float repairAhead[256];
+static int2 repairBase=int2(0,0);
+float4 RepairIn(int2 j) {
+    if(fillBound.y>0) {const uint2 v=repairMotion[(j.y-repairBase.y)*16+(j.x-repairBase.x)];return float4(f16tof32(v.x),f16tof32(v.x>>16),f16tof32(v.y),float(v.y>>16));}
+    return MotionIn(Index(j));
+}
+float RepairAhead(int2 j) {return fillBound.y>0?repairAhead[(j.y-repairBase.y)*16+(j.x-repairBase.x)]:KeptAhead(j);}
+[numthreads(8,8,1)] void Repair(uint3 id : SV_DispatchThreadID,uint3 g : SV_GroupID,uint3 t : SV_GroupThreadID) {
+    const int2 i=TileTexel(id,g,t);
+    if(fillBound.y>0) {
+        repairBase=i-int2(t.xy)-4;
+        [unroll] for(int k=0;k<4;++k) {
+            const uint n=t.y*8+t.x+uint(k)*64;const int2 j=repairBase+int2(n%16,n/16);
+            uint2 v=uint2(0,0);float ja=0;
+            if(all(j>=0) && all(j<int2(grid.xy))) {
+                ja=KeptAhead(j);
+                v=motionTileIn[uint(j.y/8)*((uint(grid.x)+7)/8)+uint(j.x/8)]!=0?motionPacked[Index(j)]:uint2(0,(ja>0?kConfirmed:kSky|kConfirmed)<<16);
+            }
+            repairMotion[n]=v;repairAhead[n]=ja;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if(any(i>=int2(grid.xy))) return;
+    const float4 m=MotionIn(Index(i));const uint w=uint(m.w);
     float4 o=m;
     if(!(w&(kSky|kDrop))) {
         const float a=KeptAhead(i);
@@ -531,12 +609,11 @@ bool TargetOn() {
             bool found=false;
             [loop] for(int r=1;r<=4 && !found;++r) {
                 float best=1e9;
-                for(int y=-r;y<=r;++y) for(int x=-r;x<=r;++x) {
-                    if(max(abs(x),abs(y))!=r) continue;                       // the ring at Chebyshev distance r
+                for(int y=-r;y<=r;++y) for(int x=-r;x<=r;x+=abs(y)==r?1:2*r) {   // the ring at Chebyshev distance r (row by row)
                     const int2 j=i+int2(x,y);
                     if(any(j<0) || any(j>=int2(grid.xy)) || x*x+y*y>=best) continue;
-                    const float4 n=MotionIn(Index(j));const uint nw=uint(n.w);
-                    if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(KeptAhead(j),a)) continue;
+                    const float4 n=RepairIn(j);const uint nw=uint(n.w);
+                    if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(RepairAhead(j),a)) continue;
                     best=x*x+y*y;found=true;o=float4(n.xyz,((w|kConfirmed)&~kMoving)|(dot(n.xyz,n.xyz)>0?kMoving:0));
                 }
             }
@@ -545,8 +622,8 @@ bool TargetOn() {
             for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) if(x!=0 || y!=0) {
                 const int2 j=i+int2(x,y);
                 if(any(j<0) || any(j>=int2(grid.xy))) continue;
-                const float4 n=MotionIn(Index(j));const uint nw=uint(n.w);
-                if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(KeptAhead(j),a)) continue;
+                const float4 n=RepairIn(j);const uint nw=uint(n.w);
+                if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(RepairAhead(j),a)) continue;
                 ++voters;agree+=distance(n.xyz,m.xyz)<px;
             }
             if(voters>=3 && agree*2<voters) {                                 // outvoted: the motion most of them agree with
@@ -554,13 +631,13 @@ bool TargetOn() {
                 for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) if(x!=0 || y!=0) {
                     const int2 j=i+int2(x,y);
                     if(any(j<0) || any(j>=int2(grid.xy))) continue;
-                    const float4 n=MotionIn(Index(j));const uint nw=uint(n.w);
-                    if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(KeptAhead(j),a)) continue;
+                    const float4 n=RepairIn(j);const uint nw=uint(n.w);
+                    if((nw&(kConfirmed|kSky|kDrop))!=kConfirmed || (nw&kRig)!=(w&kRig) || !SameSurface(RepairAhead(j),a)) continue;
                     int count=0;
                     for(int yy=-2;yy<=2;++yy) for(int xx=-2;xx<=2;++xx) {
                         const int2 k=i+int2(xx,yy);
                         if(any(k<0) || any(k>=int2(grid.xy))) continue;
-                        const float4 q=MotionIn(Index(k));
+                        const float4 q=RepairIn(k);
                         count+=(uint(q.w)&(kConfirmed|kSky|kDrop))==kConfirmed && distance(q.xyz,n.xyz)<px;
                     }
                     if(count>pick_n) {pick_n=count;pick=n.xyz;}
@@ -660,12 +737,13 @@ bool Lands(uint key,int2 j) {float a;return !TargetOn() || !(key&kKeyRig) || Rig
     if(SplatOf(int2(id.xy),key,lo,hi)) for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) if(untargeted || Lands(key,int2(x,y))) InterlockedMax(keysOut[Index(int2(x,y))],key);
 }
 // Origins: a moving texel whose key won a target texel leaves its own index there (the resolve takes its motion back off)
-[numthreads(8,8,1)] void Origins(uint3 id : SV_DispatchThreadID) {
-    if(any(id.xy>=uint2(grid.xy))) return;
-    if(!(uint(MotionIn(Index(int2(id.xy))).w)&(kMoving|kRig))) return;   // (v1191: a still world texel has no motion to leave)
+[numthreads(8,8,1)] void Origins(uint3 id : SV_DispatchThreadID,uint3 g : SV_GroupID,uint3 t : SV_GroupThreadID) {
+    const int2 i=TileTexel(id,g,t);   // (plan 3.2b: the tiles Motion listed: every moving or rig texel lies in one)
+    if(any(i>=int2(grid.xy))) return;
+    if(!(uint(MotionIn(Index(i)).w)&(kMoving|kRig))) return;   // (v1191: a still world texel has no motion to leave)
     uint key;int2 lo,hi;
-    if(SplatOf(int2(id.xy),key,lo,hi) && (key&kKeyMoving))
-        for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) if(keysIn[Index(int2(x,y))]==key) originsOut[Index(int2(x,y))]=Index(int2(id.xy));
+    if(SplatOf(i,key,lo,hi) && (key&kKeyMoving))
+        for(int y=lo.y;y<=hi.y;++y) for(int x=lo.x;x<=hi.x;++x) if(keysIn[Index(int2(x,y))]==key) originsOut[Index(int2(x,y))]=Index(i);
 }
 uint Tile(int2 i) {return uint(i.y/8)*((uint(grid.x)+7)/8)+uint(i.x/8);}
 uint Pack(int2 i,bool filled) {return uint(i.x)|(uint(i.y)<<15)|(filled?kFilled:0);}
@@ -1111,6 +1189,11 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
         D3D11_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=DXGI_FORMAT_R32_TYPELESS;u.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=33;u.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
         checked(device_->CreateUnorderedAccessView(fill_args_.Get(),&u,&fill_args_uav_),"fill arguments write view");
     }
+    {   // plan 3.2b: Repair's and Origins' groups (the listed tile count, CopyStructureCount)
+        D3D11_BUFFER_DESC a{};a.ByteWidth=12;a.Usage=D3D11_USAGE_DEFAULT;a.BindFlags=D3D11_BIND_UNORDERED_ACCESS;a.MiscFlags=D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS|D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        const UINT args[3]{0,1,1};D3D11_SUBRESOURCE_DATA i{args,0,0};checked(device_->CreateBuffer(&a,&i,&motion_args_),"motion tile arguments");
+        checked(device_->CreateBuffer(&a,&i,&scatter_args_),"scatter tile arguments");
+    }
     for(int k=0;k<10;++k) {   // pass k: step 512 >> k; the first reads the second buffers (the crack's), then they alternate
         const float pass[4]{float(512>>k),k==9?1.f:0.f,k%2==0?1.f:0.f,0};
         D3D11_BUFFER_DESC b{};b.ByteWidth=16;b.Usage=D3D11_USAGE_IMMUTABLE;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
@@ -1152,7 +1235,8 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     put(0,0,std::hypot(TK.t[0],TK.t[1])*kw/(std::tan(kf.right)-std::tan(kf.left)),mover_px);
     put(rig_target && kept_rig && fresh_rig?1:0,rig_order,rig_debug,untargeted_lands.load(std::memory_order_relaxed));   // (the rig target needs the masks: its colour comes from rig texels)
     const bool bound=fill_bound.load(std::memory_order_relaxed)!=0;
-    put(bound?1:0,0,0,0);
+    const bool tiles=motion_tiles.load(std::memory_order_relaxed)!=0;
+    put(bound?1:0,tiles?1:0,0,0);
     context_->UpdateSubresource(constants_.Get(),0,nullptr,c.data(),0,0);
     last_constants=c;
     ID3D11Buffer* cb=constants_.Get();context_->CSSetConstantBuffers(0,1,&cb);context_->PSSetConstantBuffers(0,1,&cb);
@@ -1187,17 +1271,33 @@ inline ID3D11Texture2D* Afw2Pass::run(const StaleLayers& L,UINT width,UINT heigh
     context_->ClearUnorderedAccessViewUint(motion_[1].uav.Get(),zero);   // (a structured buffer: the bit pattern 0 = 0.0f)
     if(motions) {
         context_->ClearUnorderedAccessViewUint(keys_[1].uav.Get(),zero);
-        bind({},{nullptr,keys_[1].uav.Get()});go(scatter,fw,fh);
-        bind({nullptr,keys_[1].srv.Get()},{motion_[1].uav.Get()});go(scatter_write,fw,fh);
+        bind({},{nullptr,keys_[1].uav.Get()});
+        if(tiles) {   // plan 3.2b: Scatter lists the fresh tiles that hand motion over (u4, from empty); ScatterWrite runs there only
+            {ID3D11UnorderedAccessView* t=scatter_tiles_.uav.Get();const UINT empty=0;context_->CSSetUnorderedAccessViews(4,1,&t,&empty);}
+            go(scatter,fw,fh);bind({},{});context_->CopyStructureCount(scatter_args_.Get(),0,scatter_tiles_.uav.Get());
+            bind({nullptr,keys_[1].srv.Get(),nullptr,nullptr,scatter_tiles_.srv.Get()},{motion_[1].uav.Get()});
+            context_->CSSetShader(cs_[scatter_write].Get(),nullptr,0);context_->DispatchIndirect(scatter_args_.Get(),0);
+        } else {go(scatter,fw,fh);bind({nullptr,keys_[1].srv.Get()},{motion_[1].uav.Get()});go(scatter_write,fw,fh);}
     }
     mark(1);
-    bind({motion_[1].srv.Get()},{motion_[0].uav.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,votes_.uav.Get()});go(motion,kw,kh);mark(2);
-    bind({motion_[0].srv.Get(),nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{motion_[1].uav.Get()});go(repair,kw,kh);mark(3);
+    if(tiles) {   // plan 3.2b: Motion lists the tiles with anything but the still world (u4, from empty) and writes the others' final motion (motion 1)
+        bind({},{motion_[0].uav.Get(),motion_[1].uav.Get(),nullptr,motion_flags_.uav.Get(),nullptr,nullptr,votes_.uav.Get()});
+        {ID3D11UnorderedAccessView* t=motion_tiles_.uav.Get();const UINT empty=0;context_->CSSetUnorderedAccessViews(4,1,&t,&empty);}
+        go(motion,kw,kh);bind({},{});context_->CopyStructureCount(motion_args_.Get(),0,motion_tiles_.uav.Get());mark(2);
+        bind({motion_[0].srv.Get(),nullptr,nullptr,motion_flags_.srv.Get(),motion_tiles_.srv.Get(),votes_.srv.Get()},{motion_[1].uav.Get()});
+        context_->CSSetShader(cs_[repair].Get(),nullptr,0);context_->DispatchIndirect(motion_args_.Get(),0);mark(3);
+    } else {
+        bind({motion_[1].srv.Get()},{motion_[0].uav.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,votes_.uav.Get()});go(motion,kw,kh);mark(2);
+        bind({motion_[0].srv.Get(),nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{motion_[1].uav.Get()});go(repair,kw,kh);mark(3);
+    }
     // 3 splat (keys 0), 4 origins (origins 0); fresh rig keys
     context_->ClearUnorderedAccessViewUint(keys_[0].uav.Get(),zero);context_->ClearUnorderedAccessViewUint(origins_[0].uav.Get(),zero);
     context_->ClearUnorderedAccessViewUint(fresh_keys_.uav.Get(),zero);context_->ClearUnorderedAccessViewUint(holes_.uav.Get(),zero);
     bind({motion_[1].srv.Get(),nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,keys_[0].uav.Get()});go(splat,kw,kh);mark(4);
-    bind({motion_[1].srv.Get(),keys_[0].srv.Get(),nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,origins_[0].uav.Get()});go(origins,kw,kh);mark(5);
+    if(tiles) {bind({motion_[1].srv.Get(),keys_[0].srv.Get(),nullptr,nullptr,motion_tiles_.srv.Get(),votes_.srv.Get()},{nullptr,nullptr,nullptr,origins_[0].uav.Get()});
+               context_->CSSetShader(cs_[origins].Get(),nullptr,0);context_->DispatchIndirect(motion_args_.Get(),0);}
+    else {bind({motion_[1].srv.Get(),keys_[0].srv.Get(),nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,origins_[0].uav.Get()});go(origins,kw,kh);}
+    mark(5);
     const bool fresh_hands=hands && (L.hand_moving[0] || L.hand_moving[1]);
     if(fresh_hands || motions) {bind({nullptr,nullptr,nullptr,nullptr,nullptr,votes_.srv.Get()},{nullptr,nullptr,nullptr,nullptr,fresh_keys_.uav.Get()});go(fresh_splat,fw,fh);}
     mark(6);

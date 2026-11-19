@@ -20,6 +20,7 @@
 // fill pass by pass): the median ms per stage; then N passes as the game issues them (no syncs: the pass's own timestamps) for the total.
 // STALE_REPLAY_FILL_BOUND=0|1: Afw2Pass::fill_bound (plan 3.2c: the fill's start step from this frame's holes; 0: always 512); the
 // "afw2 fill:" line gives its terms, the step and the farthest seed the fill took. STALE_REPLAY_HOLES=1: the texels left empty after it.
+// STALE_REPLAY_MOTION_TILES=0|1: Afw2Pass::motion_tiles (plan 3.2b: Repair and Origins over the tiles Motion lists; 0: every tile).
 #define _CRT_SECURE_NO_WARNINGS  // std::getenv
 #include "../src/stale_eye_warp.hpp"
 #include <algorithm>
@@ -277,6 +278,7 @@ int main(int argc, char** argv) {
     if (const char* o = std::getenv("STALE_REPLAY_RIG_ORDER")) warp.afw2->rig_order = std::atoi(o);
     if (const char* u = std::getenv("STALE_REPLAY_UNTARGETED")) Afw2Pass::untargeted_lands = std::atoi(u);   // v1312 A/B
     if (const char* b = std::getenv("STALE_REPLAY_FILL_BOUND")) Afw2Pass::fill_bound = std::atoi(b);
+    if (const char* t = std::getenv("STALE_REPLAY_MOTION_TILES")) Afw2Pass::motion_tiles = std::atoi(t);   // plan 3.2b A/B (0: Repair and Origins everywhere)
     ComPtr<ID3D11PixelShader> shipped = pixel_of(warp), paths;
     {
         const std::string src = path_variant(shader_source("src/stale_eye_warp.hpp"));
@@ -501,6 +503,7 @@ int main(int argc, char** argv) {
                 std::printf(" | total %.1f\n", sum);
             }
             if (layers.afw2 && warp.afw2) {const auto t = warp.afw2->hole_tiles(); std::printf("      afw2: %u target texels left empty after the fill; hole tiles %u of %u\n", warp.afw2->holes(), t[0], t[1]);}
+            if (layers.afw2 && warp.afw2 && Afw2Pass::motion_tiles) {const auto t = warp.afw2->motion_tile_count(); std::printf("      afw2 motion tiles (plan 3.2b: Repair, Origins): %u of %u\n", t[0], t[1]);}
             if (layers.afw2 && warp.afw2) {   // plan 3.2c: the fill's reach terms (Crack, Motion) and start step (FillSteps), and the farthest seed it took
                 const auto v = warp.afw2->votes(); float inv_z; std::memcpy(&inv_z, &v[9], 4);
                 std::printf("      afw2 fill: bound %s, hole probe r %u, seed 1/z max %.2f x side step %.2f, motion %u px, start step %u; farthest seed taken %.1f texels\n",
