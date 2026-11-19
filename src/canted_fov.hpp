@@ -20,7 +20,19 @@ struct CantedFov {
     std::array<float,4> rotation{0,0,0,1}; // x,y,z,w; eye-local, compose as eye_orientation * rotation
     float half_x{},half_y{};             // symmetric half angles of the canted frustum
 };
+inline std::optional<CantedFov> canted_fov_search(float left,float right,float up,float down);
+// v1396: canted_fov is a pure function of the runtime's FOV, which stays the same frame after frame, but it was called several times
+// per eye per frame (game_xr.hpp, dxgi_probe.cpp) and each call runs the coarse-to-fine search below (~1300 trig calls): 1.4 % of the
+// render thread's samples in the 2026-11-19 sim profile. A per-thread memo of the last four inputs returns the identical result.
 inline std::optional<CantedFov> canted_fov(float left,float right,float up,float down) {
+    struct Memo {float in[4];std::optional<CantedFov> out;bool used{};};
+    thread_local Memo memo[4];thread_local unsigned next{};
+    for(const auto& m:memo) if(m.used && m.in[0]==left && m.in[1]==right && m.in[2]==up && m.in[3]==down) return m.out;
+    auto& m=memo[next++&3u];
+    m.in[0]=left;m.in[1]=right;m.in[2]=up;m.in[3]=down;m.out=canted_fov_search(left,right,up,down);m.used=true;
+    return m.out;
+}
+inline std::optional<CantedFov> canted_fov_search(float left,float right,float up,float down) {
     for(float a:{left,right,up,down}) if(!std::isfinite(a) || std::abs(a)>=1.5f) return std::nullopt;
     if(left>=right || down>=up) return std::nullopt;
     // Symmetric tangent extents (tx, ty) around the four optical corner rays for a view turned by yaw/pitch.

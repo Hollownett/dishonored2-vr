@@ -342,8 +342,9 @@ def main():
             time.sleep(2)
         out("session over: " + (re.findall(r"StartProbe returned \d+", proxy_log()) or ["(no StartProbe returned)"])[-1])
         time.sleep(3)
-        for p in ART.iterdir():
-            if p.is_file() and p.stat().st_mtime >= started - 2:
+        for p in ART.iterdir():  # analysis files only: no image dumps (21 MB each with diagnostics on; 2026-11-19 a night of runs filled C:)
+            if (p.is_file() and p.stat().st_mtime >= started - 2 and p.suffix.lower() not in (".rgba", ".dmp", ".bin", ".raw", ".png", ".r32", ".rg16f")
+                    and p.stat().st_size <= 20 << 20):
                 shutil.copy2(p, run / p.name)
         out(f"artifacts copied to {run}")
     except Exception as e:  # noqa: BLE001 - always clean up below
@@ -360,6 +361,7 @@ def main():
         time.sleep(5)  # Steam Cloud and the game's file handles
         changed = restore_saves(backup, record)
         out("saves verified unchanged" if not changed else "saves restored: " + "; ".join(changed))
+        shutil.rmtree(backup, ignore_errors=True)  # restore_saves raised if the live folder did not match the record byte for byte
         leftovers = [p.name for p in written if p.exists()] + [s.name for s, _ in moved if not s.exists()]
         out("knobs cleaned" if not leftovers else f"KNOB CLEANUP INCOMPLETE: {leftovers}")
         (run / "runner.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")

@@ -60,6 +60,14 @@ int main() {
     }
     auto s=d2vr::canted_fov(-.8f,.8f,.7f,-.7f);REQUIRE(s && s->yaw==0 && s->pitch==0 && std::abs(s->half_x-.8f)<1e-6f && std::abs(s->half_y-.7f)<1e-6f);
     REQUIRE(!d2vr::canted_fov(.1f,-.1f,.5f,-.5f) && !d2vr::canted_fov(-1.6f,.5f,.5f,-.5f));
+    // v1396 memo: repeated and rotating inputs (more than the four memo entries) return exactly the search's result.
+    for(int round=0;round<3;++round) for(const auto& p:profiles) {
+        const auto memo=d2vr::canted_fov(p.l,p.r,p.u,p.d),direct=d2vr::canted_fov_search(p.l,p.r,p.u,p.d);
+        REQUIRE(memo.has_value()==direct.has_value());
+        if(memo) REQUIRE(memo->yaw==direct->yaw && memo->pitch==direct->pitch && memo->half_x==direct->half_x && memo->half_y==direct->half_y &&
+            memo->rotation==direct->rotation);
+    }
+    REQUIRE(!d2vr::canted_fov(.1f,-.1f,.5f,-.5f) && !d2vr::canted_fov(.1f,-.1f,.5f,-.5f)); // an invalid input stays invalid when memoised
     std::printf("PASS: canted frusta cover every optical frustum with no more pixels than the enclosing symmetric one\n");
     return 0;
 }
