@@ -527,3 +527,40 @@ Sim (v1421, run_hands, no diagnostics: the headset's status mode): 1393 of 1394 
 `hands`/`arms` blocks are written. **Next headset session:** reproduce the freeze (walk/run and swing), then read `hands.invalid` /
 `invalid_longest_ms` (the runtime lost the grip), `arms.authored` and `attack_presses` (the game's attack animation took the arm),
 `arms.reach_clamped` / `clamp_contact` (the mod held the hand at the arm's reach or a surface), `hand_visual` (the physics body drawn).
+
+## 16. The v1421 hang, and a thread that only waits (v1422, 2026-11-19)
+
+**Report (v1421 headset):** the game crashed again; the arm did not follow the controller ("like a controller connection interruption,
+which never happened before the new thread"); held objects show many artifacts in generated frames; VD was left frozen for debugging.
+
+**The hang, from the live process (pid 26536, user's go-ahead to debug; read-only stack scan, `D:\d2vr-artifacts\hang-v1421`: stacks,
+status, a 204 MB minidump).** The status file had stopped updating (game layers 7667, spacewarp 5196 generated / 5193 submitted). Thread
+stacks (heuristic scan of return addresses, the probe's own frames named from its linker map):
+- the spacewarp thread: `GameXr::spacewarp_thread_main_` -> virtualdesktop-openxr.dll (xrBeginFrame/xrEndFrame internals) -> d3d11.dll
+  -> ntdll critical-section wait: blocked on the device's multithread-protection lock;
+- the game's render thread: inside the Steam overlay's Present hook (gameoverlayrenderer64, which runs before the probe's hook and so
+  outside `gated_present`) -> d3d11.dll -> nvwgf2umx.dll waiting on an event;
+- an NVIDIA driver worker thread spinning at 100 % CPU (`GetCurrentThreadId` in a loop: a driver spin lock).
+A lock cycle between D3D11's multithread lock, the NVIDIA driver's threaded optimization and VDXR's immediate-context calls from the
+second thread. Shorter versions of the same contention stall the render thread without deadlocking: the real frames stop for a moment
+while VD keeps reprojecting the head, so only the hands look frozen. That was the "arm freezes for a second" of v1420/v1421.
+
+**v1422 design: nothing touches the game's D3D11 device off the render thread.**
+- The thread only waits: it calls xrWaitFrame (no D3D11 call in VDXR) for the generated frame's slot. When the slot opens the frame is
+  *due* (`GameXr::spacewarp_due`).
+- The game's render thread begins and ends the due frame at its next safe point: the probe's RSSetViewports / OMSetRenderTargets hooks
+  call `spacewarp_safe_point` on the game's immediate context, on the render thread, outside `GameXr::present()` (which refuses: its own
+  frame calls may be open), before the game's call goes on. VDXR's calls there are single and state-free (timer queries, a fence Signal).
+  Failing a safe point, the next present() ends it before the real frame, as v1419 did.
+- No D3D11 multithread protection (never switched on), no thread in xrBeginFrame/xrEndFrame; the Present gate stays but nobody else
+  takes it.
+- Status: `safe_frames` (ended at a safe point), `fallback_frames` (at present), `due_us_last` / `due_us_max` (slot open -> frame ended).
+
+**Held objects.** A held thing (`publish_held_object`: its model box, its pose, the drawn grip) is now the hand's body like a weapon's:
+the box as a capsule along its longest world half axis, radius covering the cross section, in the drawn grip's frame (the hand as drawn:
+the requested grip plus the held clamp's shift). It replaces the weapon body while that hand holds something and is used for 250 ms after
+its last publish. Things over 1.5 m long or 1 m across (a corpse) are not taken.
+
+Sim (v1422, the user's latest save): run_hands 2304 generated, 2303 submitted, **all at a safe point** (0 at present), slot open ->
+frame ended 0.18 ms last / 2.9 ms at most, 0 late, 0 failures, no registry poison; oil_tank_throw 2433 of 2434 at safe points, at most
+5.7 ms. The save has no tank, so the held body was not exercised in the sim (same capsule rule as the weapon bodies, lab test 10).

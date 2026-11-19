@@ -2683,6 +2683,9 @@ static bool spacewarp_knob=false,spacewarp_always_knob=false;
 static double spacewarp_palm_reach_knob=0;static bool spacewarp_no_held_far_knob=false,spacewarp_tint_held_knob=false; // v1418 diagnostics (GameXr fields)
 static bool spacewarp_no_thread_knob=false; // v1420: build/spacewarp-no-thread = submit generated frames at the next Present (v1419)
 static std::array<d2vr::SpacewarpWeaponLocal,2> spacewarp_weapons{};static std::mutex spacewarp_weapons_mutex; // v1419: Setup writes, Present hands to GameXr
+// v1422 (user, headset v1421: "objects I carry artifact a lot with frame generation"): each hand's held thing as a body like a weapon's (its
+// model box as a capsule, in the drawn grip's frame), written by publish_held_object, used while that hand holds it; tick: when written
+static std::array<d2vr::SpacewarpWeaponLocal,2> spacewarp_held_bodies{};static std::array<ULONGLONG,2> spacewarp_held_tick{};
 static bool stale_afw2_knob=false; // v1184: build/afw2; v1216: default on in performance mode, build/no-afw2
 static bool rig_forensics_knob=false; // v1216: build/rig-forensics (RigMask draw-time probe, rig-dump-*.bin, image-skin log; off even with diagnostics)
 static std::array<d2vr::WorldTrackedPose,2> warp_grips{};static unsigned warp_grip_bits{};
@@ -3104,7 +3107,17 @@ void observe_paired_target_change(ID3D11DeviceContext* context,UINT count,ID3D11
     if(next_is_backbuffer) ++paired_buffer_binds;
 }
 
+// v1422: a generated frame whose slot is open (GameXr::spacewarp_due) is begun and ended here, on the game's render thread between two of
+// its own immediate-context calls (never inside GameXr::present, which refuses), so every OpenXR call touching the game's D3D11 device stays
+// on this thread (plan section 16)
+static void spacewarp_safe_point(ID3D11DeviceContext* context) noexcept {
+    if(!d2vr::GameXr::spacewarp_due.load(std::memory_order_acquire)) return;
+    if(context!=gpu_game_context.load(std::memory_order_relaxed) || GetCurrentThreadId()!=gpu_render_thread.load(std::memory_order_relaxed)) return;
+    static thread_local bool busy=false;if(busy) return;
+    busy=true;if(game_xr) game_xr->spacewarp_safe_point();busy=false;
+}
 template<unsigned Binding> void WINAPI viewports_hook(ID3D11DeviceContext* context,UINT count,const D3D11_VIEWPORT* viewports) {
+    spacewarp_safe_point(context);
     async_present_guard(context);GpuCallbackDepth depth_guard;
     reinterpret_cast<ViewportsFn>(gpu_bindings.original(0,Binding))(context,count,viewports);
     if(!trace_game_context(context)) return;
@@ -3179,6 +3192,7 @@ static void note_rt_bind(ID3D11DeviceContext* context,UINT count,ID3D11RenderTar
     for(UINT i=0;i<slot.count;++i) slot.rt[i]=targets[i];
 }
 template<unsigned Binding> void WINAPI targets_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth) {
+    spacewarp_safe_point(context);
     async_present_guard(context);GpuCallbackDepth depth_guard;
     try {observe_paired_target_change(context,count,targets);} catch(...) {record_callback_error("OMSetRenderTargets hook: paired target observer threw");}
     try {note_rt_bind(context,count,targets,depth);} catch(...) {}
@@ -6573,6 +6587,19 @@ static void publish_held_object(unsigned side,const d2vr::WorldTrackedPose& grip
         }
     }
     published=origin;published_pose={origin,{X,Y,Z}};held_snap.published=origin;held_snap.centre=centre;
+    if(spacewarp_knob && held_extents) {  // v1422: the held thing's model box as a capsule along its longest world half axis, in the drawn grip's frame
+        const d2vr::Vec3 half=*held_extents;const d2vr::Vec3 c=origin+X*centre.x+Y*centre.y+Z*centre.z;
+        const std::array<d2vr::Vec3,3> axes{X*half.x,Y*half.y,Z*half.z};const std::array<double,3> n{d2vr::length(axes[0]),d2vr::length(axes[1]),d2vr::length(axes[2])};
+        const unsigned i=n[0]>=n[1] && n[0]>=n[2]?0u:n[1]>=n[2]?1u:2u;
+        const double radius=std::sqrt(n[(i+1)%3]*n[(i+1)%3]+n[(i+2)%3]*n[(i+2)%3]);
+        // a corpse or anything over 1.5 m long is not one rigid body near the hand: not taken
+        if(std::isfinite(radius) && std::isfinite(n[i]) && n[i]<=.75 && radius<=.5 && d2vr::finite(c)) {
+            const auto drawn=grip.position+held_clamp_live.applied[side&1u];   // the hand as drawn (the object was placed from the unshifted one)
+            const auto local=[&](const d2vr::Vec3& x) {const auto d=x-drawn;return std::array<double,3>{d2vr::dot(d,grip.basis[0]),d2vr::dot(d,grip.basis[1]),d2vr::dot(d,grip.basis[2])};};
+            std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);
+            spacewarp_held_bodies[side&1u]={true,local(c-axes[i]),local(c+axes[i]),radius};spacewarp_held_tick[side&1u]=GetTickCount64();
+        }
+    }
     {std::lock_guard<std::mutex> ul(use_targets_mutex);auto& u=use_targets;   // v1074: this frame's target of the thing (from this frame's drawn grip): the draw puts the thing there exactly
      if(u.entity!=*e) {u=UseTargets{};u.entity=*e;u.since=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
      u.side=side&1u;u.ring[u.next]=published_pose;u.next=(u.next+1)%u.ring.size();u.count=std::min<unsigned>(u.count+1,static_cast<unsigned>(u.ring.size()));
@@ -11277,7 +11304,11 @@ void prepare_head_view(void* view) noexcept {
                 unsigned armed{};{std::lock_guard<std::mutex> l(hand_state_mutex);armed=hand_loadout_bits(hand_weapon_bits);}
                 std::array<d2vr::SpacewarpWeaponLocal,2> bodies{};
                 for(unsigned side=0;side<2;++side) {
-                    if(!(hands.hands>>side&1u) || !(armed>>side&1u) || native_grab.holding(side)) continue;
+                    if(native_grab.holding(side) && (hands.hands>>side&1u)) {  // v1422: a held thing is the hand's body
+                        if(GetTickCount64()-spacewarp_held_tick[side]<=250) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);bodies[side]=spacewarp_held_bodies[side];}
+                        continue;
+                    }
+                    if(!(hands.hands>>side&1u) || !(armed>>side&1u)) continue;
                     const auto& g=hands.grips[side];
                     const unsigned extra=static_cast<unsigned>(arm_copy_now(side));
                     const bool sword=(side==sword_arm_now() && !extra) || extra==static_cast<unsigned>(d2vr::arm::Held::guard_sword);
@@ -14322,7 +14353,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     simulated_input_start=GetTickCount64();simulated_initial_pause=game_logic_mask()==4;simulated_load_confirm.reset();
                                     if(taa_capture_csv.is_open()) taa_capture_after_tick=simulated_input_start+4000;
                                 }
-                                d2vr::GameXr::d3d_protection_wanted=spacewarp_knob && !spacewarp_no_thread_knob && !alternate_on(); // v1420
+                                d2vr::GameXr::d3d_protection_wanted=false; // v1422: never (it took part in the v1421 hang: plan section 16)
                                 game_xr=std::make_unique<d2vr::GameXr>(device.Get(),desc.BufferDesc.Width,desc.BufferDesc.Height,
                                     desc.BufferDesc.Format,openxr_loader_path().c_str(),controller_requested,head_requested,eye_antialiasing_requested,
                                     controller_requested && head_requested,requested_resolution_multiplier,
