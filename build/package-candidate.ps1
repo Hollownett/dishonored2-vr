@@ -1,23 +1,27 @@
-﻿param([Parameter(Mandatory)][string]$Version)
+﻿param([Parameter(Mandatory)][string]$Version,[string]$ReleaseNote,[string]$SourceCommit,[string]$SimEvidence,[string[]]$Limitations)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $rel  = 'C:\Users\hollo\Documents\ChatGPT\VR-mods-amd-ags'   # release line: source of gitignored binaries (FSR4/OpenXR/dinput8 dlls)
 $note = 'Test candidate v1384 = v1383 + hang fix: the game froze after Stilton''s mission. A game caller kept a physics body id from the previous level and switched the new level''s body in that slot (a trigger) to dynamic through setBodyMotionType 0xc86800; destroying the trigger then looped forever. The mod''s guard on 0xc86800 now skips an id whose slot holds another live body. Unit-checked; not headset-tested, not simulated.'
+# The note above is v1384's; pass -ReleaseNote (PowerShell names ignore case: not -Note, that IS $note), or an existing manifest's "state" is reused (2026-11-19).
 $name = "d2vr_render_probe_arm_v$Version.dll"
 $dll  = Join-Path $repo "build\$name"
 if ($Version -notmatch '^\d+$') { throw "version must be digits" }
 if (-not (Test-Path $dll)) { throw "missing $dll" }
 $sha = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
-$commit = (git -C $repo rev-parse --short HEAD).Trim()
-$dirty  = [bool](git -C $repo status --porcelain)
+$commit = if ($SourceCommit) { $SourceCommit } else { (git -C $repo rev-parse --short HEAD).Trim() }
+$dirty  = if ($SourceCommit) { $false } else { [bool](git -C $repo status --porcelain --untracked-files=no) }
 $art = Join-Path $repo 'artifacts'; New-Item -ItemType Directory -Force $art | Out-Null
 $manifest = Join-Path $art "repair-v$Version-test-candidate.json"
+if ($ReleaseNote) { $note = $ReleaseNote } elseif (Test-Path $manifest) { $note = (Get-Content $manifest -Raw | ConvertFrom-Json).state }
+if (-not $SimEvidence) { $SimEvidence = 'none' }
+if (-not $Limitations) { $Limitations = @('Not headset-tested and not simulated.') }
 [ordered]@{
   schema=1; version=[int]$Version; state=$note; dll_name=$name; sha256=$sha; dll_sha256=$sha
   dll_bytes=(Get-Item $dll).Length; game_sha256='b671f8249422862bf557d00aab2f4bb671ed4515cc10ad8a8a9decad84516180'
   source_commit=$commit; source_dirty=$dirty; build_host='Windows MSVC 2022 x64 (build/compile-v'+$Version+'.cmd)'
   full_required_build_passed=$false; launch_blocked=$false; headset_validated=$false; headset_tested=$false
-  sim_evidence='none'; limitations=@('Not headset-tested and not simulated.')
+  sim_evidence=$SimEvidence; limitations=@($Limitations)
 } | ConvertTo-Json | Set-Content $manifest -Encoding UTF8
 
 # Stage a repo-shaped tree (the csproj embeds files relative to launcher\..); this worktree lacks the gitignored dlls.
@@ -34,7 +38,8 @@ foreach ($f in 'fsr4\bin\amd_fidelityfx_upscaler_dx12.dll','fsr4\bin\amd_fidelit
   New-Item -ItemType Directory -Force (Split-Path "$s\third_party\$f") | Out-Null
   $src = if (Test-Path "$repo\third_party\$f") { "$repo\third_party\$f" } else { "$rel\third_party\$f" }
   Copy-Item $src "$s\third_party\$f" }
-Copy-Item "$rel\build\dinput8.dll" "$s\build\dinput8.dll"
+$d8 = if (Test-Path "$rel\build\dinput8.dll") { "$rel\build\dinput8.dll" } else { "$repo\build\dinput8.dll" }   # this PC has no release-line folder
+Copy-Item $d8 "$s\build\dinput8.dll"
 Copy-Item $dll "$s\build\$name"; Copy-Item $manifest "$s\artifacts\"
 if (Test-Path "$dll.source.json") { Copy-Item "$dll.source.json" "$s\build\" }
 
@@ -55,6 +60,9 @@ if (@($ms).Count -ne 1 -or $ms -ne "home/artifacts/repair-v$Version-test-candida
 Write-Host "embed check OK: $name sha256 $h, manifest $ms"
 
 New-Item -ItemType Directory -Force "$repo\launcher\dist" | Out-Null
+$prev = "$repo\launcher\dist\DishonoredVRLauncher.exe"
+$backup = "$repo\launcher\dist\DishonoredVRLauncher.before-v$Version.exe"   # first build of a version only: a rebuild must not replace it
+if ((Test-Path $prev) -and -not (Test-Path $backup)) { Copy-Item $prev $backup }
 Copy-Item $exe "$repo\launcher\dist\DishonoredVRLauncher.exe" -Force
 $out = "$repo\launcher\dist\DishonoredVRLauncher.exe"
 Write-Host "EXE: $out  ($([math]::Round((Get-Item $out).Length/1MB,1)) MB)"
