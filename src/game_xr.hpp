@@ -310,7 +310,8 @@ private:
     std::array<std::array<SwPlay,4>,2> sw_play_{};  // per eye the last 4 real frames' play spaces, newest first
     // v1418: each eye's previous real frame for the held-far-part rule (SpacewarpParams::prev_on): its depth (a copy: FsrTaa's is rewritten
     // every frame), the game camera, the drawn grips and which hands were drawn, that render's depth terms, FOV and rectangle, its frame
-    struct SwPrev {bool valid{};std::uint64_t frame{};SwRigid S;std::array<SwRigid,2> grips{};unsigned hand_bits{};double m10{},m11{};std::array<double,4> tan{};UINT width{},height{};};
+    struct SwPrev {bool valid{};std::uint64_t frame{};SwRigid S;std::array<SwRigid,2> grips{};unsigned hand_bits{};double m10{},m11{};std::array<double,4> tan{};UINT width{},height{};
+                  SwRigid O;};  // v1423: and the play space (the carried-with-the-player test)
     // v1420 (docs/SPACEWARP-PLAN-2026-11-19.md section 14; user, headset v1419: "move the frame generation to its own thread so it does
     // not fall behind"): the generated frame's own thread. v1422 (section 16; headset v1421 hung: the thread inside VDXR's xrEndFrame ->
     // d3d11 waiting on the device's multithread lock, the render thread inside the Steam overlay's Present -> d3d11 -> the NVIDIA driver,
@@ -1846,6 +1847,10 @@ private:
                  ++grip_invalid_samples[side];if(!grip_invalid_since_[side]) grip_invalid_since_[side]=now;
                  grip_invalid_longest_ms[side]=std::max(grip_invalid_longest_ms[side],now-grip_invalid_since_[side]);
              } else {grip_invalid_since_[side]=0;if(!(flags&XR_SPACE_LOCATION_POSITION_TRACKED_BIT)) ++grip_inferred_samples[side];}
+         }
+         if(grip_tracked_hands) {  // v1423
+             if(last_grip_sample_ms_ && now>last_grip_sample_ms_ && now-last_grip_sample_ms_<5000) grip_sample_gap_max_ms=std::max(grip_sample_gap_max_ms,now-last_grip_sample_ms_);
+             last_grip_sample_ms_=now;
          }}
         if(grip_tracked_hands)grip_pose_tick_=GetTickCount64();
         refresh_interaction_profiles();
@@ -2309,10 +2314,12 @@ public:
     // inferred (not optically tracked)
     std::array<std::uint64_t,2> grip_samples{},grip_invalid_samples{},grip_inferred_samples{};std::array<std::uint64_t,2> grip_invalid_longest_ms{};
     std::array<std::uint64_t,2> grip_invalid_since_{};
+    std::uint64_t grip_sample_gap_max_ms{},last_grip_sample_ms_{};  // v1423: the longest gap between two tracked controller samples (focused)
     std::string hands_brief_json() const {
         std::ostringstream o;
         o<<"{\"samples\":["<<grip_samples[0]<<','<<grip_samples[1]<<"],\"invalid\":["<<grip_invalid_samples[0]<<','<<grip_invalid_samples[1]
-         <<"],\"invalid_longest_ms\":["<<grip_invalid_longest_ms[0]<<','<<grip_invalid_longest_ms[1]<<"],\"inferred\":["<<grip_inferred_samples[0]<<','<<grip_inferred_samples[1]<<"]}";
+         <<"],\"invalid_longest_ms\":["<<grip_invalid_longest_ms[0]<<','<<grip_invalid_longest_ms[1]<<"],\"inferred\":["<<grip_inferred_samples[0]<<','<<grip_inferred_samples[1]
+         <<"],\"sample_gap_max_ms\":"<<grip_sample_gap_max_ms<<"}";
         return o.str();
     }
     std::mutex& dxgi_gate() noexcept {return sw_dxgi_gate_;}
@@ -2824,7 +2831,7 @@ public:
     // After the real frame's xrEndFrame: the frame for the next display slot, from this one (both eyes, into their swapchains, released),
     // and its layers. Any missing input skips it (the runtime then shows the real frame again, as without spacewarp).
     // v1418: this real frame's depth, game camera and drawn grips become the eye's previous frame for the next generated one
-    void keep_spacewarp_prev_(UINT eye,const SwRigid& S,const std::array<SwRigid,2>& grips,const WarpCamera& cam,const XrFovf& fov) noexcept {
+    void keep_spacewarp_prev_(UINT eye,const SwRigid& S,const SwRigid& O,const std::array<SwRigid,2>& grips,const WarpCamera& cam,const XrFovf& fov) noexcept {
         auto& prev=sw_prev_[eye];prev.valid=false;
         try {
             ID3D11Texture2D* const source=stale_depth_[eye].Get();if(!source) return;
@@ -2840,7 +2847,7 @@ public:
                 if(FAILED(device->CreateShaderResourceView(sw_prev_depth_[eye].Get(),&v,&sw_prev_srv_[eye]))) {sw_prev_depth_[eye].Reset();sw_prev_srv_[eye].Reset();return;}
             }
             context_->CopyResource(sw_prev_depth_[eye].Get(),source);  // after this eye's pass on the same context: the pass read the old copy
-            prev.S=S;prev.grips=grips;prev.hand_bits=cam.hand_bits;prev.m10=cam.m10;prev.m11=cam.m11;
+            prev.S=S;prev.O=O;prev.grips=grips;prev.hand_bits=cam.hand_bits;prev.m10=cam.m10;prev.m11=cam.m11;
             prev.tan={std::tan(fov.angleLeft),std::tan(fov.angleRight),std::tan(fov.angleUp),std::tan(fov.angleDown)};
             prev.width=stale_depth_width_[eye];prev.height=stale_depth_height_[eye];prev.frame=alternate_frame;prev.valid=true;
         } catch(...) {prev.valid=false;}
@@ -2956,6 +2963,10 @@ public:
                 // v1419: each hand's weapon body, from its drawn grip in this render into source camera coordinates, widened by 4 cm (the
                 // collision model against the drawn mesh)
                 bool weapon_here=false;
+                // v1423 (user, headset v1422: "the weapon still artifacts quite strongly while walking"): walking, the drawn weapon trails the
+                // grip the camera recorded by the player's step times the render latency; the body widens by three slots' locomotion (<= 10 cm)
+                const double walk_step=std::sqrt(motion.rest.t[0]*motion.rest.t[0]+motion.rest.t[1]*motion.rest.t[1]+motion.rest.t[2]*motion.rest.t[2]);
+                const double weapon_margin=.04+std::min(.10,3*walk_step);
                 for(unsigned side=0;side<2;++side) {
                     const auto& w=spacewarp_weapon[side];
                     if(!w.valid || !(cam.hand_bits>>side&1u)) continue;
@@ -2963,7 +2974,7 @@ public:
                     const auto to_source=[&](const std::array<double,3>& l) {
                         const Vec3 x=g.position+g.basis[0]*l[0]+g.basis[1]*l[1]+g.basis[2]*l[2];return Si.apply({x.x,x.y,x.z});};
                     const auto a=to_source(w.a),b=to_source(w.b);
-                    p.weapon[side]={a[0],a[1],a[2],b[0],b[1],b[2],w.radius+.04};weapon_here=true;
+                    p.weapon[side]={a[0],a[1],a[2],b[0],b[1],b[2],w.radius+weapon_margin};weapon_here=true;
                 }
                 if(weapon_here) ++spacewarp_weapon_eyes;
                 const auto& prev=sw_prev_[eye];
@@ -2971,6 +2982,7 @@ public:
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
                     p.prev_on=true;p.prev_tan=prev.tan;p.prev_m10=prev.m10;p.prev_m11=prev.m11;
                     const auto Pi=prev.S.inverse();p.prev_world=to_pass(Pi*S);
+                    p.prev_rest=to_pass(Pi*prev.O*O.inverse()*S);p.carry_on=true;  // v1423: a point fixed in the play space, carried back
                     for(unsigned side=0;side<2;++side) if((cam.hand_bits&prev.hand_bits)>>side&1u) {
                         p.prev_hand[side]=to_pass(Pi*prev.grips[side]*grips_now[side].inverse()*S);p.prev_hand_on[side]=true;
                         const auto g=Si*grips_now[side];  // the grip in source camera coordinates; its forward axis is minus the third column
@@ -3009,7 +3021,7 @@ public:
                 if(!drawn) return skip("pass refused");
                 sw_views_[eye]={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
                 sw_views_[eye].pose=sw_to_pose(head*Vimg);sw_views_[eye].fov=image_fov;
-                keep_spacewarp_prev_(eye,S,grips_now,cam,view.fov);
+                keep_spacewarp_prev_(eye,S,O,grips_now,cam,view.fov);
                 sw_views_[eye].subImage.swapchain=chains_[eye];
                 sw_views_[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
             }

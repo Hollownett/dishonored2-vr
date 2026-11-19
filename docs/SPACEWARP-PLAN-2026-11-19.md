@@ -564,3 +564,58 @@ its last publish. Things over 1.5 m long or 1 m across (a corpse) are not taken.
 Sim (v1422, the user's latest save): run_hands 2304 generated, 2303 submitted, **all at a safe point** (0 at present), slot open ->
 frame ended 0.18 ms last / 2.9 ms at most, 0 late, 0 failures, no registry poison; oil_tank_throw 2433 of 2434 at safe points, at most
 5.7 ms. The save has no tank, so the held body was not exercised in the sim (same capsule rule as the weapon bodies, lab test 10).
+
+## 17. Arms freezing while walking; carried things (v1423, 2026-11-19)
+
+**Report (v1422 headset):** no hang any more; the game arm still "loses the controller and hangs in the air for a second" while walking
+or running (fine standing still); corpses and weapons artifact strongly while walking.
+
+**The arm (session 22:51-23:00, diagnostics on).** The controller is never lost: `controller-trace.csv` has 3960 rows (later 7170), all
+`tracked_hands`=3, no controller pose held still for 140 ms or more, also while walking. What freezes is the full-body arm: 730 of 17006
+arm uploads per side fell back to the native arm (`arm_flicker`: 556 `track_aged`, 173 `publish_refused`), in 26/22 episodes of up to
+197 uploads. `track_aged` means the arm-track the Setup publishes was older than `tracked_pose_freshness_ms` (250 ms) by one of three
+clocks when the arm palette was uploaded. Ruled out here: present() never ran longer than 19 ms in gameplay (no stall); sample_input()
+runs every present(); full_body.publish() runs every Setup (solves = frames) and the per-frame Setup block never paused while walking
+(controller trace); no C++ exception in the session's first-chance ring (only the guarded game reads); the early returns between the
+trace and the hands block are inside a lambda. The same long fallback runs appear in the sims of v1416/v1417 (before the thread), so the
+mechanism predates spacewarp. Which clock ages is not known yet, so v1423 records it (always, in both status files, block `arm_freeze`):
+- `stale.hits` / `max_ms` / `last_ms` per clock: [0] the publication tick, [1] the controller sample tick, [2] the time since publish;
+- `publish_gap_max_ms`, `publish_gaps_250`: gaps between two arm-track publications;
+- `grips.sample_gap_max_ms`: the longest gap between two tracked controller samples;
+- `episodes` (the last 12): side, start tick, length (ms), uploads, reason, the player's speed when it began.
+The `hands`/`arms` blocks of v1421 were only in the status written without diagnostics; `arm_freeze` and `arm_flicker` are now in both.
+
+**Carried things (`spacewarp_pass.hpp` carryTerms, `game_xr.hpp` prev.O).** What the player carries moves with the play space: a body on
+the shoulder, a dragged corpse, the player's own body and legs. A point between rig_near (0.5 m) and 1.6 m from the eye whose previous
+real frame shows it where the play space's step puts it (`prev_rest` = S_prev^-1 O_prev O_now^-1 S_now), and not where it would be had
+it stood still in the world, takes the rest-of-rig motion (the locomotion). Static walls and floors are confirmed still and stay. Lab test
+11 (a carried box follows, a still shelf beside it stays, rule off = v1422).
+
+**Weapons while walking.** The drawn weapon trails the grip the camera recorded by the player's step times the render latency; the weapon
+body is widened by three generated slots' locomotion (at most 10 cm more).
+
+**The arm, found: the hand clamp's hold at half rate.** The v1423 sim (walking and running, `run_hands`) did not reproduce an aged arm
+track in play: its 202 `track_aged` uploads per side are one run of 209 at the end of the run (the quit), and the clocks' 15 s maxima come
+from one 15 s present at the first gameplay frame (the transfer stage) during which the game's arm uploads went on. What the sim did show:
+the hand clamp in contact on 333 of 874 frames and the reach clamp on ~55 %. The drawn hand passes through the clamp (`hand_clamp.hpp`),
+which draws a target only where an answered sweep proved the way free; a target off the last answered segment is *held* (last frame's
+hand) for up to `hold_seconds` (0.25 s), then followed unvalidated. Offline (`tests/hand_clamp_check.cpp`
+`walking_swing_at_half_rate_follows`, the clamp itself, strict answers, free air): at 90 Hz the hand is never held; at 45 Hz (spacewarp's
+half rate) a swinging hand is held on 27-80 % of frames, 12-frame runs at every swing reversal, up to 0.75 m behind the controller while
+walking at 4.5 m/s. Two causes:
+- the sweep's look-ahead covered the root's motion for the measured answer round trip (plus the longest recent frame) but the hand's own
+  motion for one frame only: answered two frames after its post, a 2.4 m/s swing at 45 Hz (5 cm a frame, the whole palm_radius) left
+  every answered segment;
+- the root over-prediction (two frames of walking for a one-frame round trip) bends the swept line away from where a reversing swing goes.
+
+v1423: the controller-relative look-ahead covers the same time as the root (the round trip, at least the longest recent frame, of the last
+step's velocity; cap scaled alike), and a hold draws the answered centre-line's point nearest the target (the sweep proved a palm sphere
+centred there free; not a palm_radius past it: corner tests caught that reaching into unmet walls), never nearer the target than the eased
+push. Offline, walking 4.5 m/s with a 0.4 m swing at 45 Hz: the hand trails the controller by at most 75 mm (mean 26 mm) instead of 748 mm
+(mean 187 mm); standing with answers two frames late it is never held (was 27 %); a wall beside the walk is never entered (legacy: up to
+53 mm). Knob `build/legacy-clamp-lead` restores the old rules. Status `hand_clamp` adds `holds`, `hold_runs`, `hold_longest_ms`,
+`proven_draws` per side.
+
+Sim (`run_hands`, final v1423, `D:\d2vr-artifacts\sw-v1423b`): 530/530 generated frames submitted at safe points, 0 late, 0 failures;
+the clamp held 2/4 single frames (22 ms), none drawn on the answered line: the sim's controllers do not swing like a player's, so the
+fix is shown offline only. Not headset-tested.

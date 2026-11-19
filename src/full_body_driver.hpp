@@ -507,7 +507,11 @@ public:
             unsigned why=0;
             if(!have_track_ || !track_.tick) why=1;
             else if(skew(track_.tick) || (track_.source_tick && skew(track_.source_tick))) why=2;
-            else if(aged(track_.tick) || (track_.source_tick && aged(track_.source_tick))) why=3;
+            else if(aged(track_.tick) || (track_.source_tick && aged(track_.source_tick))) {
+                why=3;  // v1423 diagnostics: which clock was old, by how much
+                if(aged(track_.tick)) note_stale_(0,static_cast<double>(callback_tick-track_.tick));
+                if(track_.source_tick && aged(track_.source_tick)) note_stale_(1,static_cast<double>(callback_tick-track_.source_tick));
+            }
             if(why) {
                 diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;diag_.arm_gate[side]=ArmGate::stale_age;
                 arm_why_[side]=why;return {};
@@ -519,7 +523,9 @@ public:
         diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;
         // Native arms usually arrive first; solve this publication from the retained body pose.
         (void)solve_locked(frame_key);
-        diag_.arm_gate[side]=!latched && have_track_ && std::chrono::duration<double>(std::chrono::steady_clock::now()-published_).count()>tracked_pose_freshness_seconds?ArmGate::stale_age:
+        const double published_age=std::chrono::duration<double>(std::chrono::steady_clock::now()-published_).count();
+        if(!latched && have_track_ && published_age>tracked_pose_freshness_seconds) note_stale_(2,published_age*1000);  // v1423
+        diag_.arm_gate[side]=!latched && have_track_ && published_age>tracked_pose_freshness_seconds?ArmGate::stale_age:
             !have_out_?ArmGate::no_solution:(solved_revision_!=revision_ && !latched)?ArmGate::stale_revision:ArmGate::ready;
         if(diag_.arm_gate[side]!=ArmGate::ready || out_.arm[side].size()!=69) {
             arm_why_[side]=diag_.arm_gate[side]==ArmGate::stale_age?3u:diag_.arm_gate[side]==ArmGate::stale_revision?5u:4u;
@@ -565,6 +571,14 @@ public:
     // Why the last arm_frozen(side) returned nothing (ArmFlicker::Why): 0 = it did not, 1 no track yet, 2 the callback read its clock
     // before a newer publication (skew past tolerance), 3 the track is older than the freshness window, 4 no solution, 5 stale revision.
     unsigned arm_why(unsigned side) const {std::lock_guard<std::mutex> lock(mutex_);return side<2?arm_why_[side]:0u;}
+    // v1423 diagnostics: stale-age refusals of arm uploads by the clock that was old: [0] the publication tick, [1] the controller sample
+    // tick, [2] the time since the last publish; count, largest and last age (ms)
+    std::string stale_json() const {
+        std::lock_guard<std::mutex> lock(mutex_);std::ostringstream o;
+        o<<"{\"hits\":["<<stale_hits_[0]<<','<<stale_hits_[1]<<','<<stale_hits_[2]<<"],\"max_ms\":["<<stale_max_ms_[0]<<','<<stale_max_ms_[1]<<','<<stale_max_ms_[2]
+         <<"],\"last_ms\":["<<stale_last_ms_[0]<<','<<stale_last_ms_[1]<<','<<stale_last_ms_[2]<<"]}";
+        return o.str();
+    }
     Diagnostic diagnostic() const {
         std::lock_guard<std::mutex> lock(mutex_);auto d=diag_;d.root_gap_publishes=root_gap_publishes_;
         if(have_root_last_)d.current_root={root_last_.p,{rotated(root_last_.q,{1,0,0}),rotated(root_last_.q,{0,1,0}),rotated(root_last_.q,{0,0,1})}};
@@ -627,6 +641,8 @@ public:
 private:
     mutable std::mutex mutex_;
     unsigned arm_why_[2]{};
+    std::array<std::uint64_t,3> stale_hits_{};std::array<double,3> stale_max_ms_{},stale_last_ms_{};  // v1423 (under mutex_)
+    void note_stale_(unsigned clock,double ms) noexcept {if(clock<3) {++stale_hits_[clock];stale_last_ms_[clock]=ms;stale_max_ms_[clock]=std::max(stale_max_ms_[clock],ms);}}
     body::BodySolver solver_;
     body::Inputs solved_inputs_{};
     std::shared_ptr<const body::BodySolver> contact_model_;

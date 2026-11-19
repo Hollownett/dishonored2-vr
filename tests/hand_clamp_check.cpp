@@ -462,13 +462,17 @@ void moving_root_retains_controller_jump() {
     Rig r;r.world.wall_x=false;r.world.floor=false;
     r.post=[](unsigned) {return true;};
     for(int frame=0;frame<6;++frame) {r.root.position.x=.1*frame;r.step({.4+.1*frame,0,.5});}
+    const ClampSweep swept=r.last.palm_sweep;   // the last sweep posted: the only proof the next frames get
     r.post=[](unsigned) {return false;}; // no new sweep may certify the transported fallback
     r.root.position.x=.58;r.world.chest.x=.58;
     auto o=r.step({.98,.3,.5});
     CHECK(o.held && close_to(o.drawn.position,{.98,0,.5},1e-9));
     r.root.position.x=.81;r.world.chest.x=.81;
     o=r.step({1.21,.3,.5});
-    CHECK(o.held && close_to(o.drawn.position,{.98,0,.5},1e-9)); // transport cannot extend the older swept segment
+    // Transport cannot extend the older swept segment. v1423: the held hand is drawn at the swept centre-line's point nearest the target (its
+    // proof), never past the segment's end (the old hold: exactly where it was, build/legacy-clamp-lead).
+    {const Vec3 d=swept.to-swept.from;const double k=std::clamp(dot(o.drawn.position-swept.from,d)/dot(d,d),0.,1.);
+     CHECK(o.held && length(o.drawn.position-(swept.from+d*k))<1e-9 && o.drawn.position.x>=.98-1e-9 && o.drawn.position.x<=swept.to.x+1e-9);}
 }
 
 // No known wall is not a clear cast: accelerate from rest toward an unseen surface at an ordinary sprint speed.
@@ -1974,7 +1978,62 @@ void refuted_touched_plane_gives_its_slot() {
     }
 }
 
+// v1423 (user, headset v1420-v1422: "the game hand loses the controller and hangs in the air for a second while I walk or run; standing it is
+// fine"): at spacewarp's half rate (45 Hz) a hand swinging while the player walks left the answered segments: the clamp held last frame's hand
+// for up to hold_seconds at every swing reversal, up to 0.75 m behind the controller. Strict answers, `late` frames after their post; free air,
+// or a wall beside the walk that the swing reaches. The sweep now covers the round trip of the hand's own motion, and a hold draws the answered
+// centre-line's point nearest the target; neither lets the palm into a wall.
+namespace v1423 {
+struct Walk {double gap_max{},gap_mean{},held{},deepest{-1};};
+Walk walk_and_swing(bool legacy,double speed,double swing,double fps,unsigned late,double side_wall=0) {
+    HandClamp clamp;clamp.set_legacy_relative_lead(legacy);Walk w;
+    std::vector<ClampOutput> outs;double t=0;Vec3 root{};int frames=0;
+    const auto cast=[&](const ClampSweep& s)->std::optional<ClampHit> {
+        if(!side_wall || !s.valid) return std::nullopt;
+        const double s0=side_wall-s.from.y,s1=side_wall-s.to.y;
+        if(s0<s.radius) return ClampHit{{s.from.x,side_wall,s.from.z},{0,-1,0},7,3,true};
+        if(s1>=s.radius) return std::nullopt;
+        const double k=(s0-s.radius)/(s0-s1);const Vec3 c=s.from+(s.to-s.from)*k;
+        return ClampHit{{c.x,side_wall,c.z},{0,-1,0},7,3,false};
+    };
+    for(int f=0;f<int(fps*6);++f) {
+        t+=1/fps;root.x+=speed/fps;
+        const double ph=2*3.14159265358979*1.5*t;
+        const Vec3 rel{.35+swing*std::sin(ph),.2+swing*.5*std::cos(ph),1.1};
+        ClampInput in{};in.now=t;in.epoch=1;in.root=level_frame(root,{1,0,0});in.play=pose_at(root);
+        in.target=pose_at(root+rel);in.chest=root+Vec3{0,0,1.2};in.strict_answers=true;in.tip_enabled=false;
+        if(outs.size()>=late) {const auto& a=outs[outs.size()-late];in.answer_ids=a.request_ids;
+            const auto hit=cast(a.palm_sweep);if(a.state==ClampState::released) in.chest_hit=hit;else in.palm_hit=hit;}
+        const auto o=clamp.update(0,in);outs.push_back(o);clamp.note_drawn(0,in.root,o.drawn.position);
+        CHECK(contract_breaks==0);
+        if(f<int(fps)) continue;   // settled
+        ++frames;const double gap=length(o.drawn.position-in.target.position);
+        w.gap_max=std::max(w.gap_max,gap);w.gap_mean+=gap;w.held+=o.held;
+        if(side_wall) w.deepest=std::max(w.deepest,o.drawn.position.y+clamp.config().palm_radius-side_wall);
+    }
+    w.gap_mean/=frames;w.held/=frames;return w;
+}
+}
+void walking_swing_at_half_rate_follows() {
+    // walking 4.5 m/s, a 0.4 m swing (3.8 m/s at its fastest), 45 Hz, answered one frame late
+    const auto old=v1423::walk_and_swing(true,4.5,.4,45,1),now=v1423::walk_and_swing(false,4.5,.4,45,1);
+    if(g_verbose) std::printf("  walk+swing 45 Hz: legacy %.0f mm behind at most (mean %.0f), v1423 %.0f (mean %.0f)\n",old.gap_max*1000,old.gap_mean*1000,now.gap_max*1000,now.gap_mean*1000);
+    CHECK(old.gap_max>.5 && old.gap_mean>.1);           // the bug: the hand hangs up to 0.75 m behind
+    CHECK(now.gap_max<.1 && now.gap_mean<.04);
+    // standing, a 0.25 m swing, 45 Hz, answers two frames late: the hand's own motion is covered for the round trip
+    const auto old2=v1423::walk_and_swing(true,0,.25,45,2),now2=v1423::walk_and_swing(false,0,.25,45,2);
+    if(g_verbose) std::printf("  swing 45 Hz, two frames late: legacy held %.0f %%, v1423 %.0f %%\n",old2.held*100,now2.held*100);
+    CHECK(old2.held>.2 && now2.held==0 && now2.gap_max<1e-9);
+    // a wall beside the walk the swing reaches (palm 7 cm past it), one to three frames late: never deeper than the skin
+    for(unsigned late:{1u,2u,3u}) {
+        const auto w=v1423::walk_and_swing(false,4.5,.4,45,late,.38);
+        if(g_verbose) std::printf("  side wall, %u late: deepest %.1f mm, mean gap %.0f mm\n",late,w.deepest*1000,w.gap_mean*1000);
+        CHECK(w.deepest<=1e-6 && w.deepest>-.02 && w.gap_mean<.08);
+    }
+}
+
 int main() {
+    walking_swing_at_half_rate_follows();
     play_mapping_step_has_no_lag();
     strict_receipts_bind_geometry_and_generation();
     strict_auxiliary_receipts_and_chest_rearm();

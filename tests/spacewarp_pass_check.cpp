@@ -192,6 +192,22 @@ int main() {
             d2vr::SpacewarpParams none=p;none.weapon={};const auto img0=run(device.Get(),context.Get(),pass,s,none);
             check(img0.b(51,31)>128 && img0.b(55,31)<64,"without the weapon body the same blade stays (the v1418 rule has no previous frame here)");
         }
+        {   // 11. v1423: what the player carries. Since the previous real frame the play space moved: the world shifted 0.125 m (4 texels at
+            // 1 m) in this camera, a carried box (columns 40..43, 1 m: past rig_near, no palm) did not. The rest of the rig moves on 0.125 m.
+            // The box follows the rest motion; a shelf at the same distance (14..19), confirmed still in the world, stays.
+            const auto box=[](unsigned x,unsigned y,unsigned x0,unsigned x1,unsigned y0,unsigned y1) {return x>=x0 && x<=x1 && y>=y0 && y<=y1;};
+            Scene s;
+            s.distance=[box](unsigned x,unsigned y) {return box(x,y,40,43,28,35) || box(x,y,14,19,28,35)?1.f:3.f;};
+            s.object=[box](unsigned x,unsigned y) {return box(x,y,40,43,28,35) || box(x,y,14,19,28,35);};
+            s.prev_distance=[box](unsigned x,unsigned y) {return box(x,y,40,43,28,35) || box(x,y,18,23,28,35)?1.f:3.f;};
+            d2vr::SpacewarpParams p{};p.rig_near=.5;p.rest_on=true;p.rest.t={.125,0,0};
+            p.prev_on=true;p.prev_tan={-1,1,1,-1};p.prev_m10=0;p.prev_m11=1;p.prev_world.t={.125,0,0};p.carry_on=true;  // prev_rest: identity
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            check(img.b(45,31)>128 && img.b(41,31)<64,"carried: the box moved with the player since the last frame follows the rest motion (4 texels right)");
+            check(img.b(16,31)>128 && img.b(21,31)<64,"carried: the shelf beside it, still in the world, stayed");
+            d2vr::SpacewarpParams off=p;off.carry_on=false;const auto img0=run(device.Get(),context.Get(),pass,s,off);
+            check(img0.b(41,31)>128 && img0.b(45,31)<64,"without the carried rule the box stays (v1422)");
+        }
         {   // 6. sky only, the camera turned: every pixel is a direction (rotation-only look-up)
             Scene s;s.distance=[](unsigned,unsigned) {return 0.f;};
             const double a=std::atan(.25);d2vr::SpacewarpParams p{};p.m={std::cos(a),0,std::sin(a),0,1,0,-std::sin(a),0,std::cos(a)};

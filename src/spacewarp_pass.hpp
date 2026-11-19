@@ -75,6 +75,11 @@ struct SpacewarpParams {
     // unconditionally, like its palm's reach: the weapon follows the hand the way the hand does (user, headset v1418: "make the weapon
     // interpolate the same way as the arms").
     std::array<std::array<double,7>,2> weapon{};
+    // v1423 (user, headset v1422: "corpses artifact a lot while walking"): what the player carries (a body on the shoulder, a dragged corpse,
+    // the player's own body) moves with the play space. A point between rig_near and carry_reach whose previous real frame shows it where
+    // the play space's step puts it (prev_rest: source camera -> the previous camera, the point carried back with the play space), and not
+    // where it would be had it stood still in the world (prev_world), takes the rest-of-rig motion. Needs prev_on.
+    bool carry_on{};SpacewarpRigid prev_rest{};double carry_reach{1.6},carry_slack{.03};
 };
 
 class SpacewarpPass {
@@ -96,6 +101,7 @@ private:
         float PW[3][4],PH0[3][4],PH1[3][4],prev_tan[4],prev_terms[4],prev_grid[4],grip0[4],grip1[4];  // v1418; terms: m10, m11, hand_far, hand_back
         std::uint32_t prev_flags[4];                          // v1418: on, hand0, hand1
         float wa0[4],wb0[4],wa1[4],wb1[4];                    // v1419: the weapon bodies (wa.w: radius, 0 none)
+        float PR[3][4],carry[4];                              // v1423: carried-with-the-player test; carry: reach, slack per metre, on
     };
     static_assert(sizeof(Constants)%16==0,"constant buffer size");
     struct Grid {Ptr<ID3D11Texture2D> t;Ptr<ID3D11UnorderedAccessView> u;Ptr<ID3D11ShaderResourceView> s;};
@@ -116,6 +122,7 @@ cbuffer Sw : register(b0) {
     uint4 flags; float4 outSize; uint4 step; float4 CM[3]; float4 colourTan;
     float4 PW[3]; float4 PH0[3]; float4 PH1[3]; float4 prevTan; float4 prevTerms; float4 prevGrid; float4 grip0; float4 grip1; uint4 prevFlags;
     float4 wa0; float4 wb0; float4 wa1; float4 wb1;
+    float4 PR[3]; float4 carryTerms;
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> motionTex : register(t1);
@@ -185,6 +192,11 @@ float3 Displace(uint2 t,float3 P) {
     int heldBy=WeaponHand(P);if(heldBy<0) heldBy=FarHand(P,d0,d1);
     if(heldBy==0) return Rigid(H0,P)-P;
     if(heldBy==1) return Rigid(H1,P)-P;
+    // v1423: what the player carries, confirmed by the previous real frame, moves with the rest of the rig
+    if(prevFlags.x!=0u && carryTerms.z>0) {
+        const float r=length(P);
+        if(r>=C.w && r<carryTerms.x && PrevShows(PR,P,carryTerms.y*r)==1 && PrevShows(PW,P,0)!=1) return flags.z!=0u?Rigid(RR,P)-P:0;
+    }
     // without a rig mask (true stereo): what lies within a drawn palm's reach, or nearer than C.w metres, is the player's rig
     const bool nearRig=C.w>0 && (length(P)<C.w || d0<=palm0.w || d1<=palm1.w);
     const uint rig=(flags.w&2u)?rigTex[t]:(nearRig?1u:0u);
@@ -353,6 +365,10 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
         f4(k.prev_tan,p.prev_tan[0],p.prev_tan[1],p.prev_tan[2],p.prev_tan[3]);f4(k.prev_terms,p.prev_m10,p.prev_m11,p.hand_far,p.hand_back);
         f4(k.prev_grid,in.prev_width,in.prev_height,0,0);f4(k.grip0,p.grip[0][0],p.grip[0][1],p.grip[0][2],p.grip[0][3]);f4(k.grip1,p.grip[1][0],p.grip[1][1],p.grip[1][2],p.grip[1][3]);
         k.prev_flags[0]=1;k.prev_flags[1]=p.prev_hand_on[0];k.prev_flags[2]=p.prev_hand_on[1];
+        if(p.carry_on) {  // v1423
+            for(int i=0;i<3;++i) f4(k.PR[i],p.prev_rest.r[i*3],p.prev_rest.r[i*3+1],p.prev_rest.r[i*3+2],p.prev_rest.t[i]);
+            f4(k.carry,p.carry_reach,p.carry_slack,1,0);
+        }
     }
     const auto upload=[&](std::uint32_t distance) {
         k.step[1]=distance;D3D11_MAPPED_SUBRESOURCE m{};

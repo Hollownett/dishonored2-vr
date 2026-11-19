@@ -278,6 +278,7 @@ private:
     std::array<Side,2> sides_{};
     inline static std::atomic<std::uint64_t> next_request_id_{}; // process lifetime, including whole-object/session replacement
     std::array<std::uint64_t,2> squeeze_infeasible_{},snapbacks_{},contact_frames_{},missed_notes_{},repeated_updates_{},blocked_frames_{};
+    std::array<std::uint64_t,2> holds_{},hold_runs_{},proven_draws_{};std::array<double,2> hold_longest_s_{};bool legacy_relative_lead_{};   // v1423
     std::array<std::uint64_t,2> rig_turns_{};bool rig_turn_carry_{true};bool play_carry_{true};std::array<std::uint64_t,2> play_carries_{}; // v1195: build/legacy-clamp-play-lag   // v861: build/legacy-clamp-world-hold keeps a held hand in the world on turns
     static constexpr double snap_turn_radians=.2;   // a rig turn this large in one frame (snap turns are 15-90 deg; smooth ones a few deg a frame) re-acquires
 
@@ -635,6 +636,11 @@ public:
     }
     const HandClampConfig& config() const {return cfg_;}
     void set_hold_seconds(double seconds) {cfg_.hold_seconds=seconds;}   // build/legacy-hand-stuck: 0 restores the unbounded strict hold
+    void set_legacy_relative_lead(bool on) {legacy_relative_lead_=on;}   // build/legacy-clamp-lead: one frame of hand motion ahead (before v1423)
+    std::uint64_t holds(unsigned side) const {return side<2?holds_[side]:0;}
+    std::uint64_t hold_runs(unsigned side) const {return side<2?hold_runs_[side]:0;}
+    double hold_longest_s(unsigned side) const {return side<2?hold_longest_s_[side]:0;}
+    std::uint64_t proven_draws(unsigned side) const {return side<2?proven_draws_[side]:0;}
 
     // The meet (NativeHandContact::meet): the drawn hand is the target moved out of the prop it pushes (`met`, whose planes
     // are skipped: the prop moves with the hand) instead of held off it. It is pushed out of every other plane this side
@@ -897,6 +903,19 @@ public:
         // planes known, until a sweep validates again (the non-strict rule); the next answers still catch a wall or a body.
         if(validated) s.hold_time=0;
         if(!validated && (in.strict_answers?!(cfg_.hold_seconds>0 && s.hold_time>=cfg_.hold_seconds):s.hold_frames<max_hold_frames*s.cadence)) {
+            // v1423 (user, headset v1420-v1422: the game hand "freezes in the air for a second" while walking and swinging): the hold drew last
+            // frame's hand while the target ran on (offline, walking 4.5 m/s with a 0.4 m swing at 45 Hz: 12-frame holds, the hand up to 0.75 m
+            // behind, every swing reversal). The answered sweep proves its centre-line free for the palm sphere (to its hit, when cut): the hand is
+            // drawn at the line's point nearest the target when that is nearer than the hold. Not a palm_radius past the line (the validation's own
+            // tolerance): a sphere centred there reaches past the swept tube, into a wall no sweep has met (corner tests).
+            // build/legacy-clamp-lead: the old hold.
+            if(!legacy_relative_lead_ && s.has_segment) {
+                const Vec3 d=s.seg_to-s.seg_from;const double l2=dot(d,d);
+                const double t=l2>1e-12?std::clamp(dot(p-s.seg_from,d)/l2,0.,1.):1.;
+                const Vec3 proven=s.seg_from+d*t;
+                // never nearer the target than the eased push (release_eases_out: a hand leaving a wall still eases at release_speed)
+                if(finite(proven) && length(proven-p)+1e-6<length(held-p) && length(proven-target)>=length(shift)-1e-9) {held=proven;++proven_draws_[side];}
+            }
             Vec3 out_of_planes=held;
             if(solve(s,in.target.basis,out_of_planes)) held=out_of_planes;
             else {bool minimax=false;held=retreat(s,in.target.basis,target,in.chest,std::nullopt,minimax);}   // two walls too close
@@ -908,6 +927,7 @@ public:
         out.validated=validated;
         if(hold) {
             ++s.hold_frames;s.hold_time+=dt;out.held=true;out.drawn.position=held;out.shift=held-target;
+            ++holds_[side];if(s.hold_frames==1) ++hold_runs_[side];hold_longest_s_[side]=std::max(hold_longest_s_[side],s.hold_time);   // v1423 status
         } else {
             if(validated) s.hold_frames=0;
             s.over_time=length(own)>cfg_.snap_gap?s.over_time+dt:0;
@@ -965,7 +985,16 @@ public:
             // never draws the hand ahead of its real target. Direction changes update the world velocity at once.
             const Vec3 predicted_root=in.now-s.root_changed_at<=2*root_horizon?s.root_velocity*(root_horizon+query_age):Vec3{};
             const Vec3 relative_step=(target-s.target_world)-root_step;
-            const auto ahead_for=[&](double frames) {return predicted_root*frames+clamp_detail::clamp_length(relative_step*frames,max_lead*lead);};
+            // v1423 (user, headset v1420-v1422: "the game hand freezes in the air for a second while I walk and swing"): the controller-relative part
+            // covered one frame of the hand's own motion, the root part the measured round trip. At spacewarp's half rate an answer used two frames
+            // after its post (a 2.4 m/s swing moves ~5 cm a frame, the whole palm_radius) left the target off every answered segment: the hand was
+            // held up to hold_seconds again and again (offline, 45 Hz: held on 27-80 % of the swinging frames, up to 0.47 m behind). It now covers
+            // the same time as the root: the round trip, at least the longest recent frame, of the last step's velocity (cap scaled alike).
+            // build/legacy-clamp-lead: the old one-frame rule.
+            const double step_dt=dt>1e-4?dt:root_horizon;
+            const double rel_scale=legacy_relative_lead_?1.:std::clamp(std::max(query_age,root_horizon)/std::max(step_dt,1e-3),1.,4.);
+            const auto ahead_for=[&](double frames) {
+                return predicted_root*frames+clamp_detail::clamp_length(relative_step*(frames*rel_scale),max_lead*lead*rel_scale);};
             const Vec3 ahead=ahead_for(lead);
             // Recovery: the last palm sweep began inside something no plane describes (an overlap makes no plane), so a
             // sweep from the hand would again. Sweep from the start of the last palm sweep that began free instead.

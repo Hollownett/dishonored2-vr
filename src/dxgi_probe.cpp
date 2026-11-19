@@ -772,6 +772,7 @@ static std::uint64_t hand_body_probe_request_id{};static std::array<d2vr::HandBo
 struct HandClampStatus {
     std::atomic<bool> active{};std::atomic<unsigned> state{},probes{},max_casts{};
     std::atomic<UINT64> contact_frames{},snapbacks{},squeeze_infeasible{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{},released_shots{};
+    std::atomic<UINT64> holds{},hold_runs{},hold_longest_ms{},proven_draws{};   // v1423: frames the clamp held the drawn hand (waiting for a sweep), their runs, the longest, and the held frames drawn on the answered line
 };
 static std::array<HandClampStatus,2> hand_clamp_status;static std::atomic<double> hand_clamp_cast_mean{},hand_clamp_cast_max{};
 static std::atomic<bool> hand_clamp_tip{true},hand_clamp_alternate{};static std::atomic<double> hand_clamp_restore{1},hand_clamp_recover_wait{5};
@@ -1884,6 +1885,12 @@ static bool attachment_pose_installed=false;
 // are rewritten: hidden, contact or native palettes stay the upload's).
 static std::atomic<unsigned> authored_arm_bits{}; // render thread: arms an authored clip or player state owns this frame (v1214: declared before the arm upload hook)
 static std::array<std::atomic<std::uint64_t>,2> authored_arm_frames{};static std::atomic<std::uint64_t> arm_owner_frames{}; // v1421 status: gameplay frames, and those an authored clip or state owned each arm
+// v1423 diagnostics (user, headset v1422: "the arm freezes in the air for a second while walking"; the controller trace never lost a
+// controller, 4 % of arm uploads fell back to the native arm, mostly track_aged): the longest gap between two arm-track publications and how
+// many exceeded the 250 ms freshness, and the last fallback episodes (start tick, length ms, uploads, reason, the player's speed then)
+static std::atomic<std::uint64_t> arm_publish_gap_max_ms{},arm_publish_gaps_250{};
+struct ArmEpisode {unsigned side{};std::uint64_t start{},ms{};unsigned uploads{},why{};double speed{};};
+static std::mutex arm_episode_mutex;static std::array<ArmEpisode,12> arm_episodes{};static unsigned arm_episode_next{},arm_episode_count{};
 struct ImageSkinSlot {std::atomic<std::uintptr_t> model{};std::atomic<int> kind{};std::atomic<bool> uploading{};};   // v864 kind: 0 keep the upload, 1 tracked palette, 2 contact raw palette
 static std::array<ImageSkinSlot,3> image_skin_slots{};
 // v1247 arm slip (weapon_draw_place.hpp HandLock::slip): each rig model's frame at the eye Setup (the frontend that composes the render's camera and
@@ -2069,6 +2076,8 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     no_hand_body_feedforward=fs::exists(root/L"build"/L"no-hand-body-feedforward");no_moving_controller_visual=fs::exists(root/L"build"/L"no-moving-controller-visual");
     const bool legacy_hand_stuck=fs::exists(root/L"build"/L"legacy-hand-stuck");   // v639 (headset v638: a hand stopped following after a table / a corpse)
     hand_clamp.set_hold_seconds(legacy_hand_stuck?0.:d2vr::HandClampConfig{}.hold_seconds);
+    const bool legacy_clamp_lead=fs::exists(root/L"build"/L"legacy-clamp-lead");   // v1423 (headset v1422: the hand hung in the air while walking and swinging)
+    hand_clamp.set_legacy_relative_lead(legacy_clamp_lead);
     hand_clamp.set_rig_turn_carry(!fs::exists(root/L"build"/L"legacy-clamp-world-hold"));   // v861: a held hand turns with the rig
     hand_clamp.set_play_carry(!fs::exists(root/L"build"/L"legacy-clamp-play-lag"));   // v1195: last frame's hand carried with the play mapping
     reach_shoulder_carry=fs::exists(root/L"build"/L"reach-root-carry");   // v1195 carry, opt-in since v1197
@@ -2094,6 +2103,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     const bool legacy_run_gate=fs::exists(root/L"build"/L"legacy-run-gate");d2vr::hand_servo_legacy_gate.store(legacy_run_gate);   // v613 item 6
     std::ofstream note;if(!output.empty()) note.open(output/L"running-knobs.txt",std::ios::trunc); // v1407: diagnostics off = an empty folder; composing onto it wrote into the game folder
     note<<"knob build/legacy-arm-root-carry "<<(legacy_carry?"present: arms carry from the last arm-upload root\n":"absent: arms carry from the anchor's root\n");
+    note<<"knob build/legacy-clamp-lead "<<(legacy_clamp_lead?"present: the clamp sweep leads one frame of hand motion and a hold keeps last frame's hand (pre-v1423)\n":"absent: the clamp sweep covers the answer round trip of the hand's motion; a hold draws the answered line's point nearest the target\n");
     note<<"knob build/legacy-hand-stuck "<<(legacy_hand_stuck?"present: strict clamp hold unbounded, a wedged hand body never released\n":"absent: the clamp hold ends after 0.25 s, a wedged hand body is released after 1 s\n");
     note<<"knob build/no-run-root-gate "<<(run_root_gate?"absent: locomotion gate follows player root\n":"present: v613 hand-target gate\n");
     note<<"knob build/no-hand-body-feedforward "<<(no_hand_body_feedforward?"present: the hand body's servo gets no player velocity\n":"absent: the hand body's servo feeds forward the player velocity\n");
@@ -2608,6 +2618,21 @@ static std::array<DXGI_FORMAT,2> xr_eye_texture_formats{};
 static std::unique_ptr<d2vr::GameXr> game_xr;
 // v1420: the spacewarp submit thread's xrBeginFrame/xrEndFrame touch the game's immediate context (GameXr::dxgi_gate): the game's own
 // DXGI Present never runs beside them
+// v1423: the arm-freeze evidence, in both status files
+static std::string arm_freeze_json() {
+    std::ostringstream o;
+    o<<"{\"stale\":"<<full_body.stale_json()<<",\"publish_gap_max_ms\":"<<arm_publish_gap_max_ms.load()<<",\"publish_gaps_250\":"<<arm_publish_gaps_250.load()
+     <<",\"grips\":"<<(game_xr?game_xr->hands_brief_json():std::string("null"))<<",\"episodes\":[";
+    try {
+        std::lock_guard<std::mutex> l(arm_episode_mutex);const unsigned n=std::min<unsigned>(arm_episode_count,static_cast<unsigned>(arm_episodes.size()));
+        for(unsigned i=0;i<n;++i) {
+            const auto& e=arm_episodes[(arm_episode_next+arm_episodes.size()-n+i)%arm_episodes.size()];
+            o<<(i?",":"")<<"{\"side\":"<<e.side<<",\"start\":"<<e.start<<",\"ms\":"<<e.ms<<",\"uploads\":"<<e.uploads<<",\"why\":"<<e.why<<",\"speed\":"<<e.speed<<'}';
+        }
+    } catch(...) {}
+    o<<"],\"episodes_total\":"<<arm_episode_count<<'}';
+    return o.str();
+}
 static HRESULT gated_present(IDXGISwapChain* chain,UINT interval,UINT flags) {
     std::unique_lock<std::mutex> gate;
     if(game_xr) gate=std::unique_lock<std::mutex>(game_xr->dxgi_gate());
@@ -5145,6 +5170,17 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
             const bool tracked_palette=arm_pose_calls[side].load()>flicker_calls;
             if(tracked_palette || arm_pose_fallbacks[side].load()>flicker_fallbacks)
                 arm_flicker.note(side,tracked_palette,tracked_palette?0u:flicker_why);
+                {   // v1423: fallback episodes
+                    static std::array<std::uint64_t,2> run_start{};static std::array<unsigned,2> run_uploads{},run_why{};static std::array<double,2> run_speed{};
+                    try {
+                        std::lock_guard<std::mutex> l(arm_episode_mutex);const auto now=GetTickCount64();
+                        if(!tracked_palette) {if(!run_uploads[side]) {run_start[side]=now;run_speed[side]=player_speed;}++run_uploads[side];run_why[side]=flicker_why;}
+                        else if(run_uploads[side]) {
+                            if(run_uploads[side]>=6) {arm_episodes[arm_episode_next++%arm_episodes.size()]={side,run_start[side],now-run_start[side],run_uploads[side],run_why[side],run_speed[side]};++arm_episode_count;}
+                            run_uploads[side]=0;
+                        }
+                    } catch(...) {}
+                }
         }
     }
     const auto consume_native=[&] {
@@ -10503,7 +10539,7 @@ void prepare_head_view(void* view) noexcept {
                           if(!clamp_drew || clamped.state!=d2vr::ClampState::released)released_eye_retired_ids[side]=released_eye_request_ids[side];}
                          if(eye_sweep) {d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::exclude_slot,eye_sweep->from,eye_sweep->to,eye_sweep->radius,0,-1,0,d2vr::NativeInteractionAim::producer_eye_guard,++released_eye_request_ids[side]);++status.released_shots;}}
                         status.active.store(clamp_drew);status.state.store(static_cast<unsigned>(clamped.state));status.probes.store(static_cast<unsigned>(probes.count));
-                        status.contact_frames.store(hand_clamp.contact_frames(side));status.snapbacks.store(hand_clamp.snapbacks(side));status.squeeze_infeasible.store(hand_clamp.squeeze_infeasible(side));
+                        status.contact_frames.store(hand_clamp.contact_frames(side));status.snapbacks.store(hand_clamp.snapbacks(side));status.holds.store(hand_clamp.holds(side));status.hold_runs.store(hand_clamp.hold_runs(side));status.hold_longest_ms.store(static_cast<UINT64>(hand_clamp.hold_longest_s(side)*1000));status.proven_draws.store(hand_clamp.proven_draws(side));status.squeeze_infeasible.store(hand_clamp.squeeze_infeasible(side));
                         status.missed_notes.store(hand_clamp.missed_notes(side));status.repeated_updates.store(hand_clamp.repeated_updates(side));
                         status.reacquire_blocked.store(hand_clamp.reacquire_blocked_frames(side));
                         }
@@ -11508,6 +11544,13 @@ void prepare_head_view(void* view) noexcept {
                 std::optional<NativeNoteTargets> note_targets;
                 try {note_targets=native_note_targets(t,head_origin,anchor,hand_centre);}catch(...) {}
                 full_body.publish(t,note_targets?d2vr::body::Ownership{}:native_ownership);
+                {   // v1423: publication gaps
+                    static std::uint64_t last_publish{};const auto now=GetTickCount64();
+                    if(last_publish && now>last_publish && now-last_publish<5000) {
+                        const auto gap=now-last_publish;if(gap>arm_publish_gap_max_ms.load()) arm_publish_gap_max_ms.store(gap);if(gap>250) arm_publish_gaps_250.fetch_add(1);
+                    }
+                    last_publish=now;
+                }
                 // v1371: each gun type's grip in the hand the solver poses with that type's clip, for a copy of a type no native gun was measured for yet
                 for(unsigned type=1;type<=2;++type) if(const auto g=full_body.copy_grip(type))
                     d2vr::held_copy::SolverGrips::set(type==1?d2vr::held_copy::Kind::pistol:d2vr::held_copy::Kind::crossbow,
@@ -12540,6 +12583,8 @@ std::string feedback_status_json() {    std::ostringstream out;
              <<",\"repeated_updates\":"<<pair([](const HandClampStatus& h){return h.repeated_updates.load();})
              <<",\"reacquire_blocked\":"<<pair([](const HandClampStatus& h){return h.reacquire_blocked.load();})
              <<",\"reacquire_holds\":"<<pair([](const HandClampStatus& h){return h.reacquire_holds.load();})
+             <<",\"holds\":"<<pair([](const HandClampStatus& h){return h.holds.load();})<<",\"hold_runs\":"<<pair([](const HandClampStatus& h){return h.hold_runs.load();})
+             <<",\"hold_longest_ms\":"<<pair([](const HandClampStatus& h){return h.hold_longest_ms.load();})<<",\"proven_draws\":"<<pair([](const HandClampStatus& h){return h.proven_draws.load();})
              <<",\"unanswered\":"<<pair([](const HandClampStatus& h){return h.unanswered.load();})
              <<",\"released_shots\":"<<pair([](const HandClampStatus& h){return h.released_shots.load();})
              <<",\"probes\":"<<pair([](const HandClampStatus& h){return h.probes.load();})
@@ -15307,6 +15352,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           << ",\"game_layers_submitted\":" << xr_submitted
                                           << ",\"spacewarp\":" << (game_xr && spacewarp_knob?game_xr->spacewarp_brief_json():std::string("null")) // headset evidence without diagnostics
                                           << ",\"hands\":" << (game_xr?game_xr->hands_brief_json():std::string("null")) // v1421: grip tracking, and who drove the arms
+                                          << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json() // v1423
                                           << ",\"arms\":{\"frames\":" << arm_owner_frames.load() << ",\"authored\":[" << authored_arm_frames[0].load() << ',' << authored_arm_frames[1].load()
                                           << "],\"attack_presses\":" << attack_intent.presses()
                                           // v1421: what held a drawn hand back (the wall clamp, the arm's reach, a snap back), which pose it was drawn at, the blade's world contacts
@@ -15348,7 +15394,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"tracked_arms_requested\":" << (tracked_arms_requested?"true":"false")
                                      << ",\"native_arm_pose_calls\":[" << arm_pose_calls[0].load() << ',' << arm_pose_calls[1].load() << ']'
                                      << ",\"native_arm_pose_fallbacks\":[" << arm_pose_fallbacks[0].load() << ',' << arm_pose_fallbacks[1].load() << ']'
-                                     << ",\"arm_flicker\":" << arm_flicker_json()
+                                     << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json()
                                      << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                                      << ",\"native_controller_reads\":" << controller_bridge.reads()
                                      << ",\"native_virtual_controller_reads\":" << controller_bridge.virtual_reads()
@@ -19178,7 +19224,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"native_arm_copy_calls\":[" << arm_copy_calls[0].load() << ',' << arm_copy_calls[1].load() << ']'
                << ",\"native_arm_pose_calls\":[" << arm_pose_calls[0].load() << ',' << arm_pose_calls[1].load() << ']'
                << ",\"native_arm_pose_fallbacks\":[" << arm_pose_fallbacks[0].load() << ',' << arm_pose_fallbacks[1].load() << ']'
-                                     << ",\"arm_flicker\":" << arm_flicker_json()
+                                     << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json()
                << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                << ",\"tracked_arm_units_per_metre\":1.0,\"tracked_arm_metric_scale_verified\":false"
                << ",\"avatar_calibration_applied\":" << (avatar_calibration_applied?"true":"false")
