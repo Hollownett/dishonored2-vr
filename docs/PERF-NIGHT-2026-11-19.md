@@ -108,7 +108,8 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
 - Opt-in knobs (files in `build/`): `auto-refresh-rate` (picks 72/80/90 Hz itself), `dlss-preset` containing `K` (DLSS's best
   image, +~1.5 ms GPU), `dlss-fovea` (old foveated DLSS), `governor` (dynamic resolution, FSR modes, GPU-bound only),
   `render-pixel-cap` containing megapixels per eye (e.g. `5.0`: 2621x2822 -> 2155x2320, engine GPU 7.46 -> 6.59 ms in the sim),
-  `pass-cpu-timing` (per-pass CPU table in the status), `static-shadow-cache` (+ `-probe`, observe only).
+  `pass-cpu-timing` (per-pass CPU table in the status), `nvidia-vrs` (NVIDIA foveated shading, v1403; optional text
+  `0.35 0.55 [4x4]`), `afw2-fill-bound` (performance mode), `static-shadow-cache` (+ `-probe`, observe only).
 - The status file now says why stereo misses its budget: `perf_governor.performance_mode_advice` = `gpu_bound` (performance mode,
   DLSS Quality or a lower resolution help) or `cpu_bound` (they do not; a lower refresh rate does); the log gets a line on each change.
 - Things to look at: DLSS image (preset E ghosting vs K), Steam Link corners, the 2 s pacer hold, any new crash.
