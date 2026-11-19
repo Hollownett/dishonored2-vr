@@ -10,24 +10,24 @@ int main() {
         { // decision_table: 2 aa_chosen x 2 file_existed x 4 vendors x 2 dlss_offered = 32 combinations against the five rules
             int cases=0;
             for(const bool chosen:{false,true}) for(const bool existed:{false,true}) for(const std::uint32_t vendor:{0u,0x10deu,0x1002u,1u}) for(const bool dlss:{false,true}) {
-                FirstStartAa expected=chosen?FirstStartAa::keep:vendor==0?FirstStartAa::wait:dlss?FirstStartAa::dlaa:!existed?FirstStartAa::fsr3_native:FirstStartAa::keep;
+                FirstStartAa expected=chosen?FirstStartAa::keep:vendor==0?FirstStartAa::wait:dlss?FirstStartAa::dlss_quality:!existed?FirstStartAa::fsr3_native:FirstStartAa::keep;
                 require(first_start_aa(chosen,existed,vendor,dlss)==expected,"first-start decision differs from the rules");++cases;
             }
             require(cases==32,"decision table did not cover 32 combinations");
         }
         require(first_start_aa(false,true,0x1002,false)==FirstStartAa::keep,"A pre-v609 non-RTX file lost its saved mode");
-        require(first_start_aa(false,false,0x10de,true)==FirstStartAa::dlaa && first_start_aa(false,true,0x10de,true)==FirstStartAa::dlaa,"RTX did not get DLAA");
+        require(first_start_aa(false,false,0x10de,true)==FirstStartAa::dlss_quality && first_start_aa(false,true,0x10de,true)==FirstStartAa::dlss_quality,"RTX did not get DLSS Quality");
         require(first_start_aa(false,false,0x1002,false)==FirstStartAa::fsr3_native,"A fresh non-RTX install did not get FSR 3 native");
         require(first_start_aa(false,true,1,false)==FirstStartAa::keep,"A vendor failure with a saved file did not keep the mode");
         require(first_start_aa(false,true,0,true)==FirstStartAa::wait,"An unknown vendor did not wait");
         // v613: the default follows the GPU (three cases), and FSR 4 never beats DLSS or a choice.
-        require(first_start_aa(false,false,0x10de,true,false)==FirstStartAa::dlaa && first_start_mode(FirstStartAa::dlaa)==7 && default_aa_mode(true,false)==7,"NVIDIA RTX with DLSS: DLAA");
+        require(first_start_aa(false,false,0x10de,true,false)==FirstStartAa::dlss_quality && first_start_mode(FirstStartAa::dlss_quality)==8 && default_aa_mode(true,false)==8 && first_start_mode(FirstStartAa::dlaa)==7,"NVIDIA RTX with DLSS: DLSS Quality (v1398)");
         require(first_start_aa(false,false,0x1002,false,true)==FirstStartAa::fsr4_native && first_start_mode(FirstStartAa::fsr4_native)==5 && default_aa_mode(false,true)==5,"FSR 4 GPU: FSR 4 native");
         require(first_start_aa(false,false,0x8086,false,false)==FirstStartAa::fsr3_native && first_start_mode(FirstStartAa::fsr3_native)==2 && default_aa_mode(false,false)==2,"Other GPU: FSR 3 native");
         require(first_start_aa(false,true,0x1002,false,true)==FirstStartAa::fsr4_native,"An unchosen old file on an FSR 4 GPU gets FSR 4");
-        require(first_start_aa(true,false,0x1002,false,true)==FirstStartAa::keep && first_start_aa(false,false,0x10de,true,true)==FirstStartAa::dlaa,"FSR 4 overrode a choice or DLSS");
+        require(first_start_aa(true,false,0x1002,false,true)==FirstStartAa::keep && first_start_aa(false,false,0x10de,true,true)==FirstStartAa::dlss_quality,"FSR 4 overrode a choice or DLSS");
         require(first_start_mode(FirstStartAa::keep)<0 && first_start_mode(FirstStartAa::wait)<0,"keep/wait must not carry a mode");
-        require(std::string(first_start_name(FirstStartAa::fsr4_native))=="fsr4_native","status name");
+        require(std::string(first_start_name(FirstStartAa::fsr4_native))=="fsr4_native" && std::string(first_start_name(FirstStartAa::dlss_quality))=="dlss_quality","status name");
         {
             const auto dir=fs::temp_directory_path()/"d2vr_aa_first_start_check";fs::remove_all(dir);fs::create_directories(dir);
             const auto put=[&](const char* name,const char* text) {std::ofstream(dir/name,std::ios::binary)<<text;};

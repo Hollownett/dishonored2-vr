@@ -20,18 +20,26 @@ struct PerfGovernorConfig {
     // Samples dropped after each change: the change itself costs a ~0.5 s stall (FSR3+FSR4 contexts are rebuilt per
     // render size, fsr_taa.hpp) whose post-stall frame is a 33-40 slot miss (v300); counting it fed a spiral to the floor.
     unsigned settle=30;
+    // v1398 (docs/PERF-NIGHT-2026-11-19.md): step down only when the frame is GPU-bound. Lower resolution only helps when the GPU is the
+    // limit; on the 2026-11-19 sim (Ryzen 5 5600X + RTX 5070) the frame was CPU-bound at ~9.5 ms at 0.5x and 1.0x alike, and a miss-driven
+    // governor would floor the resolution for nothing (the 2026-11 headset note: hitches "kept flooring FSR Quality at 0.6"). The signal is
+    // the render thread's stall on a full GPU queue inside the Present hook before the XR frame (pre-XR): ~4 ms per frame GPU-bound (sim at
+    // 2621x2822, headset session), ~0.2-0.3 ms CPU-bound. A window steps down only when its mean stall is above gpu_stall_gate_ns; 0 = the
+    // old miss-only rule.
+    std::uint64_t gpu_stall_gate_ns=1'000'000;
 };
-struct PerfSample {std::uint64_t pace_ns{},period_ns{};bool missed{};}; // pace_ns: frame work (present-to-present minus the runtime's wait)
+struct PerfSample {std::uint64_t pace_ns{},period_ns{};bool missed{};std::uint64_t gpu_stall_ns{};}; // pace_ns: frame work (present-to-present minus the runtime's wait); gpu_stall_ns: pre-XR stall
 inline bool missed_slot(std::uint64_t display_time_ns,std::uint64_t previous_display_time_ns,std::uint64_t period_ns) noexcept {
     return period_ns && previous_display_time_ns && display_time_ns>previous_display_time_ns &&
         display_time_ns-previous_display_time_ns>period_ns+period_ns/2;
 }
 class PerfGovernor {
     PerfGovernorConfig c_;float scale_;
-    unsigned n_{},miss_{},calm_{},lock_{},settle_{};double busy_{};
+    unsigned n_{},miss_{},calm_{},lock_{},settle_{};double busy_{},stall_{};
     static float clamp(float v,float lo,float hi) noexcept {return std::min(hi,std::max(lo,v));}
 public:
     unsigned changes{};
+    unsigned cpu_bound_holds{}; // windows whose misses asked for a down step that the GPU-bound gate refused (status)
     explicit PerfGovernor(PerfGovernorConfig c={}) : c_(c) {
         if(!(c_.min_scale>0)) c_.min_scale=.5f;
         c_.max_scale=std::max(c_.max_scale,c_.min_scale);
@@ -40,17 +48,19 @@ public:
     }
     float scale() const noexcept {return scale_;}
     float quantize(float v) const noexcept {return c_.quantum>0?static_cast<float>(std::round(static_cast<double>(v)/c_.quantum)*static_cast<double>(c_.quantum)):v;}
-    void reset() noexcept {n_=miss_=calm_=lock_=settle_=0;busy_=0;}
+    void reset() noexcept {n_=miss_=calm_=lock_=settle_=0;busy_=stall_=0;}
     // Returns true when scale() changed.
     bool feed(PerfSample s) noexcept {
         if(!s.period_ns || !s.pace_ns || s.pace_ns>c_.max_pace_ns) {return false;} // ponytail: stalls are dropped, not counted; fine for loads
         if(settle_) {--settle_;return false;}
-        busy_+=static_cast<double>(s.pace_ns)/static_cast<double>(s.period_ns);miss_+=s.missed;
+        busy_+=static_cast<double>(s.pace_ns)/static_cast<double>(s.period_ns);miss_+=s.missed;stall_+=static_cast<double>(s.gpu_stall_ns);
         if(++n_<c_.window) return false;
-        const double busy=busy_/n_,miss=static_cast<double>(miss_)/n_;
-        n_=miss_=0;busy_=0;
+        const double busy=busy_/n_,miss=static_cast<double>(miss_)/n_,stall=stall_/n_;
+        n_=miss_=0;busy_=stall_=0;
+        const bool gpu_bound=!c_.gpu_stall_gate_ns || stall>static_cast<double>(c_.gpu_stall_gate_ns);
         float target=scale_;const bool locked=lock_!=0;if(lock_) --lock_;
-        if(miss>c_.miss_high) { // display-locked frames always look busy: only missed slots step down (headset v307)
+        if(miss>c_.miss_high && !gpu_bound) {++cpu_bound_holds;calm_=0;} // v1398: CPU-bound misses: a lower resolution would not help
+        else if(miss>c_.miss_high) { // display-locked frames always look busy: only missed slots step down (headset v307)
             // proportional to severity, capped at 2 steps so a single hitch cannot crash resolution
             const float k=miss>3*c_.miss_high?2.f:1.f;
             target=scale_-k*c_.step_down;calm_=0;

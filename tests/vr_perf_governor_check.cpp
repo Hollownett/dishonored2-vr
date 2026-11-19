@@ -5,8 +5,9 @@
 using namespace d2vr;
 #define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 static constexpr std::uint64_t P=11'111'111;
-static void run(PerfGovernor& g,unsigned n,double busy,double missrate) {
-    for(unsigned i=0;i<n;++i) g.feed({static_cast<std::uint64_t>(P*busy),P,missrate>0 && (i%100)<missrate*100});
+static constexpr std::uint64_t gpu_stall=4'000'000,cpu_stall=200'000; // v1398: pre-XR stall per frame, GPU-bound / CPU-bound (2026-11-19 sim)
+static void run(PerfGovernor& g,unsigned n,double busy,double missrate,std::uint64_t stall=gpu_stall) {
+    for(unsigned i=0;i<n;++i) g.feed({static_cast<std::uint64_t>(P*busy),P,missrate>0 && (i%100)<missrate*100,stall});
 }
 int main() {
     CHECK(missed_slot(3*P,P,P) && !missed_slot(2*P,P,P) && !missed_slot(P,0,P) && !missed_slot(5,9,P) && !missed_slot(5*P,P,0));
@@ -30,5 +31,11 @@ int main() {
     { PerfGovernorConfig c;c.busy_high=1.02;PerfGovernor g(c);run(g,450,.9,0);CHECK(g.changes==0); // work 0.9 of the period, no misses: hold
       PerfGovernor h(c);run(h,450,.9,.10);CHECK(h.scale()<.77f); } // 10% missed slots: step down
     { PerfGovernor g; run(g,450,1.1,0); CHECK(g.changes==0); } // display-locked "busy" without missed slots never steps down
+    // v1398 GPU-bound gate: CPU-bound misses never lower the resolution; GPU-bound ones do; gate 0 = the old miss-only rule.
+    { PerfGovernor g; run(g,45*10,1.1,.10,cpu_stall); CHECK(g.changes==0 && std::fabs(g.scale()-.77f)<1e-4f && g.cpu_bound_holds==6); } // 6 of the 10 windows hold misses
+    { PerfGovernor g; run(g,45,1.1,.10,gpu_stall); CHECK(g.scale()<.77f && g.cpu_bound_holds==0); }
+    { PerfGovernorConfig c;c.gpu_stall_gate_ns=0;PerfGovernor g(c); run(g,45,1.1,.10,0); CHECK(g.scale()<.77f); }
+    { PerfGovernor g; run(g,45,1.1,.10,cpu_stall); run(g,45,1.1,.10,gpu_stall); CHECK(g.changes==1 && g.cpu_bound_holds==1); } // a scene turning GPU-bound
+    { PerfGovernor g; run(g,45*100,.5,0,cpu_stall); CHECK(std::fabs(g.scale()-.95f)<1e-4f); } // calm still steps up whatever the stall
     std::puts("vr_perf_governor_check ok");
 }

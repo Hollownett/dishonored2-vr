@@ -113,7 +113,7 @@ sealed class MainForm : Form
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
     static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 200% + SMAA - maximum clarity", 11);
     const string PerfHelp = "Draws one eye per frame for a higher frame rate. Note: it can show some visual artifacts, mostly around moving hands and objects.";
-    const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLAA on NVIDIA RTX with DLSS, FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
+    const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLSS Quality on NVIDIA RTX with DLSS (DLAA is sharper and slower), FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
     readonly List<Feature> shownFeatures = new();  // the Features page rows, in order (main-settings features have none)
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
     string? featuresError; bool showFeatures, loadingFeatures;
@@ -479,7 +479,7 @@ sealed class MainForm : Form
             var found = await Task.Run(() => DlssFinder.FindAndConfigure(env.Root, DlssFinder.SteamRoot(), cts.Token));
             if (found == null || IsDisposed || Disposing || !IsHandleCreated) return;
             RefreshDlssChoices();
-            if (prefs.AaChosen == 0) { var d = LoadWithDefaultAa(); ApplyToForm(d, prefs); prefs = d; } // the found DLSS makes DLAA the default
+            if (prefs.AaChosen == 0) { var d = LoadWithDefaultAa(); ApplyToForm(d, prefs); prefs = d; } // the found DLSS makes DLSS Quality the default (v1398; DLAA before)
             SetSettingsMsg($"DLSS found in {found.Source["auto: ".Length..]}: {found.Path}. {DlssProvider.Attribution} Applies the next time VR starts.", Ui.Good);
         }
         catch (Exception) { }  // best effort: manual picking stays available

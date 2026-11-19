@@ -94,7 +94,7 @@ public sealed class Prefs
 
     /// <summary>v613: the default anti-aliasing follows the GPU, mirroring the DLL's first_start_aa (src/aa_first_start.hpp): DLSS offered -> DLAA (7);
     /// FSR 4 runs on this GPU -> FSR 4 native (5); a fresh install -> FSR 3 native (2); a file saved without the AA-chosen flag keeps its mode otherwise.</summary>
-    public static int DefaultAa(bool fileExisted, int saved, bool dlss, bool fsr4) => dlss ? 7 : fsr4 ? 5 : !fileExisted ? 2 : saved;
+    public static int DefaultAa(bool fileExisted, int saved, bool dlss, bool fsr4) => dlss ? 8 : fsr4 ? 5 : !fileExisted ? 2 : saved; // v1398: DLSS Quality (was DLAA, 7), mirrors src/aa_first_start.hpp
 
     /// <summary>The settings with the GPU default in place of an unchosen AA mode (a chosen one, in game or here, is kept).</summary>
     public static Prefs WithDefaultAa(Prefs p, bool fileExisted, bool dlss, bool fsr4)

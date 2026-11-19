@@ -60,12 +60,12 @@ public static class PrefsTests
         check("merge_save_keeps_in_game_aa_and_chosen", other.AaChosen == 1 && other.TemporalAa == 7 && other.Hud == 90);
 
         // v613: the default AA follows the GPU (mirrors src/aa_first_start.hpp first_start_aa / default_aa_mode).
-        check("default_aa_nvidia_rtx_dlss_is_dlaa", Prefs.DefaultAa(false, 2, dlss: true, fsr4: false) == 7 && Prefs.DefaultAa(true, 0, dlss: true, fsr4: true) == 7);
+        check("default_aa_nvidia_rtx_dlss_is_dlss_quality", Prefs.DefaultAa(false, 2, dlss: true, fsr4: false) == 8 && Prefs.DefaultAa(true, 0, dlss: true, fsr4: true) == 8); // v1398 (was DLAA, 7)
         check("default_aa_fsr4_gpu_is_fsr4_native", Prefs.DefaultAa(false, 2, dlss: false, fsr4: true) == 5 && Prefs.DefaultAa(true, 0, dlss: false, fsr4: true) == 5);
         check("default_aa_other_gpu_is_fsr3_native", Prefs.DefaultAa(false, 2, dlss: false, fsr4: false) == 2);
         check("default_aa_unchosen_old_file_keeps_mode_without_better_upscaler", Prefs.DefaultAa(true, 0, dlss: false, fsr4: false) == 0);
         check("default_aa_never_overrides_a_choice", Prefs.WithDefaultAa(new Prefs { TemporalAa = 0, AaChosen = 1 }, true, true, true).TemporalAa == 0
-            && Prefs.WithDefaultAa(new Prefs(), false, true, false).TemporalAa == 7);
+            && Prefs.WithDefaultAa(new Prefs(), false, true, false).TemporalAa == 8);
         var shown = Prefs.WithDefaultAa(new Prefs(), false, false, true);
         var savedDefault = Prefs.Merge(shown, shown, new Prefs());
         check("merge_saves_the_shown_gpu_default_when_nothing_chosen", savedDefault.TemporalAa == 5 && savedDefault.AaChosen == 1);
