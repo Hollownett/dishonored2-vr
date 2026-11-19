@@ -96,7 +96,9 @@ A/B (two rounds of v1393/v1396 at 0.5x and 1.0x) did not run: from 03:01 Steam s
 - **v1397 is installed** in `build/` (the dinput8 proxy loads it): v1396 plus the `canted_fov` memo (lab-tested; v1397 itself could
   not be sim-run because of the Steam prompt; v1396 ran ~10 sims). v1393 is kept in `build/night/installed/`, v1394-v1396 in
   `build/night/`. Switch: `sh build/night/use.sh 1396` or `sh build/night/use.sh 1393` (Git Bash); the proxy needs exactly one
-  `d2vr_render_probe_arm_v*.dll` in `build/`.
+  `d2vr_render_probe_arm_v*.dll` in `build/`. `artifacts/repair-v1397-test-candidate.json` names v1397 for the developer-mode
+  launcher (`launcher/dist`); restart the launcher (or Re-check) so it picks it up. With v1393 swapped back, the launcher falls back to
+  the v1393 manifest by itself (the v1397 manifest's DLL is then missing).
 - Suggested settings: Anti-aliasing **DLSS Quality**; Save diagnostic logs **off**; Virtual Desktop **90 Hz** (try 80 Hz if it
   still drops); mod Resolution 1.0 with VD High or Ultra.
 - Opt-in knobs (empty files in `build/`): `auto-refresh-rate` (picks 72/80/90 Hz itself), `dlss-preset` containing `K` (DLSS's best
