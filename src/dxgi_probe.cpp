@@ -12966,12 +12966,37 @@ static void stale_truth_next() {
     }
     text.insert(end,add.str());std::ofstream(path,std::ios::trunc)<<text;
 }
+// Spacewarp plan 0a (tools/spacewarp_replay.cpp, docs/SPACEWARP-PLAN-2026-11-19.md section 9): world poses for the dump meta, as
+// WarpCamera keeps them (position; basis rows forward, left, up). A camera adds its drawn hands; valid false = not recorded.
+static void write_world_pose(std::ostream& o,const d2vr::WorldTrackedPose& p) {
+    o<<"{\"position\":["<<p.position.x<<','<<p.position.y<<','<<p.position.z<<"],\"basis\":[";
+    for(unsigned a=0;a<3;++a) o<<(a?",":"")<<'['<<p.basis[a].x<<','<<p.basis[a].y<<','<<p.basis[a].z<<']';
+    o<<"]}";
+}
+static void write_warp_camera(std::ostream& o,const d2vr::WarpCamera& c) {
+    o<<"{\"valid\":"<<(d2vr::length(c.pose.basis[0])>.5?"true":"false")<<",\"pose\":";write_world_pose(o,c.pose);
+    o<<",\"hand_bits\":"<<c.hand_bits<<",\"hands\":[";write_world_pose(o,c.hands[0]);o<<',';write_world_pose(o,c.hands[1]);o<<"]}";
+}
+// Spacewarp plan 0a: the camera, drawn hands and play space of the -next.rgba render, appended to the dump's meta. With the meta's
+// kept_camera they give the replay the exact kept -> next camera and the world -> camera rotation for the motion textures.
+static void stale_next_cameras() {
+    const auto path=stale_next.stem+L"-meta.json";std::string text;
+    {std::ifstream in(path);text.assign(std::istreambuf_iterator<char>(in),{});}
+    const auto end=text.rfind('}');if(end==std::string::npos) return;
+    std::ostringstream add;add.precision(9);
+    add<<",\"next_camera_frame\":"<<game_xr->alternate_frame<<",\"next_camera\":";write_warp_camera(add,game_xr->rendered_camera(stale_next.eye));
+    const auto play=game_xr->rendered_play(stale_next.eye);
+    add<<",\"next_play\":{\"valid\":"<<(play.valid?"true":"false")<<",\"hand_bits\":"<<play.hand_bits<<",\"origin\":";write_world_pose(add,play.origin);
+    add<<",\"hands\":[";write_world_pose(add,play.hands[0]);add<<',';write_world_pose(add,play.hands[1]);add<<"]}";
+    text.insert(end,add.str());std::ofstream(path,std::ios::trunc)<<text;
+}
 static void capture_stale_next(UINT eye,ID3D11Texture2D* image,std::uint64_t frame) noexcept {
     if(stale_next.stem.empty() || eye!=stale_next.eye || !image) return;
     if(frame==stale_next.frame+1) try {
         const auto bytes=readback_box4(image,stale_next.x,stale_next.y,stale_next.w,stale_next.h);
         if(!bytes.empty()) std::ofstream(stale_next.stem+L"-next.rgba",std::ios::binary|std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
         if(stale_next.truth) stale_truth_next();
+        stale_next_cameras();
     } catch(...) {}
     if(frame>stale_next.frame) stale_next.stem.clear(); // taken, or the next frame of that eye was not its own
 }
@@ -13083,6 +13108,7 @@ static void capture_stale_warp(UINT eye,ID3D11Texture2D* kept,ID3D11Texture2D* w
                 pose(p.origin);meta<<",\"hands\":[";pose(p.hands[0]);meta<<',';pose(p.hands[1]);meta<<"]}";
             }
         }
+        meta<<",\"kept_camera\":";write_warp_camera(meta,game_xr->kept_camera(eye)); // spacewarp plan 0a: the kept image's camera and hands
         meta<<",\"palms\":["; // v811: each drawn palm in the kept camera and the reach it owns
         for(unsigned side=0;side<2;++side) {const auto& p=layers.palms[side];meta<<(side?",":"")<<'['<<p[0]<<','<<p[1]<<','<<p[2]<<','<<p[3]<<']';}
         meta<<"],\"sim_pose_hold\":"<<(d2vr::sim_pose_hold::on.load()?"true":"false")<<"}\n"; // v1192: truth_next and the next-frame motion are appended when it arrives

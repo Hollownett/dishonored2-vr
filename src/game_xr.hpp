@@ -2196,6 +2196,8 @@ public:
     // v1192 (sim-pose-hold dumps): the stale eye's target camera and this Present's rendered camera / play space / depth of an eye
     WarpCamera stale_target_camera(UINT eye) const noexcept {return eye<2?stale_target_cameras_[eye]:WarpCamera{};}
     WarpCamera rendered_camera(UINT eye) const noexcept {return eye<2 && rendered_camera_frame_[eye]==alternate_frame?rendered_cameras_[eye]:WarpCamera{};}
+    // Spacewarp plan 0a (stale-warp dump meta): the camera the eye's kept image was rendered with (empty when it was not recorded)
+    WarpCamera kept_camera(UINT eye) const noexcept {return eye<2 && kept_camera_valid_[eye]?kept_cameras_[eye]:WarpCamera{};}
     WarpPlaySpace rendered_play(UINT eye) const noexcept {return eye<2?rendered_play_[eye]:WarpPlaySpace{};}
     StaleDepth stale_depth_now(UINT eye) const noexcept {
         if(eye>1 || stale_depth_frame_[eye]!=alternate_frame || !stale_depth_[eye]) return {};
