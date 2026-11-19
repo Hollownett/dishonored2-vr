@@ -2542,14 +2542,45 @@ static std::uint64_t __fastcall game_side_hook(void* a,void* b,void* c,void* d) 
     d2vr::AsyncPresent::instance().wait(); // the immediate context is free again before the main loop's next steps
     return r;
 }
-static bool install_game_side_hook(std::uintptr_t base) noexcept {
-    if(game_side_hooked.load() || !base) return game_side_hooked.load();
-    static constexpr std::array<unsigned char,16> prologue{0x48,0x8b,0xc4,0x57,0x48,0x81,0xec,0xa0,0x00,0x00,0x00,0x48,0xc7,0x40,0x88,0xfe};
-    void* target=reinterpret_cast<void*>(base+0x459a0);std::array<unsigned char,16> code{};SIZE_T read{};
+// v1408b: the sim (2026-11-19 10:43) hung at the first gameplay frames with the exe:459a0 detour installed even though no Present ever
+// went asynchronous (kicks 0; an XR transfer took 11.8 s). build/async-present text selects the sync point for a bisect:
+//   (empty) or "game" - wrap exe:459a0 (the v1408 point); "next" - the entry of exe:45650, which the main loop calls right after the game
+//   side with the same arguments (does not wrap the simulation); "none" - no hook (and so no asynchronous Present).
+static int async_present_mode=3;
+// v1410: the 2026-11-19 11:29 sim deadlocked in mode "next": a frame reached the render side without passing exe:45650 (not every
+// frame calls it), and the safety net waited inside D3D11's Map (device lock held) for a worker Present blocked on that lock. Mode
+// "render" (the default) waits at the entry of the render side exe:458c0, before any GPU work of the frame; the safety net no longer
+// waits (it would run inside D3D11 with its lock held): a violation is counted and turns the asynchronous Present off for the session.
+using RenderSideFn=std::uint64_t(__fastcall*)(void*,void*,void*,void*);
+static RenderSideFn original_render_side{};
+static std::uint64_t __fastcall render_side_hook(void* a,void* b,void* c,void* d) {
+    d2vr::AsyncPresent::instance().wait();
+    return original_render_side(a,b,c,d);
+}
+using NextFn=std::uint64_t(__fastcall*)(void*,void*,void*,void*);
+static NextFn original_next{};
+static std::uint64_t __fastcall next_hook(void* a,void* b,void* c,void* d) {
+    d2vr::AsyncPresent::instance().wait();
+    return original_next(a,b,c,d);
+}
+static bool install_pinned_hook(std::uintptr_t base,std::uintptr_t rva,const std::array<unsigned char,16>& prologue,void* detour,void** original) noexcept {
+    void* target=reinterpret_cast<void*>(base+rva);std::array<unsigned char,16> code{};SIZE_T read{};
     if(!ReadProcessMemory(GetCurrentProcess(),target,code.data(),code.size(),&read) || read!=code.size() || code!=prologue) return false;
-    if(MH_CreateHook(target,reinterpret_cast<void*>(&game_side_hook),reinterpret_cast<void**>(&original_game_side))!=MH_OK) return false;
+    if(MH_CreateHook(target,detour,original)!=MH_OK) return false;
     if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);return false;}
-    game_side_hooked.store(true);return true;
+    return true;
+}
+static bool install_game_side_hook(std::uintptr_t base) noexcept {
+    if(game_side_hooked.load() || !base || async_present_mode==0) return game_side_hooked.load();
+    static constexpr std::array<unsigned char,16> game_prologue{0x48,0x8b,0xc4,0x57,0x48,0x81,0xec,0xa0,0x00,0x00,0x00,0x48,0xc7,0x40,0x88,0xfe};
+    static constexpr std::array<unsigned char,16> next_prologue{0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,0x48,0x8b,0xf9,0x48,0x8b,0x0d};
+    static constexpr std::array<unsigned char,16> render_prologue{0x40,0x53,0x48,0x83,0xec,0x20,0xc6,0x41,0x59,0x00,0x48,0x8b,0xd9,0x48,0x8b,0x0d};
+    const bool ok=async_present_mode==3?
+        install_pinned_hook(base,0x458c0,render_prologue,reinterpret_cast<void*>(&render_side_hook),reinterpret_cast<void**>(&original_render_side)):
+        async_present_mode==2?
+        install_pinned_hook(base,0x45650,next_prologue,reinterpret_cast<void*>(&next_hook),reinterpret_cast<void**>(&original_next)):
+        install_pinned_hook(base,0x459a0,game_prologue,reinterpret_cast<void*>(&game_side_hook),reinterpret_cast<void**>(&original_game_side));
+    game_side_hooked.store(ok);return ok;
 }
 static void nvidia_vrs_observer(void* context,int pass,void* view,bool begin) noexcept {
     if(pass!=27 && pass!=28) return;
@@ -2963,9 +2994,10 @@ static d2vr::HandBodyProbeRunner::Sample hand_body_probe_sample(std::uint64_t ti
     return sample;
 }
 static std::atomic<ID3D11DeviceContext*> gpu_game_context{nullptr};
+static std::atomic<bool> async_present_violated{false};
 static void async_present_guard(ID3D11DeviceContext* context) noexcept { // safety net: an immediate-context call while a Present is in flight
     auto& a=d2vr::AsyncPresent::instance();
-    if(a.in_flight() && context==gpu_game_context.load(std::memory_order_relaxed)) a.wait(true);
+    if(a.in_flight() && context==gpu_game_context.load(std::memory_order_relaxed)) {a.note_violation();async_present_violated.store(true);} // v1410: count, never wait here
 }
 static std::mutex gpu_mutex;
 static std::ofstream gpu_csv;
@@ -17113,7 +17145,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         !(flags&DXGI_PRESENT_TEST) && (++mirror_phase%mirror_every)!=0;
     const bool present_async=!mirror_skip && async_present_requested && game_side_hooked.load(std::memory_order_relaxed) && xr_requested &&
         capturing.load() && timing_gameplay && game_xr && game_xr->last_layer_submitted && !(flags&DXGI_PRESENT_TEST) &&
-        d2vr::AsyncPresent::instance().start(original_present); // v1408
+        !async_present_violated.load(std::memory_order_relaxed) && d2vr::AsyncPresent::instance().start(original_present); // v1408/v1410
     auto result=mirror_skip?S_OK:present_async?d2vr::AsyncPresent::instance().kick(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced),desktop_xr_paced):
         original_present(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced));
     if(mirror_skip) desktop_mirror_skips.fetch_add(1,std::memory_order_relaxed);
@@ -18246,6 +18278,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         {std::ifstream knob(root/L"build"/L"desktop-mirror-every");unsigned n=desktop_mirror_default;if(knob && !(knob>>n)) n=desktop_mirror_default; // v1406: absent or empty = the default
             desktop_mirror_every.store(std::clamp(n,1u,8u),std::memory_order_relaxed);}
         async_present_requested=fs::exists(root/L"build"/L"async-present"); // v1408 plan 2B.4 step 1
+        {std::ifstream knob(root/L"build"/L"async-present");std::string mode;knob>>mode;async_present_mode=mode=="none"?0:mode=="next"?2:mode=="game"?1:3;} // v1408b/v1410: default "render"
         {std::ifstream knob(root/L"build"/L"nvidia-vrs");nvidia_vrs_requested=static_cast<bool>(knob);nvidia_vrs_tried=false;nvidia_vrs_config={}; // v1403 plan 2A.5
          float inner{},outer{};std::string token;if(knob>>inner>>outer && inner>=.1f && inner<=.9f && outer>inner && outer<=1.5f) {nvidia_vrs_config.inner=inner;nvidia_vrs_config.outer=outer;}
          while(knob>>token) if(token=="4x4") nvidia_vrs_config.quarter=true;}

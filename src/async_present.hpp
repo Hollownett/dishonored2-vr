@@ -9,9 +9,10 @@
 //
 // Why the D3D11 immediate context stays single-threaded: 2026-11-19 stack walks of the main thread (tools/stack_tree.py, 3,152 walks):
 // 0 of 808 walks inside the game side and 0 of 29 in the main loop between the halves pass through d3d11/dxgi/the driver. The main
-// thread waits for the worker when the game side returns (the hook on exe:459a0), at the next Present, in ResizeBuffers and at teardown;
-// as a safety net the mod's own immediate-context hooks (draws, viewports, render targets) wait too and count it (guard_waits: expected
-// 0). The wait pumps sent window messages, so a Present that sends to the game window cannot deadlock against it.
+// thread waits for the worker at the entry of the render side (v1410: the hook on exe:458c0), at the next Present, in ResizeBuffers and
+// at teardown;
+// the mod's own immediate-context hooks (draws, viewports, render targets) count any call made while a Present is in flight (guard_waits,
+// expected 0) and turn the feature off; they never wait (v1410: waiting there deadlocked against D3D11's device lock). The wait pumps sent window messages, so a Present that sends to the game window cannot deadlock against it.
 // Pure apart from the Win32 thread/event calls; the lab is tests/async_present_check.cpp.
 #include <windows.h>
 #include <dxgi.h>
@@ -40,6 +41,9 @@ public:
     }
     bool running() const noexcept {return running_.load(std::memory_order_acquire);}
     bool in_flight() const noexcept {return in_flight_.load(std::memory_order_acquire);}
+    // v1410: the safety net counts an immediate-context call made while a Present is in flight; it must not wait (it may run inside
+    // D3D11 with the device lock held, which the worker's Present needs: the 2026-11-19 deadlock).
+    void note_violation() noexcept {guard_waits_.fetch_add(1,std::memory_order_relaxed);}
     // Main thread, inside the Present hook: hand this Present to the worker. Returns the previous asynchronous result (a Present
     // error therefore reaches the game one frame late; DXGI_ERROR_WAS_STILL_DRAWING of a paced mirror is success, as in the sync path).
     HRESULT kick(IDXGISwapChain* chain,UINT interval,UINT flags,bool paced) noexcept {

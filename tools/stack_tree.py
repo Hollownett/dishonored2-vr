@@ -116,6 +116,7 @@ def main():
         if m is exe:
             f = func_of(a - m[0] if leaf else a - m[0] - 1)
             return f"exe:{f:x}" if f is not None else f"exe?{a - m[0]:x}"
+        if m[2].lower().startswith("d2vr_render_probe"): return f"{m[2]}+{a - m[0] - (0 if leaf else 1):x}"  # mod frames keep their offset (PDB-resolvable)
         return m[2]
     keyed = [[key(a, i == 0) for i, a in enumerate(s)] for s in stacks]
     json.dump({"tid": tid, "samples": len(stacks), "times": times, "stacks": keyed}, open(out_path, "w"))

@@ -58,6 +58,8 @@ int main() {
     CHECK(a.json().find("\"guard_waits\":0")!=std::string::npos);
     a.kick(&chain,0,0,false);a.wait(true);
     CHECK(a.json().find("\"guard_waits\":1")!=std::string::npos && a.json().find("\"still_drawing\":1")!=std::string::npos);
+    a.note_violation(); // v1410: the count-only safety net
+    CHECK(a.json().find("\"guard_waits\":2")!=std::string::npos);
     a.stop();
     CHECK(!a.running() && presents==6);
     std::puts("async_present_check ok");

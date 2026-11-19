@@ -255,3 +255,23 @@ areas (`auto-refresh-rate` does that by itself) or Very Low presets; a CPU with 
   render job graph (up to ~2.4 ms of a 9.6 ms frame), or run the game side at half rate (~1.2 ms on average, but NPC animation and the
   player's movement would update at 45 Hz unless the mod extrapolates the camera).
 
+### Overlap stage 1: asynchronous desktop Present (v1408-v1410, 10:40-11:40) - does not work yet, do not enable
+
+You chose to overlap the two halves. Stage 1 moved only the desktop window's Present (the Steam overlay, DXGI and the driver,
+~0.7 ms) onto a worker thread so it overlaps the next frame's pre-game steps and game side (opt-in `build/async-present`,
+`src/async_present.hpp`; the public references in `docs/research/GAME-RENDER-OVERLAP-REFERENCES.md` back this "back end only" cut).
+
+| build / sync point | result in the sim |
+|---|---|
+| v1409 `none` (no hook, no async) | normal: p50 9.64 ms (control) |
+| v1408 wraps the game side `exe:459a0` | game stops presenting ~20 s into gameplay |
+| v1409 `next` (entry of `exe:45650`) | same; all-thread stack dump: **deadlock**: the main thread reached the render side without passing `45650` (not every frame calls it); inside D3D11's `Map` (device lock held) the safety-net check waited for the worker, whose Present (Steam overlay -> DXGI) waited for that lock |
+| v1410 `render` (entry of the render side `exe:458c0`; safety net count-only) | **crash**: access violations on two engine threads in the render job system (`exe:2c6080`, null read) at gameplay start |
+
+The Present hand-off itself works (2 asynchronous Presents of 0.21 ms, no errors). What does not: with the next frame's game side
+running beside a Present, the engine's job system crashes. The main-thread stack walks showed no GPU use in the game side, but the game
+side's jobs on the worker threads were not covered. Finding that interaction needs reverse-engineering of the job system; for a gain of
+<= 0.7 ms it stops here. The bigger overlap (render jobs beside the next game side) would move far more work across threads and is not
+realistic before this is understood. Tools from this: `tools/stack_tree.py` (real call trees), `tools/dump_stacks.py` (all threads once,
+for deadlocks). The one-time ~11 s stalls at the start of every sim's gameplay are the two `StaleEyeWarp` shader compiles (normal).
+
