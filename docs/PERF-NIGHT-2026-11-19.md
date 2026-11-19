@@ -245,4 +245,13 @@ areas (`auto-refresh-rate` does that by itself) or Very Low presets; a CPU with 
   set both from the config and live (accepted), writes no `qconsole.log`: the retail build has no console log.
 - The mod's body/hand features cost ~0.1 ms (R3), the main thread runs ~77 % of the time on the game's serial work, and no engine
   function exceeds ~3 % of its samples. What is left on the engine side is reverse-engineering and changing the game's own simulation.
+- **The main thread's frame, from real stack walks** (`tools/stack_tree.py`: dbghelp `StackWalk64` with each module's unwind tables,
+  3,152 walks over 26 s; the walks slow frames to ~12.4 ms, so shares are what counts). The main loop (`exe:450d0`) runs two parts
+  strictly in sequence: the **render side** `exe:458c0` 73 % (`RenderSingleView` 46 %, almost all of it inside the render job graph
+  where the main thread runs jobs or waits for the workers; the mod's Present/XR path 13 %; other render steps 9 %) and the **game
+  side** `exe:459a0` 25 % (`PlayTime` -> component-update job graphs `TtarkSubmitAndWaitGraph` / `TtarkComponentUpdateTask`). The
+  main thread is blocked in a wait 29 % of the time. Busy stretches grow the game side (24.8 -> 26.3 %, its job waits 7.9 -> 9.4 %).
+  So the levers that could reach 90 Hz in busy moments are engine-structural: overlap the next frame's game side with this frame's
+  render job graph (up to ~2.4 ms of a 9.6 ms frame), or run the game side at half rate (~1.2 ms on average, but NPC animation and the
+  player's movement would update at 45 Hz unless the mod extrapolates the camera).
 
