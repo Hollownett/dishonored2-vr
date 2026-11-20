@@ -1,4 +1,4 @@
-# VR v1444 (release, 2026-11-20)
+# VR v1445 (release, 2026-11-21)
 
 ## Spacewarp: the headset stays at its full frame rate, on by default
 
@@ -20,8 +20,8 @@
   pick another one.
 - Spacewarp and performance mode do not run together: with Spacewarp on, performance mode stays off.
 - Best with Virtual Desktop's own runtime (VDXR). SteamVR and Meta Link work too. On those runtimes the frames in between now go
-  out on time even when the game's own frame runs long. Before, more than a third of them came too late on SteamVR in heavy scenes.
-  Virtual Desktop is still the smoothest.
+  out at the start of the next frame, or while it waits for the graphics card, instead of after the mod's own work, so fewer of them
+  come too late. Virtual Desktop is still the smoothest.
 
 ## Faster and steadier
 
@@ -48,4 +48,4 @@ surfaces). Turning Spacewarp off on the Settings page undoes all of it. Say what
 
 Tested by the author in the headset over Virtual Desktop and SteamVR up to v1438 (Spacewarp, hands, weapons, HUD). The leg changes
 (v1439), the SteamVR timing (v1440-v1442) and performance mode without PureDark (v1443) are tested in the lab, the simulator and one
-SteamVR session. v1444's SteamVR frame timing is tested in the lab and the simulator only.
+SteamVR session. v1445's SteamVR frame timing is tested in the lab and the simulator only.
