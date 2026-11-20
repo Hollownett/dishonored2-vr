@@ -102,6 +102,19 @@ struct SpacewarpParams {
     // stays within body_cap of that step (its own animation), its full extrapolated motion (class 5). A motion vector further off (a
     // guard's sword swinging beside the player) leaves it to the other rules (a capped mover).
     bool body_on{};std::array<double,3> body_up{0,1,0},body_axis{};double body_radius{.35},body_floor{.06},body_top{1.4},body_cap{.08};
+    // v1438 (user, headset v1437: "fix legs warping ... minor ghosting around player legs"): the body rule moved the legs rigidly with the play
+    // space, so the walk cycle's own swing doubled every generated frame. The mod draws the legs itself (full_body_driver: the femur, tibia
+    // and ankle joints of each body upload): per leg the hip, knee and ankle in source camera coordinates (w: the radius of the segment
+    // starting there: thigh, shin; the ankle's a sphere for the foot) and each joint's displacement to the target slot (its step since the
+    // previous real frame times the mover share, source camera coordinates). A body texel without a motion vector within a segment takes
+    // the segment's interpolated step as its own motion (class 5, capped at body_cap beyond the play space's step).
+    bool legs_on{};std::array<std::array<double,4>,6> leg_point{};std::array<std::array<double,3>,6> leg_step{};
+    // v1438 (docs/research/FRAMEGEN-OTHER-MODS.md item 2: thin cracks on very close magnified surfaces): Crack bridges a hole between two
+    // cells of one surface up to crack_reach cells away on each side, past 2 only between source neighbours (v1437: 2)
+    int crack_reach{4};
+    // v1438: scenery inside a hand's volume (the palm's outer shell, a weapon body) confirmed still by the previous real frame stays (shader
+    // StillBesideHand). Off: v1437 (the volume takes everything in it).
+    bool hand_scenery{true};
 };
 
 class SpacewarpPass {
@@ -130,6 +143,7 @@ private:
         float PR[3][4],carry[4];                              // v1423: carried-with-the-player test; carry: reach, slack per metre, on
         float misc[4];                                        // v1426: x mover cap (metres)
         float body_up[4],body[4],body_axis[4];                // v1432: up (w on); x radius, y floor, z top, w cap; the root (source)
+        float legs[4],leg_p[6][4],leg_d[6][4];                // v1438: x on; each leg's hip, knee, ankle (w radius) and their steps
     };
     static_assert(sizeof(Constants)%16==0,"constant buffer size");
     struct Grid {Ptr<ID3D11Texture2D> t;Ptr<ID3D11UnorderedAccessView> u;Ptr<ID3D11ShaderResourceView> s;};
@@ -156,6 +170,7 @@ cbuffer Sw : register(b0) {
     float4 PR[3]; float4 carryTerms;
     float4 misc;
     float4 bodyUp; float4 body; float4 bodyAxis;  // v1432: the player's body cylinder (bodyUp.w on; body: radius, floor, top, cap; the root)
+    float4 legs; float4 legP[6]; float4 legD[6];  // v1438: the drawn legs (SpacewarpParams::legs_on)
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> motionTex : register(t1);
@@ -180,6 +195,7 @@ static const uint EMPTY=0xffffffffu, SKY=0x80000000u, FILLED=0x40000000u, INDEX=
 // tint, bit 4 rim (a texel within EDGE_R of a nearer surface that moves differently: its colour is part that surface's), bit 5 a moving
 // surface's edge (its colour is part what lies behind it), bits 6-8 that edge's inward direction (k * 45 degrees, texel x right, y down)
 static const uint CLASS=7u, SKYCLASS=7u, TINT=8u, RIM=16u, FGEDGE=32u, FEATHER=512u;  // v1425: bit 9, the displacement is dispTex's
+static const uint LEGW=1024u;  // v1438: bit 10, a body texel (class 5) whose own motion is the drawn leg's (LegStep), not the motion texture's
 static const int EDGE_R=2;
 
 float Ahead(float d) {return terms.y/(d+terms.x);}
@@ -230,11 +246,39 @@ int WeaponHand(float3 P) {
     if(flags.y!=0u && wa1.w>0 && SegmentDistance(P,wa1.xyz,wb1.xyz)<=wa1.w) return 1;
     return -1;
 }
+// v1438 (user, headset v1437: "a warp area around the hands, like a bubble, when hands hover over some object ... same around the
+// weapons"): a hand's volume (its palm's reach, its weapon body) took everything inside it, a table under a hovering hand too. Now a point
+// there that the previous real frame shows standing still in the world and not where the hand's last step carries it is scenery. Both
+// fit on a flat surface sliding along itself; in a palm's outer shell (loose) such a point beyond the palm, seen from the eye, is still
+// scenery (the forearm and the fingers lie nearer or within the inner 12 cm, which stays the hand's). misc.w 0: v1437 (no test).
+bool StillBesideHand(int side,float3 P,float d,bool loose) {
+    if(misc.w<=0 || prevFlags.x==0u || (side==0?prevFlags.y:prevFlags.z)==0u || PrevShows(PW,P,0)!=1) return false;
+    if((side==0?PrevShows(PH0,P,.015*d):PrevShows(PH1,P,.015*d))!=1) return true;
+    return loose && length(P)>length(side==0?palm0.xyz:palm1.xyz)+.05;
+}
+// v1438: the step of the drawn leg segment nearest P (within its radius): thigh and shin interpolate their joints' steps, the foot is the
+// ankle's sphere. false: no leg there.
+bool LegStep(float3 P,out float3 m) {
+    m=0; if(legs.x<=0) return false; float best=1;
+    [unroll] for(int k=0;k<2;++k) {
+        const int i=3*k;
+        [unroll] for(int s=0;s<2;++s) {
+            const float3 a=legP[i+s].xyz,ab=legP[i+s+1].xyz-a;
+            const float u=saturate(dot(P-a,ab)/max(dot(ab,ab),1e-12)); const float r=distance(P,a+u*ab)/max(legP[i+s].w,1e-4);
+            if(r<best) {best=r; m=lerp(legD[i+s].xyz,legD[i+s+1].xyz,u);}
+        }
+        const float r=distance(P,legP[i+2].xyz)/max(legP[i+2].w,1e-4);
+        if(r<best) {best=r; m=legD[i+2].xyz;}
+    }
+    return best<1;
+}
 // The texel's class (the rules in this header's comment; v1424: decided once per texel, its displacement from the class)
 uint ClassOf(uint2 t,float3 P) {
     const float4 mo=(flags.w&1u)?motionTex[t]:0;
     const float d0=palm0.w>0?distance(P,palm0.xyz):1e9,d1=palm1.w>0?distance(P,palm1.xyz):1e9;
-    int heldBy=WeaponHand(P);if(heldBy<0) heldBy=FarHand(P,d0,d1);
+    int heldBy=WeaponHand(P);
+    if(heldBy>=0 && StillBesideHand(heldBy,P,heldBy==0?d0:d1,false)) heldBy=-1;  // v1438: scenery inside a weapon body stays
+    if(heldBy<0) heldBy=FarHand(P,d0,d1);
     if(heldBy==0) return 1u|TINT;
     if(heldBy==1) return 2u|TINT;
     // v1432: the player's own body (legs, torso): inside the player's cylinder above the floor (SpacewarpParams::body_on)
@@ -251,7 +295,9 @@ uint ClassOf(uint2 t,float3 P) {
                 // frame shows scenery there (sim 2026-11-20: rubble a few cm above the root inside the cylinder slid with the player): confirmed
                 // still in the world and not where the play space's step puts it. A leg overlapping its own previous place matches both: body.
                 // without a usable previous frame (after a gap or a cut) scenery cannot be told apart: no body texel then (review)
-                if(prevFlags.x!=0u && carryTerms.z>0 && !(PrevShows(PW,P,0)==1 && PrevShows(PR,P,carryTerms.y*length(P))!=1)) return 3u;
+                if(prevFlags.x!=0u && carryTerms.z>0 && !(PrevShows(PW,P,0)==1 && PrevShows(PR,P,carryTerms.y*length(P))!=1)) {
+                    float3 lm; return LegStep(P,lm)?(5u|LEGW):3u;  // v1438: a drawn leg swings on its own
+                }
             }
         }
     }
@@ -261,11 +307,13 @@ uint ClassOf(uint2 t,float3 P) {
         if(r>=C.w && r<carryTerms.x && PrevShows(PR,P,carryTerms.y*r)==1 && PrevShows(PW,P,0)!=1) return flags.z!=0u?3u:0u;
     }
     // without a rig mask (true stereo): what lies within a drawn palm's reach, or nearer than C.w metres, is the player's rig
-    const bool nearRig=C.w>0 && (length(P)<C.w || d0<=palm0.w || d1<=palm1.w);
+    // v1438: scenery in a palm's outer shell (past the inner 12 cm) stays (StillBesideHand)
+    const bool beside0=d0<=palm0.w && d0>.12 && StillBesideHand(0,P,d0,true),beside1=d1<=palm1.w && d1>.12 && StillBesideHand(1,P,d1,true);
+    const bool nearRig=C.w>0 && (length(P)<C.w || (d0<=palm0.w && !beside0) || (d1<=palm1.w && !beside1));
     const uint rig=(flags.w&2u)?rigTex[t]:(nearRig?1u:0u);
     if(rig!=0u) {
-        if(flags.x!=0u && d0<=palm0.w && d0<=d1) return 1u;
-        if(flags.y!=0u && d1<=palm1.w) return 2u;
+        if(flags.x!=0u && d0<=palm0.w && d0<=d1 && !beside0) return 1u;
+        if(flags.y!=0u && d1<=palm1.w && !beside1) return 2u;
         if(mo.w>=.5 && terms.z>0) return 4u;
         if(flags.z!=0u) return 3u;
         return 0u;
@@ -282,8 +330,9 @@ float3 DisplaceW(uint w,uint2 t,float3 P) {
     if(c==3u) return Rigid(RR,P)-P;
     if(c==5u) {  // v1432: the play space's step plus the texel's own motion beyond it (the walk cycle), only that part capped
         const float3 rest=flags.z!=0u?Rigid(RR,P)-P:0;
-        const float4 mo=motionTex[t];
-        float3 r=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z-rest;
+        float3 r;
+        if(w&LEGW) {float3 lm; LegStep(P,lm); r=lm-rest;}  // v1438: the drawn leg's step
+        else {const float4 mo=motionTex[t]; r=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z-rest;}
         const float l=length(r); if(body.w>0 && l>body.w) r*=body.w/l;
         return rest+r;
     }
@@ -384,10 +433,18 @@ bool Surface(uint idx) {return idx!=EMPTY && (idx&(SKY|FILLED))==0u;}
     const int2 p=int2(id.xy); if(any(p>=int2(grid.xy))) return;
     uint bd=depthIn[p],bi=indexIn[p]; const float zi=bi==EMPTY?1e30:Z(bd); float best=1e30;
     const int2 dirs[4]={int2(1,0),int2(0,1),int2(1,1),int2(1,-1)};
-    for(int k=0;k<4;++k) for(int d=1;d<=2;++d) {
+    // v1438 (docs/research/FRAMEGEN-OTHER-MODS.md item 2, thin cracks on very close magnified surfaces): past 2 cells a side, only between
+    // two cells whose source texels are neighbours (within 2 texels) of one class: one surface splatted apart by magnification. A gap a
+    // mover left beside a surface at its own depth (lab: the mover on a wall, whose edge texels neighbour the wall's) stays a hole
+    const int reach=misc.z>0?int(misc.z):2;
+    for(int k=0;k<4;++k) for(int d=1;d<=reach;++d) {
         const int2 a=p-dirs[k]*d,b=p+dirs[k]*d;
         if(any(a<0) || any(b<0) || any(a>=int2(grid.xy)) || any(b>=int2(grid.xy))) continue;
         const uint ia=indexIn[a],ib=indexIn[b]; if(!Surface(ia) || !Surface(ib)) continue;
+        if(d>2) {
+            const uint sa=ia&INDEX,sb=ib&INDEX; const int2 ta=int2(sa%uint(grid.x),sa/uint(grid.x)),tb=int2(sb%uint(grid.x),sb/uint(grid.x));
+            if(any(abs(ta-tb)>2) || (wordTex[uint2(ta)]&CLASS)!=(wordTex[uint2(tb)]&CLASS)) continue;  // and of one class (moving alike)
+        }
         const uint da=depthIn[a],db=depthIn[b]; const float za=Z(da),zb=Z(db);
         if(abs(za-zb)>.1*min(za,zb) || !(zi>1.1*max(za,zb))) continue;
         const bool takeA=za<=zb; const float z=takeA?za:zb;
@@ -610,10 +667,13 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     }
     f4(k.C,p.c[0],p.c[1],p.c[2],in.rig?0:p.rig_near);f4(k.palm0,p.palm[0][0],p.palm[0][1],p.palm[0][2],p.palm[0][3]);f4(k.palm1,p.palm[1][0],p.palm[1][1],p.palm[1][2],p.palm[1][3]);
     k.flags[0]=p.hand_on[0];k.flags[1]=p.hand_on[1];k.flags[2]=p.rest_on;k.flags[3]=(in.motion?1u:0u)|(in.rig?2u:0u);
-    f4(k.out,out_width,out_height,1.0/out_width,1.0/out_height);k.step[0]=p.soft_edges?1u:0u;f4(k.misc,p.mover_cap,p.sharp_resample?1:0,0,0);
+    f4(k.out,out_width,out_height,1.0/out_width,1.0/out_height);k.step[0]=p.soft_edges?1u:0u;f4(k.misc,p.mover_cap,p.sharp_resample?1:0,p.crack_reach,p.hand_scenery?1:0);
     k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_classes?2u:p.debug_tint_held?1u:0u;
     if(p.body_on) {f4(k.body_up,p.body_up[0],p.body_up[1],p.body_up[2],1);f4(k.body,p.body_radius,p.body_floor,p.body_top,p.body_cap);  // v1432
-                   f4(k.body_axis,p.body_axis[0],p.body_axis[1],p.body_axis[2],0);}
+                   f4(k.body_axis,p.body_axis[0],p.body_axis[1],p.body_axis[2],0);
+                   if(p.legs_on) {k.legs[0]=1;  // v1438
+                       for(unsigned i=0;i<6;++i) {f4(k.leg_p[i],p.leg_point[i][0],p.leg_point[i][1],p.leg_point[i][2],p.leg_point[i][3]);
+                           f4(k.leg_d[i],p.leg_step[i][0],p.leg_step[i][1],p.leg_step[i][2],0);}}}
     {const auto& cm=p.colour_camera?p.colour_m:std::array<double,9>{1,0,0,0,1,0,0,0,1};const auto& ct=p.colour_camera?p.colour_tan:p.source_tan;
      for(int i=0;i<3;++i) f4(k.CM[i],cm[i*3],cm[i*3+1],cm[i*3+2],0);f4(k.colour_tan,ct[0],ct[1],ct[2],ct[3]);}
     f4(k.wa0,p.weapon[0][0],p.weapon[0][1],p.weapon[0][2],p.weapon[0][6]);f4(k.wb0,p.weapon[0][3],p.weapon[0][4],p.weapon[0][5],0);  // v1419

@@ -186,6 +186,9 @@ struct Diagnostic {
     unsigned substeps{};bool gap_reset{},body_valid{},arm_valid[2]{};
     Frame body_frame{},arm_frame[2]{};
     Xf pelvis{},feet[2]{},palm[2]{},wrist[2]{},target_attachment[2]{},grip_to_attachment[2]{};
+    // v1438: the drawn legs of the last body upload (world: hip, knee, ankle per leg), for spacewarp's leg rule: the solved pose when the mod
+    // drew the body, else the engine's own (the mod's solve declined: the game's animation is drawn)
+    Vec3 leg[2][3]{};bool legs_valid{},legs_solved{};
     Vec3 pelvis_forward{},pelvis_left{};
     Vec3 plant[2]{},swing_from[2]{},swing_to[2]{};double phase[2]{},owned[4]{},palm_residual[2]{};
     ArmGate arm_gate[2]{ArmGate::no_solution,ArmGate::no_solution};
@@ -468,6 +471,18 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         back_=std::clamp(back,0.,.3);head_scale_=std::clamp(head_scale,.01,1.);
     }
+    // v1438: each leg's hip, knee and ankle (femur, tibia, ankle joints of the 20-joint body) through `world` (joint index -> world pose)
+    template<class World> void legs_from_(World world,bool solved) {
+        diag_.legs_valid=false;
+        const auto& sk=solver_.skeleton(0);
+        static const char* names[2][3]={{"left_femur_jnt","left_tibia_jnt","left_ankle_jnt"},{"right_femur_jnt","right_tibia_jnt","right_ankle_jnt"}};
+        for(unsigned i=0;i<2;++i) for(unsigned k=0;k<3;++k) {
+            const int j=sk.find(names[i][k]);
+            if(j<0 || j>=20) return;
+            diag_.leg[i][k]=world(static_cast<std::size_t>(j)).p;
+        }
+        diag_.legs_valid=true;diag_.legs_solved=solved;
+    }
     // Animation/render workers: the engine's own body upload for this frame. Returns the
     // replacement model-space joints, or nothing (keep the native upload).
     std::optional<std::array<Transform,20>> body(const std::array<Transform,20>& native,const std::array<float,15>& frame,std::uint64_t frame_key=0) {
@@ -477,6 +492,7 @@ public:
         native_.model=body_frame_.rigid;native_.body.resize(20);
         for(unsigned j=0;j<20;++j) native_.body[j]=to_xf(native[j]);
         have_native_body_=true;
+        legs_from_([&](std::size_t j) {return to_world(body_frame_,native_.body[j]);},false);  // v1438: the engine's own legs until the solve replaces them
         if(!solve_locked(frame_key)) return {};
         const auto conv=anchored(2,body_frame_);
         const auto out=export_body(out_,conv,body_frame_);
@@ -488,6 +504,7 @@ public:
         diag_.pelvis_forward=rotated(pelvis_heading,{1,0,0});
         diag_.pelvis_left=rotated(pelvis_heading,{0,1,0});
         for(unsigned i=0;i<2;++i) diag_.feet[i]=to_world(conv,to_xf(out[sk.find(i?"right_ankle_jnt":"left_ankle_jnt")]));
+        legs_from_([&](std::size_t j) {return to_world(conv,to_xf(out[j]));},true);  // v1438: the solved legs, as drawn
         return out;
     }
     std::optional<std::array<Transform,69>> arm(unsigned side,const std::array<Transform,69>& native,const std::array<float,15>& frame) {

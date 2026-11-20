@@ -2220,6 +2220,7 @@ public:
     UINT64 world_ui_layers{};
     std::array<UINT64,3> world_ui_layers_by_kind{};
     bool last_world_ui_layer{};
+    void request_resolution(double multiplier) noexcept {resolution_change_=multiplier;}  // dev command `resolution <m>` (sim repro)
     std::optional<double> take_resolution_request() noexcept {const auto request=resolution_change_;resolution_change_.reset();return request;}
     std::optional<int> take_hud_request() noexcept {const auto request=hud_change_;hud_change_.reset();return request;}
     bool crosshair_visible() const noexcept {return settings_.crosshair();}
@@ -2302,7 +2303,8 @@ public:
          <<",\"not_kept_why\":\""<<spacewarp_not_kept_why<<"\",\"captures\":"<<spacewarp_captures_saved
          <<",\"presents\":"<<spacewarp_presents<<",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"gated\":"<<spacewarp_gated
          <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"soft_edges\":"<<(spacewarp_soft_edges?"true":"false")<<",\"mover_eyes\":"<<spacewarp_mover_eyes
-         <<",\"body\":"<<(spacewarp_body?"true":"false")<<",\"body_eyes\":"<<spacewarp_body_eyes<<",\"body_eye_height\":"<<spacewarp_body_eye_height
+         <<",\"body\":"<<(spacewarp_body?"true":"false")<<",\"body_eyes\":"<<spacewarp_body_eyes<<",\"resizes\":"<<spacewarp_resizes<<",\"generated_at_last_resize\":"<<spacewarp_resize_settled_at<<",\"leg_eyes\":"<<spacewarp_leg_eyes<<",\"leg_valid\":"<<spacewarp_leg_valid<<",\"leg_insane\":"<<spacewarp_leg_insane<<",\"leg_noshare\":"<<spacewarp_leg_noshare
+         <<",\"leg_hip\":["<<spacewarp_leg_hip[0]<<','<<spacewarp_leg_hip[1]<<','<<spacewarp_leg_hip[2]<<"],\"leg_root\":["<<spacewarp_leg_root[0]<<','<<spacewarp_leg_root[1]<<','<<spacewarp_leg_root[2]<<"],\"leg_step_m\":"<<spacewarp_leg_step_m<<",\"leg_why\":\""<<spacewarp_leg_why<<"\""<<",\"legs\":"<<(spacewarp_leg_rule?"true":"false")<<",\"body_eye_height\":"<<spacewarp_body_eye_height
          <<",\"body_up_dot\":"<<spacewarp_body_up_dot<<",\"overlays\":"<<(spacewarp_overlays?"true":"false")<<",\"overlay_draws\":"<<spacewarp_overlay_draws
          <<",\"overlay_failures\":"<<spacewarp_overlay_failures<<",\"layers_moved\":"<<spacewarp_layers_moved<<",\"cylinders\":"<<spacewarp_cylinders
          <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
@@ -2377,6 +2379,10 @@ public:
     bool spacewarp_body{true};  // v1432: the player's body rule (spacewarp_pass.hpp SpacewarpParams::body_on; build/no-spacewarp-body: off)
     bool spacewarp_overlays{true};bool spacewarp_tint_classes{};  // v1432 diagnostics: build/spacewarp-tint-classes
     std::optional<Vec3> spacewarp_body_root;  // v1432: the player model's root (world, at the feet), set by dxgi_probe each Present; none: no body rule
+    // v1438: the drawn legs (world; hip, knee, ankle per leg) of this real frame's body upload and of the previous real frame's (dxgi_probe)
+    struct SpacewarpLegs {bool valid{};std::array<std::array<Vec3,3>,2> now{},prev{};};
+    std::uint64_t sw_settle_until_{},spacewarp_resizes{},spacewarp_resize_settled_at{};  // v1438
+    SpacewarpLegs spacewarp_legs{};bool spacewarp_leg_rule{true};std::uint64_t spacewarp_leg_valid{},spacewarp_leg_insane{},spacewarp_leg_noshare{};std::array<double,3> spacewarp_leg_hip{},spacewarp_leg_root{};double spacewarp_leg_step_m{};const char* spacewarp_leg_why="";int spacewarp_crack_reach{4};bool spacewarp_hand_scenery{true};std::uint64_t spacewarp_leg_eyes{};
     double spacewarp_body_up_dot{},spacewarp_body_eye_height{};std::uint64_t spacewarp_body_eyes{};  // v1432 status (up agreement, the root's depth)  // v1432: the eye overlays redrawn on generated frames (build/spacewarp-baked-overlays: off, v1431 warped them)
     std::uint64_t spacewarp_overlay_draws{},spacewarp_overlay_failures{},spacewarp_layers_moved{},spacewarp_cylinders{};
     double spacewarp_play_mismatch_mm{};  // the two eyes' play spaces (camera * view^-1) apart: a check of the camera/view pairing
@@ -2727,6 +2733,7 @@ public:
         const bool format_changed=format!=format_;
         if(frame_open_) throw std::runtime_error("Cannot resize an open XR frame");
         drain_spacewarp_();release_spacewarp_images_();sw_pending_=false;sw_colour_={};sw_colour_srv_={};  // spacewarp: a generated frame would name the old swapchains
+        sw_settle_until_=GetTickCount64()+1000;++spacewarp_resizes;  // v1438: a second without generated frames (the skip above)
         for(auto& prev:sw_prev_) prev.valid=false;
         if(!width || !height || width>system_maximum_.width || height>system_maximum_.height ||
            width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
@@ -2913,6 +2920,11 @@ public:
         const auto skip=[&](const char* why) {release_spacewarp_images_();spacewarp_skip=why;++spacewarp_unusable;};
         if(!sw_keep_) return;
         if(!sw_kept_[0] || !sw_kept_[1]) return skip("no eye image");
+        // v1438 (user, headset v1437: after a resolution change "it breaks the warping ... I see double image and ghosting"; not reproduced
+        // in the sim, also not with the headset's canted FOV): no generated frame for a second after the eye swapchains were resized, while
+        // the upscaler, the game's output size and the runtime settle on the new size
+        if(sw_settle_until_ && GetTickCount64()<sw_settle_until_) return skip("resize settle");
+        if(sw_settle_until_) {sw_settle_until_=0;spacewarp_resize_settled_at=spacewarp_generated;}
         for(UINT eye=0;eye<2;++eye)
             if(rendered_camera_frame_[eye]!=alternate_frame || stale_depth_frame_[eye]!=alternate_frame || !stale_depth_[eye]) return skip("no camera or depth");
         try {
@@ -3031,6 +3043,7 @@ public:
                 }
                 if(weapon_here) ++spacewarp_weapon_eyes;
                 const auto& prev=sw_prev_[eye];
+                p.crack_reach=spacewarp_crack_reach;p.hand_scenery=spacewarp_hand_scenery;  // v1438
                 p.debug_tint_held=spacewarp_tint_held;p.debug_tint_classes=spacewarp_tint_classes;p.soft_edges=spacewarp_soft_edges;p.sharp_resample=spacewarp_sharp;
                 // v1432: the player's body, a cylinder on the player model's root (dxgi_probe render_player_root: world, at the feet). Up in
                 // source camera coordinates is the game world's up (+z) seen from S: S's rotation transposed times (0, 0, 1) = its third row.
@@ -3041,6 +3054,23 @@ public:
                     const std::array<double,3> local_up{V.r[3],V.r[4],V.r[5]};
                     spacewarp_body_up_dot=up[0]*local_up[0]+up[1]*local_up[1]+up[2]*local_up[2];spacewarp_body_eye_height=eye_height;
                     if(eye_height>.4 && eye_height<2.6) {p.body_on=true;p.body_up=up;p.body_axis=axis;p.body_top=eye_height-.3;++spacewarp_body_eyes;}
+                    // v1438: each drawn leg segment and its joints' steps to the target slot (a step over 0.5 m is a cut: no leg rule)
+                    if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid) ++spacewarp_leg_valid;  // v1438 status: which test let the rule apply
+                    if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid && !(mover_share>0)) ++spacewarp_leg_noshare;
+                    if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid && mover_share>0) {
+                        static constexpr double radius[3]={.13,.10,.15};  // thigh, shin, the foot's sphere at the ankle
+                        bool sane=true;
+                        for(unsigned side=0;side<2;++side) for(unsigned j=0;j<3;++j) {
+                            const Vec3 n=spacewarp_legs.now[side][j],q=spacewarp_legs.prev[side][j];
+                            if(!(length(n-q)<.5)) sane=false;
+                            const auto a=Si.apply({n.x,n.y,n.z}),b=Si.apply({q.x,q.y,q.z});
+                            p.leg_point[3*side+j]={a[0],a[1],a[2],radius[j]};
+                            p.leg_step[3*side+j]={(a[0]-b[0])*mover_share,(a[1]-b[1])*mover_share,(a[2]-b[2])*mover_share};
+                        }
+                        {const Vec3 h=spacewarp_legs.now[0][0];spacewarp_leg_hip={h.x,h.y,h.z};spacewarp_leg_step_m=length(h-spacewarp_legs.prev[0][0]);
+                         if(spacewarp_body_root) spacewarp_leg_root={spacewarp_body_root->x,spacewarp_body_root->y,spacewarp_body_root->z};}
+                        if(sane) {p.legs_on=true;++spacewarp_leg_eyes;} else ++spacewarp_leg_insane;
+                    }
                 }
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
                     p.prev_on=true;p.prev_tan=prev.tan;p.prev_m10=prev.m10;p.prev_m11=prev.m11;
@@ -3094,6 +3124,9 @@ public:
                             if(spacewarp_capture_alt==1) {alt_in.motion=nullptr;alt.motion_share=0;}  // v1426: the same frame without movers
                             else if(spacewarp_capture_alt==2) alt.sharp_resample=!p.sharp_resample;  // v1429: the other resample
                             else if(spacewarp_capture_alt==3) alt.body_on=false;  // v1432: without the body rule (the same frame when it did not apply)
+                            else if(spacewarp_capture_alt==4) alt.legs_on=false;  // v1438: without the leg rule
+                            else if(spacewarp_capture_alt==5) alt.crack_reach=2;  // v1438: the v1437 crack reach
+                            else if(spacewarp_capture_alt==6) alt.hand_scenery=false;  // v1438: the v1437 hand volumes
                             else alt.soft_edges=!p.soft_edges;
                             if(sw_pass_->run(context_.Get(),alt_in,alt,rtv.Get(),width_,height_)) afw_capture_save_(target,std::wstring(n)+L"generated-alt");
                             drawn=sw_pass_->run(context_.Get(),in,p,rtv.Get(),width_,height_);

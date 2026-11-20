@@ -2867,6 +2867,7 @@ static std::atomic<bool> spacewarp_legacy_edges_knob{false};   // v1424: build/s
 // phase = consecutive renders of that view (the engine stamp +0x77b4 one up). Only with spacewarp on and build/no-spacewarp-movers absent.
 static std::atomic<bool> spacewarp_movers_knob{true};
 static std::atomic<bool> spacewarp_bilinear_knob{false};  // v1429: build/spacewarp-bilinear = the v1428 bilinear colour resample
+static std::atomic<bool> spacewarp_no_legs_knob{false},spacewarp_crack2_knob{false},spacewarp_hand_bubble_knob{false};  // v1438: build/no-spacewarp-legs = the body moves rigidly (v1437)
 static std::atomic<bool> spacewarp_no_body_knob{false};  // v1432: build/no-spacewarp-body = no body rule (the player's legs as v1431)
 static std::atomic<bool> spacewarp_baked_overlays_knob{false};static std::atomic<bool> spacewarp_tint_classes_knob{false};  // v1432 diagnostics  // v1432: build/spacewarp-baked-overlays = the eye overlays warped with the scene (v1431)
 static std::atomic<bool> spacewarp_recent{false};  // v1426: spacewarp generated a frame within the last second (Present thread): only then are motion textures made
@@ -7165,6 +7166,8 @@ static std::string run_test_command(const std::string& line) {
         if(v=="on" || v=="off") d2vr::GlyphSwap::stop_filter_abab(v=="on");
         else if(v=="abab") {int ms=1000;if(!(in>>ms)) ms=1000;d2vr::GlyphSwap::start_filter_abab(ms);}
         return d2vr::GlyphSwap::pass_json();}
+    if(verb=="resolution") {double m=0;if(!(in>>m) || m<.3 || m>3) return std::string("usage: resolution <multiplier 0.3..3>");  // v1438: the VR menu's slider, at a script time
+        if(!game_xr) return std::string("no XR session");game_xr->request_resolution(m);return std::string("resolution requested ")+std::to_string(m);}
     if(verb=="asyncpresent") {std::string v;in>>v;if(v=="on" || v=="off") async_present_live=v=="on";return std::string("{\"async_present_live\":")+(async_present_live.load()?"true":"false")+"}";}  // v1428
     if(verb=="spacewarp") { // spacewarp capture N: N triples of eye 0 (real, generated from it, next real) as sw-capture-NN-*.rgba (afw_capture_dir)
         std::string v;in>>v;
@@ -7176,7 +7179,10 @@ static std::string run_test_command(const std::string& line) {
         else if(v=="altmovers" && game_xr) game_xr->spacewarp_capture_alt=1;else if(v=="altedges" && game_xr) game_xr->spacewarp_capture_alt=0;  // v1426
         else if(v=="altsharp" && game_xr) game_xr->spacewarp_capture_alt=2;  // v1429
         else if(v=="altbody" && game_xr) game_xr->spacewarp_capture_alt=3;  // v1432
+        else if(v=="altlegs" && game_xr) game_xr->spacewarp_capture_alt=4;else if(v=="altcrack" && game_xr) game_xr->spacewarp_capture_alt=5;  // v1438
+        else if(v=="althands" && game_xr) game_xr->spacewarp_capture_alt=6;  // v1438
         else if(v=="body") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_no_body_knob=m=="off";}  // v1432 A/B: spacewarp body on|off
+        else if(v=="legs") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_no_legs_knob=m=="off";}  // v1438 A/B: the leg rule on|off
         else if(v=="overlays") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_baked_overlays_knob=m=="off";}  // v1432 A/B: spacewarp overlays on|off
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
@@ -14511,6 +14517,22 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
                             if(const auto cameras=alt_cameras.take(number))
                                 for(UINT e=0;e<2;++e) if(cameras->mask&(1u<<e)) game_xr->record_rendered_camera(e,cameras->view[e],number);
+                        {   // v1438: the drawn legs of this real frame and of the previous one (spacewarp's leg rule); a gap of more than one Present: none
+                            static std::uint64_t last_number=0;static std::array<std::array<d2vr::Vec3,3>,2> last{};static bool have_last=false;
+                            d2vr::GameXr::SpacewarpLegs legs{};
+                            const auto d=full_body.diagnostic();const char* why="ok";
+                            if(d.legs_valid) {
+                                std::array<std::array<d2vr::Vec3,3>,2> now{};bool finite=true;
+                                for(unsigned s=0;s<2;++s) {now[s]={d.leg[s][0],d.leg[s][1],d.leg[s][2]};for(const auto& v:now[s]) finite=finite && d2vr::finite(v);}
+                                if(finite) {
+                                    if(have_last && number==last_number+1) {legs.valid=true;legs.now=now;legs.prev=last;} else why="gap";
+                                    last=now;have_last=true;last_number=number;
+                                } else {have_last=false;why="not finite";}
+                            } else {have_last=false;why="no body upload";}
+                            if(legs.valid && !d.legs_solved) why="ok (engine legs)";
+                            game_xr->spacewarp_leg_why=why;
+                            game_xr->spacewarp_legs=legs;game_xr->spacewarp_leg_rule=!spacewarp_no_legs_knob.load();game_xr->spacewarp_crack_reach=spacewarp_crack2_knob.load()?2:4;game_xr->spacewarp_hand_scenery=!spacewarp_hand_bubble_knob.load();
+                        }
                             for(UINT e=0;e<2;++e) {UINT dw{},dh{};if(const auto depth=fsr_taa.eye_depth(static_cast<int>(e),dw,dh)) game_xr->stale_eye_depth(e,depth.Get(),dw,dh,number);
                                 UINT mw{},mh{};const auto motion=spacewarp_movers_knob.load()?fsr_taa.eye_motion(static_cast<int>(e),mw,mh):nullptr;  // v1426: movers
                                 game_xr->stale_eye_motion(e,motion.Get(),mw,mh,number);}
@@ -18299,6 +18321,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_movers_knob=!fs::exists(root/L"build"/L"no-spacewarp-movers");   // v1426
                 spacewarp_bilinear_knob=fs::exists(root/L"build"/L"spacewarp-bilinear");   // v1429
                 spacewarp_no_body_knob=fs::exists(root/L"build"/L"no-spacewarp-body");   // v1432
+                spacewarp_no_legs_knob=fs::exists(root/L"build"/L"no-spacewarp-legs");   // v1438
+                spacewarp_crack2_knob=fs::exists(root/L"build"/L"spacewarp-crack2");   // v1438: the v1437 crack reach
+                spacewarp_hand_bubble_knob=fs::exists(root/L"build"/L"spacewarp-hand-bubble");   // v1438: the v1437 hand volumes
                 spacewarp_baked_overlays_knob=fs::exists(root/L"build"/L"spacewarp-baked-overlays");   // v1432
                 spacewarp_tint_classes_knob=fs::exists(root/L"build"/L"spacewarp-tint-classes");   // v1432 diagnostics
                 {   // v1428: compiled shaders cached under the mod folder; the big ones compiled into it on a background thread during the menus

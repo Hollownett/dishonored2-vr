@@ -769,3 +769,32 @@ Knob `build/no-spacewarp-body`; capture A/B `spacewarp altbody`. Lab test 18 (6 
 - A gameplay script console line `d2vr <test command>` runs a mod test command at an exact script time. Captures used to drift several
   seconds against the runner's `--command` times. Scenario `look_down_walk`.
 - `spacewarp capture` also saves `generated-ui` (with the redrawn overlays) and `next-ui` (the next real frame as submitted).
+
+## 22. v1438: legs, the hand bubble, cracks, resolution changes (2026-11-20)
+
+User, headset v1437: "works quite well"; left: "fix legs warping ... minor ghosting around player legs"; "a warp area around the hands,
+like a bubble, when hands hover over some object ... same around the weapons"; after a resolution change "double image and ghosting";
+and the small improvements of `docs/research/FRAMEGEN-OTHER-MODS.md`.
+
+- **Legs.** The body rule moved the player's legs rigidly with the play space (the engine draws the body without motion vectors), so the
+  walk cycle's swing doubled. `FullBodyDriver::body()` now records each drawn leg's hip, knee and ankle (world) at every body upload: the
+  mod's solved pose when it draws the body, else the engine's own joints. Per real frame dxgi_probe pairs this frame's legs with the
+  previous one's; `game_xr` hands the pass each joint in source coordinates and its step to the slot (mover share). A body texel without a
+  motion vector within a segment (thigh 0.13 m, shin 0.10 m, foot sphere 0.15 m) takes the segment's interpolated step as its own motion
+  (class 5 with word bit 10 LEGW, capped at body_cap 0.08 m beyond the play space's step). Knob `build/no-spacewarp-legs`, dev
+  `spacewarp legs on|off`, capture A/B `spacewarp altlegs`. Lab test 18 (3 new checks). Sim: the rule on 4,874 of 4,878 eyes; the sim
+  save's walk barely swings its legs, so the same-frame A/B differs on < 0.2 % of pixels: the headset decides.
+- **The hand bubble.** Inside a palm's 0.22 m reach and a weapon body everything moved with the hand, a table under a hovering hand too
+  (the v1418 "a wall or a table near the hand stays" test only ran past the reach). Now (shader `StillBesideHand`) a point in a palm's
+  outer shell (past the inner 0.12 m) or in a weapon body that the previous real frame shows standing still in the world and not where
+  the hand's last step carries it stays scenery; in the palm's shell a point that fits both (a flat surface sliding along itself) beyond
+  the palm, seen from the eye, too. Knob `build/spacewarp-hand-bubble` = v1437, capture A/B `althands`. Lab test 19.
+- **Cracks** (research item 2). `Crack` bridges up to 4 cells a side (v1437: 2), past 2 only between cells whose source texels are
+  neighbours (within 2 texels) of one class: a magnified surface splatted apart. A bare wider reach failed 3 lab tests (a mover sliding on
+  a wall at the wall's depth was duplicated into the gap it left). Knob `build/spacewarp-crack2`, capture A/B `altcrack`.
+- **Resolution changes.** Not reproduced: sims changing 1.0 -> 0.8 -> 1.2 mid-walk (dev command `resolution <m>`, scenario
+  `resolution_walk`), also with the headset's canted FOV (`build/sim-fov`), keep every generated frame closer to the next real one than
+  the old frame is, with no global offset. The sim runtime ignores display times, so a slot or pacing fault would not show there. v1438
+  makes no generated frame for 1 s after the eye swapchains are resized and counts `resizes` / `generated_at_last_resize` in the status;
+  the next headset report with them decides. Each change resized the eye chains once and rebuilt the upscaler once or twice (1.2: render
+  1996x2150, then 1997x2151).

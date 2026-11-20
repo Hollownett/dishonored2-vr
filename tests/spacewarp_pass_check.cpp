@@ -315,10 +315,46 @@ int main() {
             const auto img2=run(device.Get(),context.Get(),pass,floor_only,pp);
             check(img2.b(31,30)>128 && img2.b(29,30)<64,"body: a leg without a motion vector (the engine's player body) moves with the play space (3 texels)");
             check(img2.r(12,30)==12*4,"body: the floor (on the root's plane) stays still");
+            // v1438 (user, headset v1437: "fix legs warping"): the mod's drawn leg (hip, knee, ankle down the leg's centre line, 1 m below the
+            // eye) stepped 0.15 m right since the previous real frame (the walk 0.10 m plus its swing): the leg takes that step, not just the
+            // play space's (5 texels, as with a motion vector); the other leg is far away
+            d2vr::SpacewarpParams pl=pp;pl.legs_on=true;
+            pl.leg_point[0]={0,.4,-1,.13};pl.leg_point[1]={0,0,-1,.10};pl.leg_point[2]={0,-.4,-1,.15};
+            for(unsigned j=0;j<3;++j) {pl.leg_step[j]={.15,0,0};pl.leg_point[3+j]={5,5,-1,.01};pl.leg_step[3+j]={0,0,0};}
+            const auto img4=run(device.Get(),context.Get(),pass,floor_only,pl);
+            check(img4.b(39,30)>128 && img4.b(29,30)<64,"legs: a drawn leg without a motion vector moves with its own step (5 texels)");
+            check(img4.r(12,30)==12*4,"legs: the floor stays still");
+            for(unsigned j=0;j<3;++j) pl.leg_step[j]={0,0,0};  // a planted foot: no step in the world
+            const auto img5=run(device.Get(),context.Get(),pass,floor_only,pl);
+            // (this scene's play space steps 0.10 m a slot, past body_cap 0.08: the planted leg keeps within 0.02 m, under a texel; walking
+            // 1.5 m/s steps under 2 cm a slot, inside the cap)
+            check(img5.b(29,30)>128 && img5.b(37,30)<64,"legs: a leg that did not move in the world stays (within the cap) while the play space moves on");
             Scene no_prev=floor_only;no_prev.prev_distance=nullptr;const auto img2b=run(device.Get(),context.Get(),pass,no_prev,p);
             check(img2b.b(29,30)>128,"body: without a previous real frame a texel without a motion vector is left alone (scenery cannot be told apart)");
             d2vr::SpacewarpParams level=p;level.body_up={0,1,0};const auto img3=run(device.Get(),context.Get(),pass,s,level);
             check(img3.b(29,30)>128,"body: looking level the same texels are 1 m ahead, outside the cylinder: a capped mover again");
+        }
+        {   // 19. v1438 (user, headset v1437: "a warp area around the hands, like a bubble, when hands hover over some object"): a hand (columns
+            // 26..33, rows 26..33, 1 m, palm at texel 30) moved 4 texels right since the previous real frame and moves on 4 to the target. A
+            // table edge (columns 27..30, rows 34..35, 1 m: 0.13-0.18 m from the palm, inside its 0.22 m reach but past the inner 0.12 m) stood
+            // still. v1437 moved it with the hand; now the previous frame confirms it still, so it stays, and the hand still moves.
+            const auto box=[](unsigned x,unsigned y,unsigned x0,unsigned x1,unsigned y0,unsigned y1) {return x>=x0 && x<=x1 && y>=y0 && y<=y1;};
+            const auto at=[box](unsigned x,unsigned y,int shift) {
+                const int sx=static_cast<int>(x)+shift;const unsigned ux=sx<0?999u:static_cast<unsigned>(sx);
+                return box(ux,y,26,33,26,33) || box(x,y,27,30,34,35)?1.f:3.f;
+            };
+            Scene s;s.distance=[at](unsigned x,unsigned y) {return at(x,y,0);};
+            s.object=[box](unsigned x,unsigned y) {return box(x,y,26,33,26,33) || box(x,y,27,30,34,35);};
+            s.prev_distance=[at](unsigned x,unsigned y) {return at(x,y,4);};
+            d2vr::SpacewarpParams p{};p.hand_on={true,false};p.hand[0].t={.125,0,0};p.rig_near=.5;
+            const double centre=(30.0/N)*2-1;p.palm[0]={centre,-centre,-1,.22};
+            p.prev_on=true;p.prev_tan={-1,1,1,-1};p.prev_m10=0;p.prev_m11=1;p.prev_hand_on={true,false};p.prev_hand[0].t={-.125,0,0};
+            p.grip[0]={0,0,-1,1};
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            check(img.b(28,35)>128 && img.b(33,35)<64,"hand bubble: the table edge inside the palm's outer shell, confirmed still, stayed");
+            check(img.b(35,30)>128 && img.b(27,30)<64,"hand bubble: the hand itself still moved 4 texels right");
+            d2vr::SpacewarpParams old=p;old.hand_scenery=false;const auto img0=run(device.Get(),context.Get(),pass,s,old);
+            check(img0.b(33,35)>128,"hand bubble off (v1437): the table edge moved with the hand");
         }
         {   // 13. v1424: the same hand against the sky moves 4 texels right: the sky it uncovers is sky, not the hand looked up again
             const auto hand=[](unsigned x,unsigned y) {return x>=26 && x<34 && y>=26 && y<34;};
