@@ -954,6 +954,9 @@ Present, 633 late slots. Full analysis: `docs/research/STEAMVR-SAFE-SUBMIT.md`.
 - **Status** `spacewarp_safe_mid`: `due_phase`, per point `sent` / `late_slot` / `after_ms` / `wait_us` / `call_us`, `violations`.
   Dev command `safemid off|graph|game|all`.
 - **Lab**: `spacewarp_safe_mid_check` (38 checks). Not headset-tested; the simulator cannot reproduce SteamVR's D3D11 calls.
+- **The other route** (doc section 11, not built): the XR session on the mod's own D3D11 device, with shared mirror textures and a
+  fence, so the waiting thread sends the generated frame in its slot as on VDXR. That removes the deadlock class by construction.
+  Estimated at about 2-4 days for stage 1; recommended next, after v1450's headset test.
 - **Secondary.** SteamVR's "Use Legacy Reprojection Mode" (`disableAsync`) fixed a 45 fps lock on PSVR2 without frame generation
   (Indurhra). The user's Steam Link session shows no sign of that stall (desktop Present 0.16 ms), so the launcher does not set it (doc
   section 10).

@@ -27,6 +27,9 @@ of six sims, and the user's v1445 SteamVR session (read-only: its status and fra
 - **Not proven by running.** Only the headset can show whether SteamVR presents these frames on time and whether the game stays stable.
   The status counts any other thread's immediate-context call during a send. On the first such call, the mid points switch off for the
   session.
+- **The other route** (section 11): bind the XR session to the mod's own D3D11 device, so SteamVR never touches the game's device. It is
+  the structural fix and takes SteamVR's per-frame cost off the main thread. Estimated at about 2-4 days for a first stage; recommended
+  as the next step after v1450's headset test.
 
 ## 1. The problem, measured
 
@@ -210,9 +213,13 @@ The v1450 status measures the real distribution: `due_phase`, and per point `sen
 - **Floor.** v1444 sent 134 frames at 0.4 ms after the due time on average and still had 4 % late. SteamVR's own pacing (real frames
   that miss, slot phase drift) sets a floor. Expect roughly 90-97 % on time. Before: 44 % (v1445), 62 % (v1443), 99.8 % on VDXR with the
   waiting thread.
-- **Main-thread cost:** one send per generated frame, as before, only at another point. Frames v1445 dropped are now sent too.
-  The status reports the cost per point (`call_us_mean`/`_max`) and how long SteamVR's xrWaitFrame blocked there (`wait_us_mean`/`_max`;
-  v1444: mean 0.25 ms, max 9.2 ms).
+- **Main-thread cost:** one send per generated frame, as before, only at another point. But the 43 % of frames v1445 dropped are now
+  sent too.
+  - SteamVR's xrEndFrame costs the main thread about 1.1 ms p50 (2.3 ms p99; the real frame's `submit_cpu_ns`).
+  - So v1450 adds roughly 0.4-0.5 ms per real frame on average, on a main thread already at 17-21 ms of its 22.2 ms.
+  - The status reports the cost per point (`call_us_mean`/`_max`) and how long SteamVR's xrWaitFrame blocked there (`wait_us_mean`/`_max`;
+    v1444: mean 0.25 ms, max 9.2 ms).
+  - Section 11's route takes this cost off the main thread instead.
 
 ## 8. Implementation (v1450)
 
@@ -277,3 +284,82 @@ The v1450 status measures the real distribution: `due_phase`, and per point `sen
     Reprojection Mode), and on PSVR2.
   - If it helps there, `FrameGen.SyncSteamVr` could write `disableAsync` beside `motionSmoothingOverride`, with the same backup and
     restore.
+
+## 11. The other route: the XR session on the mod's own D3D11 device (evaluated, not built)
+
+The coordinating session asked for this evaluation on 2026-11-21. The idea: bind the OpenXR session to a second D3D11 device ("D2") on the
+same adapter. SteamVR then never touches the game's device ("D1"), and the generated frame can go out from spacewarp's existing waiting
+thread exactly in its slot, as on Virtual Desktop. The v1421/v1444 deadlock class disappears by construction, because SteamVR's
+immediate-context calls go to D2, which no engine thread uses.
+
+**What the code does today** [code]:
+- The session is bound to the game's device (`game_xr.hpp`, `XrGraphicsBindingD3D11KHR binding.device=device`, about line 2762).
+- GameXr owns more than a dozen swapchain kinds: two eye chains, two wrist chains, world UI, menu band, HUD window, pointer, hint, dot,
+  blank, vignette, settings, and overlay chains made on demand.
+- It renders into their images with the game's immediate context: 66 `context_->` uses in `game_xr.hpp`. `spacewarp_pass`,
+  `stale_eye_warp`, `vr_menu_imgui` and the eye anti-aliasing, sharpening and upscaling passes write into them too.
+- All 66 acquire/wait/release calls go through GameXr's own lease wrappers (v1393, `game_xr.hpp` 582-600, same names as the OpenXR
+  functions). That is one place to interpose. Swapchain creation and enumeration are member function pointers as well.
+- All of GameXr's OpenXR calls run on the Present thread inside `present()`: events, views (3704), input sync and hand spaces
+  (`sample_input`, 3718), and haptics (queued, flushed there). The exceptions are VDXR's waiting thread (`xrWaitFrame` only) and v1450's
+  mid points. Moving only the generated frame's calls to the thread adds no concurrency the VDXR path does not already have. v1421's
+  "collect the thread's frame at the start of `present()`" rule still holds.
+
+**Stage 1 design (opt-in, for example `build/xr-own-device`):**
+- **The device.** Create D2 on the adapter whose LUID `xrGetD3D11GraphicsRequirementsKHR` names, with BGRA support, not single-threaded,
+  and with D3D11 multithread protection on. Only mod threads use D2, so the v1421 cycle with the game's own Present and the Steam
+  overlay cannot form there. Bind the session to D2.
+- **Mirror images.** For every runtime swapchain image (on D2), create a texture on D1 with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` and
+  open it on D2 (`OpenSharedResource1`). Enumeration hands GameXr the D1 mirrors, so every render path stays as it is.
+- **Synchronisation, inside the lease wrappers.** One shared `ID3D11Fence` (D3D11.4, `D3D11_FENCE_FLAG_SHARED`, opened on D2 with
+  `OpenSharedFence`). At release, the Present thread signals it on D1 after its rendering. D2's context waits on it GPU-side, with no CPU
+  stall, copies the mirror into the runtime image, and the runtime's `xrReleaseSwapchainImage` follows.
+- **The generated frame.** `spacewarp_thread_ready_()` accepts SteamVR when the session is on D2. The waiting thread then does
+  xrWaitFrame, xrBeginFrame and xrEndFrame in the slot, the v1420 design. v1422's rule ("nothing touches the game's device off the render
+  thread") still holds, because D2 is not the game's device.
+- Everything else stays on the Present thread.
+
+**Effort** [estimate]: about 2-4 days to a sim-checked opt-in candidate:
+- D2 creation, binding, and the teardown and recovery paths (resize, session loss, Steam Link fault ride-through): about half a day.
+- The mirror layer in the lease wrappers, plus create, enumerate and destroy: about 1 day.
+- Fence ordering across the two devices, and the thread path on SteamVR: half a day to a day.
+- Sim checks: overlays, the wrist watch, menus, eye captures, a resolution change; the simulated runtime must accept the second device.
+  Half a day to a day.
+- Headset iterations come on top.
+
+**Stage 2** (later, optional): move the real frame's frame calls and its pacing to the thread as well.
+- This takes SteamVR's real-frame xrEndFrame (p50 1.1 ms, p99 2.3 ms) off the main thread.
+- It needs a new pacing handshake: the main thread would wait on the thread's xrWaitFrame result instead of calling it. That touches
+  the pacing and locomotion feel the user has accepted.
+- About 3-5 more days.
+
+**Risks:**
+- **Synchronisation.** Shared fences need Windows 10 1703 or later and driver support (fine on the RTX 5070). A missing Signal/Wait
+  pair shows torn or stale images, not a hang. Keyed mutexes are the fallback; they block on the CPU.
+- **GPU cost and latency.**
+  - One extra copy per eye per frame, plus the generated frame's: two images of about 21 MB at 2244 x 2352 RGBA8, roughly 0.1-0.2 ms on
+    the RTX 5070.
+  - Two device contexts share one GPU (Steam Link's encoder is a third); hardware scheduling usually interleaves them well.
+  - The copy runs after the game's GPU work, as SteamVR's own copy does today. The expected added latency is under 0.5 ms; measure it
+    with the existing GPU timers.
+- **Memory.** The mirrors double the swapchain memory: about 127 MB for the eye chains (3 images x 2 eyes, RGBA8), little for the
+  overlays. Fine on 12 GB.
+- **The mod's D3D11 hooks.** D2's contexts run the same d3d11.dll code, so D2's copies and SteamVR's calls on D2 pass through the
+  probe's hooks.
+  - The hooks compare against `gpu_game_context` and skip other contexts, but each must be rechecked.
+  - Multithread protection switches D2's methods to d3d11's thread-safe layer. That was v1420's registry-poisoning lesson: create D2 and
+    turn protection on before the probe installs its hooks, or prove the hooks never bind D2's methods.
+- **Swapchain image ownership.**
+  - The runtime image must be acquired and waited before D2's copy writes it, and released only after the copy is queued.
+  - The wrist chains keep an image acquired across frames (`self_managed_chain_`), so their copy must run at their release.
+  - Mirror formats and bind flags must match what GameXr creates views with: sRGB or UNORM, RTV, SRV, and UAV for the upscalers.
+- **OpenXR threading.** Unchanged in stage 1, as above. A crash in VD's runtime under concurrent haptics (v1421) is why haptics stay
+  queued.
+- **SteamVR with a device that never presents a window.** Normal for VR applications, but untested here, over Steam Link included.
+
+**Recommendation:**
+1. Test v1450's mid-frame points now. They are ready, small and opt-in, and fix most of the lateness.
+2. Build stage 1 of this route next, behind its own off-by-default knob, as the structural fix. It removes the deadlock class by
+   construction, sends the generated frame in its slot as on Virtual Desktop, and takes the generated frame's SteamVR call off the main
+   thread, about 1 ms per real frame, which v1450 puts back on it.
+3. Do stage 2 only if the real frame's 1.1 ms SteamVR submit still holds the CPU-bound main thread back after stage 1.
