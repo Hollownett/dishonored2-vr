@@ -987,6 +987,11 @@ static std::array<bool,d2vr::NativeHudChildCapture::slot_count> native_hud_art_s
 // per-frame CPU image is made. The texture is owned here and published to GameXr as a bounded, fresh ComPtr.
 static ComPtr<ID3D11Texture2D> wrist_cluster_texture;
 static ComPtr<ID3D11RenderTargetView> wrist_cluster_rtv;
+// v1442 (user, SteamVR: "the interface on the wrist blinks"; that session rejected 3,196 cluster blits): the cluster is composed into this
+// back texture and becomes the published (front) one only when every piece was blitted; a failed composition keeps the last complete one
+static ComPtr<ID3D11Texture2D> wrist_cluster_back;
+static ComPtr<ID3D11RenderTargetView> wrist_cluster_back_rtv;
+static UINT64 wrist_cluster_partial{};  // compositions dropped because a piece failed (the watch kept the previous complete cluster)
 static UINT wrist_cluster_tex_w{},wrist_cluster_tex_h{},wrist_cluster_surface_w{},wrist_cluster_surface_h{};
 static double wrist_cluster_rect_left{},wrist_cluster_rect_top{},wrist_cluster_rect_side{};
 static UINT64 wrist_cluster_key{},wrist_cluster_generation{},wrist_cluster_tick{},wrist_cluster_epoch{};
@@ -7171,6 +7176,9 @@ static std::string run_test_command(const std::string& line) {
         if(v=="on" || v=="off") d2vr::GlyphSwap::stop_filter_abab(v=="on");
         else if(v=="abab") {int ms=1000;if(!(in>>ms)) ms=1000;d2vr::GlyphSwap::start_filter_abab(ms);}
         return d2vr::GlyphSwap::pass_json();}
+    if(verb=="watch") {std::string v;in>>v;if(!game_xr) return std::string("no XR session");  // v1442 sim: the wrist watch held in view
+        if(v=="on" || v=="off") game_xr->wrist_watch_force=v=="on";
+        return std::string("{\"watch_force\":")+(game_xr->wrist_watch_force?"true":"false")+"}";}
     if(verb=="resolution") {double m=0;if(!(in>>m) || m<.3 || m>3) return std::string("usage: resolution <multiplier 0.3..3>");  // v1438: the VR menu's slider, at a script time
         if(!game_xr) return std::string("no XR session");game_xr->request_resolution(m);return std::string("resolution requested ")+std::to_string(m);}
     if(verb=="asyncpresent") {std::string v;in>>v;if(v=="on" || v=="off") async_present_live=v=="on";return std::string("{\"async_present_live\":")+(async_present_live.load()?"true":"false")+"}";}  // v1428
@@ -8722,16 +8730,19 @@ static void update_wrist_cluster(ID3D11DeviceContext* context,UINT64 now) noexce
         cluster_desc.Width=cluster_w;cluster_desc.Height=cluster_h;cluster_desc.MipLevels=1;cluster_desc.ArraySize=1;
         cluster_desc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;cluster_desc.SampleDesc.Count=1;
         cluster_desc.Usage=D3D11_USAGE_DEFAULT;cluster_desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
-        ComPtr<ID3D11Texture2D> cluster_texture;ComPtr<ID3D11RenderTargetView> cluster_rtv;
-        if(!cluster_device || FAILED(cluster_device->CreateTexture2D(&cluster_desc,nullptr,&cluster_texture))) {
+        ComPtr<ID3D11Texture2D> cluster_texture,back_texture;ComPtr<ID3D11RenderTargetView> cluster_rtv,back_rtv;
+        if(!cluster_device || FAILED(cluster_device->CreateTexture2D(&cluster_desc,nullptr,&cluster_texture)) ||
+           FAILED(cluster_device->CreateTexture2D(&cluster_desc,nullptr,&back_texture))) {
             ++wrist_cluster_rejects;publish_none();return;
         }
         D3D11_RENDER_TARGET_VIEW_DESC cluster_view{};cluster_view.Format=cluster_target_format_value;
         cluster_view.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
-        if(FAILED(cluster_device->CreateRenderTargetView(cluster_texture.Get(),&cluster_view,&cluster_rtv))) {
+        if(FAILED(cluster_device->CreateRenderTargetView(cluster_texture.Get(),&cluster_view,&cluster_rtv)) ||
+           FAILED(cluster_device->CreateRenderTargetView(back_texture.Get(),&cluster_view,&back_rtv))) {
             ++wrist_cluster_rejects;publish_none();return;
         }
-        wrist_cluster_texture=cluster_texture;wrist_cluster_rtv=cluster_rtv;
+        wrist_cluster_texture=cluster_texture;wrist_cluster_rtv=cluster_rtv;wrist_cluster_back=back_texture;wrist_cluster_back_rtv=back_rtv;
+        wrist_cluster_owner=0;wrist_cluster_tick=0;  // a new pair: nothing complete is published until the first full composition
         wrist_cluster_tex_w=cluster_w;wrist_cluster_tex_h=cluster_h;
         wrist_cluster_target_format=cluster_target_format_value;wrist_cluster_key=0;
     }
@@ -8764,10 +8775,11 @@ static void update_wrist_cluster(ID3D11DeviceContext* context,UINT64 now) noexce
         saved_targets.context=context;
         context->OMGetRenderTargetsAndUnorderedAccessViews(8,saved_targets.targets.data(),&saved_targets.depth,0,8,saved_targets.uavs.data());
         saved_targets.saved=true;
-        ID3D11RenderTargetView* cluster_target=wrist_cluster_rtv.Get();
+        ID3D11RenderTargetView* cluster_target=wrist_cluster_back_rtv.Get();  // v1442: the back texture
         context->OMSetRenderTargets(1,&cluster_target,nullptr);
         constexpr float transparent[4]{};
         context->ClearRenderTargetView(cluster_target,transparent);
+        bool complete=true;  // v1442: every piece that should be there was blitted
         const auto draw_art=[&](NativeCompactArt& art) {
             if(!art.texture || art.surface_w!=cluster_surface_w || art.surface_h!=cluster_surface_h || !art.metadata.tick) return;
             const auto place=d2vr::wrist_watch_cluster_place(cluster_rect,static_cast<int>(art.crop.left),
@@ -8778,15 +8790,20 @@ static void update_wrist_cluster(ID3D11DeviceContext* context,UINT64 now) noexce
             const D3D11_RECT cluster_destination{place.destination_left,place.destination_top,
                 place.destination_right,place.destination_bottom};
             if(!native_hud_fallback.blit_scaled(context,cluster_target,art.texture.Get(),cluster_source,cluster_destination,
-                cluster_target_format_value,true,1.f)) ++wrist_cluster_rejects;
+                cluster_target_format_value,true,1.f)) {++wrist_cluster_rejects;complete=false;}
         };
         // The game's own MasterHUD child order: health, mana, then the equipped item (with its ammo badge) on top.
         draw_art(health);draw_art(mana);draw_art(equipment);
+        saved_targets.restore();  // before the swap: the game's targets back on, never the cluster texture
+        if(!complete) {++wrist_cluster_partial;}  // keep the previous complete cluster; the key stays old so the next frame composes again
+        else {
+        std::swap(wrist_cluster_texture,wrist_cluster_back);std::swap(wrist_cluster_rtv,wrist_cluster_back_rtv);  // v1442: the complete one goes out
         wrist_cluster_key=cluster_key;
         wrist_cluster_tick=std::max(health.metadata.tick,std::max(mana.metadata.tick,equipment.metadata.tick));
         wrist_cluster_epoch=cluster_epoch;
         wrist_cluster_owner=health.metadata.owner?health.metadata.owner:(equipment.metadata.owner?equipment.metadata.owner:mana.metadata.owner);
         ++wrist_cluster_generation;++wrist_cluster_updates;
+        }
     }
     if(!wrist_cluster_owner || !wrist_cluster_tick || wrist_cluster_epoch!=cluster_epoch ||
        now<wrist_cluster_tick || now-wrist_cluster_tick>250) {publish_none();return;}
@@ -12726,7 +12743,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"backdrop\":" << (wrist_hud_backdrop?"true":"false")
         << ",\"cluster_ready\":" << (game_xr && game_xr->wrist_watch_cluster_ready()?"true":"false")
         << ",\"cluster_published\":" << (wrist_cluster_published?"true":"false")
-        << ",\"cluster_updates\":" << wrist_cluster_updates << ",\"cluster_rejects\":" << wrist_cluster_rejects
+        << ",\"cluster_updates\":" << wrist_cluster_updates << ",\"cluster_rejects\":" << wrist_cluster_rejects << ",\"cluster_partial\":" << wrist_cluster_partial
         << ",\"cluster_generation\":" << wrist_cluster_generation << ",\"cluster_tick\":" << wrist_cluster_tick
         << ",\"cluster_surface\":[" << wrist_cluster_surface_w << ',' << wrist_cluster_surface_h << ']'
         << ",\"cluster_tex\":[" << wrist_cluster_tex_w << ',' << wrist_cluster_tex_h << ']'
@@ -17927,9 +17944,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         head_calibration={};scripted_recenter.reset();scripted_offset_now=0;cutscene_calibration={};cutscene_view_tracker.reset();cutscene_view_frame=~0ull;cutscene_scene_motion.reset();scripted_ease_tick=0;head_setup_seen=0;head_matched=0;head_writes=0;head_restores=0;xr_present_thread=0;head_pose_epoch=0;
         head_body_anchor.clear();authored_camera_anchor.clear();head_body_camera=0;authored_camera_rows=0;
         native_hud_art_capture.clear();native_hud_fallback.clear();native_hud_art_bounds={};native_hud_compact_art={};native_hud_art_saved={};native_hud_art_queue_ticks={};native_hud_art_queued_serials={};native_hud_art_queue_cursor=0;
-        wrist_cluster_texture.Reset();wrist_cluster_rtv.Reset();wrist_cluster_tex_w=wrist_cluster_tex_h=0;wrist_cluster_surface_w=wrist_cluster_surface_h=0;
+        wrist_cluster_texture.Reset();wrist_cluster_rtv.Reset();wrist_cluster_back.Reset();wrist_cluster_back_rtv.Reset();wrist_cluster_tex_w=wrist_cluster_tex_h=0;wrist_cluster_surface_w=wrist_cluster_surface_h=0;
         wrist_cluster_key=wrist_cluster_generation=wrist_cluster_tick=wrist_cluster_epoch=0;wrist_cluster_owner=0;wrist_cluster_target_format=DXGI_FORMAT_UNKNOWN;
-        wrist_cluster_updates=wrist_cluster_rejects=0;wrist_cluster_published=false;wrist_cluster_rect_left=wrist_cluster_rect_top=wrist_cluster_rect_side=0;
+        wrist_cluster_updates=wrist_cluster_rejects=wrist_cluster_partial=0;wrist_cluster_published=false;wrist_cluster_rect_left=wrist_cluster_rect_top=wrist_cluster_rect_side=0;
         native_hud_art_queued_scopes={};native_hud_flat_fallbacks=native_hud_flat_failures=0;
         {std::lock_guard<std::mutex> lock(native_hud_commit_mutex);native_hud_committed_scopes={};native_hud_committed_ticks={};}
         {std::lock_guard<std::mutex> lock(native_hud_layout_mutex);native_master_layout.reset();}

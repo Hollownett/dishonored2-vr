@@ -854,3 +854,13 @@ point SteamVR's own D3D11 calls pass through the mod's hooks in the middle of th
 context-state scope does not shield (it protects the game's pipeline state, not the mod's trackers). The safe-point submit is now opt-in
 (`build/spacewarp-inline`); the narrower late cutoff stays on for every runtime without the waiting thread (most of v1440's SteamVR gain:
 cutoff drops 1,722 -> 94). Sim (forced SteamVR path): 1,350 of 1,407 submitted, 0 failures, 0 exceptions.
+
+## 26. v1442: the wrist watch keeps its last complete face (2026-11-20)
+
+User: "fix SteamVR wrist UI blink, other UI is stable in SteamVR". On top of v1441 (the SteamVR safe-point submit opt-in): the watch's
+cluster (the game's health, mana and equipment pieces, dxgi_probe update_wrist_cluster) is composed into a back texture and swapped to
+the published one only when every piece was blitted; a failed composition keeps the last complete cluster (status `cluster_partial`), so
+a rejected piece can no longer make part of the watch come and go. Dev command `watch on|off` holds the watch 0.4 m ahead of the head
+(scenario `watch_walk`). Sims at SteamVR's eye size (2244 x 2352, cluster 418 x 417), forced SteamVR path, watch held: safe-point submit
+on 2,251 compositions, off 2,194, 0 rejects in both (the simulated runtime makes no D3D11 call through the mod's hooks, so the SteamVR
+rejects do not reproduce here). Needs the headset on SteamVR.

@@ -1211,7 +1211,18 @@ private:
             if(pose) angles=pose->angles;else tracked=false;
         }
         const bool menu=!allowable,trigger=controller_input.left_trigger>.5f;
-        const auto frame=wrist_watch_state_.update(angles,tracked,trigger,menu,dt);
+        auto frame=wrist_watch_state_.update(angles,tracked,trigger,menu,dt);
+        if(wrist_watch_force && views_valid_) {  // v1442 sim (dev `watch on`): fully shown 0.4 m ahead of the head and 0.1 m below, facing it
+            const auto& l=views_[0].pose;const auto& r=views_[1].pose;
+            const double qx=l.orientation.x,qy=l.orientation.y,qz=l.orientation.z,qw=l.orientation.w;
+            const auto rot=[&](double vx,double vy,double vz) {  // v' = q v q*
+                const double tx=2*(qy*vz-qz*vy),ty=2*(qz*vx-qx*vz),tz=2*(qx*vy-qy*vx);
+                return std::array<double,3>{vx+qw*tx+(qy*tz-qz*ty),vy+qw*ty+(qz*tx-qx*tz),vz+qw*tz+(qx*ty-qy*tx)};};
+            const auto off=rot(0,-.1,-.4);
+            WristWatchPose forced{};forced.pose={{(l.position.x+r.position.x)*.5+off[0],(l.position.y+r.position.y)*.5+off[1],(l.position.z+r.position.z)*.5+off[2]},
+                {qx,qy,qz,qw}};
+            pose=forced;frame.alpha=1;
+        }
         wrist_watch_alpha_=frame.alpha;wrist_watch_pose_=pose;
         if(frame.haptic && wrist_haptic_enabled) pulse(0,.12f,.018f);
     }
@@ -2340,6 +2351,7 @@ public:
     // already gave a later slot (late_slot); and generated eyes with a weapon body (weapon_eyes)
     std::uint64_t spacewarp_late_wait{},spacewarp_late_slot{},spacewarp_weapon_eyes{};
     bool spacewarp_thread{true};  // v1420: submit generated frames from their own thread (build/spacewarp-no-thread: the v1419 path)
+    bool wrist_watch_force{};  // v1442: dev command `watch on|off` (sims: the watch held in view, its cluster composed every frame)
     // v1440 (user: "SteamVR - can we fix it?"; the user's v1438 SteamVR session: 17 % of generated frames late): where the runtime refuses
     // the waiting thread (SteamVR: its xrWaitFrame queues GPU work on the game's device), the render thread itself waits for the generated
     // frame's slot, begins and ends it at its first safe point after the slot opens (one display period after the real frame's wait),
