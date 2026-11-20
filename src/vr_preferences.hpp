@@ -26,7 +26,7 @@ struct VrPreferences {
     bool scripted_recenter=true; // v610 (file version 10): re-aim the view on scripted moments
     CutsceneMode cutscene_mode=CutsceneMode::vr_comfort; // v610: stored as vr_comfort | vr_full | theater
     int upscale_percent=0; // v11 (file version 11): the player's own render scale for the upscaler mode in temporal_aa, 50..100; 0 = that mode's preset
-    int renderer=0; // v12: 0 native stereo, 1 alternate eye + built-in warp, 2 alternate eye + AFW (PureDark plugin); 1/2 apply at the next start
+    int renderer=0; // v12: 0 native stereo, 1 alternate eye + built-in warp (v1443: 2, the removed PureDark AFW, is read as 1); 1 applies at the next start
 };
 inline void validate_preferences(const VrPreferences& p) {
     if(!std::isfinite(p.resolution) || p.resolution<.5 || p.resolution>2)

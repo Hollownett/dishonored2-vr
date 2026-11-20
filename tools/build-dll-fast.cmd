@@ -1,7 +1,7 @@
 @echo off
 rem Fast mod-DLL build: compiles MinHook, Dear ImGui and src\dxgi_probe.cpp only, skipping the full check suite of build-msvc.cmd.
 rem Usage: tools\build-dll-fast.cmd [output.dll]   (default build\d2vr_render_probe.dll)
-rem The PureDark AFW backend needs no header or import library: PDAFWPlugin.dll is loaded at run time from the game folder.
+rem (v1443: the PureDark AFW backend was removed; the built-in warp needs no extra library.)
 setlocal
 cd /d "%~dp0.."
 if defined D2VR_VS_ROOT set "VSROOT=%D2VR_VS_ROOT%"

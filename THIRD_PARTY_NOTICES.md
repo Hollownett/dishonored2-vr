@@ -194,8 +194,3 @@ notice does not itself grant shipping approval.
 `third_party/psvr2` holds the out-of-process trigger bridge (`Bridge.cpp`, built as `DVR_psvr2\dvr_psvr2_bridge.exe`) and
 trigger-effect definitions (`pad_trigger_effect.h`) from [PSVR2Toolkit](https://github.com/BnuuySolutions/PSVR2Toolkit) by
 Bnuuy Solutions, MIT (`third_party/psvr2/PSVR2Toolkit-LICENSE`). Used by `src/psvr2_triggers.hpp`.
-
-## AFW (alternate frame warping) backend
-
-`src/afw_puredark.hpp` calls PureDark's frame-warp plugin (`PDAFWPlugin.dll`) at run time. The plugin is the user's own copy and is
-not distributed; only the subset of its public interface the mod calls is declared, field for field.

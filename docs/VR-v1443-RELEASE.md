@@ -1,4 +1,4 @@
-# VR v1442 (release, 2026-11-20)
+# VR v1443 (release, 2026-11-20)
 
 ## Spacewarp: the headset stays at its full frame rate, on by default
 
@@ -29,9 +29,8 @@
 
 ## Also new
 
-- The VR settings menu is drawn with Dear ImGui.
-- Performance mode can use PureDark's AFW plugin (your own `PDAFWPlugin.dll`, picked in the launcher; not included).
-- PlayStation VR2 adaptive triggers on SteamVR (thanks to Indurhra).
+- The VR settings menu is drawn with Dear ImGui, and PlayStation VR2 adaptive triggers work on SteamVR. Both are Indurhra's
+  work, thank you.
 
 ## Known issues
 
@@ -45,4 +44,4 @@ If a Spacewarp change looks worse to you, each one can be undone with an empty f
 surfaces). Turning Spacewarp off on the Settings page undoes all of it. Say what you saw.
 
 Tested by the author in the headset over Virtual Desktop and SteamVR up to v1438 (Spacewarp, hands, weapons, HUD). The leg changes
-(v1439) and the SteamVR timing (v1440-v1442) are tested in the lab, the simulator and one SteamVR session.
+(v1439) and the SteamVR timing (v1440-v1442) and performance mode without PureDark (v1443) are tested in the lab, the simulator and one SteamVR session.

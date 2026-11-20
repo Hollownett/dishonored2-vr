@@ -139,18 +139,6 @@ public:
     // Empty stem = nothing. The writes wait for the GPU.
     struct MotionProbe {std::wstring stem;std::string json;Microsoft::WRL::ComPtr<ID3D11Buffer> b1;bool colour{};Microsoft::WRL::ComPtr<ID3D11Resource> scene; // v1169: the TAA dispatch input (HDR scene colour)
     };
-    // AFW renderer (afw_puredark.hpp): a per-eye copy of the motion vectors this eye's dispatch consumed (the engine reuses its own
-    // target for the next eye), same render rectangle as eye_depth, and the raster jitter (render pixels) it was rendered with.
-    std::atomic<bool> afw_keep_motion{false};
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> afw_eye_motion(int eye,float& jitter_x,float& jitter_y) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        jitter_x=jitter_y=0;
-        if((eye!=0 && eye!=1) || !enabled.load() || !ready.load()) return {};
-        const auto& e=(*eyes_)[static_cast<std::size_t>(eye)];
-        if(!e.afw_motion.p) return {};
-        jitter_x=e.afw_jitter_x;jitter_y=e.afw_jitter_y;
-        return Microsoft::WRL::ComPtr<ID3D11Texture2D>(e.afw_motion.p);
-    }
 private:
     template<class T> struct Ref {
         T* p{};~Ref() {if(p) p->Release();}
@@ -171,7 +159,6 @@ private:
         std::array<Ref<ID3D11Buffer>,4> rig_count_staging{};std::uint64_t rig_count_serial{},rig_read_serial{};
         std::array<std::uint64_t,4> rig_count_display{}; // v1207: the receipt display of each read-back slot (0: none)
         UINT motion_w{},motion_h{};bool motion_valid{};
-        Ref<ID3D11Texture2D> afw_motion;float afw_jitter_x{},afw_jitter_y{}; // AFW: the last motion copy (afw_eye_motion)
         // v1107: FSR 4 runs on this display box only (fsr4 created at the box size); FSR 3 upscales the whole eye underneath.
         bool fovea=false;fovea::Axis fovea_x,fovea_y;
         bool fovea_box=false;          // v1107: a box exists for this eye (FSR 4 or DLSS)
@@ -802,7 +789,7 @@ public:
             Fsr4CreateGate::Skip fsr4_skipped=Fsr4CreateGate::Skip::none;
             for(auto& e:*eyes_) {
                 e.timer.clear();
-                e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.afw_motion.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();
+                e.fsr.destroy();e.fsr4.destroy();e.depth.reset();e.depth_w=e.depth_h=0;e.depth_uav.reset();
                 e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.motion_valid=false;e.motion_w=e.motion_h=0; // v1153
                 e.rig.reset();e.rig_uav.reset();e.rig_valid=false;e.rig_srv.reset();e.rig_live=false;e.rig_count.reset();e.rig_count_uav.reset();for(auto& s:e.rig_count_staging) s.reset(); // v1160
                 e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();e.reset=true;
@@ -911,7 +898,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ready=false;++reset_epoch_;
         dlss_session_end_locked();fsr4_gate_.session_end();
-        for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.afw_motion.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();
+        for(auto& e:*eyes_) {e.fsr.destroy();e.fsr4.destroy();e.timer.clear();e.depth.reset();e.depth_uav.reset();e.reactive.reset();e.reactive_uav.reset();e.colour_in.reset();e.upscaled.reset();
             e.motion.reset();e.motion_uav.reset();e.depth_srv.reset();e.mv_srv.reset();e.mv_key=nullptr;e.motion_valid=false;e.rig.reset();e.rig_uav.reset();e.rig_valid=false;e.rig_srv.reset();e.rig_live=false;e.rig_count.reset();e.rig_count_uav.reset();for(auto& s:e.rig_count_staging) s.reset();}
         for(auto& r:receipt_) r.reset();
         for(auto& r:last_receipt_) r.reset();
@@ -1270,21 +1257,6 @@ private:
             if(!e.motion_valid) ++motion_refused;
         }
         if(job.receipt) last_receipt_[static_cast<std::size_t>(job.eye)]=job.receipt;
-        if(afw_keep_motion.load() && job.motion.p) { // AFW: keep this eye's motion vectors past the engine's reuse of its target
-            Ref<ID3D11Texture2D> source;
-            if(SUCCEEDED(job.motion.p->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&source.p)))) {
-                D3D11_TEXTURE2D_DESC sd{},kd{};source.p->GetDesc(&sd);
-                if(e.afw_motion.p) e.afw_motion.p->GetDesc(&kd);
-                if(!e.afw_motion.p || kd.Width!=sd.Width || kd.Height!=sd.Height || kd.Format!=sd.Format) {
-                    e.afw_motion.reset();
-                    D3D11_TEXTURE2D_DESC d=sd;d.MipLevels=d.ArraySize=1;d.SampleDesc={1,0};d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.CPUAccessFlags=0;d.MiscFlags=0;
-                    ID3D11Device* device{};c->GetDevice(&device);ID3D11Texture2D* t{};
-                    if(device && sd.MipLevels==1 && sd.ArraySize==1 && sd.SampleDesc.Count==1 && SUCCEEDED(device->CreateTexture2D(&d,nullptr,&t))) e.afw_motion.adopt(t);
-                    if(device) device->Release();
-                }
-                if(e.afw_motion.p) {c->CopyResource(e.afw_motion.p,source.p);e.afw_jitter_x=job.jitter_x;e.afw_jitter_y=job.jitter_y;}
-            }
-        }
         LARGE_INTEGER now{},freq{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&freq);
         float dt=e.last.QuadPart?static_cast<float>(double(now.QuadPart-e.last.QuadPart)*1000.0/double(freq.QuadPart)):11.1f;
         e.last=now;if(!(dt>0 && dt<100)) dt=11.1f;

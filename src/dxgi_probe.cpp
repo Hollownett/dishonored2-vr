@@ -7199,16 +7199,10 @@ static std::string run_test_command(const std::string& line) {
         else if(v=="overlays") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_baked_overlays_knob=m=="off";}  // v1432 A/B: spacewarp overlays on|off
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
-    if(verb=="afw") { // AFW renderer: afw [on|off|status] | afw tune <threshold|jitter|gap|reset> <value>
-        std::string v;in>>v;auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();
-        if(v=="on") rt.requested=renderer_running!=0;else if(v=="off") rt.requested=false;
-        else if(v=="capture") {int n=6;in>>n;if(game_xr) game_xr->afw_capture_requested=std::clamp(n,1,32);}
-        else if(v=="tune") {std::string k;double x{};in>>k>>x;
-            if(k=="threshold") t.ignore_motion_threshold=static_cast<float>(std::clamp(x,0.,64.));else if(k=="jitter") t.jitter_scale=static_cast<float>(std::clamp(x,-2.,2.));
-            else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));else if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));else if(k=="reset") t.reset_on_gap=x!=0;else return "afw tune: threshold|jitter|gap|reset|mv <value>";}
-        std::ostringstream o;o<<"afw requested "<<rt.requested.load()<<" running "<<renderer_running<<" rebuilt "<<rt.rebuilt.load()<<" refused "<<rt.refused.load()
-            <<" fallbacks "<<rt.fallbacks.load()<<" busy "<<rt.busy()<<" threshold "<<t.ignore_motion_threshold.load()<<" jitter "<<t.jitter_scale.load()
-            <<" captures "<<(game_xr?game_xr->afw_captures_saved:0)<<" gap "<<t.max_frame_gap.load()<<" mv "<<t.motion_scale.load()<<" reset "<<t.reset_on_gap.load()<<" | "<<rt.problem();
+    if(verb=="afw") { // v1443: the PureDark AFW renderer is gone; `afw capture N` still saves the built-in warp's rebuilt eyes (tools/afw_compare.py)
+        std::string v;in>>v;
+        if(v=="capture") {int n=6;in>>n;if(game_xr) game_xr->afw_capture_requested=std::clamp(n,1,32);}
+        std::ostringstream o;o<<"afw (built-in warp) running "<<renderer_running<<" captures "<<(game_xr?game_xr->afw_captures_saved:0);
         return o.str();
     }
     if(verb=="eyeburst") {unsigned n=12;in>>n;n=std::clamp(n,2u,24u);alt_band_request=n;return "eyeburst "+std::to_string(n)+" presents (alternate-eye gameplay only)";}
@@ -12876,10 +12870,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
                << ",\"paired\":" << alt_paired.load() << ",\"scope_held\":" << alt_scope_held.load() << ",\"fallbacks\":" << alt_fallbacks.load()
                << ",\"parity_flip\":" << (d2vr::alternate_parity_flip.load()?"true":"false") << ",\"band_bursts\":" << alt_band_bursts
-               << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << [&]{auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();std::string pr=rt.problem();for(auto& ch:pr) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';
-                   std::ostringstream o;o<<",\"renderer_live\":"<<(game_xr?game_xr->renderer_live():-1)<<",\"afw\":{\"requested\":"<<(rt.requested.load()?"true":"false")<<",\"rebuilt\":"<<rt.rebuilt.load()<<",\"submitted\":"<<(game_xr?game_xr->afw_rebuilds:0)
-                    <<",\"refused\":"<<rt.refused.load()<<",\"fallbacks\":"<<rt.fallbacks.load()<<",\"busy\":"<<rt.busy()<<",\"mv\":"<<t.motion_scale.load()<<",\"jitter\":"<<t.jitter_scale.load()
-                    <<",\"halo\":"<<t.halo.load()<<",\"threshold\":"<<t.ignore_motion_threshold.load()<<",\"problem\":\""<<pr<<"\"}";return o.str();}() << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
+               << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << ",\"renderer_live\":" << (game_xr?game_xr->renderer_live():-1) << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
                << ",\"stale_warp_failures\":" << (game_xr?game_xr->stale_eye_warp_failures:0)
                << ",\"stale_parallax\":" << (stale_eye_parallax_knob?"true":"false") << ",\"stale_parallax_warps\":" << (game_xr?game_xr->stale_parallax_passes():0)
                << ",\"stale_parallax_misses\":" << (game_xr?game_xr->stale_eye_parallax_misses:0) << ",\"stale_near_range\":" << stale_near_range << ",\"stale_fresh_warps\":" << (game_xr?game_xr->stale_fresh_passes():0)
@@ -14598,8 +14589,6 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                             alt_motion_times.note(number,alt_fresh);
                             game_xr->stale_fresh_part=alt_motion_times.fresh_part(number);game_xr->stale_kept_part=alt_motion_times.kept_part(number);
-                            fsr_taa.afw_keep_motion=d2vr::afw::runtime().requested.load(); // AFW renderer: the fresh eye's motion vectors
-                            if(fsr_taa.afw_keep_motion.load()) {float jx{},jy{};if(const auto motion=fsr_taa.afw_eye_motion(alt_fresh,jx,jy)) game_xr->afw_eye_motion(static_cast<UINT>(alt_fresh),motion.Get(),jx,jy,number);}
                         }
                         // G2 VR cutscenes (cutscene_policy.hpp): classify this Present. Immersive = exact 32 with a complete native pair of two distinct
                         // eyes (two textures, two eye poses, both layer views recorded), the player camera read, no fault since the cutscene began. Any
@@ -15224,7 +15213,6 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;
                             game_xr->stale_eye_warp_enabled=stale_eye_warp_knob;game_xr->stale_eye_parallax_enabled=stale_eye_parallax_knob;game_xr->stale_near_range=stale_near_range;game_xr->locate_periods=legacy_locate_horizon?1:2;game_xr->gpu_queue_limit=!legacy_gpu_queue;game_xr->steady_pacing=!legacy_pacing;game_xr->pacer_miss_lock=pacer_miss_lock;game_xr->median_horizon=!legacy_display_horizon;
                             game_xr->performance_mode(alternate_on() && game_xr->renderer_live()!=0);
-                            game_xr->afw_status(d2vr::afw::runtime().problem());
                             { // PSVR2 adaptive triggers, per hand: gameplay with the panel closed and the session focused
                                 std::string slot1_equip;unsigned weapon_bits{};
                                 {std::lock_guard<std::mutex> l(hand_state_mutex);slot1_equip.assign(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));weapon_bits=hand_weapon_bits;}
@@ -15247,24 +15235,6 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     {game_xr->controller_input.left_trigger,game_xr->controller_input.right_trigger},game_dir);
                             }
                             if(game_xr->afw_capture_dir.empty()) game_xr->afw_capture_dir=output_directory.always().wstring();
-                            if(game_xr->afw_plugin_path.empty()) { // AFW renderer: PDAFWPlugin.dll is the user's own copy (never bundled)
-                                // v1413: build/afw-plugin-path (the launcher's "AFW plugin" picker; one line, a full path) names it; else next to Dishonored2.exe.
-                                std::wstring chosen;
-                                {std::ifstream knob(output_directory.always().parent_path()/L"build"/L"afw-plugin-path",std::ios::binary);std::string line; // UTF-8, as the launcher writes it
-                                 if(knob && std::getline(knob,line)) {
-                                     const auto trim=[](char c) {return c==13 || c==32 || c==34 || c==39 || c==9;}; // CR, space, double and single quote, tab
-                                     while(!line.empty() && trim(line.back())) line.pop_back();
-                                     std::size_t b=0;while(b<line.size() && trim(line[b])) ++b;line=line.substr(b);
-                                     if(line.size()>=3 && static_cast<unsigned char>(line[0])==0xEF && static_cast<unsigned char>(line[1])==0xBB && static_cast<unsigned char>(line[2])==0xBF) line=line.substr(3);
-                                     const int n=line.empty()?0:MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,line.data(),static_cast<int>(line.size()),nullptr,0);
-                                     std::wstring wide(static_cast<std::size_t>(n>0?n:0),L' ');
-                                     if(n>0) MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,line.data(),static_cast<int>(line.size()),wide.data(),n);
-                                     std::error_code ec;const fs::path candidate(wide);
-                                     if(n>0 && candidate.is_absolute() && fs::is_regular_file(candidate,ec)) chosen=candidate.wstring();
-                                 }}
-                                if(chosen.empty()) {wchar_t exe[MAX_PATH]{};GetModuleFileNameW(nullptr,exe,MAX_PATH);chosen=(std::filesystem::path(exe).parent_path()/L"PDAFWPlugin.dll").wstring();}
-                                game_xr->afw_plugin_path=chosen;
-                            }
                             game_xr->effective_temporal_aa(temporal_live_mode.load());
                             game_xr->scene_hold=cutscene_hold;game_xr->scene_id=cutscene_count.load(); // G2: this cutscene's hold and its identity
                             if(dual_wield_enabled && game_logic_mask()==256) { // v776: the hand wheel's ring goes behind the hands drawn in this displayed frame
@@ -18389,16 +18359,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             {std::ifstream knob(root/L"build"/L"alt-motion-probe");unsigned n{},k{},s{};
              if(knob>>n>>k>>s && n>=1 && n<=50 && k>=2 && k<=64 && s>=1 && s<=600) {alt_motion_bursts=n;alt_motion_size=k;alt_motion_interval_s=s;}}
             layer_pose_sync_state=fs::exists(root/L"build"/L"no-layer-pose-sync")?0:1;layer_pose_synced=0;layer_pose_sync_fallbacks=0; // paired / perf-mono layer-pose sync (2026-10-22); the knob restores the Setup-time record
-            if(fs::exists(root/L"build"/L"afw")) renderer_preference=2;
-            { // build/afw-tune: "<key> <value>" lines (mv, jitter, threshold, gap, reset), the same keys as the `afw tune` command
-                std::ifstream tune(root/L"build"/L"afw-tune");std::string k;double x{};auto& t=d2vr::afw::tuning();
-                while(tune>>k>>x) {
-                    if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="jitter") t.jitter_scale=static_cast<float>(std::clamp(x,-2.,2.));
-                    else if(k=="threshold") t.ignore_motion_threshold=static_cast<float>(std::clamp(x,0.,64.));else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));
-                    else if(k=="reset") t.reset_on_gap=x!=0;else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));
-                }
-            }
-            d2vr::psvr2::runtime().enabled=!fs::exists(root/L"build"/L"no-psvr2-triggers"); // PSVR2 left adaptive trigger (SteamVR + PS VR2 only) // knob: AFW renderer (development runs without saved settings)
+            d2vr::psvr2::runtime().enabled=!fs::exists(root/L"build"/L"no-psvr2-triggers"); // PSVR2 left adaptive trigger (SteamVR + PS VR2 only)
             // v1412 (2026-11-19 sim: an alternate-capable session renders Native through the mono-view path, both eyes unshared - no
             // shadow share, no paired skips - 13.4 ms against 9.5 ms paired): Native starts paired again, as before the merge. A session
             // starts alternate-capable (every renderer live) only when it is asked for: build/alternate-eye (the launcher's performance

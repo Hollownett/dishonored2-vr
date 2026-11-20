@@ -1,3 +1,9 @@
+> **Removed in v1443 (2026-11-20, user request).** The PureDark AFW renderer described below (`src/afw_puredark.hpp`, the VR menu's
+> AFW renderer choice, the launcher's "On with AFW" and its plugin picker, the `afw-renderer` feature) is gone: measured against the
+> mod's own built-in warp it was a tie in image quality and 0.1-0.4 ms dearer (v1414, `docs/afw-compare/`), and it needed the player's
+> own copy of a closed-source plugin. Performance mode is Off / On with the built-in warp. A saved renderer 2 reads as 1. The ImGui VR
+> menu and the PSVR2 triggers from the same port stay. `afw capture N` still captures the built-in warp.
+
 # AFW renderer, PSVR2 triggers and the ImGui VR menu
 
 Ported from the Indurhra DLSS/AFW fork (`dishonored-2-dlss-afw`, docs `DLSS-AFW-IMPLEMENTATION.md`, `PSVR2-TRIGGERS.md`) onto this
