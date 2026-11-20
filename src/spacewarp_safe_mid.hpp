@@ -16,6 +16,8 @@
 //                (35ea10), which takes the engine lock.
 //   game_end     the return of the game side.
 //   render_start the entry of the render side (exe 458c0), before its first engine call.
+//   hook_end     v1451: the exit of the Present hook (the main thread inside the engine's Present call, no graph in flight), for a frame
+//                whose due time passed while the hook generated it; otherwise its first point would be the first graph's end.
 // Present-time points (v1445) stay as they were: present_start (the Present hook's start), present_fence (present()'s GPU fence wait),
 // present (present()'s own late path).
 //
@@ -44,8 +46,9 @@ namespace d2vr::safe_mid {
 enum Phase : unsigned {hook,after_hook,graph0,after_graph0,graph1,after_graph1,graph_more,after_graph_more,render_to_game,game,game_to_render,before_hook,phases};
 inline constexpr const char* phase_names[phases]={"hook","after_hook","graph0","after_graph0","graph1","after_graph1","graph_more","after_graph_more",
     "render_to_game","game","game_to_render","before_hook"};
-enum Point : unsigned {graph_end,game_wait,game_wait_timer,game_end,render_start,present_start,present_fence,present_late,points};
-inline constexpr const char* point_names[points]={"graph_end","game_wait","game_wait_timer","game_end","render_start","present_start","present_fence","present"};
+// v1451: hook_end = the Present hook's exit, for a frame that came due inside the hook (the earliest point after the frame exists).
+enum Point : unsigned {graph_end,game_wait,game_wait_timer,game_end,render_start,hook_end,present_start,present_fence,present_late,points};
+inline constexpr const char* point_names[points]={"graph_end","game_wait","game_wait_timer","game_end","render_start","hook_end","present_start","present_fence","present"};
 // Knob text (build/spacewarp-safe-mid): empty or "all" = every mid point, "graph" = graph_end only, "game" = the game-side points only
 // (game_wait, game_end, render_start). Dev command `safemid off|graph|game|all`.
 enum Mask : unsigned {mask_off=0u,mask_graph=1u,mask_game=2u,mask_all=3u};
@@ -56,8 +59,8 @@ inline unsigned mask_of(const std::string& text) noexcept {
     return mask_all;
 }
 inline const char* mask_name(unsigned m) noexcept {return m==mask_all?"all":m==mask_graph?"graph":m==mask_game?"game":"off";}
-inline constexpr bool mid_point(Point p) noexcept {return p<=render_start;}
-inline constexpr unsigned mask_bit(Point p) noexcept {return p==graph_end?mask_graph:mid_point(p)?mask_game:0u;}
+inline constexpr bool mid_point(Point p) noexcept {return p<=hook_end;}
+inline constexpr unsigned mask_bit(Point p) noexcept {return p==graph_end?mask_graph:p==hook_end?mask_all:mid_point(p)?mask_game:0u;}
 
 inline std::atomic<unsigned> mask{mask_off};          // the knob (or the dev command)
 inline std::atomic<bool> hooks_ok{false};             // the game side, render side, graph submit and graph wait detours are all in
@@ -155,6 +158,13 @@ inline void record(Point p,Outcome outcome,std::int64_t now,std::int64_t after_n
 // A pending frame was abandoned without a send attempt (a resize, a fault, the session ending)
 inline void abandon() noexcept {state().armed=false;}
 
+// v1451: after a late slot at an inline point, the wait handed to the next real frame for its due time: SteamVR's slot grid, not the
+// clock time of the late wait. The late frame was due at due_ns for its target slot; the handed slot opens step_ns (its display time minus
+// that target) later. Outside half a period to four periods (a skipped run or a clock jump) the clock time stays.
+inline std::int64_t grid_handoff(std::int64_t due_ns,std::int64_t step_ns,std::int64_t base_ns,std::int64_t clock_ns) noexcept {
+    if(due_ns<=0 || base_ns<=0 || step_ns<base_ns/2 || step_ns>4*base_ns) return clock_ns;
+    return due_ns+step_ns;
+}
 // job_wake idle callbacks: only inside the game side, only with a frame armed and the game points allowed
 inline std::int64_t game_wait_left(std::int64_t now,std::int64_t none) noexcept {
     const MainState& s=state();

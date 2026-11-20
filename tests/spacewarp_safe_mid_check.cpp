@@ -90,8 +90,12 @@ int main() {
         check(!sm::allowed(sm::graph_end) && sm::allowed(sm::game_wait) && sm::allowed(sm::game_wait_timer) && sm::allowed(sm::game_end) && sm::allowed(sm::render_start),"game: the game-side points");
         sm::mask=sm::mask_all;sm::hooks_ok=false;
         check(!sm::allowed(sm::graph_end) && !sm::allowed(sm::game_end),"no mid point without the phase detours");
-        sm::hooks_ok=true;sm::violated=true;
-        check(!sm::allowed(sm::graph_end) && !sm::allowed(sm::game_wait) && sm::allowed(sm::present_start),"a violation switches the mid points off, not the Present-time ones");
+        sm::hooks_ok=true;
+        sm::mask=sm::mask_graph;const bool hook_graph=sm::allowed(sm::hook_end);sm::mask=sm::mask_game;const bool hook_game=sm::allowed(sm::hook_end);
+        sm::mask=sm::mask_off;const bool hook_off=sm::allowed(sm::hook_end);sm::mask=sm::mask_all;
+        check(hook_graph && hook_game && !hook_off,"v1451 hook_end: with either mask, never off");
+        sm::violated=true;
+        check(!sm::allowed(sm::graph_end) && !sm::allowed(sm::game_wait) && !sm::allowed(sm::hook_end) && sm::allowed(sm::present_start),"a violation switches the mid points off, not the Present-time ones");
         sm::violated=false;
         check(sm::mask_of("")==sm::mask_all && sm::mask_of("all")==sm::mask_all && sm::mask_of("graph")==sm::mask_graph && sm::mask_of("game")==sm::mask_game && sm::mask_of("off")==sm::mask_off,"knob text");
     }
@@ -112,6 +116,13 @@ int main() {
         check(sm::violations==1,"after the window closes nothing more is counted");
         sm::violated=false;
     }
+    {   // v1451: the due time after a late slot follows SteamVR's slot grid
+        const std::int64_t P=11'111'111,due=5000*ms,clock=5009*ms;
+        check(sm::grid_handoff(due,P,P,clock)==due+P,"the handed slot one period on: due + a period (not the late clock time)");
+        check(sm::grid_handoff(due,2*P,P,clock)==due+2*P,"two periods on (a slot skipped): due + two periods");
+        check(sm::grid_handoff(due,P/4,P,clock)==clock && sm::grid_handoff(due,5*P,P,clock)==clock,"a step under half a period or over four: the clock time");
+        check(sm::grid_handoff(0,P,P,clock)==clock && sm::grid_handoff(due,P,0,clock)==clock,"no due time or no period: the clock time");
+    }
     {   // after-time buckets
         check(sm::after_bucket(0)==0 && sm::after_bucket(249'999)==0 && sm::after_bucket(250'000)==1 && sm::after_bucket(999'999)==2 && sm::after_bucket(1'000'000)==3,"buckets below 1 ms");
         check(sm::after_bucket(3'999'999)==4 && sm::after_bucket(4'000'000)==5 && sm::after_bucket(8'000'000)==6 && sm::after_bucket(-5)==0,"buckets above 1 ms (negative = 0)");
@@ -120,7 +131,7 @@ int main() {
         const std::string j=sm::json(0x140000000);int depth=0;bool balanced=true;
         for(char c:j) {if(c=='{') ++depth;if(c=='}' && --depth<0) balanced=false;}
         check(balanced && depth==0,"status JSON braces balance");
-        check(j.find("\"due_phase\":{\"hook\":")!=std::string::npos && j.find("\"graph_end\":{\"sent\":")!=std::string::npos && j.find("\"game_wait_timer\":")!=std::string::npos,"status JSON names the phases and points");
+        check(j.find("\"due_phase\":{\"hook\":")!=std::string::npos && j.find("\"graph_end\":{\"sent\":")!=std::string::npos && j.find("\"game_wait_timer\":")!=std::string::npos && j.find("\"hook_end\":")!=std::string::npos,"status JSON names the phases and points");
     }
     {   // job_wake's timer flag: true only while the work runs because the due time came first
         LARGE_INTEGER f{};QueryPerformanceFrequency(&f);jw::ticks_per_second=f.QuadPart;

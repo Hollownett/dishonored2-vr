@@ -363,3 +363,59 @@ immediate-context calls go to D2, which no engine thread uses.
    construction, sends the generated frame in its slot as on Virtual Desktop, and takes the generated frame's SteamVR call off the main
    thread, about 1 ms per real frame, which v1450 puts back on it.
 3. Do stage 2 only if the real frame's 1.1 ms SteamVR submit still holds the CPU-bound main thread back after stage 1.
+
+## 12. v1450 in the headset, and v1451 (2026-11-21)
+
+**User** (SteamVR over Steam Link, Quest 2, Spacewarp Always and Auto, `build/spacewarp-safe-mid` on): "better but not very stable";
+they want the stability Virtual Desktop has.
+
+**The mod** (session pid 47384, 7,267 generated frames) [data]:
+- **Late: 2,269 (31 %), against 56 % in v1445.**
+  - Drops at the next Present (`late_wait`) fell from 2,073 to 37.
+  - Late slots rose from 633 to 2,232.
+  - Violations 0, `lock_skips` 0. No freeze.
+- **By point:**
+
+| point | sent | late slot | send delay after the due time |
+|---|---|---|---|
+| game side's job waits (`game_wait` + timer) | 2,736 | 62 (2.2 %) | about 0.25 ms mean |
+| `game_end` + `render_start` + Present-time points | 371 | 0 | |
+| `graph_end` | 1,891 | 2,170 (53 %) | 7.0 ms mean; 1,682 at 8 ms or more |
+
+- **Due times:** 2,042 fell inside a Present hook. In v1445 that was 23 of 5,008.
+- **The cause: a feedback loop.**
+  1. A late slot hands its wait to the next real frame. The next due time was taken from the clock time of that late wait, which came
+     well after SteamVR's slot opened.
+  2. That due time then fell before the next generated frame even existed.
+  3. The frame's first point was the first graph's end, about 7 ms later. So it was late too, and handed on again.
+  - In the frame-timing CSV (the session's first 1,066 gameplay frames) the handed slots come in runs of up to 86 frames, about 2 s at
+    45 fps. In v1445 the longest run was 5.
+- **Real frames:** steadier. Three-period slips fell from 14.6 % to 5.8 %. The pacer's sleep now runs, because the generated frame no
+  longer goes out at the hook's start.
+- **Cost of a send on the main thread** (`call_us_mean`): about 1.0-1.4 ms at the game-side points, 2.0 ms at `graph_end`. xrWaitFrame
+  blocks for 0.55 ms on average there, at most 9.8 ms.
+
+**Steam Link** (`D:\Steam\logs\vrlink_aftm_*.csv` and `driver_vrlink.txt`, headset clock) [data]:
+- **Decode on the Quest 2:**
+  - 12-16 ms per frame (median) during gameplay, over the 11.1 ms budget on 62-86 % of frames;
+  - 4.9 ms in the v1445 session at the same stream settings;
+  - receive -> decode start is 0.1 ms, so this is decoding, not queueing.
+- **What the headset got:** 62-75 fps.
+- **End-to-end latency:** about 31-33 ms, against 20 ms.
+- **Stream settings:**
+  - 2748 x 2880 per eye, 10-bit;
+  - automatic bandwidth up to 350 Mbit/s (the driver's default target is 200);
+  - 21-42 "bad link" stalls per minute, up to 0.4 s each (10-15 per minute in the v1445 session).
+- **SteamVR's global resolution** is set by hand to 150 % (`supersampleScale` 1.5).
+- **Conclusion.** Steam Link's stream, not the mod's timing, caps this session below 90. The mod sent more unique frames than v1445, the
+  stream got heavier, and the decoder and the Wi-Fi fell behind. Steam Link's own settings offer:
+  - "Target Bandwidth" (automatic or a fixed Mbps);
+  - "Use 10 bit depth encoding";
+  - "Encoded Video Size".
+
+**v1451 (mod):**
+- **The grid rule.** After a late slot at an inline point, the handed wait for the next due time is this frame's due time plus the
+  step to the handed slot (its display time minus this frame's target): SteamVR's slot grid (`safe_mid::grid_handoff`; status
+  `grid_handoffs`). Outside half a period to four periods, the clock time stays.
+- **`hook_end` point.** A frame that comes due inside the Present hook goes out at the hook's exit, not at the first graph's end.
+- **Lab:** `spacewarp_safe_mid_check`, 43 checks. Not headset-tested.

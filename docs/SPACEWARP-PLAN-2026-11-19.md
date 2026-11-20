@@ -960,3 +960,9 @@ Present, 633 late slots. Full analysis: `docs/research/STEAMVR-SAFE-SUBMIT.md`.
 - **Secondary.** SteamVR's "Use Legacy Reprojection Mode" (`disableAsync`) fixed a 45 fps lock on PSVR2 without frame generation
   (Indurhra). The user's Steam Link session shows no sign of that stall (desktop Present 0.16 ms), so the launcher does not set it (doc
   section 10).
+- **v1450 headset** (SteamVR, Quest 2 over Steam Link): 31 % late instead of 56 %, no freeze, no violation.
+  - Game-side sends were 98 % on time. `graph_end` sends had 53 % late slots: after one late slot, the next due time came from the late
+    wait's clock time, so late frames ran in chains of up to 86.
+  - **v1451** takes the next due time from SteamVR's slot grid after a late slot, and adds a `hook_end` point (doc section 12).
+  - **Steam Link** itself decoded 12-16 ms per frame on the Quest 2 in that session (budget 11.1). It streamed 2748 x 2880 per eye,
+    10-bit, up to 350 Mbit/s, with SteamVR at 150 % resolution. So the headset got only 62-75 fps whatever the mod sent.

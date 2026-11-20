@@ -2318,7 +2318,7 @@ public:
          <<",\"body_up_dot\":"<<spacewarp_body_up_dot<<",\"overlays\":"<<(spacewarp_overlays?"true":"false")<<",\"overlay_draws\":"<<spacewarp_overlay_draws
          <<",\"overlay_failures\":"<<spacewarp_overlay_failures<<",\"layers_moved\":"<<spacewarp_layers_moved<<",\"cylinders\":"<<spacewarp_cylinders
          <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
-         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"inline\":"<<(spacewarp_inline_path()?"true":"false")<<",\"inline_frames\":"<<spacewarp_inline_frames<<",\"inline_late\":"<<spacewarp_inline_late
+         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"inline\":"<<(spacewarp_inline_path()?"true":"false")<<",\"inline_frames\":"<<spacewarp_inline_frames<<",\"inline_late\":"<<spacewarp_inline_late<<",\"grid_handoffs\":"<<spacewarp_grid_handoffs
          <<",\"inline_wait_us_max\":"<<spacewarp_inline_wait_us_max<<",\"inline_wait_us_mean\":"<<(spacewarp_inline_measured?spacewarp_inline_wait_us_sum/spacewarp_inline_measured:0)
          <<",\"inline_after_us_max\":"<<spacewarp_inline_after_us_max<<",\"inline_after_us_mean\":"<<(spacewarp_inline_measured?spacewarp_inline_after_us_sum/spacewarp_inline_measured:0)
          <<",\"inline_fence_frames\":"<<spacewarp_fence_frames<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")
@@ -2337,7 +2337,7 @@ public:
          <<"\",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"held_far_eyes\":"<<spacewarp_held_far_eyes
          <<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
          <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"thread_frames\":"<<spacewarp_thread_frames
-         <<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"stuck\":"<<spacewarp_stuck<<",\"cuts\":"<<spacewarp_cuts<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg
+         <<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"stuck\":"<<spacewarp_stuck<<",\"late_slot_inline\":"<<spacewarp_inline_late<<",\"grid_handoffs\":"<<spacewarp_grid_handoffs<<",\"cuts\":"<<spacewarp_cuts<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg
          <<",\"safe_frames\":"<<spacewarp_safe_frames<<",\"fallback_frames\":"<<spacewarp_fallback_frames<<",\"due_us_last\":"<<spacewarp_due_us_last<<",\"due_us_max\":"<<spacewarp_due_us_max<<'}';
         return o.str();
     }
@@ -2378,6 +2378,7 @@ public:
     // points of the main thread, with the engine's immediate-context lock held: a render graph's wait return (the graph's drains are over),
     // the game side's job waits, its end and the render side's entry. Never inside a render graph.
     bool spacewarp_inline{true},spacewarp_force_inline{},sw_inline_mode_{};std::uint64_t spacewarp_inline_frames{},spacewarp_inline_late{};
+    std::uint64_t spacewarp_grid_handoffs{};  // v1451: late inline frames whose handed slot set the next due time from SteamVR's slot grid
     inline static std::atomic<bool> spacewarp_inline_pending{false};  // a generated frame waits for its due time (dxgi_probe spacewarp_wait_point)
     inline static std::atomic<std::int64_t> spacewarp_inline_due{0};  // v1444: that time (cpu_time_ns), read by the main thread's waits
     // v1444: at the wait points, how long the runtime's xrWaitFrame took and how long after the due time it was called (us)
@@ -3397,7 +3398,18 @@ public:
         }
         if(slot.predictedDisplayTime>sw_target_time_+pacer_.base/2) {
             release_spacewarp_images_();++spacewarp_late;++spacewarp_late_slot;record_mid_(safe_mid::late_slot,cpu_time_ns(),wait_start,wait_ns,call_start,point);
-            if(at_safe_point) {sw_handed_frame_=slot;sw_handed_=true;sw_handed_wait_ns_=cpu_time_ns();++spacewarp_inline_late;return true;}  // v1440: the real frame's
+            if(at_safe_point) {  // v1440: the real frame's
+                sw_handed_frame_=slot;sw_handed_=true;sw_handed_wait_ns_=cpu_time_ns();++spacewarp_inline_late;
+                // v1451 (user, SteamVR on v1450: "better but not very stable"; late slots came in runs of up to 86 frames): the next
+                // generated frame's due time follows SteamVR's slot grid, not the clock time of this late wait. This wait came well after
+                // the slot opened, so a due time taken from it fell before the next frame was even generated (2,042 of 7,267 due times
+                // inside the Present hook), that frame went out late too, and so on. The handed slot opens (its display time - this
+                // frame's target) after this frame's due time.
+                const auto clock=sw_handed_wait_ns_;
+                sw_handed_wait_ns_=safe_mid::grid_handoff(sw_inline_due_ns_,slot.predictedDisplayTime-sw_target_time_,pacer_.base,clock);
+                if(sw_handed_wait_ns_!=clock) ++spacewarp_grid_handoffs;
+                return true;
+            }
             frame_=slot;sw_real_wait_ns_=cpu_time_ns();return true;}
         XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
         if(const auto began=xrBeginFrame(session_,&begin);XR_FAILED(began)) {
