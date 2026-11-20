@@ -1,4 +1,4 @@
-# VR v1443 (release, 2026-11-20)
+# VR v1444 (release, 2026-11-20)
 
 ## Spacewarp: the headset stays at its full frame rate, on by default
 
@@ -19,8 +19,9 @@
 - Spacewarp works only with an FSR or DLSS anti-aliasing mode. That is the default on every GPU; Setup checks turn red if you
   pick another one.
 - Spacewarp and performance mode do not run together: with Spacewarp on, performance mode stays off.
-- Best with Virtual Desktop's own runtime (VDXR). SteamVR and Meta Link work too: there, far fewer generated frames are now dropped
-  when the game hitches, but Virtual Desktop still copes best with a heavy scene.
+- Best with Virtual Desktop's own runtime (VDXR). SteamVR and Meta Link work too. On those runtimes the frames in between now go
+  out on time even when the game's own frame runs long. Before, more than a third of them came too late on SteamVR in heavy scenes.
+  Virtual Desktop is still the smoothest.
 
 ## Faster and steadier
 
@@ -31,11 +32,13 @@
 
 - The VR settings menu is drawn with Dear ImGui, and PlayStation VR2 adaptive triggers work on SteamVR. Both are Indurhra's
   work, thank you.
+- Quitting the game no longer ends in a crash report.
 
 ## Known issues
 
 - Glass objects (drinking glasses, bottles) can show doubled while you move with Spacewarp on: glass has no depth to warp it with.
-- On SteamVR, some generated frames can still come late when the game hitches; Virtual Desktop copes best.
+- Steam Link (SteamVR on a Quest) adds stutter of its own that Spacewarp cannot fill: a Quest 2 decodes each frame more slowly
+  than 90 Hz allows, and Wi-Fi drops pause the stream. Virtual Desktop copes best.
 - Sometimes the weapon wheel selects a different weapon than the one you pointed at. Choose again if the wrong one comes to
   the hand.
 
@@ -44,4 +47,5 @@ If a Spacewarp change looks worse to you, each one can be undone with an empty f
 surfaces). Turning Spacewarp off on the Settings page undoes all of it. Say what you saw.
 
 Tested by the author in the headset over Virtual Desktop and SteamVR up to v1438 (Spacewarp, hands, weapons, HUD). The leg changes
-(v1439) and the SteamVR timing (v1440-v1442) and performance mode without PureDark (v1443) are tested in the lab, the simulator and one SteamVR session.
+(v1439), the SteamVR timing (v1440-v1442) and performance mode without PureDark (v1443) are tested in the lab, the simulator and one
+SteamVR session. v1444's SteamVR frame timing is tested in the lab and the simulator only.
