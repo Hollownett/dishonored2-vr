@@ -827,3 +827,20 @@ double; SteamVR a bit worse than Virtual Desktop; spacewarp on by default for ev
   (every install takes the new defaults once). A Setup check row "Frame generation" (red, never blocking, with an anti-aliasing mode it
   cannot use), a one-time notice (build/launcher-spacewarp-notice) and the Save/Launch lists say what to switch off and that it needs FSR
   or DLSS.
+
+## 24. v1440: SteamVR (2026-11-20)
+
+User: "SteamVR - can we fix it?". The user's v1438 SteamVR session: 17 % of generated frames late (late_wait 1,722, late_slot 448).
+SteamVR cannot use the waiting thread (its xrWaitFrame queues GPU work on the game's device), so a generated frame went out at the next
+Present, and v1419's cutoff dropped it whenever that Present started later than half a period before the real frame's slot.
+- **Safe points.** Where the thread is refused (SteamVR, Meta Link, WMR), the render thread waits for the generated slot itself and begins
+  and ends it at its first safe point after the slot opens (one display period after the real frame's wait), inside an isolated context
+  state (`ContextState::Scope`: the runtime never changes the game's pipeline state mid-frame). A wait that comes back at the real frame's
+  slot is handed to the next Present as the thread's is; an OpenXR error there becomes a session fault at the next Present. Knobs
+  `build/spacewarp-no-inline` (the v1419 path) and `build/spacewarp-force-inline` (the SteamVR path in the simulator). Status `inline`,
+  `inline_frames`, `inline_late`.
+- **Cutoff.** On that path a generated frame is dropped only in the last eighth of a period before the real frame's slot (v1419: half).
+- Sims (look_down_walk, user-like, same save): VDXR-like thread 0 late of 2,792; forced SteamVR path 50 late of 2,784 (1.8 %); old path 82
+  of 2,848 (2.9 %). Only ~2 % of the frames found a safe point after the slot opened (the second half of a frame is the game side, which
+  makes no D3D11 call), so most of the gain is the cutoff. The user's SteamVR frame timing: frames ending inside the dropped window 5.0 %
+  with the old cutoff, 0.9 % with the new one. Not headset-tested on SteamVR.

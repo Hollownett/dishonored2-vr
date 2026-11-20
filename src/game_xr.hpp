@@ -2308,7 +2308,7 @@ public:
          <<",\"body_up_dot\":"<<spacewarp_body_up_dot<<",\"overlays\":"<<(spacewarp_overlays?"true":"false")<<",\"overlay_draws\":"<<spacewarp_overlay_draws
          <<",\"overlay_failures\":"<<spacewarp_overlay_failures<<",\"layers_moved\":"<<spacewarp_layers_moved<<",\"cylinders\":"<<spacewarp_cylinders
          <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
-         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")
+         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"inline\":"<<(spacewarp_inline?"true":"false")<<",\"inline_frames\":"<<spacewarp_inline_frames<<",\"inline_late\":"<<spacewarp_inline_late<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")
          <<",\"thread_frames\":"<<spacewarp_thread_frames<<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg
          <<",\"safe_frames\":"<<spacewarp_safe_frames<<",\"fallback_frames\":"<<spacewarp_fallback_frames<<",\"due_us_last\":"<<spacewarp_due_us_last<<",\"due_us_max\":"<<spacewarp_due_us_max<<"}}";
         return o.str();
@@ -2340,6 +2340,13 @@ public:
     // already gave a later slot (late_slot); and generated eyes with a weapon body (weapon_eyes)
     std::uint64_t spacewarp_late_wait{},spacewarp_late_slot{},spacewarp_weapon_eyes{};
     bool spacewarp_thread{true};  // v1420: submit generated frames from their own thread (build/spacewarp-no-thread: the v1419 path)
+    // v1440 (user: "SteamVR - can we fix it?"; the user's v1438 SteamVR session: 17 % of generated frames late): where the runtime refuses
+    // the waiting thread (SteamVR: its xrWaitFrame queues GPU work on the game's device), the render thread itself waits for the generated
+    // frame's slot, begins and ends it at its first safe point after the slot opens (one display period after the real frame's wait),
+    // inside an isolated context state (ContextState::Scope), instead of at the next Present (late whenever a game frame runs long).
+    // build/spacewarp-no-inline: the v1419 path.
+    bool spacewarp_inline{true},spacewarp_force_inline{},sw_inline_mode_{};std::uint64_t spacewarp_inline_frames{},spacewarp_inline_late{};
+    inline static std::atomic<bool> spacewarp_inline_pending{false};  // a generated frame waits for a safe point (dxgi_probe spacewarp_safe_point)
     const char* spacewarp_thread_why="";bool spacewarp_mt_was{};  // v1420: why the thread is not used; whether the device was protected already
     double spacewarp_cut_m{},spacewarp_cut_deg{};  // v1420 diagnostics: the play-space step of the last locomotion cut
     std::uint64_t spacewarp_stuck{};  // v1421: Presents that skipped their XR frame because the thread's frame had not come back within 1 s
@@ -2349,7 +2356,20 @@ public:
     // opening (the thread's wait returning) to the frame's end, last and largest (us)
     std::uint64_t spacewarp_safe_frames{},spacewarp_fallback_frames{},spacewarp_due_us_last{},spacewarp_due_us_max{};
     // v1422: called by the probe's immediate-context hooks on the game's render thread, between two of the game's own calls
-    void spacewarp_safe_point() noexcept {if(!sw_in_present_) submit_due_spacewarp_(false);}
+    void spacewarp_safe_point() noexcept {if(!sw_in_present_) {submit_due_spacewarp_(false);submit_inline_spacewarp_();}}
+    std::int64_t sw_real_wait_ns_{},sw_inline_due_ns_{},sw_handed_wait_ns_{};std::string sw_inline_fault_;
+    // v1440: the pending generated frame, at a safe point once its slot is open (spacewarp_inline)
+    void submit_inline_spacewarp_() noexcept {
+        if(!spacewarp_inline_pending.load(std::memory_order_acquire)) return;
+        if(!sw_pending_) {spacewarp_inline_pending.store(false,std::memory_order_relaxed);return;}
+        if(cpu_time_ns()<sw_inline_due_ns_) return;
+        spacewarp_inline_pending.store(false,std::memory_order_relaxed);
+        try {
+            ContextState::Scope graphics_scope(graphics_state_);  // the runtime's calls never change the game's pipeline state mid-frame
+            submit_spacewarp_(true);
+        } catch(const std::exception& e) {sw_inline_fault_=e.what();if(sw_inline_fault_.empty()) sw_inline_fault_="error";
+        } catch(...) {sw_inline_fault_="error";}
+    }
     // v1421 (user, headset v1420: "while walking or running the arm freezes for a second as I swing it, then comes back"): per grip, the
     // focused input samples, those without a valid pose (the hand is then not driven), the longest such run, and those valid but only
     // inferred (not optically tracked)
@@ -2735,7 +2755,7 @@ public:
         if(width==width_ && height==height_ && format==format_) return false;
         const bool format_changed=format!=format_;
         if(frame_open_) throw std::runtime_error("Cannot resize an open XR frame");
-        drain_spacewarp_();release_spacewarp_images_();sw_pending_=false;sw_colour_={};sw_colour_srv_={};  // spacewarp: a generated frame would name the old swapchains
+        drain_spacewarp_();release_spacewarp_images_();sw_pending_=false;spacewarp_inline_pending.store(false,std::memory_order_relaxed);sw_colour_={};sw_colour_srv_={};  // spacewarp: a generated frame would name the old swapchains
         sw_settle_until_=GetTickCount64()+1000;++spacewarp_resizes;  // v1438: a second without generated frames (the skip above)
         for(auto& prev:sw_prev_) prev.valid=false;
         if(!width || !height || width>system_maximum_.width || height>system_maximum_.height ||
@@ -3175,6 +3195,8 @@ public:
             }
             sw_target_time_=slot_time;++spacewarp_generated;spacewarp_skip="";
             if(spacewarp_thread && spacewarp_thread_ready_()) {release_spacewarp_images_();post_spacewarp_job_();}  // v1420: its own thread submits it in its slot
+            else if(spacewarp_thread && spacewarp_inline && sw_real_wait_ns_ && pacer_.base>0) {  // v1440: at a safe point once the slot opens
+                sw_pending_=true;sw_inline_mode_=true;sw_inline_due_ns_=sw_real_wait_ns_+pacer_.base;spacewarp_inline_pending.store(true,std::memory_order_release);}
             else sw_pending_=true;
         } catch(const XrSessionFault&) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="session fault";
         } catch(...) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="exception";}
@@ -3186,6 +3208,7 @@ public:
         if(sw_thread_checked_) return sw_thread_ok_;
         sw_thread_checked_=true;sw_thread_ok_=false;
         if(!xr_runtime_name.empty() && xr_runtime_name.find("VirtualDesktop")==std::string::npos) {spacewarp_thread_why="runtime";return false;}
+        if(spacewarp_force_inline) {spacewarp_thread_why="forced inline";return false;}  // v1440 sim: the SteamVR path in the simulator
         spacewarp_thread_why="";return sw_thread_ok_=true;
     }
     // v1420: hand the generated frame (sw_views_, sw_layers_, sw_target_time_; its images already released) to the submit thread
@@ -3302,14 +3325,22 @@ public:
     }
     // At the next Present, before the real frame: the generated frame in its own slot. true = the runtime is already at the real
     // frame's slot, and this xrWaitFrame (in frame_) is the real frame's.
-    bool submit_spacewarp_() {
+    bool submit_spacewarp_(bool at_safe_point=false) {
+        spacewarp_inline_pending.store(false,std::memory_order_relaxed);
         if(!sw_pending_) {release_spacewarp_images_();return false;}
         sw_pending_=false;
         if(!spacewarp_enabled || alternate_enabled || !pacer_.active || pacer_.k<2) {release_spacewarp_images_();return false;}
-        if(pacer_.target && cpu_time_ns()>pacer_.target-pacer_.base/2) {release_spacewarp_images_();++spacewarp_late;++spacewarp_late_wait;return false;}  // too near the real frame's slot
+        // too near the real frame's slot. v1440: on the SteamVR path (no waiting thread) only the last eighth of a period: the generated slot
+        // stays open about a period after it opens, and v1419's half period dropped most of the user's late frames (1722 of 2170 on SteamVR);
+        // a wait that comes back at the real frame's slot is still the real frame's (late_slot)
+        const auto margin=sw_inline_mode_?pacer_.base/8:pacer_.base/2;
+        if(pacer_.target && cpu_time_ns()>pacer_.target-margin) {release_spacewarp_images_();++spacewarp_late;++spacewarp_late_wait;return false;}
         XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};XrFrameState slot{XR_TYPE_FRAME_STATE};
         try {checked(xrWaitFrame(session_,&wait,&slot),"Wait spacewarp frame");} catch(...) {release_spacewarp_images_();throw;}
-        if(slot.predictedDisplayTime>sw_target_time_+pacer_.base/2) {release_spacewarp_images_();frame_=slot;++spacewarp_late;++spacewarp_late_slot;return true;}
+        if(slot.predictedDisplayTime>sw_target_time_+pacer_.base/2) {
+            release_spacewarp_images_();++spacewarp_late;++spacewarp_late_slot;
+            if(at_safe_point) {sw_handed_frame_=slot;sw_handed_=true;sw_handed_wait_ns_=cpu_time_ns();++spacewarp_inline_late;return true;}  // v1440: the real frame's
+            frame_=slot;sw_real_wait_ns_=cpu_time_ns();return true;}
         XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
         if(const auto began=xrBeginFrame(session_,&begin);XR_FAILED(began)) {release_spacewarp_images_();throw XrSessionFault("Begin spacewarp frame: "+std::to_string(began));}
         frame_open_=true;
@@ -3321,7 +3352,7 @@ public:
         end.layerCount=n;end.layers=list.data();
         const auto ended=xrEndFrame(session_,&end);frame_open_=false;
         if(XR_FAILED(ended)) {if(xr_result_session_fatal(ended)) checked(ended,"Submit spacewarp frame");++spacewarp_failures;spacewarp_skip="frame rejected";return false;}
-        ++spacewarp_submitted;return false;
+        ++spacewarp_submitted;if(at_safe_point) ++spacewarp_inline_frames;return false;
     }
     // perf-mono-view diagnostic: the one engine view sits at the midpoint of the two eye poses, faces their mean orientation and
     // covers both eyes' FOV (the union), so the one image is valid for both projection layers (flat, no stereo depth).
@@ -3497,6 +3528,9 @@ public:
         // v1421: the spacewarp submit thread's frame first: from here to the end of this Present the thread is idle, so no OpenXR call of the
         // Present thread (events, xrEndSession, overlays, input, haptics, the real frame) ever runs beside the thread's frame calls
         if(collect_spacewarp_()==2) {++spacewarp_stuck;return;}
+        if(!sw_inline_fault_.empty()) {  // v1440: an OpenXR error at a safe point: the session's recovery, as a fault here would be
+            const auto why=sw_inline_fault_;sw_inline_fault_.clear();++spacewarp_failures;spacewarp_skip="safe point fault";
+            throw XrSessionFault("Spacewarp safe point: "+why);}
         flush_pulses_();
         XrEventDataBuffer event{};event.type=XR_TYPE_EVENT_DATA_BUFFER;
         XrResult result{};
@@ -3546,7 +3580,7 @@ public:
         // Spacewarp: the frame generated after the last real one goes into its own slot first (counted as idle, like the pacing sleep).
         // If the runtime is already at the real frame's slot, that wait is the real frame's.
         bool spacewarp_waited=false;  // v1420/v1421: the thread's handed wait (collected at the start), else (no thread) the v1419 path
-        if(sw_handed_) {frame_=sw_handed_frame_;sw_handed_=false;spacewarp_waited=true;}
+        if(sw_handed_) {frame_=sw_handed_frame_;sw_handed_=false;spacewarp_waited=true;sw_real_wait_ns_=sw_handed_wait_ns_;}
         else spacewarp_waited=submit_spacewarp_();
         if(!spacewarp_waited) {
             frame_={};frame_.type=XR_TYPE_FRAME_STATE;
@@ -3558,6 +3592,7 @@ public:
                 }
             }
             checked(xrWaitFrame(session_,&wait,&frame_),"Wait game XR frame");
+            sw_real_wait_ns_=cpu_time_ns();  // v1440: the next slot opens a display period after this
         }
         timing.waited=true;timing.wait_ns=cpu_time_ns()-stage_start; // includes the pacing sleep: the governor counts both as idle
         pacer_.miss_lock=pacer_miss_lock;

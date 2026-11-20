@@ -1,4 +1,4 @@
-# VR v1439 (release, 2026-11-20)
+# VR v1440 (release, 2026-11-20)
 
 ## Spacewarp: the headset stays at its full frame rate, on by default
 
@@ -19,8 +19,8 @@
 - Spacewarp works only with an FSR or DLSS anti-aliasing mode. That is the default on every GPU; Setup checks turn red if you
   pick another one.
 - Spacewarp and performance mode do not run together: with Spacewarp on, performance mode stays off.
-- Best with Virtual Desktop's own runtime (VDXR). On SteamVR, a hitch in the game makes some generated frames late, and SteamVR
-  fills in with its own reprojection.
+- Best with Virtual Desktop's own runtime (VDXR). SteamVR and Meta Link work too: there, far fewer generated frames are now dropped
+  when the game hitches, but Virtual Desktop still copes best with a heavy scene.
 
 ## Faster and steadier
 
@@ -36,7 +36,7 @@
 ## Known issues
 
 - Glass objects (drinking glasses, bottles) can show doubled while you move with Spacewarp on: glass has no depth to warp it with.
-- On SteamVR, more generated frames come late than on Virtual Desktop.
+- On SteamVR, some generated frames can still come late when the game hitches; Virtual Desktop copes best.
 - Sometimes the weapon wheel selects a different weapon than the one you pointed at. Choose again if the wrong one comes to
   the hand.
 
@@ -44,5 +44,5 @@ If a Spacewarp change looks worse to you, each one can be undone with an empty f
 `no-spacewarp-legs` (legs), `spacewarp-hand-bubble` (the area around the hands and weapons), `spacewarp-crack2` (close
 surfaces). Turning Spacewarp off on the Settings page undoes all of it. Say what you saw.
 
-Tested by the author in the headset over Virtual Desktop and SteamVR up to v1438 (Spacewarp, hands, weapons, HUD). v1439's leg
-changes are tested in the lab and the simulator.
+Tested by the author in the headset over Virtual Desktop and SteamVR up to v1438 (Spacewarp, hands, weapons, HUD). The leg changes
+(v1439) and the SteamVR timing (v1440) are tested in the lab and the simulator.
