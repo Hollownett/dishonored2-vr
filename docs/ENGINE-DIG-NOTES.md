@@ -118,7 +118,7 @@ Lessons:
 
 ## 6. Measured dead ends (do not retest without a new idea)
 
-- **Thread and job settings:** the engine's threading switches are already all on (`r_schedulerThreadingMode 2`, deferred contexts, `mdnt_multithreaded_*`, `r_useAnimBlendJobs`). `jobs_numThreads` is an output.
+- **Thread and job settings:** the engine's threading switches are already all on (`r_schedulerThreadingMode 2`, deferred contexts, `mdnt_multithreaded_*`, `r_useAnimBlendJobs`). `jobs_numThreads` is an output. The worker COUNT is a lever after all: section 9 (proxy knob `build/job-workers`).
 - **Shadow cvars:** no effect, set live or in the config.
 - **LOD and frame-target cvars:** no effect set live (`lod_dist_*`, `mdnt_minDistanceForLod`, `com_FPSTargeted`).
 - **Game ticking:** no physics-step rhythm in the frame times; `com_fixedTic` is 0.
@@ -133,7 +133,9 @@ Lessons:
 - **Thread wake-ups, core sharing, the "VSSetShader wait"** (section 8):
   - wake-up latency is 3.6 us mean;
   - giving the main thread its own core changed nothing (12 interleaved pairs);
-  - the VSSetShader wait was a raw-stack-scan artifact.
+  - the VSSetShader wait was a raw-stack-scan artifact;
+  - GlyphSwap's shared lock on every texture bind: a lock-free per-thread memory of non-glyph views (68 % of lookups skipped the lock)
+    changed nothing (21 interleaved pairs, median +0.004 ms, faster in 10 of 21). Reverted.
 - **The desktop mirror** costs ~0.7 ms per Present, but the user does not want the desktop window thinned by default ("no cut desktop"); thinning stays opt-in via `build/desktop-mirror-every`.
 
 ## 7. Night of 2026-11-20: the probe, the engine lock, a stable asynchronous Present (v1427-v1428)
@@ -227,6 +229,14 @@ by `SetEvent`/`ReleaseSemaphore`. The probe patches only the exe's import table 
 - At these frame times no CPU trim below ~3 ms changes what the headset shows. Auto unlocks only when the 80th percentile of the work
   drops under 8.9 ms.
 
+**NVIDIA VRS at DLAA (v1431, dev command `vrs abab 1000`: coarse shading on in even seconds of the frame clock, off in odd ones).**
+Tested because DLAA blocks the engine's thread ~1.7 ms more than DLSS Quality.
+- Setup: user-like DLAA, spacewarp off, default rings (full rate within 35 % of the render height, 2x2 beyond; 59 % of the tiles
+  coarse); 4 runs, 25 one-second pairs.
+- Frame work: median on-off -0.17 ms (mean -0.28 +- 0.47 s.e.), faster in 15 of 25 (sign test p = 0.42).
+- Engine gap: faster in 9 of 25.
+- No measurable gain. The first run's -1.2 ms (5 pairs) was noise. The DLAA cost is not the scene passes' pixel shading that VRS reduces.
+
 **What is left for the engine: stage 2, statically assessed (`docs/research/ENGINE-OVERLAP-STAGE2.md`).**
 - Submit and wait of the render graph are separate functions (`2c8310` / `2c8440`, back to back at `358202`/`35820a`).
 - The hand-off from the game to the renderer is single-buffered and pointer-based:
@@ -241,6 +251,54 @@ by `SetEvent`/`ReleaseSemaphore`. The probe patches only the exe's import table 
 - The "tail only" variant has nothing to overlap, because Present comes first.
 - Verdict: a multi-day project with crash risk, and up to ~2.4 ms at best. Profile what the pass jobs read from game objects before
   starting.
+- Phase 0 measured it (`docs/ENGINE-OVERLAP-PLAN.md` section 5, v1432 `build/overlap-probe`):
+  - the next game side writes 26 us after the render side returns, so deferring the render graph's wait gains 0.04 ms;
+  - the ~2.7 ms overlap (render graph wait 2.66 ms vs game side 3.26 ms p50) needs the snapshot rewrite.
+  - Phase 0b: the two eyes' graphs run one after the other, both on one render context (first wait 3.70 ms, second 2.58 ms p50), with
+    only 0.11 ms of main-thread work between them. Running them at the same time (a second context, separate targets) is the other deep
+    lever.
 - Half-rate simulation needs the user's go-ahead on 45 Hz movement.
 - Neither brings this PC to 90 real fps at DLAA. Spacewarp's 90 is the frame rate the headset shows.
 
+
+## 9. 2026-11-20 09:10-10:05: the eye graphs are wide; more job workers pay (v1433, proxy knob `build/job-workers`)
+
+**Pass timeline (v1433 `build/pass-timeline` with `build/overlap-probe`, measurement only).**
+- Every job item of the executor `2c5d50` is timestamped on its thread, along with the main thread's graph submits and waits and the
+  render and game sides. Details: `docs/research/ENGINE-PARALLEL-EYES.md` section 10.
+- Eye 0's graph: span 2.66 ms, 4.3 of the 6 job threads inside an item on average, 12 thread-ms of items.
+- Eye 1's graph: span 1.72 ms, 3.5 threads busy, 6.4 thread-ms.
+- The earlier "1-3 of 5 workers busy" (sections 2 and 6, the P0 sampling) was an artifact of suspending ~128 threads one at a time.
+  Use timestamps, not stack sampling, for concurrency.
+- Consequences:
+  - running both eyes' graphs at once can save at most ~1.3 ms, so parallel eyes is shelved;
+  - the graphs are limited by thread count, which makes more workers the cheaper lever.
+
+**The worker count.**
+- `79c60` returns clamp(physical cores - 1, 2, 15): 5 on the 6-core/12-thread 5600X.
+  - The count comes from `de2c0` -> `de070` (GetLogicalProcessorInformation through GetProcAddress).
+  - It is cached in exe .bss `0x2bf8414`.
+  - First call: the render context constructor `2c62d0` (CRT static init), then the scheduler init `7b600`.
+- `jobs_numThreads` only publishes the result (`3fd7d`). The six SMT threads stay unused.
+- Workers are not pinned. Their affinity is `0xfff`, and their ideal processors are spread by Windows.
+- The mod DLL loads seconds too late. Only a statically imported DLL's DllMain runs before the CRT init. That is the dinput8 proxy,
+  which now:
+  - reads `<modhome>\build\job-workers` = N (2..15);
+  - checks the exe (the 14 bytes at `79c60` and SizeOfImage);
+  - writes N into the cache.
+  No knob means no change. The proxy log shows `job-workers knob: N`.
+- The launcher reinstalls `<modhome>\build\dinput8.dll` beside the game at every VR launch, so a proxy change must be copied there.
+
+**A/B** (separate alternating runs, user-like sim: 2496x2688, DLSS Quality, spacewarp off; means of the per-run p50):
+
+| workers | runs | engine gap | first eye graph wait | second | game side |
+|---|---|---|---|---|---|
+| 5 (engine) | 4 | 12.54 ms | 4.15 ms | 2.86 ms | 3.32 ms |
+| 8 | 4 | 11.76 ms | 3.55 ms | 2.62 ms | 3.29 ms |
+| 10 | 2 | 11.70 ms | 3.51 ms | 2.66 ms | 3.32 ms |
+
+- Every 8-worker run beat every 5-worker run on engine gap and first-graph wait; the ranges do not overlap.
+- About -0.8 ms of engine CPU per frame. Most of it is the shadow-heavy first eye graph. The game side does not change.
+- 10 workers adds nothing over 8.
+- Set to 8 in the user's `build\job-workers` for the next headset test (manifest `artifacts/repair-v1433-test-candidate.json`).
+- Not checked in the headset: Virtual Desktop's streamer and the runtime share the same 12 threads. Remove the file if it stutters.

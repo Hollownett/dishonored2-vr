@@ -705,3 +705,67 @@ headset-tested; fast reversing NPC animation (attacks) still cannot be predicted
   background thread fills the cache during the menus. Sim: first gameplay Present 0.3 ms (was 15.2 s), no Present over 0.5 s.
 - Spacewarp sanity (v1429 sim, Always): 412/412 generated frames submitted, 0 late, 0 failures, movers on 818 eyes.
 - Engine-side experiments of the night: `docs/ENGINE-DIG-NOTES.md` section 7.
+
+## 21. The player's body and the UI in generated frames (v1432, 2026-11-20)
+
+User, headset v1431: "spacewarp looks very good now. Two things: player body (especially legs) still has a lot of ghosting and game UI
+has a lot of ghosting."
+
+**The body.** v1431 had no rule for it.
+- Legs past the carried rule's 1.6 m were still world. Looking down, the feet are 1.7-2 m away.
+- Inside a walking leg the carried test fails: the leg overlaps its own previous place, so the previous frame "confirms it still".
+- Parts of a leg therefore stayed behind every generated frame while the rest moved on.
+
+The engine's motion vectors cannot help here. The class-tint captures (`build/spacewarp-tint-classes`: hands green, rest of rig yellow,
+movers cyan, body magenta) show that the player's own body has none: w < 1 px over the legs.
+
+v1432 finds the body by its place:
+- **Where:** a vertical cylinder on the player model's root (`render_player_root`, at the feet; the sim measures the eye 1.69 m above
+  it). Radius 0.35 m, about the collision capsule's, so no wall or crate stands inside. From 6 cm above the root (the floor and a planted
+  foot stay still) up to 30 cm below the eye.
+- **Scenery excluded:** a texel the previous real frame shows still in the world, and not at its play-space-carried place, is scenery.
+  Without this, rubble a few cm above the root slid with the player.
+- **Motion:** body texels take the play space's step (walking, turning: class 3). Where the engine does give a motion vector within
+  8 cm of that step, they take their full extrapolated motion (class 5).
+- **Melee:** a guard's sword swinging beside the player is further off that step and stays a 3 cm-capped mover.
+
+Knob `build/no-spacewarp-body`; capture A/B `spacewarp altbody`. Lab test 18 (6 checks).
+
+**The UI.** Four separate causes:
+1. **HUD panel.** It is a cylinder layer, and generated frames resubmitted only quads, so the HUD vanished every other frame (a 45 Hz
+   flicker). Cylinders now go out too, in the real frame's layer order.
+2. **Anchored quads.** The quads anchored to the head (the comfort vignette) or a hand (the wrist watch) stayed where the real frame put
+   them while the generated image moved. They now move with the generated frame's head step or that hand's grip step.
+3. **Overlays in the eye image.** The crosshair art, reticle dot, dual-wield rings, prompts, markers, note tablet and wheel ring were baked
+   into the warped image and moved as if they were the wall behind them.
+   - Spacewarp now warps the image taken before them (`keep_spacewarp_eye_` runs under the overlays).
+   - Each overlay draw of the real frame is recorded and drawn again on the generated frame at its own pose:
+     - world-anchored art is moved with the locomotion (`O^-1 loco^-1 O` in local space);
+     - head-locked messages move with the head;
+     - the main crosshair stays fixed to the tracked hands (its aim ray is the hand's);
+     - the dual-wield rings take their hand's grip step;
+     - the note tablet and wheel ring are redrawn with the generated view.
+   - Knob `build/spacewarp-baked-overlays` restores v1431.
+4. **The game's own crosshair.** When the mod's crosshair art is not composed for a frame, the game draws its crosshair into the eye image
+   itself, and it is still warped with the scene. In the user's v1431 session the mod composed 9,489 of 9,646 crosshair draws.
+
+**Checks:**
+- Lab: spacewarp_pass_check all pass; hand_clamp, frame_pacer, spacewarp_math, async_present pass.
+- Sim, user's configuration (2496x2688, DLAA, spacewarp Auto, diagnostics):
+  - 528/528 generated frames submitted, 0 late, 0 failures, 0 exceptions;
+  - body rule on every generated eye (1,056), 3,083 overlay redraws, 0 failures.
+- Class-tint captures looking down while walking: the body moves with the play space and the rubble around it stays.
+- The sim's runtime has no cylinder layers, and its save never shows the legs 1.2-2 m away the user describes, so both need the headset.
+
+**Review (2026-11-20, before the headset):**
+- Anchors are kept by the layer's own pointer. `guard_frame_layers` may drop a layer before the generated frame sees the list, so a
+  position in it would point at a neighbour.
+- Without a usable previous real frame (after a gap or a cut), a texel without a motion vector is never body: scenery cannot be told
+  apart then.
+- Kept as designed: the crosshair stays fixed in the tracked space, not in the game world. The aim ray is the hand's, so walking past a
+  wall the hit point stays on the ray.
+
+**Tooling:**
+- A gameplay script console line `d2vr <test command>` runs a mod test command at an exact script time. Captures used to drift several
+  seconds against the runner's `--command` times. Scenario `look_down_walk`.
+- `spacewarp capture` also saves `generated-ui` (with the redrawn overlays) and `next-ui` (the next real frame as submitted).

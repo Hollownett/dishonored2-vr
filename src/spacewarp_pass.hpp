@@ -72,6 +72,7 @@ struct SpacewarpParams {
     bool prev_on{};double hand_far{.8},hand_back{-.12};std::array<double,4> prev_tan{};double prev_m10{},prev_m11{};
     SpacewarpRigid prev_world{};std::array<SpacewarpRigid,2> prev_hand{};std::array<bool,2> prev_hand_on{};std::array<std::array<double,4>,2> grip{};
     bool debug_tint_held{};  // v1418 diagnostics (build/spacewarp-tint-held): pixels whose texel the held-far-part rule gave a hand are tinted magenta
+    bool debug_tint_classes{};  // v1432 diagnostics (build/spacewarp-tint-classes): every texel by class: hands green, rest of rig yellow, movers cyan, body magenta
     // v1419: each hand's weapon body in source camera coordinates: a (xyz), b (xyz), radius (0: none). Everything within it is that hand's,
     // unconditionally, like its palm's reach: the weapon follows the hand the way the hand does (user, headset v1418: "make the weapon
     // interpolate the same way as the arms").
@@ -89,6 +90,18 @@ struct SpacewarpParams {
     // v1429: the colour is resampled with Catmull-Rom (5 bilinear taps) clamped to the 2x2 texels around the point, not bilinear: a generated
     // frame as sharp as the real ones (bilinear at fractional positions softened fine detail every other frame: 45 Hz shimmer). Off: bilinear.
     bool sharp_resample{true};
+    // v1432 (user, headset v1431: "player body (especially legs) still has a lot of ghosting"): the player's own body. v1431 had no rule for
+    // it: legs past the carried rule's 1.6 m (the feet, looking down) were still world, and the carried test itself fails inside a walking
+    // leg (the leg overlaps its own previous place, so the previous frame "confirms it still"): parts of a leg stayed behind every generated
+    // frame while the rest moved on. The engine draws the player's body without motion vectors (sim class tint 2026-11-20: w < 1 px over the
+    // legs), so the body is found by its place instead: inside the player's own vertical cylinder (axis through body_axis, the player model's
+    // root at the feet, source camera coordinates; body_radius about the collision capsule's, so no wall or crate stands inside it), more
+    // than body_floor above the root (the floor and a planted foot stay still) and lower than body_top (below the head), outside both palms'
+    // reach, and not shown as scenery by the previous real frame (still in the world and not carried with the player: rubble above the
+    // root). Such a texel takes the play space's step (walking, turning: class 3), or where the engine does give it a motion vector that
+    // stays within body_cap of that step (its own animation), its full extrapolated motion (class 5). A motion vector further off (a
+    // guard's sword swinging beside the player) leaves it to the other rules (a capped mover).
+    bool body_on{};std::array<double,3> body_up{0,1,0},body_axis{};double body_radius{.35},body_floor{.06},body_top{1.4},body_cap{.08};
 };
 
 class SpacewarpPass {
@@ -116,6 +129,7 @@ private:
         float wa0[4],wb0[4],wa1[4],wb1[4];                    // v1419: the weapon bodies (wa.w: radius, 0 none)
         float PR[3][4],carry[4];                              // v1423: carried-with-the-player test; carry: reach, slack per metre, on
         float misc[4];                                        // v1426: x mover cap (metres)
+        float body_up[4],body[4],body_axis[4];                // v1432: up (w on); x radius, y floor, z top, w cap; the root (source)
     };
     static_assert(sizeof(Constants)%16==0,"constant buffer size");
     struct Grid {Ptr<ID3D11Texture2D> t;Ptr<ID3D11UnorderedAccessView> u;Ptr<ID3D11ShaderResourceView> s;};
@@ -141,6 +155,7 @@ cbuffer Sw : register(b0) {
     float4 wa0; float4 wb0; float4 wa1; float4 wb1;
     float4 PR[3]; float4 carryTerms;
     float4 misc;
+    float4 bodyUp; float4 body; float4 bodyAxis;  // v1432: the player's body cylinder (bodyUp.w on; body: radius, floor, top, cap; the root)
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> motionTex : register(t1);
@@ -160,7 +175,7 @@ RWTexture2D<float4> blendOut : register(u3);
 Texture2D<float4> blurIn : register(t11);      // v1425: BlurBlend's input (one direction per pass)
 Texture2D<float4> dispTex : register(t10);     // v1425: each texel's displacement (Edge's output, the class's motion feathered on one surface)
 RWTexture2D<float4> dispOut : register(u4);
-static const uint EMPTY=0xffffffffu, SKY=0x80000000u, FILLED=0x40000000u, INDEX=0x3fffffffu;
+static const uint EMPTY=0xffffffffu, SKY=0x80000000u, FILLED=0x40000000u, INDEX=0x3fffffffu;  // v1432: class 5 = the player's body
 // v1424 texel word: bits 0-2 the class (0 still, 1 hand 0, 2 hand 1, 3 the rest of the rig, 4 its motion texture, 7 sky), bit 3 held-rule
 // tint, bit 4 rim (a texel within EDGE_R of a nearer surface that moves differently: its colour is part that surface's), bit 5 a moving
 // surface's edge (its colour is part what lies behind it), bits 6-8 that edge's inward direction (k * 45 degrees, texel x right, y down)
@@ -222,6 +237,24 @@ uint ClassOf(uint2 t,float3 P) {
     int heldBy=WeaponHand(P);if(heldBy<0) heldBy=FarHand(P,d0,d1);
     if(heldBy==0) return 1u|TINT;
     if(heldBy==1) return 2u|TINT;
+    // v1432: the player's own body (legs, torso): inside the player's cylinder above the floor (SpacewarpParams::body_on)
+    if(bodyUp.w>0 && d0>palm0.w && d1>palm1.w) {
+        const float3 q=P-bodyAxis.xyz; const float h=dot(q,bodyUp.xyz); const float3 hor=q-h*bodyUp.xyz;
+        if(h>body.y && h<body.z && dot(hor,hor)<body.x*body.x) {
+            if((flags.w&1u)!=0u && terms.z>0 && mo.w>=terms.w) {
+                // a motion vector: its own motion when it stays within body_cap of the play space's step (sim 2026-11-20: a guard's sword
+                // swing in melee range is further off and stays with the other rules below)
+                const float3 rest=flags.z!=0u?Rigid(RR,P)-P:0;
+                const float3 m=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z;
+                if(length(m-rest)<=body.w) return 5u;
+            } else if(flags.z!=0u) {  // none (the engine draws the player's body without one): the play space's step, unless the previous real
+                // frame shows scenery there (sim 2026-11-20: rubble a few cm above the root inside the cylinder slid with the player): confirmed
+                // still in the world and not where the play space's step puts it. A leg overlapping its own previous place matches both: body.
+                // without a usable previous frame (after a gap or a cut) scenery cannot be told apart: no body texel then (review)
+                if(prevFlags.x!=0u && carryTerms.z>0 && !(PrevShows(PW,P,0)==1 && PrevShows(PR,P,carryTerms.y*length(P))!=1)) return 3u;
+            }
+        }
+    }
     // v1423: what the player carries, confirmed by the previous real frame, moves with the rest of the rig
     if(prevFlags.x!=0u && carryTerms.z>0) {
         const float r=length(P);
@@ -239,12 +272,21 @@ uint ClassOf(uint2 t,float3 P) {
     }
     return mo.w>=terms.w && terms.z>0?4u:0u;
 }
+)HLSL"
+R"HLSL(  // (split: MSVC caps one string literal at 16 KB)
 // The texel's displacement in source camera metres, from its class
 float3 DisplaceW(uint w,uint2 t,float3 P) {
     const uint c=w&CLASS;
     if(c==1u) return Rigid(H0,P)-P;
     if(c==2u) return Rigid(H1,P)-P;
     if(c==3u) return Rigid(RR,P)-P;
+    if(c==5u) {  // v1432: the play space's step plus the texel's own motion beyond it (the walk cycle), only that part capped
+        const float3 rest=flags.z!=0u?Rigid(RR,P)-P:0;
+        const float4 mo=motionTex[t];
+        float3 r=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z-rest;
+        const float l=length(r); if(body.w>0 && l>body.w) r*=body.w/l;
+        return rest+r;
+    }
     if(c==4u) {
         const float4 mo=motionTex[t];float3 m=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z;
         const float l=length(m);if(misc.x>0 && l>misc.x) m*=misc.x/l;  // v1426: the mover cap
@@ -290,19 +332,19 @@ float3 DisplaceW(uint w,uint2 t,float3 P) {
     // the surface stretches across the boundary instead of tearing. Only between the player's own parts (the hands, the rest of the rig):
     // a mover on a wall, or a carried body on the floor, keeps its hard boundary. Depth edges keep theirs (the rim rules above).
     float3 Df=D;
-    const bool own=c>=1u && c<=3u;  // hand 0, hand 1, the rest of the rig
+    const bool own=(c>=1u && c<=3u) || c==5u;  // hand 0, hand 1, the rest of the rig, v1432 the body
     if(own) {
         bool seam=false;
         [loop] for(int y=-4;y<=4 && !seam;y+=2) [loop] for(int x=-4;x<=4;x+=2) {
             const int2 n=p+int2(x,y); if(any(n<0) || any(n>=int2(grid.xy))) continue;
-            const uint cn=classTex[n]&CLASS; if(cn==c || cn<1u || cn>3u) continue;
+            const uint cn=classTex[n]&CLASS; if(cn==c || ((cn<1u || cn>3u) && cn!=5u)) continue;
             if(abs(Ahead(depthTex[n])-z)<=.05*z+.005) {seam=true;break;}
         }
         if(seam) {
             float3 sum=0; float wsum=0;
             [loop] for(int y=-4;y<=4;++y) [loop] for(int x=-4;x<=4;++x) {
                 const int2 n=p+int2(x,y); if(any(n<0) || any(n>=int2(grid.xy))) continue;
-                const uint wn=classTex[n]; if((wn&CLASS)<1u || (wn&CLASS)>3u) continue;
+                const uint wn=classTex[n]; if(((wn&CLASS)<1u || (wn&CLASS)>3u) && (wn&CLASS)!=5u) continue;
                 const float dn=depthTex[n]; if(abs(Ahead(dn)-z)>.05*z+.005) continue;
                 const float wt=5-float(max(abs(x),abs(y)));
                 sum+=DisplaceW(wn,uint2(n),SourcePoint(uint2(n)))*wt; wsum+=wt;
@@ -459,7 +501,7 @@ float4 Resolve(Vertex v) : SV_TARGET {
     // ray at the cell's depth, back into the source (minus the texel's displacement), wherever the source sees that point (its depth there
     // agrees within 2 %: also in a filled cell on a magnified surface, if its seed did not move); else the texel's own point (a hole behind something that moved
     // shows its background seed, never the foreground in front of it). Then looked up in the colour image through its own camera.
-    float3 P;bool tint=false,blended=false;float2 inward=0;float3 blend=0;
+    float3 P;bool tint=false,blended=false;float2 inward=0;float3 blend=0;uint tintClass=0u;
     if(idx==EMPTY || (idx&SKY)) {
         P=MulM(Ray(dstTan,uv));
         // v1424: a sky cell whose direction the source shows covered by something that moved (or by a rim) shows its own sky texel instead:
@@ -471,7 +513,7 @@ float4 Resolve(Vertex v) : SV_TARGET {
         }
     } else {
         const uint i=idx&INDEX; const uint2 t=uint2(i%uint(grid.x),i/uint(grid.x)); const float3 Ps=SourcePoint(t); const uint w=wordTex[t];
-        if(step.w!=0u) tint=(w&TINT)!=0u;
+        if(step.w!=0u) {tint=(w&TINT)!=0u;tintClass=w&CLASS;}
         const float3 d=Disp(w,t,Ps),Pk=MulM(Ray(dstTan,uv)*Z(depthIn[cell]))+C.xyz-d;
         // a filled cell takes the back-projected point only from still parts of the source (its seed and the texel it lands on): the
         // place a mover left shows its seed's colour, never the mover seen again. v1424: no cell takes it from a rim texel either.
@@ -492,7 +534,12 @@ float4 Resolve(Vertex v) : SV_TARGET {
     if(blended) rgb=blend;
     else if(misc.y>0) rgb=SharpSample(saturate(s));
     else rgb=colourTex.SampleLevel(linearClamp,saturate(s),0).rgb;
-    if(tint) rgb=lerp(rgb,float3(1,0,1),.6);
+    if(step.w==2u) {  // v1432 diagnostics: the class of the texel each pixel came from
+        if(tintClass==1u || tintClass==2u) rgb=lerp(rgb,float3(0,1,0),.5);
+        else if(tintClass==3u) rgb=lerp(rgb,float3(1,1,0),.5);
+        else if(tintClass==4u) rgb=lerp(rgb,float3(0,1,1),.5);
+        else if(tintClass==5u) rgb=lerp(rgb,float3(1,0,1),.6);
+    } else if(tint) rgb=lerp(rgb,float3(1,0,1),.6);
     if(step.z!=0u) rgb=rgb<=.0031308?rgb*12.92:1.055*pow(max(rgb,1e-8),1/2.4)-.055;  // a UNORM target holding sRGB values
     return float4(rgb,1);
 }
@@ -563,7 +610,10 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     }
     f4(k.C,p.c[0],p.c[1],p.c[2],in.rig?0:p.rig_near);f4(k.palm0,p.palm[0][0],p.palm[0][1],p.palm[0][2],p.palm[0][3]);f4(k.palm1,p.palm[1][0],p.palm[1][1],p.palm[1][2],p.palm[1][3]);
     k.flags[0]=p.hand_on[0];k.flags[1]=p.hand_on[1];k.flags[2]=p.rest_on;k.flags[3]=(in.motion?1u:0u)|(in.rig?2u:0u);
-    f4(k.out,out_width,out_height,1.0/out_width,1.0/out_height);k.step[0]=p.soft_edges?1u:0u;f4(k.misc,p.mover_cap,p.sharp_resample?1:0,0,0);k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_held?1u:0u;
+    f4(k.out,out_width,out_height,1.0/out_width,1.0/out_height);k.step[0]=p.soft_edges?1u:0u;f4(k.misc,p.mover_cap,p.sharp_resample?1:0,0,0);
+    k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_classes?2u:p.debug_tint_held?1u:0u;
+    if(p.body_on) {f4(k.body_up,p.body_up[0],p.body_up[1],p.body_up[2],1);f4(k.body,p.body_radius,p.body_floor,p.body_top,p.body_cap);  // v1432
+                   f4(k.body_axis,p.body_axis[0],p.body_axis[1],p.body_axis[2],0);}
     {const auto& cm=p.colour_camera?p.colour_m:std::array<double,9>{1,0,0,0,1,0,0,0,1};const auto& ct=p.colour_camera?p.colour_tan:p.source_tan;
      for(int i=0;i<3;++i) f4(k.CM[i],cm[i*3],cm[i*3+1],cm[i*3+2],0);f4(k.colour_tan,ct[0],ct[1],ct[2],ct[3]);}
     f4(k.wa0,p.weapon[0][0],p.weapon[0][1],p.weapon[0][2],p.weapon[0][6]);f4(k.wb0,p.weapon[0][3],p.weapon[0][4],p.weapon[0][5],0);  // v1419

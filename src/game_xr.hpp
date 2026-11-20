@@ -6,6 +6,7 @@
 #define XR_USE_GRAPHICS_API_D3D11
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include <functional>
 #include "alternate_eye.hpp"
 #include "frame_pacer.hpp"
 #include "refresh_rate_policy.hpp"
@@ -320,11 +321,19 @@ private:
     // begins and ends it at its next safe point (spacewarp_safe_point: between two of the game's own immediate-context calls, outside
     // present()) or, failing that, at the start of the next present(). Every OpenXR call that touches the game's D3D11 device runs on the
     // render thread again, and no multithread protection is needed.
+    // v1432 (user, headset v1431: "game UI has a lot of ghosting"): the real frame's other layers go out with each generated frame in their own
+    // order. v1431 took only quads: the HUD window (a cylinder layer) vanished every other frame (a 45 Hz flicker), and the quads anchored to
+    // the head (the comfort vignette) or to a hand (the wrist watch) stayed where the real frame put them while the generated image moved on.
+    struct SwLayer {
+        XrCompositionLayerQuad quad{};XrCompositionLayerCylinderKHR cylinder{};bool is_cylinder{};
+        const XrCompositionLayerBaseHeader* header() const noexcept {
+            return is_cylinder?reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cylinder):reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);}
+    };
     struct SwJob {
         enum State {idle,posted,waiting,due,done};
         State state{idle};
         XrTime target{},period{};XrSpace space{};
-        std::array<XrCompositionLayerProjectionView,2> views{};std::vector<XrCompositionLayerQuad> quads;
+        std::array<XrCompositionLayerProjectionView,2> views{};std::vector<SwLayer> layers;
         XrFrameState slot{XR_TYPE_FRAME_STATE};  // the slot the thread's wait opened (due)
         bool submitted{},late_slot{},rejected{},fault{},at_safe_point{};XrResult result{XR_SUCCESS};XrFrameState handed{XR_TYPE_FRAME_STATE};const char* what="";
         std::int64_t waited_ns{},ended_ns{};  // when the thread's wait returned and when the frame was ended
@@ -348,7 +357,32 @@ private:
     std::array<XrPosef,2> sw_layer_pose_{};std::array<XrFovf,2> sw_layer_fov_{};std::array<bool,2> sw_acquired_{};
     bool sw_capture_pending_{};int sw_capture_index_{};std::uint64_t sw_capture_frame_{};  // `spacewarp capture`: waiting for the next real image
     XrCompositionLayerProjection sw_projection_{};std::array<XrCompositionLayerProjectionView,2> sw_views_{};
-    std::vector<XrCompositionLayerQuad> sw_quads_;
+    std::vector<SwLayer> sw_layers_;
+    // v1432: the real frame's anchored layers and what each is attached to (1 the head, 2 + side that hand), by the layer's own pointer:
+    // guard_frame_layers may drop a layer before generate_spacewarp_ sees the list, so a position in it would point at a neighbour (review)
+    std::array<std::pair<const XrCompositionLayerBaseHeader*,std::uint8_t>,16> sw_layer_anchor_{};unsigned sw_layer_anchors_{};
+    void sw_anchor_layer_(const XrCompositionLayerBaseHeader* layer,std::uint8_t anchor) noexcept {
+        if(layer && sw_layer_anchors_<sw_layer_anchor_.size()) sw_layer_anchor_[sw_layer_anchors_++]={layer,anchor};}
+    // v1432: the overlays drawn into each real eye image (reticles, prompts and markers, the note tablet, the wheel ring), kept as draws to
+    // repeat on the generated frame at its own pose. Spacewarp warps the image taken before them (keep_spacewarp_eye_ runs under the
+    // overlays), so no overlay is moved as if it were the wall behind it (v1431: they were, and the UI ghosted).
+    struct SwSteps {SwRigid world,head;std::array<SwRigid,2> hand;};  // local space: a point fixed in the game world, the head, each hand
+    using SwOverlayDraw=std::function<bool(ID3D11Texture2D*,const XrView&,const SwSteps&)>;  // true: drawn
+    std::array<std::vector<SwOverlayDraw>,2> sw_overlays_;int sw_capture_next_ui_=-1;
+    // A point placed at (x, y) NDC and `depth` metres ahead in view `from`, moved by `step` (local space), in view `to` (NDC); none behind it
+    static std::optional<std::array<float,2>> sw_reproject(const XrView& from,float x,float y,float depth,const SwRigid& step,const XrView& to) noexcept {
+        const double d=depth>0?depth:10.;  // unknown: a far point
+        const double l=std::tan(from.fov.angleLeft),r=std::tan(from.fov.angleRight),u=std::tan(from.fov.angleUp),dn=std::tan(from.fov.angleDown);
+        if(!(r>l) || !(u>dn)) return {};
+        const double tx=(x*(r-l)+r+l)/2,ty=(y*(u-dn)+u+dn)/2;
+        const auto q=sw_from_pose(to.pose).inverse().apply(step.apply(sw_from_pose(from.pose).apply({tx*d,ty*d,-d})));
+        if(!(q[2]< -.05)) return {};
+        const double l2=std::tan(to.fov.angleLeft),r2=std::tan(to.fov.angleRight),u2=std::tan(to.fov.angleUp),d2=std::tan(to.fov.angleDown);
+        if(!(r2>l2) || !(u2>d2)) return {};
+        const double nx=(2*q[0]/-q[2]-r2-l2)/(r2-l2),ny=(2*q[1]/-q[2]-u2-d2)/(u2-d2);
+        if(!std::isfinite(nx) || !std::isfinite(ny)) return {};
+        return std::array<float,2>{static_cast<float>(nx),static_cast<float>(ny)};
+    }
     // Plan 1.6: automatic display refresh rate through XR_FB_display_refresh_rate (refresh_rate_policy.hpp), opt-in knob
     // build/auto-refresh-rate. The extension is enabled only with the knob; every change and request is logged to xr-recoveries.log.
     RefreshRatePolicy refresh_;
@@ -2268,6 +2302,9 @@ public:
          <<",\"not_kept_why\":\""<<spacewarp_not_kept_why<<"\",\"captures\":"<<spacewarp_captures_saved
          <<",\"presents\":"<<spacewarp_presents<<",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"gated\":"<<spacewarp_gated
          <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"soft_edges\":"<<(spacewarp_soft_edges?"true":"false")<<",\"mover_eyes\":"<<spacewarp_mover_eyes
+         <<",\"body\":"<<(spacewarp_body?"true":"false")<<",\"body_eyes\":"<<spacewarp_body_eyes<<",\"body_eye_height\":"<<spacewarp_body_eye_height
+         <<",\"body_up_dot\":"<<spacewarp_body_up_dot<<",\"overlays\":"<<(spacewarp_overlays?"true":"false")<<",\"overlay_draws\":"<<spacewarp_overlay_draws
+         <<",\"overlay_failures\":"<<spacewarp_overlay_failures<<",\"layers_moved\":"<<spacewarp_layers_moved<<",\"cylinders\":"<<spacewarp_cylinders
          <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
          <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")
          <<",\"thread_frames\":"<<spacewarp_thread_frames<<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg
@@ -2335,8 +2372,13 @@ public:
     // the pixels it took tinted (spacewarp-tint-held)
     double spacewarp_palm_reach{};bool spacewarp_held_far{true},spacewarp_tint_held{};
     bool spacewarp_soft_edges{true};  // v1424: build/spacewarp-legacy-edges turns the rim / moving-edge handling off
-    std::atomic<int> spacewarp_capture_alt{0};  // v1426: `spacewarp capture`'s generated-alt: 0 the other edge rule, 1 without movers, 2 the other resample
+    std::atomic<int> spacewarp_capture_alt{0};  // v1426: `spacewarp capture`'s generated-alt: 0 the other edge rule, 1 without movers, 2 the other resample, 3 v1432 the other body rule
     bool spacewarp_sharp{true};  // v1429: Catmull-Rom colour resample (build/spacewarp-bilinear: off)
+    bool spacewarp_body{true};  // v1432: the player's body rule (spacewarp_pass.hpp SpacewarpParams::body_on; build/no-spacewarp-body: off)
+    bool spacewarp_overlays{true};bool spacewarp_tint_classes{};  // v1432 diagnostics: build/spacewarp-tint-classes
+    std::optional<Vec3> spacewarp_body_root;  // v1432: the player model's root (world, at the feet), set by dxgi_probe each Present; none: no body rule
+    double spacewarp_body_up_dot{},spacewarp_body_eye_height{};std::uint64_t spacewarp_body_eyes{};  // v1432 status (up agreement, the root's depth)  // v1432: the eye overlays redrawn on generated frames (build/spacewarp-baked-overlays: off, v1431 warped them)
+    std::uint64_t spacewarp_overlay_draws{},spacewarp_overlay_failures{},spacewarp_layers_moved{},spacewarp_cylinders{};
     double spacewarp_play_mismatch_mm{};  // the two eyes' play spaces (camera * view^-1) apart: a check of the camera/view pairing
     const char* spacewarp_skip="";       // why the last real frame got no generated frame (status)
     std::uint64_t spacewarp_not_kept{};const char* spacewarp_not_kept_why="";  // gameplay Presents that could not feed a generated frame, and why
@@ -2828,6 +2870,7 @@ public:
                 sw_capture_pending_=false;
                 if(alternate_frame==sw_capture_frame_+1) {
                     wchar_t n[64];swprintf_s(n,L"sw-capture-%02d-next",sw_capture_index_);afw_capture_save_(sw_colour_[0].Get(),n);
+                    if(spacewarp_overlays) sw_capture_next_ui_=static_cast<int>(sw_capture_index_);  // v1432: and the same frame with its overlays
                     ++sw_capture_index_;++spacewarp_captures_saved;--spacewarp_capture_requested;
                 }
             }
@@ -2892,7 +2935,7 @@ public:
                    (located.viewStateFlags&(XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT))!=(XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT))
                     return skip("views not located");
             }
-            std::array<SwRigid,2> grip_step{};
+            std::array<SwRigid,2> grip_step{};SwRigid sw_head_step0{};  // v1432: eye 0's head step (head-anchored layers)
             for(unsigned side=0;side<2;++side) {
                 std::array<XrSpaceLocation,2> g{};bool ok=hand_spaces_[0][side]!=XR_NULL_HANDLE;
                 for(int k=0;k<2 && ok;++k) {
@@ -2940,6 +2983,7 @@ public:
                 const double mover_share=hist[1].valid && hist[1].frame+1==alternate_frame && display>hist[1].time?
                     std::clamp(static_cast<double>(slot_time-display)/static_cast<double>(display-hist[1].time),0.,1.):0.;
                 const SwRigid head=sw_from_pose(at[1][eye].pose)*sw_from_pose(at[0][eye].pose).inverse();
+                if(eye==0) sw_head_step0=head;
                 const auto motion=spacewarp_eye_motion(S,V,locomotion,head,grip_step);
                 SpacewarpParams p{};
                 const auto tans=[](const XrFovf& f) {return std::array<double,4>{std::tan(f.angleLeft),std::tan(f.angleRight),std::tan(f.angleUp),std::tan(f.angleDown)};};
@@ -2986,7 +3030,17 @@ public:
                 }
                 if(weapon_here) ++spacewarp_weapon_eyes;
                 const auto& prev=sw_prev_[eye];
-                p.debug_tint_held=spacewarp_tint_held;p.soft_edges=spacewarp_soft_edges;p.sharp_resample=spacewarp_sharp;
+                p.debug_tint_held=spacewarp_tint_held;p.debug_tint_classes=spacewarp_tint_classes;p.soft_edges=spacewarp_soft_edges;p.sharp_resample=spacewarp_sharp;
+                // v1432: the player's body, a cylinder on the player model's root (dxgi_probe render_player_root: world, at the feet). Up in
+                // source camera coordinates is the game world's up (+z) seen from S: S's rotation transposed times (0, 0, 1) = its third row.
+                if(spacewarp_body && spacewarp_body_root) {
+                    const auto axis=Si.apply({spacewarp_body_root->x,spacewarp_body_root->y,spacewarp_body_root->z});
+                    const std::array<double,3> up{S.r[6],S.r[7],S.r[8]};
+                    const double eye_height=-(axis[0]*up[0]+axis[1]*up[1]+axis[2]*up[2]);  // the eye (the source origin) above the root
+                    const std::array<double,3> local_up{V.r[3],V.r[4],V.r[5]};
+                    spacewarp_body_up_dot=up[0]*local_up[0]+up[1]*local_up[1]+up[2]*local_up[2];spacewarp_body_eye_height=eye_height;
+                    if(eye_height>.4 && eye_height<2.6) {p.body_on=true;p.body_up=up;p.body_axis=axis;p.body_top=eye_height-.3;++spacewarp_body_eyes;}
+                }
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
                     p.prev_on=true;p.prev_tan=prev.tan;p.prev_m10=prev.m10;p.prev_m11=prev.m11;
                     const auto Pi=prev.S.inverse();p.prev_world=to_pass(Pi*S);
@@ -3038,11 +3092,19 @@ public:
                             auto alt=p;auto alt_in=in;
                             if(spacewarp_capture_alt==1) {alt_in.motion=nullptr;alt.motion_share=0;}  // v1426: the same frame without movers
                             else if(spacewarp_capture_alt==2) alt.sharp_resample=!p.sharp_resample;  // v1429: the other resample
+                            else if(spacewarp_capture_alt==3) alt.body_on=false;  // v1432: without the body rule (the same frame when it did not apply)
                             else alt.soft_edges=!p.soft_edges;
                             if(sw_pass_->run(context_.Get(),alt_in,alt,rtv.Get(),width_,height_)) afw_capture_save_(target,std::wstring(n)+L"generated-alt");
                             drawn=sw_pass_->run(context_.Get(),in,p,rtv.Get(),width_,height_);
                         }
                         sw_capture_pending_=true;sw_capture_frame_=alternate_frame;
+                    }
+                    if(drawn && spacewarp_overlays && !sw_overlays_[eye].empty()) {  // v1432: the real frame's overlays at this frame's pose
+                        XrView gv{XR_TYPE_VIEW};gv.pose=sw_to_pose(head*Vimg);gv.fov=image_fov;
+                        SwSteps steps;steps.world=O.inverse()*locomotion.inverse()*O;steps.head=head;steps.hand=grip_step;
+                        for(auto& draw:sw_overlays_[eye]) {try {if(draw(target,gv,steps)) ++spacewarp_overlay_draws;} catch(...) {++spacewarp_overlay_failures;}}
+                        if(eye==0 && sw_capture_pending_ && sw_capture_frame_==alternate_frame) {
+                            wchar_t n[64];swprintf_s(n,L"sw-capture-%02d-generated-ui",sw_capture_index_);afw_capture_save_(target,n);}
                     }
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
                 sw_acquired_[eye]=true;  // released just before the generated frame's xrEndFrame (submit_spacewarp_)
@@ -3054,9 +3116,20 @@ public:
                 sw_views_[eye].subImage.imageRect.extent={static_cast<int32_t>(width_),static_cast<int32_t>(height_)};
             }
             sw_projection_={XR_TYPE_COMPOSITION_LAYER_PROJECTION};sw_projection_.space=local_;sw_projection_.viewCount=2;sw_projection_.views=sw_views_.data();
-            sw_quads_.clear();
-            for(uint32_t k=0;k<real.layerCount;++k) if(real.layers[k] && real.layers[k]->type==XR_TYPE_COMPOSITION_LAYER_QUAD)
-                sw_quads_.push_back(*reinterpret_cast<const XrCompositionLayerQuad*>(real.layers[k]));  // the same images: their last release
+            sw_layers_.clear();
+            for(uint32_t k=0;k<real.layerCount;++k) {  // v1432: quads and cylinders in their order (the same images: their last release)
+                const auto* h=real.layers[k];if(!h) continue;
+                SwLayer l{};
+                if(h->type==XR_TYPE_COMPOSITION_LAYER_QUAD) l.quad=*reinterpret_cast<const XrCompositionLayerQuad*>(h);
+                else if(h->type==XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR) {l.cylinder=*reinterpret_cast<const XrCompositionLayerCylinderKHR*>(h);l.is_cylinder=true;++spacewarp_cylinders;}
+                else continue;  // the projection is the generated frame's own
+                unsigned anchor=0;for(unsigned a=0;a<sw_layer_anchors_;++a) if(sw_layer_anchor_[a].first==h) {anchor=sw_layer_anchor_[a].second;break;}
+                if(anchor==1u || anchor==2u || anchor==3u) {  // moved as the generated image moves what it is attached to
+                    const SwRigid& step=anchor==1u?sw_head_step0:grip_step[anchor-2u];
+                    XrPosef& pose=l.is_cylinder?l.cylinder.pose:l.quad.pose;pose=sw_to_pose(step*sw_from_pose(pose));++spacewarp_layers_moved;
+                }
+                sw_layers_.push_back(l);
+            }
             sw_target_time_=slot_time;++spacewarp_generated;spacewarp_skip="";
             if(spacewarp_thread && spacewarp_thread_ready_()) {release_spacewarp_images_();post_spacewarp_job_();}  // v1420: its own thread submits it in its slot
             else sw_pending_=true;
@@ -3072,12 +3145,12 @@ public:
         if(!xr_runtime_name.empty() && xr_runtime_name.find("VirtualDesktop")==std::string::npos) {spacewarp_thread_why="runtime";return false;}
         spacewarp_thread_why="";return sw_thread_ok_=true;
     }
-    // v1420: hand the generated frame (sw_views_, sw_quads_, sw_target_time_; its images already released) to the submit thread
+    // v1420: hand the generated frame (sw_views_, sw_layers_, sw_target_time_; its images already released) to the submit thread
     void post_spacewarp_job_() {
         drain_spacewarp_();  // none in flight: present() collects before it generates (a safety net only)
         {std::lock_guard<std::mutex> l(sw_job_mutex_);
          sw_job_=SwJob{};sw_job_.state=SwJob::posted;sw_job_.target=sw_target_time_;sw_job_.period=pacer_.base>0?pacer_.base:frame_.predictedDisplayPeriod;
-         sw_job_.space=local_;sw_job_.views=sw_views_;sw_job_.quads=sw_quads_;
+         sw_job_.space=local_;sw_job_.views=sw_views_;sw_job_.layers=sw_layers_;
          if(!sw_thread_alive_) {
              if(sw_thread_.joinable()) sw_thread_.join();  // a thread that stopped on an error
              sw_quit_=false;sw_thread_alive_=true;sw_thread_=std::thread([this] {spacewarp_thread_main_();});
@@ -3125,7 +3198,7 @@ public:
                 projection.space=job.space;projection.viewCount=2;projection.views=job.views.data();
                 std::array<const XrCompositionLayerBaseHeader*,12> list{};uint32_t n=0;
                 list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
-                for(const auto& q:job.quads) if(n<list.size()) list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);
+                for(const auto& q:job.layers) if(n<list.size()) list[n++]=q.header();
                 XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=job.slot.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
                 end.layerCount=n;end.layers=list.data();
                 job.result=xrEndFrame(session_,&end);job.ended_ns=cpu_time_ns();
@@ -3200,7 +3273,7 @@ public:
         release_spacewarp_images_();  // now: the runtime has the real frame; the generated images become the eyes' last released ones
         std::array<const XrCompositionLayerBaseHeader*,12> list{};uint32_t n=0;
         list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&sw_projection_);
-        for(const auto& q:sw_quads_) if(n<list.size()) list[n++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);
+        for(const auto& q:sw_layers_) if(n<list.size()) list[n++]=q.header();
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=slot.predictedDisplayTime;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.layerCount=n;end.layers=list.data();
         const auto ended=xrEndFrame(session_,&end);frame_open_=false;
@@ -3958,6 +4031,10 @@ public:
                     if(!spyglass_scope_mask_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);spyglass_scope_mask_=std::make_unique<SpyglassScopeMask>(device.Get());}
                     spyglass_scope_mask_->draw(images_[eye].at(index).texture,layers[eye].fov,scope_axis,spyglass_art_probe().art());++spyglass_scope_draws;
                 } catch(const std::exception&) {++spyglass_scope_failures;}
+                // v1432: spacewarp warps this image as it is now, without the overlays below; they are recorded and drawn again on the generated
+                // frame at its own pose (v1431 warped them with the scene behind them: the UI ghosted)
+                sw_overlays_[eye].clear();const bool sw_record=sw_keep_ && spacewarp_overlays;
+                if(sw_record) keep_spacewarp_eye_(eye,images_[eye].at(index).texture,layers[eye]);
                 if(composite_note && !native_note_art_disabled_) try { // v685: a note-art fault disables the note overlay, never the frame
                     if(!note_eye_art_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);note_eye_art_=std::make_unique<NoteEyeArt>(device.Get());}
                     D3D11_TEXTURE2D_DESC art_desc{};world_ui_source_->GetDesc(&art_desc);
@@ -3965,6 +4042,8 @@ public:
                     XrView note_view{XR_TYPE_VIEW};note_view.pose=layers[eye].pose;note_view.fov=layers[eye].fov;
                     note_eye_art_->draw(images_[eye].at(index).texture,world_ui_source_.Get(),format_,
                         {0,top,0,art_desc.Width,top+rows,1},note_view,*note_panel_,note_hands_);++note_eye_draws;
+                    if(sw_record) sw_overlays_[eye].push_back([this,crop=D3D11_BOX{0,top,0,art_desc.Width,top+rows,1},panel=*note_panel_,hands=note_hands_](ID3D11Texture2D* t,const XrView& v,const SwSteps&) {
+                        if(!note_eye_art_ || !world_ui_source_) return false;note_eye_art_->draw(t,world_ui_source_.Get(),format_,crop,v,panel,hands);return true;});
                 } catch(const std::exception& error) {
                     native_note_art_disabled_=true;++native_note_eye_art_failures;
                     if(observe_eye_art_failure) {
@@ -3986,6 +4065,8 @@ public:
                         else if(alternate_frame>1 && hand.current(now_ring,pose_epoch(),reference_epoch(),alternate_frame-1)) {over[side]=hand;++over_count;grace=true;}
                     }
                     note_eye_art_->draw(images_[eye].at(index).texture,world_ui_source_.Get(),format_,{0,top,0,art_desc.Width,top+rows,1},ring_view,ring_panel,over,true);
+                    if(sw_record) sw_overlays_[eye].push_back([this,crop=D3D11_BOX{0,top,0,art_desc.Width,top+rows,1},panel=ring_panel,hands=over](ID3D11Texture2D* t,const XrView& v,const SwSteps&) {
+                        if(!note_eye_art_ || !world_ui_source_) return false;note_eye_art_->draw(t,world_ui_source_.Get(),format_,crop,v,panel,hands,true);return true;});
                     ++wheel_eye_draws;if(over_count)++wheel_eye_occluded;if(grace)++wheel_eye_grace;
                 } catch(const std::exception& error) {
                     wheel_eye_art_disabled_=true;++wheel_eye_failures;
@@ -4026,7 +4107,16 @@ public:
                             const float cw=static_cast<float>(a.crop.right-a.crop.left)*a.scale,ch=static_cast<float>(a.crop.bottom-a.crop.top)*a.scale;
                             const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,a.texture.Get(),a.crop,
                                 {px/w*2.f-1.f,1.f-py/h*2.f,(px+cw)/w*2.f-1.f,1.f-(py+ch)/h*2.f},format_,true,DXGI_FORMAT_UNKNOWN,false,false,true);   // v1387: whitened
-                            if(art_result.drawn) {++eye_reticle_draws;++crosshair_art_draws;game_crosshair=true;}
+                            if(art_result.drawn) {++eye_reticle_draws;++crosshair_art_draws;game_crosshair=true;
+                                if(sw_record) sw_overlays_[eye].push_back([this,a=crosshair_art_,x=reticle->x,y=reticle->y,depth=reticle->depth,from=view](ID3D11Texture2D* t,const XrView& v,const SwSteps&) {
+                                    // v1432: fixed in the tracked space, not in the game world: the aim ray is the hand's, so walking past a wall the hit
+                                    // point stays on the ray (a point fixed in the world would slide with the wall)
+                                    const auto q=sw_reproject(from,x,y,depth,SwRigid{},v);if(!q || !native_eye_art_) return false;
+                                    const float w=static_cast<float>(width_),h=static_cast<float>(height_);
+                                    const float px=((*q)[0]+1.f)*.5f*w-a.anchor_x*a.scale,py=(1.f-(*q)[1])*.5f*h-a.anchor_y*a.scale;
+                                    const float cw=static_cast<float>(a.crop.right-a.crop.left)*a.scale,ch=static_cast<float>(a.crop.bottom-a.crop.top)*a.scale;
+                                    return native_eye_art_->draw(t,a.texture.Get(),a.crop,{px/w*2.f-1.f,1.f-py/h*2.f,(px+cw)/w*2.f-1.f,1.f-(py+ch)/h*2.f},format_,true,DXGI_FORMAT_UNKNOWN,false,false,true).drawn;});
+                            }
                             else {note_eye_art_fault(art_result,"game crosshair");crosshair_art_={};}
                         }
                         if(reticle && !game_crosshair)
@@ -4044,7 +4134,12 @@ public:
                                     const D3D11_BOX crop{0,0,0,32,32,1};
                                     const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,eye_reticle_texture_.Get(),crop,
                                         {(*rect)[0],(*rect)[1],(*rect)[2],(*rect)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM);
-                                    if(art_result.drawn) ++eye_reticle_draws;
+                                    if(art_result.drawn) {++eye_reticle_draws;
+                                        if(sw_record) sw_overlays_[eye].push_back([this,tex=eye_reticle_texture_,x=reticle->x,y=reticle->y,depth=reticle->depth,from=view](ID3D11Texture2D* t,const XrView& v,const SwSteps&) {
+                                            const auto q=sw_reproject(from,x,y,depth,SwRigid{},v);if(!q || !native_eye_art_) return false;  // v1432 (as the crosshair)
+                                            const auto r=eye_reticle_rect((*q)[0],(*q)[1],width_,height_,10.f);
+                                            return r && native_eye_art_->draw(t,tex.Get(),D3D11_BOX{0,0,0,32,32,1},{(*r)[0],(*r)[1],(*r)[2],(*r)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM).drawn;});
+                                    }
                                     else note_eye_art_fault(art_result,"eye reticle"); // the game crosshair child still draws
                                 }
                             }
@@ -4066,7 +4161,13 @@ public:
                             const D3D11_BOX crop{0,0,0,32,32,1};
                             const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,copy_reticle_texture_.Get(),crop,
                                 {(*rect)[0],(*rect)[1],(*rect)[2],(*rect)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM);
-                            if(art_result.drawn) ++copy_reticle_draws;else note_eye_art_fault(art_result,"copy reticle");
+                            if(art_result.drawn) {++copy_reticle_draws;
+                                if(sw_record) sw_overlays_[eye].push_back([this,tex=copy_reticle_texture_,x=ring->x,y=ring->y,depth=ring->depth,from=view,hand](ID3D11Texture2D* t,const XrView& v,const SwSteps& st) {
+                                    const auto q=sw_reproject(from,x,y,depth,st.hand[hand],v);if(!q || !native_eye_art_) return false;  // v1432
+                                    const auto r=eye_reticle_rect((*q)[0],(*q)[1],width_,height_,std::max(10.f,static_cast<float>(width_)*.0045f));
+                                    return r && native_eye_art_->draw(t,tex.Get(),D3D11_BOX{0,0,0,32,32,1},{(*r)[0],(*r)[1],(*r)[2],(*r)[3]},format_,false,DXGI_FORMAT_R8G8B8A8_UNORM).drawn;});
+                            }
+                            else note_eye_art_fault(art_result,"copy reticle");
                         }
                     } catch(...) {
                         // Fail locally. The following prepared frame restores
@@ -4084,7 +4185,14 @@ public:
                         if(rect) {
                             if(ensure_native_eye_art()) {
                                 const auto art_result=native_eye_art_->draw(images_[eye].at(index).texture,art.texture.Get(),art.crop,*rect,format_,art.premultiplied);
-                                if(art_result.drawn) {++native_object_art_draws;++native_object_art_slot_draws[art_slot];native_object_art_masks_[art_slot]|=1u<<eye;}
+                                if(art_result.drawn) {++native_object_art_draws;++native_object_art_slot_draws[art_slot];native_object_art_masks_[art_slot]|=1u<<eye;
+                                    const Vec3 at=locked?*locked:art.point;
+                                    if(sw_record) sw_overlays_[eye].push_back([this,tex=art.texture,crop=art.crop,premultiplied=art.premultiplied,at,head_locked=locked.has_value(),
+                                                                              width=art.width*hud_scale(),aspect](ID3D11Texture2D* t,const XrView& v,const SwSteps& st) {
+                                        const auto q=(head_locked?st.head:st.world).apply({at.x,at.y,at.z});  // v1432: with the head, or fixed in the game world
+                                        const auto r=native_art_rect(v,Vec3{q[0],q[1],q[2]},width,aspect);
+                                        return r && native_eye_art_ && native_eye_art_->draw(t,tex.Get(),crop,*r,format_,premultiplied).drawn;});
+                                }
                                 else {note_eye_art_fault(art_result,"native object art");native_object_art_[art_slot]={};}
                             }
                         }
@@ -4094,7 +4202,9 @@ public:
                 if(composite_note && observe_note_composition)observe_note_composition(eye,images_[eye].at(index).texture,layers[eye],*note_panel_);
                 if(observe_final_eye && world_scene)observe_final_eye(eye,images_[eye].at(index).texture);
                 if(eye==0 && !world_scene) gates.band_ready=menu_band_ready=copy_menu_band(images_[0].at(index).texture);
-                if(sw_keep_) keep_spacewarp_eye_(eye,images_[eye].at(index).texture,layers[eye]);  // the final image, overlays included, and its layer
+                if(sw_keep_ && !spacewarp_overlays) keep_spacewarp_eye_(eye,images_[eye].at(index).texture,layers[eye]);  // v1431: the final image, overlays included
+                if(eye==0 && sw_capture_next_ui_>=0) {  // v1432 `spacewarp capture`: the next real frame as submitted (overlays included)
+                    wchar_t n[64];swprintf_s(n,L"sw-capture-%02d-next-ui",sw_capture_next_ui_);afw_capture_save_(images_[eye].at(index).texture,n);sw_capture_next_ui_=-1;}
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}
                 {SpanClock span(xr_spans,XrSpan::release);checked(xrReleaseSwapchainImage(chains_[eye],&release),"Release game eye");}
             }
@@ -4121,6 +4231,7 @@ public:
             if(!world_scene && menu_band_ready && (hint_panel=hint_layer())) { // the controls page opened from VR Settings shows over the pause menu
                 menu_layers_with_pointer[0]=layer;menu_layers_with_pointer[1]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*hint_panel);
                 end.layerCount=2;end.layers=menu_layers_with_pointer.data();++hint_layers;}
+            sw_layer_anchors_=0;  // v1432
             if(world_scene && !authored_camera) {
                 ModGpuScope layers_scope(context_.Get(),ModSpan::layer_overlays); // task 3b: HUD/wrist/vignette panel updates
                 SpanClock layers_span(xr_spans,XrSpan::overlay_layers);
@@ -4145,12 +4256,14 @@ public:
                         for(unsigned side:{1u,0u}) {
                             wrist_panels[side]=optional_wrist_layer(side);
                             if(wrist_panels[side]) {
-                                menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[side]);++wrist_layers[side];}
+                                menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[side]);++wrist_layers[side];
+                                sw_anchor_layer_(menu_layers_with_pointer[end.layerCount-1],static_cast<std::uint8_t>(2+side));}
                         }
                     } else { // v1013: one watch on the back of the left wrist
                         wrist_panels[0]=optional_wrist_layer(0);
                         if(wrist_panels[0]) {
-                            menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[0]);++wrist_layers[0];}
+                            menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*wrist_panels[0]);++wrist_layers[0];
+                            sw_anchor_layer_(menu_layers_with_pointer[end.layerCount-1],2);}  // v1432: the left wrist
                     }
                 }
                 if((hint_panel=hint_layer())) {
@@ -4163,6 +4276,7 @@ public:
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*dot_panel);
                 if(gameplay && (vignette_panel=vignette_layer())) { // submitted last: the ring sits over the HUD panels too
                     menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*vignette_panel);++vignette_layers;
+                    sw_anchor_layer_(menu_layers_with_pointer[end.layerCount-1],1);  // v1432: head-locked
                 }
                 end.layers=menu_layers_with_pointer.data();
                 overlay_stats.end_frame();
@@ -4171,6 +4285,7 @@ public:
                 // the comfort ring over the projection; the probe keeps its opacity 0 everywhere else.
                 end.layerCount=0;menu_layers_with_pointer[end.layerCount++]=layer;
                 menu_layers_with_pointer[end.layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&*vignette_panel);++vignette_layers;
+                    sw_anchor_layer_(menu_layers_with_pointer[end.layerCount-1],1);  // v1432: head-locked
                 end.layers=menu_layers_with_pointer.data();
                 overlay_stats.end_frame();
             }

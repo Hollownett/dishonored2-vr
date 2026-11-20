@@ -7,6 +7,8 @@
 #include <unknwn.h>
 
 #include <atomic>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <optional>
 #include <string>
@@ -37,6 +39,8 @@ std::wstring g_build_dir;
 std::atomic<ProbeFn> g_stop_probe{nullptr};
 // True from a start trigger (or settle timeout) until that attempt ends, StartProbe included.
 std::atomic<bool> g_attempt_active{false};
+// v1433 build\job-workers result for the log (apply_job_workers_knob, DllMain): 0 no knob, N written, -1 unknown exe, -2 bad value, -3 set.
+int g_job_workers_result = 0;
 
 // ---------------- text and files
 
@@ -496,6 +500,7 @@ void run_worker() {
     open_log(artifacts, L"proxy " + from_utf8(g_marker) + L" " + from_utf8(g_sim_marker) + L" pid=" + num(pid) + L" exe=" + exe + L" modhome=" + home);
 
     append_focus_cvars();
+    if (g_job_workers_result != 0) log_line(L"job-workers knob: " + std::to_wstring(g_job_workers_result) + L" (N = engine workers set; -1 unknown exe, -2 bad value, -3 already set)");
 
     const std::wstring start_trigger = build + L"\\" + kStartTrigger;
     if (DeleteFileW(start_trigger.c_str())) log_line(L"removed stale linux-start");
@@ -683,11 +688,56 @@ extern "C" HRESULT WINAPI proxy_DirectInput8Create(HINSTANCE inst, DWORD version
     return g_real_create(inst, version, riid, out, outer);
 }
 
-// Loader lock: only remember the module and start the worker.
+// v1433 opt-in engine job worker count (docs/research/ENGINE-PARALLEL-EYES.md section 10). <modhome>\build\job-workers holding N
+// (2..15) replaces the engine's worker count, clamp(physical cores - 1, 2, 15) = 5 on a 6-core CPU. The engine caches that count in
+// exe .bss 0x2bf8414 on the first call of exe 0x79c60 (renderer static constructor during CRT init, then the scheduler init 0x7b600);
+// a statically imported DLL's DllMain runs before both, so writing the cache here is the only early-enough point. Exe identity: the 14
+// bytes at 0x79c60 (mov eax,[rip+0x2b7e7aa] -> 0x2bf8414; test; jne) and SizeOfImage. No knob, another exe, or a non-zero cache: no write.
+// Result for the log: 0 no knob, N written, -1 unknown exe, -2 bad value, -3 cache already set.
+void apply_job_workers_knob() noexcept {
+    static constexpr unsigned char expected[14]{0x48, 0x83, 0xec, 0x28, 0x8b, 0x05, 0xaa, 0xe7, 0xb7, 0x02, 0x85, 0xc0, 0x75, 0x48};
+    static constexpr std::uintptr_t count_fn = 0x79c60, cache = 0x2bf8414;
+    try {
+        const std::wstring exe = module_path(nullptr);
+        std::string ini;
+        read_small(parent(exe) + L"\\" + kIniName, ini);
+        std::string text;
+        if (!read_small(mod_home_from_ini(from_utf8(ini)) + L"\\build\\job-workers", text)) return;
+        const auto* base = reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.SizeOfImage < cache + 4 ||
+            std::memcmp(base + count_fn, expected, sizeof expected) != 0) {
+            g_job_workers_result = -1;
+            return;
+        }
+        int n = 0;
+        for (char c : text) {
+            if (c >= '0' && c <= '9') n = n * 10 + (c - '0');
+            else if (n > 0 || (c != ' ' && c != '\r' && c != '\n' && c != '\t')) break;
+            if (n > 99) break;
+        }
+        if (n < 2 || n > 15) {
+            g_job_workers_result = -2;
+            return;
+        }
+        auto* slot = reinterpret_cast<volatile int*>(const_cast<unsigned char*>(base) + cache);
+        if (*slot != 0) {
+            g_job_workers_result = -3;
+            return;
+        }
+        *slot = n;
+        g_job_workers_result = n;
+    } catch (...) {
+    }
+}
+
+// Loader lock: only remember the module, apply the opt-in worker count and start the worker.
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
         g_self = instance;
+        apply_job_workers_knob();
         HANDLE thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
         if (thread != nullptr) CloseHandle(thread);
     }

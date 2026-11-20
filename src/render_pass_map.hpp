@@ -44,6 +44,7 @@
 #include "shadow_share.hpp"
 #include "static_shadow_cache.hpp"
 #include "visibility_stamp.hpp"
+#include "pass_timeline.hpp"
 
 namespace d2vr {
 class RenderPassMap {
@@ -400,6 +401,17 @@ public:
     }
 private:
     static bool __fastcall execute_hook(void* item) {
+        // v1433 pass timeline (src/pass_timeline.hpp): this item's [start, end] on its thread, nesting depth kept per thread.
+        if(pass_timeline::recording.load(std::memory_order_relaxed)) {
+            int pass=-1;void* context{};void* view{};peek_job(item,pass,context,view);
+            const std::uint16_t d=pass_timeline::depth++;const auto t0=pass_timeline::now();
+            const bool r=execute_dispatch(item);
+            pass_timeline::add(pass,view,t0,pass_timeline::now(),d);pass_timeline::depth=d;
+            return r;
+        }
+        return execute_dispatch(item);
+    }
+    static bool execute_dispatch(void* item) {
         const PassObserver observer=pass_observer_.load(std::memory_order_relaxed);
         if(!cpu_timing_.load(std::memory_order_relaxed)) {
             if(!observer) return execute_inner(item);

@@ -291,6 +291,35 @@ int main() {
             d2vr::SpacewarpParams soft=p;soft.sharp_resample=false;const auto blur=run(device.Get(),context.Get(),pass,s,soft);
             check(amp(sharp)>=amp(blur)+15 && amp(sharp)<=200,"sharp resample: fine detail half a texel off keeps more contrast ("+std::to_string(amp(sharp))+" of 200; bilinear "+std::to_string(amp(blur))+"), never past the source");
         }
+        {   // 18. v1432 (user, headset v1431: "player body (especially legs) still has a lot of ghosting"): the player's own body. Looking
+            // straight down (up = +z in the camera), a leg (columns 28..35, rows 20..43, 1 m below the eye) over the floor (1.7 m) moved
+            // 0.15 m right in the world since the last frame (the walk 0.10 m plus its swing); the play space's step to the slot is 0.10 m.
+            // Body rule: 0.10 + (0.15 - 0.10) = 0.15 m = 4.8 texels right. Without it the leg is a mover capped at 3 cm: about 1 texel.
+            const auto leg=[](unsigned x,unsigned y) {return x>=28 && x<=35 && y>=20 && y<=43;};
+            Scene s;s.distance=[leg](unsigned x,unsigned y) {return leg(x,y)?1.f:1.7f;};s.object=leg;
+            s.motion=[leg](unsigned x,unsigned y) {return leg(x,y)?std::array<float,4>{.15f,0,0,10}:std::array<float,4>{0,0,0,0};};
+            d2vr::SpacewarpParams p{};p.motion_share=1;p.rest_on=true;p.rest.t={.10,0,0};p.body_on=true;p.body_up={0,0,1};
+            p.body_axis={0,0,-1.7};p.body_radius=.5;p.body_top=1.4;  // the root on the floor straight below the eye
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            check(img.b(39,30)>128 && img.b(29,30)<64,"body: the walking leg moves with the walk and its swing (5 texels right)");
+            d2vr::SpacewarpParams off=p;off.body_on=false;const auto img0=run(device.Get(),context.Get(),pass,s,off);
+            check(img0.b(29,30)>128 && img0.b(39,30)<64,"without the body rule the leg is a capped mover and stays behind (v1431)");
+            Scene wild=s;wild.motion=[leg](unsigned x,unsigned y) {return leg(x,y)?std::array<float,4>{2.f,0,0,10}:std::array<float,4>{0,0,0,0};};
+            const auto img1=run(device.Get(),context.Get(),pass,wild,p);
+            check(img1.b(29,30)>128 && img1.b(39,30)<64,"body: a 2 m step (a sword swing, a wild vector) is not the body's: a mover capped at 3 cm");
+            // no motion vectors (the engine draws the player's body without them); the previous real frame shows the leg where the play
+            // space's step put it (prev_rest identity) and the world 0.10 m further right (prev_world)
+            Scene floor_only=s;floor_only.motion=[](unsigned,unsigned) {return std::array<float,4>{0,0,0,0};};
+            floor_only.prev_distance=[leg](unsigned x,unsigned y) {return leg(x,y)?1.f:1.7f;};
+            d2vr::SpacewarpParams pp=p;pp.prev_on=true;pp.prev_tan={-1,1,1,-1};pp.prev_m10=0;pp.prev_m11=1;pp.prev_world.t={.10,0,0};pp.carry_on=true;
+            const auto img2=run(device.Get(),context.Get(),pass,floor_only,pp);
+            check(img2.b(31,30)>128 && img2.b(29,30)<64,"body: a leg without a motion vector (the engine's player body) moves with the play space (3 texels)");
+            check(img2.r(12,30)==12*4,"body: the floor (on the root's plane) stays still");
+            Scene no_prev=floor_only;no_prev.prev_distance=nullptr;const auto img2b=run(device.Get(),context.Get(),pass,no_prev,p);
+            check(img2b.b(29,30)>128,"body: without a previous real frame a texel without a motion vector is left alone (scenery cannot be told apart)");
+            d2vr::SpacewarpParams level=p;level.body_up={0,1,0};const auto img3=run(device.Get(),context.Get(),pass,s,level);
+            check(img3.b(29,30)>128,"body: looking level the same texels are 1 m ahead, outside the cylinder: a capped mover again");
+        }
         {   // 13. v1424: the same hand against the sky moves 4 texels right: the sky it uncovers is sky, not the hand looked up again
             const auto hand=[](unsigned x,unsigned y) {return x>=26 && x<34 && y>=26 && y<34;};
             Scene s;s.distance=[hand](unsigned x,unsigned y) {return hand(x,y)?1.f:0.f;};s.object=hand;
