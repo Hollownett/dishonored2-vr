@@ -28,6 +28,19 @@ inline std::atomic<std::uint32_t> spin_main_us{0},spin_other_us{0};
 inline std::atomic<bool> installed{false};
 inline std::int64_t ticks_per_second=1;
 
+// v1444 (SteamVR spacewarp, docs/SPACEWARP-PLAN-2026-11-19.md section 27): where the runtime refuses spacewarp's waiting thread, the
+// generated frame goes out on the main thread at its slot time. The main thread spends the second half of a frame (the game side, no
+// D3D11 call) in these waits, so a main-thread wait that would outlast the due time waits for its object OR the due time
+// (WaitForMultipleObjects with a high-resolution timer: the object is taken exactly as WaitForSingleObject takes it, and index 0 wins a
+// tie), runs `idle_work` at the due time (on the main thread, between two of the engine's own calls) and then waits on for the rest of
+// the timeout. Set by the probe; null = no idle points.
+using LeftFn=std::int64_t(*)() noexcept;  // ns until the pending work is due (<= 0: due now), idle_none: nothing pending
+using WorkFn=void(*)() noexcept;
+inline constexpr std::int64_t idle_none=INT64_MAX;
+inline std::atomic<LeftFn> idle_left{};
+inline std::atomic<WorkFn> idle_work{};
+inline std::atomic<std::uint64_t> idle_runs{},idle_timer_runs{},idle_timed_waits{},idle_fallbacks{};
+
 struct Kind {
     std::atomic<std::uint64_t> waits{},slept{},blocked{},woken{},wake{},spin_hits{},spin{},hist[6]{};
 };
@@ -44,12 +57,46 @@ inline void note_signal(HANDLE h) noexcept {
 inline BOOL WINAPI set_event_hook(HANDLE h) {note_signal(h);return real_set_event.load(std::memory_order_relaxed)(h);}
 inline BOOL WINAPI release_hook(HANDLE h,LONG n,LPLONG previous) {note_signal(h);return real_release.load(std::memory_order_relaxed)(h,n,previous);}
 
+// v1444: on the main thread, before its wait: due work runs now, or the wait also ends at the due time (the work then runs and the wait
+// goes on). true: `result` is the wait's own result (the object was taken or abandoned, or the whole timeout passed); false: the caller
+// waits as usual with `timeout` (reduced by the time already spent here).
+inline bool idle_wait(HANDLE h,DWORD& timeout,DWORD& result) noexcept {
+    const LeftFn left_of=idle_left.load(std::memory_order_acquire);const WorkFn work=idle_work.load(std::memory_order_acquire);
+    if(!left_of || !work) return false;
+    const std::int64_t left=left_of();
+    if(left==idle_none) return false;
+    if(left<=0) {idle_runs.fetch_add(1,std::memory_order_relaxed);work();return false;}
+    if(left>200'000'000) return false;  // more than 200 ms away: not a display slot
+    if(timeout!=INFINITE && static_cast<std::int64_t>(timeout)*1'000'000<=left) return false;  // this wait ends before the work is due
+    static thread_local const HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    if(!timer) return false;
+    LARGE_INTEGER due{};due.QuadPart=-(left/100>0?left/100:1);  // relative, 100 ns units
+    if(!SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)) return false;  // (re)arming also clears a timer that fired unseen
+    const HANDLE handles[2]={h,timer};
+    const std::int64_t t0=now();
+    idle_timed_waits.fetch_add(1,std::memory_order_relaxed);
+    const DWORD r=WaitForMultipleObjects(2,handles,FALSE,timeout);
+    if(r==WAIT_OBJECT_0+1) {  // the due time came first: the work, then the rest of the wait
+        idle_timer_runs.fetch_add(1,std::memory_order_relaxed);idle_runs.fetch_add(1,std::memory_order_relaxed);work();
+        if(timeout!=INFINITE) {const auto spent=static_cast<DWORD>(((now()-t0)*1000)/ticks_per_second);timeout=timeout>spent?timeout-spent:0;}
+        return false;
+    }
+    CancelWaitableTimer(timer);
+    if(r==WAIT_FAILED) {idle_fallbacks.fetch_add(1,std::memory_order_relaxed);return false;}  // the plain wait decides (and reports the error)
+    result=r;return true;  // WAIT_OBJECT_0, WAIT_ABANDONED_0 (= WAIT_ABANDONED) or WAIT_TIMEOUT: what WaitForSingleObject returns
+}
+
 inline DWORD WINAPI wait_hook(HANDLE h,DWORD timeout) {
     const WaitFn wait=real_wait.load(std::memory_order_relaxed);
     if(timeout==0) return wait(h,0);
     const bool main=GetCurrentThreadId()==main_tid.load(std::memory_order_relaxed);
     Kind& k=kinds[main?0:1];
     k.waits.fetch_add(1,std::memory_order_relaxed);
+    if(main) {  // v1444: idle points
+        DWORD result{};
+        if(idle_wait(h,timeout,result)) return result;
+        if(timeout==0) return wait(h,0);
+    }
     const std::uint32_t spin_us=(main?spin_main_us:spin_other_us).load(std::memory_order_relaxed);
     if(spin_us) {
         const std::int64_t t0=now(),deadline=t0+static_cast<std::int64_t>(spin_us)*ticks_per_second/1000000;
@@ -126,6 +173,8 @@ inline bool install(HMODULE exe) noexcept {
 inline std::string json(std::uint64_t frames) {
     std::ostringstream o;o.setf(std::ios::fixed);o.precision(4);
     o<<"{\"installed\":"<<(installed.load()?"true":"false")<<",\"frames\":"<<frames<<",\"spin_main_us\":"<<spin_main_us.load()<<",\"spin_other_us\":"<<spin_other_us.load();
+    o<<",\"idle\":{\"on\":"<<(idle_work.load()?"true":"false")<<",\"runs\":"<<idle_runs.load()<<",\"timer_runs\":"<<idle_timer_runs.load()
+     <<",\"timed_waits\":"<<idle_timed_waits.load()<<",\"fallbacks\":"<<idle_fallbacks.load()<<"}";  // v1444
     const double ms=1000./static_cast<double>(ticks_per_second);
     for(int i=0;i<2;++i) {
         const Kind& k=kinds[i];

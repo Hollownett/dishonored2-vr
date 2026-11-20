@@ -864,3 +864,52 @@ a rejected piece can no longer make part of the watch come and go. Dev command `
 (scenario `watch_walk`). Sims at SteamVR's eye size (2244 x 2352, cluster 418 x 417), forced SteamVR path, watch held: safe-point submit
 on 2,251 compositions, off 2,194, 0 rejects in both (the simulated runtime makes no D3D11 call through the mod's hooks, so the SteamVR
 rejects do not reproduce here). Needs the headset on SteamVR.
+
+## 27. v1444: SteamVR's generated frames from the main thread's waits (2026-11-20)
+
+User (SteamVR + Steam Link, Quest 2, v1443, Spacewarp Always): "SteamVR seems to run much worse than Virtual Desktop ... not holding
+very well". SteamVR debug logging was on.
+- **The mod (session 22:02-22:12, pid 51188).** 20,280 generated frames, 12,664 submitted, **7,616 late (38 %)**: 4,276 `late_wait` (the
+  next Present came within an eighth of a period of the real frame's slot) and 3,340 `late_slot` (SteamVR's wait already gave the real
+  frame's slot). `thread` false (`thread_why` runtime), `inline` false (v1441's opt-in). SteamVR's compositor counted 69.4 presents/s
+  (61.6/s in the session before, which rendered 2636 x 2760 per eye). The Virtual Desktop session right after (22:16-22:20, 2688 x 2880
+  per eye, larger than SteamVR's 2244 x 2352): 7,370 generated, 18 late (0.2 %). The difference is the submit path, not the image size.
+- **Steam Link itself** (driver_vrlink.txt, vrlink_aftm CSVs, vrcompositor.txt; not the mod). Quest 2 decode median 13-15 ms, over the
+  11.1 ms budget on 58-84 % of frames. 424 bad-link events in the session, with ping spikes to 100 ms, and a stream reset at 22:03:50.
+  NVENC stalls of 51-61 ms in the session before. Motion smoothing was really off (0 reprojected).
+- **Why the mod's frames were late.** Without spacewarp's waiting thread (SteamVR's xrWaitFrame queues GPU work on the game's device,
+  section 16), the generated frame could only go out at the next Present, after the game's next frame. v1440's D3D11 safe points rarely
+  came after the slot opened, because the due time often falls in the game side (the engine runs the game side, then the render side,
+  then Present), which makes no D3D11 calls.
+- **Wait points.** In both sides the main thread waits on its job threads in WaitForSingleObject, about 49 times per gameplay frame
+  (docs/ENGINE-DIG-NOTES.md, job_wake v1430). With the inline path on by default again (`build/spacewarp-no-inline` turns it off), the
+  exe's WaitForSingleObject import is hooked once the runtime refuses the thread.
+  - A frame whose next Present comes before the due time still goes out at that Present, as before.
+  - Two more points, both on the render thread before the Present's own frame calls: the start of the Present hook (a frame already
+    due goes out before the hook's own work), and present()'s v840 GPU fence wait (GPU-bound, that wait took most of the hook's 15.6 ms
+    in the first sim, so the due time passed inside it; status `inline_fence_frames`).
+  - A main-thread wait that would outlast the generated frame's due time waits for its object or the due time, whichever comes first.
+    The due time is one period after the real frame's wait. This uses WaitForMultipleObjects with a high-resolution timer, and the object
+    is taken exactly as WaitForSingleObject takes it.
+  - At the due time the probe begins and ends the generated frame on that thread. ContextState::Scope protects the game's pipeline
+    state. XrGraphicsScope makes the hooks ignore SteamVR's own D3D11 calls; v1440's safe points lacked it, which is the likely cause of
+    the watch's 3,196 rejects.
+  - The D3D11 safe points no longer submit the inline frame. VDXR's thread path is unchanged. With `build/async-present` on, no wait
+    point submits while the desktop Present is in flight.
+- Status: `inline_frames`, `inline_late`, `inline_wait_us_max`/`_mean` (SteamVR's xrWaitFrame at the wait point), and
+  `inline_after_us_max`/`_mean` (from the due time to the wait). job_wake `idle` reports runs, timer_runs, timed_waits and fallbacks.
+- **Exit crash.** Both sessions ended with an access violation in nvwgf2umx during process exit.
+  - The SteamVR session crashed in GameXr's static destructor (StaleEyeWarp's queries; the crash observer's fatal dump). The DLL now leaves
+    the XR session's objects alone at process exit (DllMain, reserved != null): the driver and the runtime detach before this DLL.
+  - The VD session crashed inside virtualdesktop-openxr's own DLL detach. That one is not the mod's.
+- Unit test `tests/job_wake_idle_check.cpp` (lab):
+  - the due-time work ran 20.08 ms in, for a 20 ms due time;
+  - when the object comes first, an auto-reset event and a semaphore are each taken once;
+  - short waits are untouched;
+  - WAIT_FAILED falls back to the plain wait.
+- Sims (watch_walk, Spacewarp Always via the scenario, forced SteamVR path, SteamVR's eye size 2244 x 2352):
+  - diagnostics off: v1444 2 late of 2,819 generated (0.07 %) vs **1,340 of 2,541 (53 %)** with `build/spacewarp-no-inline` (v1443's
+    path), 0 failures;
+  - diagnostics on (GPU-bound, before the Present-entry and fence points): 147 frames from job waits, 0.44 ms after the due time on
+    average, the watch composed 2,230 times with 0 rejects and 0 partial, 0 end-frame rejections, 0 exceptions;
+  - the simulated runtime ignores display times, so SteamVR's own slot timing (late_slot) is for the headset.

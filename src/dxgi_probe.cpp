@@ -2875,7 +2875,8 @@ static std::atomic<bool> spacewarp_movers_knob{true};
 static std::atomic<bool> spacewarp_bilinear_knob{false};  // v1429: build/spacewarp-bilinear = the v1428 bilinear colour resample
 static constexpr int spacewarp_legs_lag_default=1;  // v1439: set from the phase measurement
 static std::atomic<int> spacewarp_legs_lag{spacewarp_legs_lag_default};  // v1439: build/spacewarp-legs-lag 0|1 (see the leg history at the spacewarp camera record)
-static bool spacewarp_inline_knob=false,spacewarp_force_inline_knob=false;  // v1441: build/spacewarp-inline (opt-in since v1441), build/spacewarp-force-inline (sim)
+static bool spacewarp_inline_knob=true,spacewarp_force_inline_knob=false;  // v1444: on (build/spacewarp-no-inline: off; v1441-v1443 opt-in), build/spacewarp-force-inline (sim)
+static bool spacewarp_wait_points_tried=false;  // v1444: the main thread's waits were hooked for the inline frame (once per process)
 static std::atomic<bool> spacewarp_no_legs_knob{false},spacewarp_crack2_knob{false},spacewarp_hand_bubble_knob{false};  // v1438: build/no-spacewarp-legs = the body moves rigidly (v1437)
 static std::atomic<bool> spacewarp_no_body_knob{false};  // v1432: build/no-spacewarp-body = no body rule (the player's legs as v1431)
 static std::atomic<bool> spacewarp_baked_overlays_knob{false};static std::atomic<bool> spacewarp_tint_classes_knob{false};  // v1432 diagnostics  // v1432: build/spacewarp-baked-overlays = the eye overlays warped with the scene (v1431)
@@ -3266,8 +3267,9 @@ static std::array<std::array<HandDrawKey,64>,4> gpu_hand_draw_keys{};
 static std::array<unsigned,4> gpu_hand_draw_counts{};
 static thread_local bool xr_graphics_active=false;
 struct XrGraphicsScope {
+    bool was{xr_graphics_active};  // v1444: nesting keeps an outer scope on
     XrGraphicsScope() {xr_graphics_active=true;}
-    ~XrGraphicsScope() {xr_graphics_active=false;}
+    ~XrGraphicsScope() {xr_graphics_active=was;}
 };
 struct GpuCallbackDepth {
     GpuCallbackDepth() {gpu_callback_depth.fetch_add(1,std::memory_order_acq_rel);}
@@ -3350,10 +3352,26 @@ void observe_paired_target_change(ID3D11DeviceContext* context,UINT count,ID3D11
 // its own immediate-context calls (never inside GameXr::present, which refuses), so every OpenXR call touching the game's D3D11 device stays
 // on this thread (plan section 16)
 static void spacewarp_safe_point(ID3D11DeviceContext* context) noexcept {
-    if(!d2vr::GameXr::spacewarp_due.load(std::memory_order_acquire) && !d2vr::GameXr::spacewarp_inline_pending.load(std::memory_order_acquire)) return;  // v1440: inline too
+    if(!d2vr::GameXr::spacewarp_due.load(std::memory_order_acquire)) return;  // v1444: the inline frame goes out from the main thread's waits instead
     if(context!=gpu_game_context.load(std::memory_order_relaxed) || GetCurrentThreadId()!=gpu_render_thread.load(std::memory_order_relaxed)) return;
     static thread_local bool busy=false;if(busy) return;
     busy=true;if(game_xr) game_xr->spacewarp_safe_point();busy=false;
+}
+// v1444 (SteamVR, plan section 27): the inline generated frame goes out from the main thread's own waits (job_wake idle points), at its
+// due time: on the game's render thread, never inside Present (GameXr refuses) or inside a runtime call, and with the hooks told that the
+// runtime's own D3D11 calls are not the game's (XrGraphicsScope; v1440's mid-frame submit lacked it and the watch's composition failed).
+static std::int64_t spacewarp_wait_left() noexcept {
+    if(!d2vr::GameXr::spacewarp_inline_pending.load(std::memory_order_acquire)) return d2vr::job_wake::idle_none;
+    return d2vr::GameXr::spacewarp_inline_due.load(std::memory_order_acquire)-d2vr::GameXr::cpu_time_ns();
+}
+static void spacewarp_wait_point() noexcept {
+    if(!d2vr::GameXr::spacewarp_inline_pending.load(std::memory_order_acquire) || xr_graphics_active) return;
+    if(GetCurrentThreadId()!=gpu_render_thread.load(std::memory_order_relaxed)) return;
+    if(d2vr::AsyncPresent::instance().in_flight()) return;  // build/async-present: the desktop Present still holds the immediate context
+    static thread_local bool busy=false;if(busy) return;
+    busy=true;
+    {XrGraphicsScope graphics_scope;if(game_xr) game_xr->spacewarp_wait_point();}
+    busy=false;
 }
 template<unsigned Binding> void WINAPI viewports_hook(ID3D11DeviceContext* context,UINT count,const D3D11_VIEWPORT* viewports) {
     d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::viewports,_ReturnAddress());
@@ -14301,6 +14319,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
         return gated_present(chain,interval,flags);
     }
     RenderPerfPresentExit perf_present_exit;
+    spacewarp_wait_point();  // v1444: the SteamVR path's generated frame, already due, goes out before this Present's own work (no-op otherwise)
     const auto present_start_ns=d2vr::GameXr::cpu_time_ns();
     struct SplitHookScope {SplitHookScope() {frame_split_in_hook.store(true,std::memory_order_release);} ~SplitHookScope() {frame_split_in_hook.store(false,std::memory_order_release);}} split_hook_scope;
     if(census_on.load(std::memory_order_relaxed) && ps_tracking()) {ps_state.barrier_all();wide_state.barrier_all();} // v992/v997: no shadow survives a Present
@@ -14526,6 +14545,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(spacewarp_knob) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);game_xr->spacewarp_weapon=spacewarp_weapons;}
                             game_xr->spacewarp_body_root=spacewarp_knob && !spacewarp_no_body_knob?render_player_root():std::nullopt;  // v1432: the player's body cylinder
                             game_xr->spacewarp_thread=!spacewarp_no_thread_knob;game_xr->spacewarp_inline=spacewarp_inline_knob;game_xr->spacewarp_force_inline=spacewarp_force_inline_knob;  // v1440
+                            if(!spacewarp_wait_points_tried && spacewarp_knob && game_xr->spacewarp_inline_path()) {  // v1444: the runtime refused the thread
+                                spacewarp_wait_points_tried=true;
+                                d2vr::job_wake::idle_left.store(&spacewarp_wait_left,std::memory_order_release);d2vr::job_wake::idle_work.store(&spacewarp_wait_point,std::memory_order_release);
+                                note_resolution("spacewarp wait points (inline frame from the main thread's waits): %s",d2vr::job_wake::install(GetModuleHandleW(nullptr))?"ok":"FAILED");
+                            }
                             {static std::uint64_t last_generated=0;static UINT64 last_tick=0;const auto generated=game_xr->spacewarp_generated;const auto tick=GetTickCount64();  // v1426
                              if(generated!=last_generated) {last_generated=generated;last_tick=tick;} spacewarp_recent=last_tick && tick-last_tick<1000;}}
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
@@ -18324,7 +18348,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_bilinear_knob=fs::exists(root/L"build"/L"spacewarp-bilinear");   // v1429
                 spacewarp_no_body_knob=fs::exists(root/L"build"/L"no-spacewarp-body");   // v1432
                 spacewarp_no_legs_knob=fs::exists(root/L"build"/L"no-spacewarp-legs");   // v1438
-                spacewarp_inline_knob=fs::exists(root/L"build"/L"spacewarp-inline");spacewarp_force_inline_knob=fs::exists(root/L"build"/L"spacewarp-force-inline");  // v1440
+                spacewarp_inline_knob=!fs::exists(root/L"build"/L"spacewarp-no-inline");spacewarp_force_inline_knob=fs::exists(root/L"build"/L"spacewarp-force-inline");  // v1440 (v1444: on by default)
                 {std::ifstream lagk(root/L"build"/L"spacewarp-legs-lag");int lag=-1;if(lagk>>lag && (lag==0 || lag==1)) spacewarp_legs_lag=lag;else spacewarp_legs_lag=spacewarp_legs_lag_default;}  // v1439
                 spacewarp_crack2_knob=fs::exists(root/L"build"/L"spacewarp-crack2");   // v1438: the v1437 crack reach
                 spacewarp_hand_bubble_knob=fs::exists(root/L"build"/L"spacewarp-hand-bubble");   // v1438: the v1437 hand volumes
@@ -19835,6 +19859,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
 
 BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID reserved) {
     if(reason==DLL_PROCESS_ATTACH) module=instance;
-    else if(reason==DLL_PROCESS_DETACH) crash_observer.note_exit(reserved!=nullptr); // v1041: tells a clean ExitProcess from a crash in native-exception-context-last.txt
+    else if(reason==DLL_PROCESS_DETACH) {
+        crash_observer.note_exit(reserved!=nullptr); // v1041: tells a clean ExitProcess from a crash in native-exception-context-last.txt
+        // v1444: the process is ending (reserved != null). The GPU driver and the OpenXR runtime were loaded after this DLL and are torn down
+        // before it, so releasing the XR session's D3D objects from the static destructor crashed in nvwgf2umx (user's SteamVR session
+        // 2026-11-20 22:12: GameXr::~GameXr -> StaleEyeWarp's queries). Leave them to the process's end.
+        if(reserved!=nullptr) (void)game_xr.release();
+    }
     return TRUE;
 }
