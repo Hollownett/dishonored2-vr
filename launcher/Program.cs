@@ -114,7 +114,7 @@ sealed class MainForm : Form
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
     static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 200% + SMAA - maximum clarity", 11);
-    const string SpacewarpHelp = "When the game cannot hold the headset's frame rate, it runs at half rate and the mod generates every frame in between from the last real one (its depth, your head and controller motion, your walking and turning). Auto switches when a frame takes longer than one display period; Always holds half rate. Needs an FSR or DLSS anti-aliasing mode and Performance mode Off. Turn off Virtual Desktop's Synchronous Spacewarp. Experimental, not yet tested in a headset.";
+    const string SpacewarpHelp = "When the game cannot hold the headset's frame rate, it runs at half rate and the mod generates every frame in between from the last real one (its depth, your head and controller motion, your walking and turning). Auto switches when a frame takes longer than one display period; Always holds half rate. Needs an FSR or DLSS anti-aliasing mode. Only one frame generation runs at a time: with Spacewarp on, performance mode stays off and the launcher switches SteamVR's Motion Smoothing off for Dishonored 2 (put back when Spacewarp is Off). What the PC cannot switch (Virtual Desktop's Synchronous Spacewarp, Meta ASW, NVIDIA Smooth Motion) is listed on Save and at Launch: switch it off yourself. Experimental.";
     const string PerfHelp = "Draws one eye per frame for a higher frame rate. Note: it can show some visual artifacts, mostly around moving hands and objects. On with AFW rebuilds the other eye with PureDark's PDAFWPlugin.dll (your own copy, not included: AFW plugin button below) and needs an FSR or DLSS anti-aliasing mode; without the plugin it uses the built-in warp.";
     const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLSS Quality on NVIDIA RTX with DLSS (DLAA is sharper and slower), FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
     readonly List<Feature> shownFeatures = new();  // the Features page rows, in order (main-settings features have none)
@@ -826,6 +826,13 @@ sealed class MainForm : Form
         Append(log, $"Launching {candidate!.Dll} from {env.Root}", Ui.Teal);
         if (Features.DiagnosticsOn(FeatureBuild))  // plan 1.5: the logging costs frame time and causes hitches
             Append(log, Features.DiagnosticsWarning, Ui.Gold);
+        {   // one frame generation at a time (launcher/FrameGen.cs): with Spacewarp on, the runtime's and the driver's stay off
+            var swOn = File.Exists(env.P("build", "spacewarp"));
+            var (changed, manual) = await Task.Run(() => FrameGen.Prepare(swOn, env.P("build", FrameGen.StateFileName), Env.OpenXrRuntime(), Env.FindGameDir()));
+            foreach (var line in changed) Append(log, line, Ui.Text);
+            if (manual.Count > 0) Append(log, "Spacewarp is on, so no other frame generation may run. Switch these off yourself:", Ui.Gold);
+            foreach (var line in manual) Append(log, "  " + line, Ui.Gold);
+        }
         try
         {
             if (await Probe.Launch(candidate, env.Root, l => Append(log, l), () => env.LiveStatus().gameplay))
@@ -1115,6 +1122,11 @@ sealed class MainForm : Form
                 if (swChoice >= 1) File.WriteAllText(env.P("build", "spacewarp"), swChoice == 2 ? "always" : "");
             }
             if (swChoice >= 1 && merged.TemporalAa is < 2 or > 8) note += " Spacewarp needs an FSR or DLSS anti-aliasing mode; with the current one it does nothing.";
+            {   // one frame generation at a time (launcher/FrameGen.cs)
+                var (changed, manual) = FrameGen.Prepare(swChoice >= 1, env.P("build", FrameGen.StateFileName), Env.OpenXrRuntime(), Env.FindGameDir());
+                foreach (var line in changed) note += " " + line;
+                if (manual.Count > 0) note += " Only one frame generation may run; switch these off yourself: " + string.Join(" ", manual);
+            }
             loadedPerf = perfChoice; loadedSpacewarp = swChoice;
             if (features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf && Features.State(FeatureBuild, features)[pf.Id].On != (perfChoice >= 1))
                 Features.Set(FeatureBuild, pf, perfChoice >= 1);

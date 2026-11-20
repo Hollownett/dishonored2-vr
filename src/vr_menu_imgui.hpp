@@ -43,7 +43,8 @@ inline std::array<VrMenuRow,settings_row_count> vr_menu_rows(const VrSettings& s
     std::string renderer_help="Native stereo renders both eyes every frame. Alternate eye renders one eye per frame and re-projects the other (built-in warp). "
         "AFW (alternate frame warping) rebuilds the other eye from the fresh one (needs PDAFWPlugin.dll next to the game and an FSR or DLSS anti-aliasing mode). "
         "Choose with the stick, then press A to apply: it switches at once, no restart.";
-    if(s.renderer_pending() && !s.renderer_available(s.renderer())) renderer_help+=" Unavailable this session: alternate eye did not start (see the log).";
+    if(s.spacewarp_hold()) renderer_help+=" Spacewarp is on (launcher Settings), so only Native stereo runs: one frame generation at a time. Turn Spacewarp off to use the others.";
+    else if(s.renderer_pending() && !s.renderer_available(s.renderer())) renderer_help+=" Unavailable this session: alternate eye did not start (see the log).";
     if(!s.afw_status().empty() && s.renderer()==2) renderer_help+=" Status: "+s.afw_status()+".";
     return {{
         {"Resolution",scale,(s.requested()-.5)/1.5,"Pixels each eye renders. Higher is sharper but slower; the mod caps it to what the GPU can hold. Now "+size_text+"."},

@@ -73,6 +73,7 @@ class VrSettings {
     int renderer_{};          // the Renderer row's selection: 0 native stereo, 1 alternate eye (built-in warp), 2 AFW (vr_preferences.hpp v12)
     int renderer_applied_{};  // what renders now (and is saved); the selection takes effect only on Apply (A on the row)
     bool renderer_capable_{}; // this session started alternate-capable, so every renderer switches live
+    bool spacewarp_hold_{};   // spacewarp is on, so performance mode did not start (spacewarp_hold)
     std::string afw_status_;  // afw_puredark.hpp Runtime::problem(), shown under the Renderer row
     std::optional<int> effective_temporal_aa_;
     bool dlss_available_{}; // NVIDIA GPU and a usable nvngx_dlss.dll: the DLAA/DLSS Quality rows are offered only then
@@ -237,9 +238,13 @@ public:
     void afw_status(std::string s) {afw_status_=std::move(s);}
     const std::string& afw_status() const noexcept {return afw_status_;}
     // Every switch is live in an alternate-capable session (Native renders both eyes every frame there, as menus already do).
+    // build/spacewarp kept this session in native stereo (one frame generation at a time): the saved choice stays, Native renders.
+    void spacewarp_hold(bool v) noexcept {spacewarp_hold_=v;}
+    bool spacewarp_hold() const noexcept {return spacewarp_hold_;}
     std::wstring renderer_text() const {
         std::wstring t=L"Renderer: ";t+=renderer_name(renderer_);
-        if(renderer_pending()) t+=renderer_available(renderer_)?L" (A: apply)":L" (unavailable this session)";
+        if(spacewarp_hold_ && renderer_!=0) t+=L" (spacewarp is on: Native stereo runs)";
+        else if(renderer_pending()) t+=renderer_available(renderer_)?L" (A: apply)":L" (unavailable this session)";
         return t;
     }
     bool performance_mode() const noexcept {return performance_mode_;}

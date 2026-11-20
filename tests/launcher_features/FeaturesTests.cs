@@ -484,5 +484,6 @@ Check("crosshair_row_moved_to_settings", !list.Any(x => x.Id == "hand-crosshair"
     Check("leftover_no_hand_crosshair_untouched", Has(dc, "no-hand-crosshair"));
 }
 PrefsTests.Run(Check);
+FrameGenTests.Run(Check);  // one frame generation at a time (launcher/FrameGen.cs)
 Console.WriteLine(failures == 0 ? "ALL PASS" : failures + " FAILED");
 return failures == 0 ? 0 : 1;
