@@ -2870,7 +2870,7 @@ static std::atomic<bool> spacewarp_movers_knob{true};
 static std::atomic<bool> spacewarp_bilinear_knob{false};  // v1429: build/spacewarp-bilinear = the v1428 bilinear colour resample
 static constexpr int spacewarp_legs_lag_default=1;  // v1439: set from the phase measurement
 static std::atomic<int> spacewarp_legs_lag{spacewarp_legs_lag_default};  // v1439: build/spacewarp-legs-lag 0|1 (see the leg history at the spacewarp camera record)
-static bool spacewarp_no_inline_knob=false,spacewarp_force_inline_knob=false;  // v1440: build/spacewarp-no-inline, build/spacewarp-force-inline (sim)
+static bool spacewarp_inline_knob=false,spacewarp_force_inline_knob=false;  // v1441: build/spacewarp-inline (opt-in since v1441), build/spacewarp-force-inline (sim)
 static std::atomic<bool> spacewarp_no_legs_knob{false},spacewarp_crack2_knob{false},spacewarp_hand_bubble_knob{false};  // v1438: build/no-spacewarp-legs = the body moves rigidly (v1437)
 static std::atomic<bool> spacewarp_no_body_knob{false};  // v1432: build/no-spacewarp-body = no body rule (the player's legs as v1431)
 static std::atomic<bool> spacewarp_baked_overlays_knob{false};static std::atomic<bool> spacewarp_tint_classes_knob{false};  // v1432 diagnostics  // v1432: build/spacewarp-baked-overlays = the eye overlays warped with the scene (v1431)
@@ -14517,7 +14517,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             game_xr->spacewarp_palm_reach=spacewarp_palm_reach_knob;game_xr->spacewarp_held_far=!spacewarp_no_held_far_knob;game_xr->spacewarp_tint_held=spacewarp_tint_held_knob;game_xr->spacewarp_soft_edges=!spacewarp_legacy_edges_knob;game_xr->spacewarp_sharp=!spacewarp_bilinear_knob;game_xr->spacewarp_body=!spacewarp_no_body_knob;game_xr->spacewarp_overlays=!spacewarp_baked_overlays_knob;game_xr->spacewarp_tint_classes=spacewarp_tint_classes_knob;
                             if(spacewarp_knob) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);game_xr->spacewarp_weapon=spacewarp_weapons;}
                             game_xr->spacewarp_body_root=spacewarp_knob && !spacewarp_no_body_knob?render_player_root():std::nullopt;  // v1432: the player's body cylinder
-                            game_xr->spacewarp_thread=!spacewarp_no_thread_knob;game_xr->spacewarp_inline=!spacewarp_no_inline_knob;game_xr->spacewarp_force_inline=spacewarp_force_inline_knob;  // v1440
+                            game_xr->spacewarp_thread=!spacewarp_no_thread_knob;game_xr->spacewarp_inline=spacewarp_inline_knob;game_xr->spacewarp_force_inline=spacewarp_force_inline_knob;  // v1440
                             {static std::uint64_t last_generated=0;static UINT64 last_tick=0;const auto generated=game_xr->spacewarp_generated;const auto tick=GetTickCount64();  // v1426
                              if(generated!=last_generated) {last_generated=generated;last_tick=tick;} spacewarp_recent=last_tick && tick-last_tick<1000;}}
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
@@ -18337,7 +18337,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_bilinear_knob=fs::exists(root/L"build"/L"spacewarp-bilinear");   // v1429
                 spacewarp_no_body_knob=fs::exists(root/L"build"/L"no-spacewarp-body");   // v1432
                 spacewarp_no_legs_knob=fs::exists(root/L"build"/L"no-spacewarp-legs");   // v1438
-                spacewarp_no_inline_knob=fs::exists(root/L"build"/L"spacewarp-no-inline");spacewarp_force_inline_knob=fs::exists(root/L"build"/L"spacewarp-force-inline");  // v1440
+                spacewarp_inline_knob=fs::exists(root/L"build"/L"spacewarp-inline");spacewarp_force_inline_knob=fs::exists(root/L"build"/L"spacewarp-force-inline");  // v1440
                 {std::ifstream lagk(root/L"build"/L"spacewarp-legs-lag");int lag=-1;if(lagk>>lag && (lag==0 || lag==1)) spacewarp_legs_lag=lag;else spacewarp_legs_lag=spacewarp_legs_lag_default;}  // v1439
                 spacewarp_crack2_knob=fs::exists(root/L"build"/L"spacewarp-crack2");   // v1438: the v1437 crack reach
                 spacewarp_hand_bubble_knob=fs::exists(root/L"build"/L"spacewarp-hand-bubble");   // v1438: the v1437 hand volumes

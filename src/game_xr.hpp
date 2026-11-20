@@ -2345,7 +2345,11 @@ public:
     // frame's slot, begins and ends it at its first safe point after the slot opens (one display period after the real frame's wait),
     // inside an isolated context state (ContextState::Scope), instead of at the next Present (late whenever a game frame runs long).
     // build/spacewarp-no-inline: the v1419 path.
-    bool spacewarp_inline{true},spacewarp_force_inline{},sw_inline_mode_{};std::uint64_t spacewarp_inline_frames{},spacewarp_inline_late{};
+    // v1441 (user, SteamVR on v1440: "the interface on the wrist blinks during frame generation"): OFF by default, opt-in build/spacewarp-inline.
+    // At a safe point SteamVR's own D3D11 calls pass through the mod's hooks in the middle of the mod's HUD capture and wrist-watch
+    // composition (the watch's cluster blits were rejected 3,196 times in that session, 0 on v1438 SteamVR and 0 on VDXR), so parts of the
+    // watch came and went. The narrower late cutoff (below, sw_inline_mode_) stays on for every runtime without the waiting thread.
+    bool spacewarp_inline{false},spacewarp_force_inline{},sw_inline_mode_{};std::uint64_t spacewarp_inline_frames{},spacewarp_inline_late{};
     inline static std::atomic<bool> spacewarp_inline_pending{false};  // a generated frame waits for a safe point (dxgi_probe spacewarp_safe_point)
     const char* spacewarp_thread_why="";bool spacewarp_mt_was{};  // v1420: why the thread is not used; whether the device was protected already
     double spacewarp_cut_m{},spacewarp_cut_deg{};  // v1420 diagnostics: the play-space step of the last locomotion cut
@@ -3197,7 +3201,7 @@ public:
             if(spacewarp_thread && spacewarp_thread_ready_()) {release_spacewarp_images_();post_spacewarp_job_();}  // v1420: its own thread submits it in its slot
             else if(spacewarp_thread && spacewarp_inline && sw_real_wait_ns_ && pacer_.base>0) {  // v1440: at a safe point once the slot opens
                 sw_pending_=true;sw_inline_mode_=true;sw_inline_due_ns_=sw_real_wait_ns_+pacer_.base;spacewarp_inline_pending.store(true,std::memory_order_release);}
-            else sw_pending_=true;
+            else {sw_pending_=true;sw_inline_mode_=spacewarp_thread && !sw_thread_ok_ && sw_thread_checked_;}  // v1441: the narrow cutoff without the thread
         } catch(const XrSessionFault&) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="session fault";
         } catch(...) {release_spacewarp_images_();++spacewarp_failures;spacewarp_skip="exception";}
     }

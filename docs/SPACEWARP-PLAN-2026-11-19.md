@@ -844,3 +844,13 @@ Present, and v1419's cutoff dropped it whenever that Present started later than 
   of 2,848 (2.9 %). Only ~2 % of the frames found a safe point after the slot opened (the second half of a frame is the game side, which
   makes no D3D11 call), so most of the gain is the cutoff. The user's SteamVR frame timing: frames ending inside the dropped window 5.0 %
   with the old cutoff, 0.9 % with the new one. Not headset-tested on SteamVR.
+
+## 25. v1441: the wrist watch blinked on SteamVR (2026-11-20)
+
+User, SteamVR on v1440: "the interface on the wrist blinks during frame generation". The watch's content (the game's HUD cluster,
+composed by dxgi_probe update_wrist_cluster) was rejected 3,196 times against 1,540 updates in that session; 0 on v1438 SteamVR (the same
+418 x 417 cluster texture) and 0 on v1440 over VDXR. Only the v1440 SteamVR session ran the safe-point submit (3,792 frames): at a safe
+point SteamVR's own D3D11 calls pass through the mod's hooks in the middle of the mod's HUD capture and watch composition, which the
+context-state scope does not shield (it protects the game's pipeline state, not the mod's trackers). The safe-point submit is now opt-in
+(`build/spacewarp-inline`); the narrower late cutoff stays on for every runtime without the waiting thread (most of v1440's SteamVR gain:
+cutoff drops 1,722 -> 94). Sim (forced SteamVR path): 1,350 of 1,407 submitted, 0 failures, 0 exceptions.
