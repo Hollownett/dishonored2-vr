@@ -4255,13 +4255,86 @@ bool write_self_aim(std::uintptr_t address,const void* data,std::size_t size) no
     __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
 
-// Diagnostic (knob build/region-cache-stats): read_self's region-cache hits and why lookups missed (native_readable_range.hpp).
+
+// Diagnostic (knob build/compile-census): every call into d3dcompiler_47's compile/reflect/disassemble/preprocess exports in the process
+// (the mod's, the game's, any helper's, by name or ordinal), keyed by export + entry point (compiles) or calling module (the others), so
+// shader work during play instead of once shows by name. Hooks the exports; off by default.
+struct CompileCensusSlot {std::atomic<std::uint64_t> calls{};std::atomic<std::uintptr_t> caller_rva{};char key[48]{};wchar_t module[40]{};std::atomic<int> state{};};
+static std::array<CompileCensusSlot,64> compile_census;static std::atomic<std::uint64_t> compile_census_total{},compile_census_overflow{};
+static bool compile_census_installed{};
+static void compile_census_note(const char* api,const char* entry,std::uintptr_t caller) noexcept {
+    compile_census_total.fetch_add(1,std::memory_order_relaxed);
+    HMODULE module{};wchar_t path[MAX_PATH]{};const wchar_t* base=L"?";
+    if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(caller),&module)) {
+        GetModuleFileNameW(module,path,MAX_PATH);const wchar_t* slash=std::wcsrchr(path,L'\\');base=slash?slash+1:path;
+    }
+    char key[48]{};
+    {char m[24]{};WideCharToMultiByte(CP_UTF8,0,base,-1,m,sizeof m,nullptr,nullptr);
+     _snprintf_s(key,_TRUNCATE,"%s:%s@%s",api,entry?entry:"",m);}
+    for(auto& slot:compile_census) {
+        int st=slot.state.load(std::memory_order_acquire);
+        if(st==0) {
+            int expected=0;
+            if(slot.state.compare_exchange_strong(expected,1)) {
+                std::memcpy(slot.key,key,sizeof key);wcsncpy_s(slot.module,base,_TRUNCATE);
+                slot.caller_rva=module?caller-reinterpret_cast<std::uintptr_t>(module):caller;
+                slot.calls.fetch_add(1,std::memory_order_relaxed);slot.state.store(2,std::memory_order_release);return;
+            }
+            st=slot.state.load(std::memory_order_acquire);
+        }
+        while(st==1) st=slot.state.load(std::memory_order_acquire);
+        if(std::strcmp(slot.key,key)==0) {slot.calls.fetch_add(1,std::memory_order_relaxed);return;}
+    }
+    compile_census_overflow.fetch_add(1,std::memory_order_relaxed);
+}
+using D3DCompileFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,ID3DInclude*,LPCSTR,LPCSTR,UINT,UINT,ID3DBlob**,ID3DBlob**);
+using D3DCompile2Fn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,ID3DInclude*,LPCSTR,LPCSTR,UINT,UINT,UINT,LPCVOID,SIZE_T,ID3DBlob**,ID3DBlob**);
+using D3DReflectFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,REFIID,void**);
+using D3DDisassembleFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,UINT,LPCSTR,ID3DBlob**);
+using D3DPreprocessFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,ID3DInclude*,ID3DBlob**,ID3DBlob**);
+static D3DCompileFn original_d3d_compile{};static D3DCompile2Fn original_d3d_compile2{};static D3DReflectFn original_d3d_reflect{};
+static D3DDisassembleFn original_d3d_disassemble{};static D3DPreprocessFn original_d3d_preprocess{};
+static HRESULT WINAPI d3d_compile_census_hook(LPCVOID a,SIZE_T b,LPCSTR c,const D3D_SHADER_MACRO* d,ID3DInclude* e,LPCSTR entry,LPCSTR g,UINT h,UINT i,ID3DBlob** j,ID3DBlob** k) {
+    compile_census_note("D3DCompile",entry,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_compile(a,b,c,d,e,entry,g,h,i,j,k);}
+static HRESULT WINAPI d3d_compile2_census_hook(LPCVOID a,SIZE_T b,LPCSTR c,const D3D_SHADER_MACRO* d,ID3DInclude* e,LPCSTR entry,LPCSTR g,UINT h,UINT i,UINT j,LPCVOID k,SIZE_T l,ID3DBlob** m,ID3DBlob** n) {
+    compile_census_note("D3DCompile2",entry,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_compile2(a,b,c,d,e,entry,g,h,i,j,k,l,m,n);}
+static HRESULT WINAPI d3d_reflect_census_hook(LPCVOID a,SIZE_T b,REFIID c,void** d) {
+    compile_census_note("D3DReflect",nullptr,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_reflect(a,b,c,d);}
+static HRESULT WINAPI d3d_disassemble_census_hook(LPCVOID a,SIZE_T b,UINT c,LPCSTR d,ID3DBlob** e) {
+    compile_census_note("D3DDisassemble",nullptr,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_disassemble(a,b,c,d,e);}
+static HRESULT WINAPI d3d_preprocess_census_hook(LPCVOID a,SIZE_T b,LPCSTR c,const D3D_SHADER_MACRO* d,ID3DInclude* e,ID3DBlob** f,ID3DBlob** g) {
+    compile_census_note("D3DPreprocess",nullptr,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_preprocess(a,b,c,d,e,f,g);}
+template<class Fn> static void compile_census_hook_export(HMODULE compiler,const char* name,void* detour,Fn& original) noexcept {
+    void* target=reinterpret_cast<void*>(GetProcAddress(compiler,name));
+    if(!target || MH_CreateHook(target,detour,reinterpret_cast<void**>(&original))!=MH_OK) {original=nullptr;return;}
+    if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);original=nullptr;}
+}
+static void install_compile_census() noexcept {
+    if(compile_census_installed) return;
+    const HMODULE compiler=LoadLibraryW(L"d3dcompiler_47.dll");
+    if(!compiler) return;
+    compile_census_installed=true;
+    compile_census_hook_export(compiler,"D3DCompile",reinterpret_cast<void*>(&d3d_compile_census_hook),original_d3d_compile);
+    compile_census_hook_export(compiler,"D3DCompile2",reinterpret_cast<void*>(&d3d_compile2_census_hook),original_d3d_compile2);
+    compile_census_hook_export(compiler,"D3DReflect",reinterpret_cast<void*>(&d3d_reflect_census_hook),original_d3d_reflect);
+    compile_census_hook_export(compiler,"D3DDisassemble",reinterpret_cast<void*>(&d3d_disassemble_census_hook),original_d3d_disassemble);
+    compile_census_hook_export(compiler,"D3DPreprocess",reinterpret_cast<void*>(&d3d_preprocess_census_hook),original_d3d_preprocess);
+}
 static std::string region_cache_json() {
     auto& st=d2vr::region_cache_stats();if(!st.on.load()) return "null";
     std::ostringstream o;o<<"{\"lookups\":"<<st.lookups.load()<<",\"hit_readable\":"<<st.hit_readable.load()<<",\"hit_unreadable\":"<<st.hit_unreadable.load()
         <<",\"miss_empty\":"<<st.miss_empty.load()<<",\"miss_expired\":"<<st.miss_expired.load()<<",\"miss_other_region\":"<<st.miss_other_region.load()
         <<",\"miss_past_end\":"<<st.miss_past_end.load()<<",\"queries\":"<<st.queries.load()<<",\"query_unreadable\":"<<st.query_unreadable.load()<<"}";
     return o.str();
+}
+static std::string compile_census_json() {
+    if(!compile_census_installed) return "null";
+    std::ostringstream o;o<<"{\"total\":"<<compile_census_total.load()<<",\"overflow\":"<<compile_census_overflow.load()<<",\"entries\":[";
+    bool first=true;
+    for(auto& slot:compile_census) if(slot.state.load()==2) {
+        o<<(first?"":",")<<"{\"key\":"<<std::quoted(slot.key)<<",\"calls\":"<<slot.calls.load()<<",\"caller_rva\":"<<slot.caller_rva.load()<<"}";first=false;
+    }
+    return o.str()+"]}";
 }
 // Called on the native Present thread alongside XR retirement.
 void restore_audio_session() noexcept {
@@ -15879,7 +15952,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_cached_output_size\":[" << cached_dimensions[0] << ',' << cached_dimensions[1] << ']'
                                      << ",\"cached_output_reapplies\":" << cached_output_reapplies.load()
                                      << ",\"cached_output_deferred\":" << cached_output_deferred.load()
-                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
+                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"compile_census\":" << compile_census_json() << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << (async_present_requested?",\"async_present\":"+d2vr::AsyncPresent::instance().json()+",\"game_side_hooked\":"+(game_side_hooked.load()?std::string("true"):std::string("false")):std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
@@ -18628,6 +18701,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             if(target!=hook_target || !read_self(reinterpret_cast<std::uintptr_t>(target),current.data(),current.size()) || current!=disabled_target_bytes)
                 throw std::runtime_error("Present code changed since the prior diagnostic; restart the game");
         }
+        if(fs::exists(root/L"build"/L"compile-census")) install_compile_census(); // diagnostic: who compiles shaders during play
         d2vr::BodylessMotionGuard::install(image_base,&read_self);   // v1296/v1297: no motion switch on a bodyless physics system (crash 0xcaf005)
         if(controller_requested) native_pad_focus.install(image_base,&read_self);
         if(paired_requested) {
@@ -19809,7 +19883,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"cached_output_written\":" << (cached_output_written?"true":"false")
                << ",\"cached_output_restored\":" << (cached_output_restored.load()?"true":"false")
                << ",\"requested_native_output\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
-               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
+               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"compile_census\":" << compile_census_json() << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << (async_present_requested?",\"async_present\":"+d2vr::AsyncPresent::instance().json()+",\"game_side_hooked\":"+(game_side_hooked.load()?std::string("true"):std::string("false")):std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
