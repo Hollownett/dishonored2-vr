@@ -2876,7 +2876,6 @@ static std::atomic<bool> spacewarp_bilinear_knob{false};  // v1429: build/spacew
 static constexpr int spacewarp_legs_lag_default=1;  // v1439: set from the phase measurement
 static std::atomic<int> spacewarp_legs_lag{spacewarp_legs_lag_default};  // v1439: build/spacewarp-legs-lag 0|1 (see the leg history at the spacewarp camera record)
 static bool spacewarp_inline_knob=true,spacewarp_force_inline_knob=false;  // v1444: on (build/spacewarp-no-inline: off; v1441-v1443 opt-in), build/spacewarp-force-inline (sim)
-static bool spacewarp_wait_points_tried=false;  // v1444: the main thread's waits were hooked for the inline frame (once per process)
 static std::atomic<bool> spacewarp_no_legs_knob{false},spacewarp_crack2_knob{false},spacewarp_hand_bubble_knob{false};  // v1438: build/no-spacewarp-legs = the body moves rigidly (v1437)
 static std::atomic<bool> spacewarp_no_body_knob{false};  // v1432: build/no-spacewarp-body = no body rule (the player's legs as v1431)
 static std::atomic<bool> spacewarp_baked_overlays_knob{false};static std::atomic<bool> spacewarp_tint_classes_knob{false};  // v1432 diagnostics  // v1432: build/spacewarp-baked-overlays = the eye overlays warped with the scene (v1431)
@@ -3357,13 +3356,10 @@ static void spacewarp_safe_point(ID3D11DeviceContext* context) noexcept {
     static thread_local bool busy=false;if(busy) return;
     busy=true;if(game_xr) game_xr->spacewarp_safe_point();busy=false;
 }
-// v1444 (SteamVR, plan section 27): the inline generated frame goes out from the main thread's own waits (job_wake idle points), at its
-// due time: on the game's render thread, never inside Present (GameXr refuses) or inside a runtime call, and with the hooks told that the
-// runtime's own D3D11 calls are not the game's (XrGraphicsScope; v1440's mid-frame submit lacked it and the watch's composition failed).
-static std::int64_t spacewarp_wait_left() noexcept {
-    if(!d2vr::GameXr::spacewarp_inline_pending.load(std::memory_order_acquire)) return d2vr::job_wake::idle_none;
-    return d2vr::GameXr::spacewarp_inline_due.load(std::memory_order_acquire)-d2vr::GameXr::cpu_time_ns();
-}
+// v1444/v1445 (SteamVR, plan section 27): the inline generated frame, once due, goes out at the start of the Present hook (and from
+// present()'s GPU fence wait): on the game's render thread, never inside a runtime call, with the hooks told that the runtime's own D3D11
+// calls are not the game's (XrGraphicsScope). Present time is where every runtime call of the mod has always run; v1444's calls from
+// the main thread's job waits deadlocked against the engine's render-graph workers (v1445 removed them).
 static void spacewarp_wait_point() noexcept {
     if(!d2vr::GameXr::spacewarp_inline_pending.load(std::memory_order_acquire) || xr_graphics_active) return;
     if(GetCurrentThreadId()!=gpu_render_thread.load(std::memory_order_relaxed)) return;
@@ -14545,11 +14541,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(spacewarp_knob) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);game_xr->spacewarp_weapon=spacewarp_weapons;}
                             game_xr->spacewarp_body_root=spacewarp_knob && !spacewarp_no_body_knob?render_player_root():std::nullopt;  // v1432: the player's body cylinder
                             game_xr->spacewarp_thread=!spacewarp_no_thread_knob;game_xr->spacewarp_inline=spacewarp_inline_knob;game_xr->spacewarp_force_inline=spacewarp_force_inline_knob;  // v1440
-                            if(!spacewarp_wait_points_tried && spacewarp_knob && game_xr->spacewarp_inline_path()) {  // v1444: the runtime refused the thread
-                                spacewarp_wait_points_tried=true;
-                                d2vr::job_wake::idle_left.store(&spacewarp_wait_left,std::memory_order_release);d2vr::job_wake::idle_work.store(&spacewarp_wait_point,std::memory_order_release);
-                                note_resolution("spacewarp wait points (inline frame from the main thread's waits): %s",d2vr::job_wake::install(GetModuleHandleW(nullptr))?"ok":"FAILED");
-                            }
+                            // v1445: NO submit from the main thread's job waits. v1444 did (job_wake idle points) and froze the user's game twice on
+                            // SteamVR (2026-11-20 23:45 and 23:50): the main thread sat in SteamVR's xrEndFrame -> d3d11 -> nvwgf2umx while an engine
+                            // render-graph worker waited on d3d11's lock (render-side waits overlap the workers' immediate-context use:
+                            // docs/ENGINE-DIG-NOTES.md section 7). Only the Present-time points remain (the hook's start, present()'s fence wait).
                             {static std::uint64_t last_generated=0;static UINT64 last_tick=0;const auto generated=game_xr->spacewarp_generated;const auto tick=GetTickCount64();  // v1426
                              if(generated!=last_generated) {last_generated=generated;last_tick=tick;} spacewarp_recent=last_tick && tick-last_tick<1000;}}
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present

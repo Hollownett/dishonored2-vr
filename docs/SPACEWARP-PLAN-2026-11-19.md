@@ -913,3 +913,21 @@ very well". SteamVR debug logging was on.
   - diagnostics on (GPU-bound, before the Present-entry and fence points): 147 frames from job waits, 0.44 ms after the due time on
     average, the watch composed 2,230 times with 0 rejects and 0 partial, 0 end-frame rejections, 0 exceptions;
   - the simulated runtime ignores display times, so SteamVR's own slot timing (late_slot) is for the headset.
+
+## 28. v1445: the job-wait points froze the game; Present-time points only (2026-11-20)
+
+The user's first two SteamVR sessions on v1444 (Always) froze about 3 s into gameplay (23:45 and 23:50).
+- **Stacks** (tools/dump_stacks.py, D:\d2vr-artifacts\hang-v1444): the main thread was in `submit_spacewarp_` -> SteamVR's xrEndFrame
+  (vrclient) -> d3d11 -> nvwgf2umx, waiting. An engine render-graph worker (start 7a1e1/a0095 -> 2c85cb -> 2c6086) waited on d3d11's
+  lock. The wait points sent the frame from render-side job waits, and there the render-graph workers use the immediate context
+  (ExecuteCommandList, ENGINE-DIG-NOTES section 7). That makes a lock cycle of the v1421 kind. The simulator cannot show it, because its
+  runtime makes no D3D11 call.
+- **Before the freeze**, the timing worked: 141 generated, 134 sent from job waits, 6 late (4 %), against v1443's 38 %. SteamVR's wait
+  at those points blocked for up to 9.2 ms, and SteamVR accepted frames up to 13 ms after the due time.
+- Mitigation for the user: `build/spacewarp-no-inline`, which gives v1443's path.
+- **v1445**: no submit from job waits. The job_wake idle mechanism stays in the code, unused, with a warning. The inline frame goes out
+  only at Present time, where the mod's runtime calls have always run: the start of the Present hook (if already due) and present()'s
+  GPU fence wait.
+- A real mid-frame point would need a window where no other thread uses the immediate context, such as the game side, where none does.
+  Even there the engine's background ExecuteCommandList runs under its own spinlock. The due time usually falls in the render side, so
+  game-side points come too early. This is not pursued without the user's go-ahead.

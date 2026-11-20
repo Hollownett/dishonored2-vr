@@ -34,6 +34,9 @@ inline std::int64_t ticks_per_second=1;
 // (WaitForMultipleObjects with a high-resolution timer: the object is taken exactly as WaitForSingleObject takes it, and index 0 wins a
 // tie), runs `idle_work` at the due time (on the main thread, between two of the engine's own calls) and then waits on for the rest of
 // the timeout. Set by the probe; null = no idle points.
+// v1445: NOT used for spacewarp any more. Runtime calls made from these waits deadlocked the game twice on SteamVR: in render-side waits
+// the engine's render-graph workers use the immediate context (docs/ENGINE-DIG-NOTES.md section 7). Never hand idle_work anything that
+// touches the game's D3D11 device unless the wait is proven to be one where no other thread uses the immediate context.
 using LeftFn=std::int64_t(*)() noexcept;  // ns until the pending work is due (<= 0: due now), idle_none: nothing pending
 using WorkFn=void(*)() noexcept;
 inline constexpr std::int64_t idle_none=INT64_MAX;

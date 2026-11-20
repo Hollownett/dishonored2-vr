@@ -2369,6 +2369,10 @@ public:
     // (docs/ENGINE-DIG-NOTES.md). A main-thread wait that would outlast the due time waits for its object or the due time, and the probe
     // submits at the due time with its hooks told that SteamVR's D3D11 calls are not the game's (XrGraphicsScope, which v1440's safe
     // point lacked: the likely cause of the watch's rejects). A frame whose Present comes before the due time goes out there, as before.
+    // v1445: the job-wait points are gone. They froze the user's game twice on SteamVR (main thread in SteamVR's xrEndFrame -> d3d11 ->
+    // driver, an engine render-graph worker waiting on d3d11's lock: render-side waits overlap the workers' immediate-context use). The
+    // frame goes out only at Present time, where all of the mod's runtime calls have always run: the start of the Present hook (already
+    // due) and present()'s GPU fence wait (due while the GPU finishes the last submit).
     bool spacewarp_inline{true},spacewarp_force_inline{},sw_inline_mode_{};std::uint64_t spacewarp_inline_frames{},spacewarp_inline_late{};
     inline static std::atomic<bool> spacewarp_inline_pending{false};  // a generated frame waits for its due time (dxgi_probe spacewarp_wait_point)
     inline static std::atomic<std::int64_t> spacewarp_inline_due{0};  // v1444: that time (cpu_time_ns), read by the main thread's waits
@@ -2386,7 +2390,7 @@ public:
     std::uint64_t spacewarp_safe_frames{},spacewarp_fallback_frames{},spacewarp_due_us_last{},spacewarp_due_us_max{};
     // v1422: called by the probe's immediate-context hooks on the game's render thread, between two of the game's own calls
     void spacewarp_safe_point() noexcept {if(!sw_in_present_) submit_due_spacewarp_(false);}  // v1444: the inline frame no longer goes out here
-    // v1444: called by the probe from the main thread's waits (job_wake idle points), on the game's render thread, inside an XrGraphicsScope
+    // v1444: called by the probe on the game's render thread inside an XrGraphicsScope (v1445: only at the start of the Present hook)
     void spacewarp_wait_point() noexcept {if(!sw_in_present_) submit_inline_spacewarp_();}
     std::int64_t sw_real_wait_ns_{},sw_inline_due_ns_{},sw_handed_wait_ns_{};std::string sw_inline_fault_;
     // v1440: the pending generated frame, at a safe point once its slot is open (spacewarp_inline)
