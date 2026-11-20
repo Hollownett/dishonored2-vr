@@ -72,7 +72,13 @@ public static class FrameGenTests
         var st72 = Path.Combine(dir, "status72.json"); File.WriteAllText(st72, "{\"simulated_vr\":false,\"pacer\":{\"k\":2,\"base_ms\":13.8889}}");
         var stSim = Path.Combine(dir, "statusSim.json"); File.WriteAllText(stSim, "{\"simulated_vr\":true,\"pacer\":{\"base_ms\":11.1111}}");
         check("framegen_last_refresh_hz", FrameGen.LastRefreshHz(st72) == 72.0 && FrameGen.LastRefreshHz(stSim) == null && FrameGen.LastRefreshHz(Path.Combine(dir, "none.json")) == null);
-        check("framegen_notice_90hz", FrameGen.NoticeText.Contains("Set the headset to 90 Hz") && FrameGen.NoticeText.Contains("45 fps at 90 Hz"));
+        // v1440: the Settings form's rules (Spacewarp vs performance mode; Spacewarp's anti-aliasing)
+        check("framegen_spacewarp_aa_modes", Enumerable.Range(2, 7).All(FrameGen.SpacewarpAa) && !new[] { 0, 1, 9, 10, 11 }.Any(FrameGen.SpacewarpAa));
+        check("framegen_spacewarp_default_aa", FrameGen.SpacewarpDefaultAa(true, false) == 8 && FrameGen.SpacewarpDefaultAa(false, true) == 5 && FrameGen.SpacewarpDefaultAa(false, false) == 2);
+        check("framegen_exclusive_spacewarp_wins", FrameGen.Exclusive(1, 1, perfChanged: false) is (0, 1, var n1) && n1.StartsWith("Performance mode turned off"));
+        check("framegen_exclusive_perf_wins", FrameGen.Exclusive(2, 2, perfChanged: true) is (2, 0, var n2) && n2.StartsWith("Spacewarp turned off"));
+        check("framegen_exclusive_quiet", FrameGen.Exclusive(0, 2, false) == (0, 2, "") && FrameGen.Exclusive(1, 0, true) == (1, 0, ""));
+        check("framegen_notice_90hz",FrameGen.NoticeText.Contains("Set the headset to 90 Hz") && FrameGen.NoticeText.Contains("45 fps at 90 Hz"));
         check("framegen_notice_text", FrameGen.NoticeText.Contains("Synchronous Spacewarp to Disabled") && FrameGen.NoticeText.Contains("FSR or DLSS") && FrameGen.NoticeText.Contains("\n\n"));
 
         // NVIDIA Smooth Motion: a read of the real driver profile where there is one (no driver: null); it must never throw

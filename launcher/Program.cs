@@ -114,8 +114,8 @@ sealed class MainForm : Form
     static readonly (string text, object val) AaSmaa = ("SMAA - edge anti-aliasing", 9);
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
     static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 200% + SMAA - maximum clarity", 11);
-    const string SpacewarpHelp = "When the game cannot hold the headset's frame rate, it runs at half rate and the mod generates every frame in between from the last real one (its depth, your head and controller motion, your walking and turning). Auto switches when a frame takes longer than one display period; Always holds half rate. On by default (Auto). Set the headset to 90 Hz: Spacewarp renders every second frame, so the game needs 45 fps at 90 Hz (60 at 120 Hz; 72 Hz leaves longer gaps). Works only with an FSR or DLSS anti-aliasing mode. Only one frame generation runs at a time: with Spacewarp on, performance mode stays off and the launcher switches SteamVR's Motion Smoothing off for Dishonored 2 (put back when Spacewarp is Off). Switch the rest off yourself: Virtual Desktop's Synchronous Spacewarp (headset app > Settings > Streaming), Meta ASW, NVIDIA Smooth Motion, Lossless Scaling. Setup checks, Save and Launch list them.";
-    const string PerfHelp = "Draws one eye per frame for a higher frame rate. Note: it can show some visual artifacts, mostly around moving hands and objects. On with AFW rebuilds the other eye with PureDark's PDAFWPlugin.dll (your own copy, not included: AFW plugin button below) and needs an FSR or DLSS anti-aliasing mode; without the plugin it uses the built-in warp.";
+    const string SpacewarpHelp = "When the game cannot hold the headset's frame rate, it runs at half rate and the mod generates every frame in between from the last real one (its depth, your head and controller motion, your walking and turning). Auto switches when a frame takes longer than one display period; Always holds half rate. On by default (Auto). Set the headset to 90 Hz: Spacewarp renders every second frame, so the game needs 45 fps at 90 Hz (60 at 120 Hz; 72 Hz leaves longer gaps). Works only with an FSR or DLSS anti-aliasing mode. Only one frame generation runs at a time: with Spacewarp on, performance mode stays off and the launcher switches SteamVR's Motion Smoothing off for Dishonored 2 (put back when Spacewarp is Off). Switch the rest off yourself: Virtual Desktop's Synchronous Spacewarp (headset app > Settings > Streaming), Meta ASW, NVIDIA Smooth Motion, Lossless Scaling. Setup checks, Save and Launch list them. Not together with performance mode: turning Spacewarp on turns performance mode off, and while it is on the anti-aliasing list offers only FSR and DLSS.";
+    const string PerfHelp = "Draws one eye per frame for a higher frame rate. Note: it can show some visual artifacts, mostly around moving hands and objects. On with AFW rebuilds the other eye with PureDark's PDAFWPlugin.dll (your own copy, not included: AFW plugin button below) and needs an FSR or DLSS anti-aliasing mode; without the plugin it uses the built-in warp. Not together with Spacewarp: turning performance mode on turns Spacewarp off.";
     const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLSS Quality on NVIDIA RTX with DLSS (DLAA is sharper and slower), FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
     readonly List<Feature> shownFeatures = new();  // the Features page rows, in order (main-settings features have none)
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
@@ -179,6 +179,7 @@ sealed class MainForm : Form
         options.Rows.AddRange(new object[] { "DISPLAY", res, aa, perf, spacewarp, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth, "CUTSCENES", recenter, cutscenes });
         options.Selected = 1;
         options.SelectionChanged += () => pages[1].Invalidate(new Rectangle(0, options.Bottom, pages[1].Width, pages[1].Height - options.Bottom));
+        options.ValueChanged += OnOptionValueChanged;  // v1440: Spacewarp vs performance mode, Spacewarp's anti-aliasing
         save.Click += (_, _) => SaveSettings(); reload.Click += (_, _) => LoadSettings();
         try
         {
@@ -473,12 +474,19 @@ sealed class MainForm : Form
     {
         var current = aa.Items.Count > 0 ? aa.Items[aa.Index].Val : 2;
         var offered = DlssProvider.Available(env.Root);
+        // v1440 (user: "spacewarp should block non FSR and DLSS antialiasing"): while Spacewarp is on, only the modes it can use
+        var swOnly = spacewarp != null && spacewarp.Items.Count > 0 && Val<int>(spacewarp) >= 1;
         aa.Items.Clear();
-        foreach (var (t, v) in AaBase) aa.Items.Add(new Item(t, v));
+        foreach (var (t, v) in AaBase) if (!swOnly || FrameGen.SpacewarpAa((int)v)) aa.Items.Add(new Item(t, v));
         if (offered) foreach (var (t, v) in AaDlss) aa.Items.Add(new Item(t, v));
-        aa.Items.Add(new Item(AaSmaa.text, AaSmaa.val)); // v963: SMAA is a listed AA mode, not only an edge toggle
-        aa.Items.Add(new Item(AaSmaaSsaa.text, AaSmaaSsaa.val)); // v973: one-click MSAA-equivalent supersample + SMAA
-        aa.Items.Add(new Item(AaSmaaSsaa150.text, AaSmaaSsaa150.val)); // v975: more samples for thin distant geometry
+        if (!swOnly)
+        {
+            aa.Items.Add(new Item(AaSmaa.text, AaSmaa.val)); // v963: SMAA is a listed AA mode, not only an edge toggle
+            aa.Items.Add(new Item(AaSmaaSsaa.text, AaSmaaSsaa.val)); // v973: one-click MSAA-equivalent supersample + SMAA
+            aa.Items.Add(new Item(AaSmaaSsaa150.text, AaSmaaSsaa150.val)); // v975: more samples for thin distant geometry
+        }
+        if (swOnly && !(current is int c && FrameGen.SpacewarpAa(c)))
+            current = FrameGen.SpacewarpDefaultAa(offered, Prefs.Fsr4Supported(env.P("artifacts", "aa-gpu-caps.txt")));
         aaHelpBase = offered ? AaHelp + " " + DlssProvider.Attribution : AaHelp; // the attribution the DLSS licence asks for, where the modes are offered
         RefreshAaNote();
         Select(aa, current, $"Mode {current}");
@@ -943,7 +951,7 @@ sealed class MainForm : Form
     void PaintSettings(Graphics g)
     {
         var p = pages[1]; var o = showFeatures ? null : options.Current;
-        if (!showFeatures) aa.Help = Prefs.AaHelpFor(aaHelpBase, Val<int>(perf) >= 1);  // follows the Performance mode choice at once
+        if (!showFeatures) aa.Help = AaHelpNow();  // follows the Performance mode and Spacewarp choices at once
         if (showFeatures) { PaintSettingsMsg(g); return; }
         var plate = new Rectangle(0, options.Bottom + S(12), p.Width, S(84));
         Ui.Image(g, Ui.Art["menu_background"], Rectangle.Inflate(plate, S(30), S(26)), .95f);
@@ -981,11 +989,37 @@ sealed class MainForm : Form
 
     string aaHelpBase = AaHelp;
 
-    /// <summary>The Anti-aliasing help carries the performance-mode note while that feature row is on (performance mode retains the selected AA).</summary>
+    /// <summary>The Anti-aliasing help carries the performance-mode note while that feature row is on (performance mode retains the selected AA),
+    /// and v1440 the Spacewarp note while Spacewarp is on (only FSR and DLSS offered).</summary>
     void RefreshAaNote()
     {
-        aa.Help = Prefs.AaHelpFor(aaHelpBase, perf != null && Val<int>(perf) >= 1);
+        aa.Help = AaHelpNow();
         options.Invalidate();
+    }
+    string AaHelpNow() => Prefs.AaHelpFor(aaHelpBase, perf != null && perf.Items.Count > 0 && Val<int>(perf) >= 1) +
+        (spacewarp != null && spacewarp.Items.Count > 0 && Val<int>(spacewarp) >= 1 ? " Spacewarp is on, so only FSR and DLSS modes are offered: turn Spacewarp off for Off, Game TAA, SMAA or SSAA." : "");
+
+    /// <summary>v1440: a row the user changed. Spacewarp and performance mode: the one changed wins and the other goes Off; the
+    /// anti-aliasing list follows Spacewarp.</summary>
+    void OnOptionValueChanged(Option o)
+    {
+        if (o != spacewarp && o != perf) return;
+        var note = EnforceSpacewarpRules(o == perf);
+        if (note != "") SetSettingsMsg(note + " Save to apply.", Ui.Gold);
+    }
+
+    /// <summary>v1440: performance mode Off while Spacewarp is on (or the reverse when perfChanged), and the anti-aliasing modes Spacewarp can
+    /// use. Returns what changed in the form ("" nothing).</summary>
+    string EnforceSpacewarpRules(bool perfChanged)
+    {
+        var (p, s, note) = FrameGen.Exclusive(Val<int>(perf), Val<int>(spacewarp), perfChanged);
+        if (p != Val<int>(perf)) Select(perf, p, "");
+        if (s != Val<int>(spacewarp)) Select(spacewarp, s, "");
+        var before = Val<int>(aa);
+        RefreshDlssChoices();
+        if (Val<int>(aa) != before) note = (note + $" Anti-aliasing set to {aa.Items[aa.Index].Text}: Spacewarp works only with FSR or DLSS.").Trim();
+        RefreshAaNote();
+        return note;
     }
 
     /// <summary>Reads the knob files into the check rows (no writes).</summary>
@@ -1010,6 +1044,9 @@ sealed class MainForm : Form
                 string text = ""; try { if (File.Exists(file)) text = File.ReadAllText(file).Trim(); } catch (IOException) { }
                 Select(spacewarp, !File.Exists(file) ? 0 : text == "always" ? 2 : 1, "");
                 loadedSpacewarp = Val<int>(spacewarp);
+                // v1440: the saved state with both on (hand-made knobs, an older launcher) or a mode Spacewarp cannot use: Spacewarp wins in
+                // the form (as the mod does since v1437); Save writes it
+                if (EnforceSpacewarpRules(false) is { Length: > 0 } fixedNote) SetSettingsMsg((settingsMsg + " " + fixedNote + " Save to keep it.").Trim(), Ui.Gold);
             }
             RefreshAaNote();
             if (showFeatures) SetSettingsMsg("Each switch is saved at once. It applies the next time VR starts.", Ui.Dim);

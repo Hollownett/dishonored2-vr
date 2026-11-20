@@ -231,6 +231,23 @@ public static class FrameGen
         return (name, aaOk, detail, fix);
     }
 
+    /// <summary>v1440 (user: "user should not be able to select both spacewarp and performance mode + spacewarp should block non FSR and
+    /// DLSS antialiasing"): the Settings form's anti-aliasing modes Spacewarp can use (the launcher's display values: FSR 3 2-4, FSR 4 5-6,
+    /// DLAA 7, DLSS Quality 8; not Off 0, Game TAA 1, SMAA 9, SSAA 10/11).</summary>
+    public static bool SpacewarpAa(int displayAa) => displayAa is >= 2 and <= 8;
+
+    /// <summary>v1440: the mode the form switches to when Spacewarp is turned on with another one (the GPU's default, Prefs.DefaultAa).</summary>
+    public static int SpacewarpDefaultAa(bool dlss, bool fsr4) => dlss ? 8 : fsr4 ? 5 : 2;
+
+    /// <summary>v1440: Spacewarp and performance mode never both on. The row the user just changed wins (perfChanged: Performance mode);
+    /// returns both values and a note for the form ("" when nothing changed).</summary>
+    public static (int perf, int spacewarp, string note) Exclusive(int perf, int spacewarp, bool perfChanged)
+    {
+        if (perf < 1 || spacewarp < 1) return (perf, spacewarp, "");
+        return perfChanged ? (perf, 0, "Spacewarp turned off: it does not run with performance mode.")
+                           : (0, spacewarp, "Performance mode turned off: it does not run with Spacewarp.");
+    }
+
     /// <summary>v1439: why 90 Hz, and where each runtime sets it.</summary>
     public const string RefreshAdvice =
         "Set the headset to 90 Hz: Spacewarp renders every second frame, so the game needs 45 fps at 90 Hz (60 at 120 Hz; 72 Hz leaves " +

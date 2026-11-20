@@ -486,6 +486,7 @@ sealed class OptionList : ArtControl
     public readonly List<object> Rows = new();  // string = section heading, Option = setting
     public int Selected = -1;
     public event Action? SelectionChanged;
+    public event Action<Option>? ValueChanged;  // v1440: the user changed a row's value (keys, arrows, slider)
     int hover = -1; bool drag;
     int scroll;  // pixels the rows are moved up when they do not all fit (mouse wheel, or the selection moving out of view)
 
@@ -535,6 +536,7 @@ sealed class OptionList : ArtControl
     {
         if (!o.Move(dir, page)) return;
         Invalidate(); AccessibleDescription = $"{o.Name}: {ValueText(o)}";
+        ValueChanged?.Invoke(o);
     }
     static string ValueText(Option o) => o.IsSlider ? o.Format(o.Value) : o.Items.Count > 0 ? o.Items[o.Index].Text : "";
 
@@ -576,7 +578,7 @@ sealed class OptionList : ArtControl
     {
         int v = o.Min + (int)Math.Round((double)(x - t.X) / Math.Max(1, t.Width) * (o.Max - o.Min));
         v = Math.Clamp(v, o.Min, o.Max);
-        if (v != o.Value) { o.Value = v; Invalidate(); }
+        if (v != o.Value) { o.Value = v; Invalidate(); ValueChanged?.Invoke(o); }
     }
     protected override void OnMouseMove(MouseEventArgs e)
     {
