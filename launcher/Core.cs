@@ -166,7 +166,7 @@ public sealed class Env
             try { if (File.Exists(SettingsFile)) aa = Prefs.Load(SettingsFile).TemporalAa; } catch (Exception) { }
             bool always = false;
             try { always = sw && File.ReadAllText(swFile).Trim() == "always"; } catch (Exception) { }
-            var (name, ok, detail, fix) = FrameGen.SpacewarpCheck(sw, always, aa, rt);
+            var (name, ok, detail, fix) = FrameGen.SpacewarpCheck(sw, always, aa, rt, FrameGen.LastRefreshHz(P("artifacts", "xr-live-status.json")));
             l.Add(new(name, ok, detail, fix));
         }
         return l;

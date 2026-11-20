@@ -59,11 +59,20 @@ public static class FrameGenTests
         // v1439: the Setup check row (spacewarp on by default; red, never blocking, only with an anti-aliasing mode it cannot use)
         var vdRt = @"C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json";
         var c1 = FrameGen.SpacewarpCheck(true, false, 8, vdRt);
-        check("framegen_check_vd_auto_ok", c1.ok && c1.detail == "Spacewarp Auto" && c1.fix.StartsWith("Virtual Desktop: set Synchronous Spacewarp to Disabled") && c1.fix.Contains("FSR or DLSS"));
+        check("framegen_check_vd_auto_ok", c1.ok && c1.detail == "Spacewarp Auto" && c1.fix.Contains("Virtual Desktop: set Synchronous Spacewarp to Disabled") && c1.fix.StartsWith("Set the headset to 90 Hz") && c1.fix.Contains("FSR or DLSS"));
         var c2 = FrameGen.SpacewarpCheck(true, true, 9, null);
         check("framegen_check_smaa_red", !c2.ok && c2.detail.StartsWith("Spacewarp Always") && c2.fix.StartsWith("Choose an FSR or DLSS"));
         check("framegen_check_unsaved_aa_ok", FrameGen.SpacewarpCheck(true, false, null, null).ok);
         check("framegen_check_off", FrameGen.SpacewarpCheck(false, false, 1, vdRt) is { ok: true, detail: "Spacewarp off" });
+        // v1439: 90 Hz is recommended (Spacewarp renders every second frame); the last real session's refresh rate from the mod's status
+        var c72 = FrameGen.SpacewarpCheck(true, false, 8, vdRt, 72);
+        check("framegen_check_72hz_advice", c72.ok && c72.detail.Contains("last session 72 Hz, 90 Hz recommended") && c72.fix.StartsWith("Your last VR session ran at 72 Hz. Set the headset to 90 Hz"));
+        var c90 = FrameGen.SpacewarpCheck(true, false, 8, vdRt, 90);
+        check("framegen_check_90hz_quiet", c90.detail == "Spacewarp Auto" && c90.fix.StartsWith("Set the headset to 90 Hz"));
+        var st72 = Path.Combine(dir, "status72.json"); File.WriteAllText(st72, "{\"simulated_vr\":false,\"pacer\":{\"k\":2,\"base_ms\":13.8889}}");
+        var stSim = Path.Combine(dir, "statusSim.json"); File.WriteAllText(stSim, "{\"simulated_vr\":true,\"pacer\":{\"base_ms\":11.1111}}");
+        check("framegen_last_refresh_hz", FrameGen.LastRefreshHz(st72) == 72.0 && FrameGen.LastRefreshHz(stSim) == null && FrameGen.LastRefreshHz(Path.Combine(dir, "none.json")) == null);
+        check("framegen_notice_90hz", FrameGen.NoticeText.Contains("Set the headset to 90 Hz") && FrameGen.NoticeText.Contains("45 fps at 90 Hz"));
         check("framegen_notice_text", FrameGen.NoticeText.Contains("Synchronous Spacewarp to Disabled") && FrameGen.NoticeText.Contains("FSR or DLSS") && FrameGen.NoticeText.Contains("\n\n"));
 
         // NVIDIA Smooth Motion: a read of the real driver profile where there is one (no driver: null); it must never throw

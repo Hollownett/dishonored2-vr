@@ -6,6 +6,10 @@
   itself. It uses each real frame's depth, your head and controller motion, your walking and turning, and your hands, weapons,
   held objects, arms and legs. The crosshair, prompts, markers and the HUD are drawn again at the right place in every frame.
 - On by default (Auto). The launcher's Settings page has Spacewarp Off / Auto / Always (half rate).
+- **Set your headset to 90 Hz.** Spacewarp renders every second frame, so the game needs 45 fps at 90 Hz. At 120 Hz it would
+  need 60, and 72 Hz leaves longer gaps to fill. Virtual Desktop: Settings > Streaming > Frame rate. Meta Link: Meta Quest
+  Link app > Devices > Graphics Preferences > Refresh rate. SteamVR: Settings > Video > Refresh rate. The launcher tells you
+  when your last session ran at another rate.
 - **Only one frame generation may run at a time.** With Spacewarp on, switch these off yourself:
   - Virtual Desktop: Synchronous Spacewarp → Disabled (headset app > Settings > Streaming).
   - Meta Link: Asynchronous Spacewarp off (Oculus Debug Tool).

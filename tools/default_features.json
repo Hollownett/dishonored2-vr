@@ -273,7 +273,7 @@
    "file": "spacewarp",
    "kind": "enable",
    "label": "Spacewarp: generate every second frame when the game cannot hold the headset's rate",
-   "help": "When a frame takes longer than one display period, the game switches to half rate and the mod generates each frame in between from the last real one, using its depth, your head and controller motion, your walking and turning, and your arms and legs. That halves the game's CPU work per displayed frame. On by default (Auto). Only one frame generation may run: turn off Virtual Desktop's Synchronous Spacewarp (headset app > Settings > Streaming), Meta ASW, NVIDIA Smooth Motion and Lossless Scaling; the launcher switches SteamVR's Motion Smoothing off for Dishonored 2 itself. Works only with an FSR or DLSS anti-aliasing mode, and not in performance mode.",
+   "help": "When a frame takes longer than one display period, the game switches to half rate and the mod generates each frame in between from the last real one, using its depth, your head and controller motion, your walking and turning, and your arms and legs. That halves the game's CPU work per displayed frame. On by default (Auto). Set the headset to 90 Hz: Spacewarp renders every second frame, so the game needs 45 fps at 90 Hz (60 at 120 Hz; 72 Hz leaves longer gaps to fill). Only one frame generation may run: turn off Virtual Desktop's Synchronous Spacewarp (headset app > Settings > Streaming), Meta ASW, NVIDIA Smooth Motion and Lossless Scaling; the launcher switches SteamVR's Motion Smoothing off for Dishonored 2 itself. Works only with an FSR or DLSS anti-aliasing mode, and not in performance mode.",
    "default": true,
    "requires_dll_knob": "spacewarp",
    "main_settings": true

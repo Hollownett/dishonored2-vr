@@ -209,19 +209,49 @@ public static class FrameGen
     /// <summary>v1439: the main page's Setup check row for frame generation (user 2026-11-20: spacewarp on by default for all players, with
     /// a notice to turn the other frame generation off and that it works only with FSR or DLSS anti-aliasing). spacewarp: build\spacewarp
     /// present; always: its text "always"; aa: the saved anti-aliasing mode (null: none saved yet, the GPU's FSR/DLSS default applies);
-    /// runtime: the active OpenXR runtime's manifest path. Not ok (red, never blocking) only when spacewarp is on with a mode it cannot use.</summary>
-    public static (string name, bool ok, string detail, string fix) SpacewarpCheck(bool spacewarp, bool always, int? aa, string? runtime)
+    /// runtime: the active OpenXR runtime's manifest path; lastHz: the headset refresh rate of the last real VR session (LastRefreshHz), null
+    /// when unknown. Not ok (red, never blocking) only when spacewarp is on with a mode it cannot use.
+    /// v1439 (user 2026-11-20: "notify people that 90 Hz is recommended for spacewarp because it renders half frames"): the game renders
+    /// every second frame, so it needs 45 fps at 90 Hz, 60 at 120 Hz (rarely reachable) and only 36 at 72 Hz (longer gaps to fill).</summary>
+    public static (string name, bool ok, string detail, string fix) SpacewarpCheck(bool spacewarp, bool always, int? aa, string? runtime, double? lastHz = null)
     {
         const string name = "Frame generation";
         if (!spacewarp) return (name, true, "Spacewarp off", "Turn Spacewarp on (Settings page) to keep the headset at its full frame rate when the game cannot.");
         var aaOk = aa is null or (>= 2 and <= 8);
         var rt = runtime ?? "";
         var vd = rt.Contains("vdxr", StringComparison.OrdinalIgnoreCase) || rt.Contains("VirtualDesktop", StringComparison.OrdinalIgnoreCase) || rt.Contains("Virtual Desktop", StringComparison.OrdinalIgnoreCase);
-        var fix = (vd ? "Virtual Desktop: set Synchronous Spacewarp to Disabled (headset app > Settings > Streaming). " : "") +
+        var off90 = lastHz is double hz && Math.Abs(hz - 90) > 2;
+        var fix = (off90 ? $"Your last VR session ran at {lastHz:0} Hz. " : "") + RefreshAdvice + " " +
+                  (vd ? "Virtual Desktop: set Synchronous Spacewarp to Disabled (headset app > Settings > Streaming). " : "") +
                   "Only one frame generation may run: also keep Virtual Desktop's SSW, Meta ASW, NVIDIA Smooth Motion and Lossless Scaling off " +
                   "(the launcher turns SteamVR's Motion Smoothing off for Dishonored 2 itself). Spacewarp works only with an FSR or DLSS anti-aliasing mode.";
         if (!aaOk) fix = "Choose an FSR or DLSS anti-aliasing mode on the Settings page: with the current one Spacewarp does nothing. " + fix;
-        return (name, aaOk, (always ? "Spacewarp Always (half rate)" : "Spacewarp Auto") + (aaOk ? "" : ": needs FSR or DLSS anti-aliasing"), fix);
+        var detail = (always ? "Spacewarp Always (half rate)" : "Spacewarp Auto") + (aaOk ? "" : ": needs FSR or DLSS anti-aliasing") +
+                     (off90 ? $"; last session {lastHz:0} Hz, 90 Hz recommended" : "");
+        return (name, aaOk, detail, fix);
+    }
+
+    /// <summary>v1439: why 90 Hz, and where each runtime sets it.</summary>
+    public const string RefreshAdvice =
+        "Set the headset to 90 Hz: Spacewarp renders every second frame, so the game needs 45 fps at 90 Hz (60 at 120 Hz; 72 Hz leaves " +
+        "longer gaps to fill). Virtual Desktop: Settings > Streaming > Frame rate. Meta Link: Meta Quest Link app > Devices > Graphics " +
+        "Preferences > Refresh rate. SteamVR: Settings > Video > Refresh rate.";
+
+    /// <summary>v1439: the headset refresh rate of the last real VR session (the mod's xr-live-status.json: pacer.base_ms, the display
+    /// period; a simulated session does not count). Null when unknown.</summary>
+    public static double? LastRefreshHz(string statusFile)
+    {
+        try
+        {
+            if (!File.Exists(statusFile)) return null;
+            using var doc = JsonDocument.Parse(File.ReadAllText(statusFile));
+            var r = doc.RootElement;
+            if (r.TryGetProperty("simulated_vr", out var sim) && sim.ValueKind == JsonValueKind.True) return null;
+            if (!r.TryGetProperty("pacer", out var pacer) || !pacer.TryGetProperty("base_ms", out var b) || b.ValueKind != JsonValueKind.Number) return null;
+            var ms = b.GetDouble();
+            return ms > 4 && ms < 40 ? Math.Round(1000 / ms, 1) : null;
+        }
+        catch (Exception) { return null; }
     }
 
     /// <summary>v1439: the one-time notice when Spacewarp is on and the player has not seen it yet (marker build\launcher-spacewarp-notice).</summary>
@@ -230,6 +260,11 @@ public static class FrameGen
         "Spacewarp is on.\n\n" +
         "When the game cannot hold the headset's frame rate, the mod renders every second frame and generates the ones in " +
         "between, so the headset stays at its full rate.\n\n" +
+        "Set the headset to 90 Hz. Because Spacewarp renders every second frame, the game needs 45 fps at 90 Hz (60 at 120 Hz; " +
+        "72 Hz leaves longer gaps to fill):\n" +
+        "- Virtual Desktop: Settings > Streaming > Frame rate.\n" +
+        "- Meta Link: Meta Quest Link app > Devices > Graphics Preferences > Refresh rate.\n" +
+        "- SteamVR: Settings > Video > Refresh rate.\n\n" +
         "Only one frame generation may run at a time:\n" +
         "- Virtual Desktop: set Synchronous Spacewarp to Disabled (headset app > Settings > Streaming).\n" +
         "- Meta Link: turn Asynchronous Spacewarp off (Oculus Debug Tool).\n" +
