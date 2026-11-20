@@ -931,3 +931,29 @@ The user's first two SteamVR sessions on v1444 (Always) froze about 3 s into gam
 - A real mid-frame point would need a window where no other thread uses the immediate context, such as the game side, where none does.
   Even there the engine's background ExecuteCommandList runs under its own spinlock. The due time usually falls in the render side, so
   game-side points come too early. This is not pursued without the user's go-ahead.
+
+## 29. v1450: safe mid-frame points for SteamVR (opt-in `build/spacewarp-safe-mid`, 2026-11-21)
+
+User: SteamVR should run well. The user's v1445 SteamVR session: 2,706 of 4,842 generated frames late (56 %): 2,073 dropped at the next
+Present, 633 late slots. Full analysis: `docs/research/STEAMVR-SAFE-SUBMIT.md`.
+- **The v1444 freeze, re-read.** The blocked worker had already run its ExecuteCommandList (under the engine lock) and was releasing the
+  command list inside its drain. The main thread's SteamVR calls had entered the immediate context during that drain. The rule is: no
+  other thread inside a drain or any immediate-context call while the runtime runs.
+- **The points.** The frame goes out on the main thread at the first point after its due time, with the engine's immediate-context lock
+  held:
+  - `graph_end`: a render-graph wait's return. The graph's last drain ends before its done flag, and the wait returns only after every
+    job instance left.
+  - `game_wait`: a job wait inside the game side, where no thread uses the immediate context (ctx_probe census, ~42,000 sim frames).
+  - `game_end`, `render_start`.
+  The Present-time points stay. Any other thread's hooked immediate-context call during a send counts a violation and switches the mid
+  points off for the session.
+- **Where the due time lands.** In the user's frames it is 9.2 ms after the Present hook (p10-p90 8.4-9.5). The headset's eye split puts
+  that about 1.1 ms into eye 1's view, so mostly inside the second eye's render graph. v1444's freezes in a graph wait confirm it.
+- **Expected** [model]: 96-99 % sent before SteamVR's late-slot threshold (about 7.6 ms after the due time). With SteamVR's own floor,
+  roughly 90-97 % on time instead of 44 %.
+- **Status** `spacewarp_safe_mid`: `due_phase`, per point `sent` / `late_slot` / `after_ms` / `wait_us` / `call_us`, `violations`.
+  Dev command `safemid off|graph|game|all`.
+- **Lab**: `spacewarp_safe_mid_check` (38 checks). Not headset-tested; the simulator cannot reproduce SteamVR's D3D11 calls.
+- **Secondary.** SteamVR's "Use Legacy Reprojection Mode" (`disableAsync`) fixed a 45 fps lock on PSVR2 without frame generation
+  (Indurhra). The user's Steam Link session shows no sign of that stall (desktop Present 0.16 ms), so the launcher does not set it (doc
+  section 10).

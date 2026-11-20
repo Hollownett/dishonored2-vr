@@ -37,12 +37,16 @@ inline std::int64_t ticks_per_second=1;
 // v1445: NOT used for spacewarp any more. Runtime calls made from these waits deadlocked the game twice on SteamVR: in render-side waits
 // the engine's render-graph workers use the immediate context (docs/ENGINE-DIG-NOTES.md section 7). Never hand idle_work anything that
 // touches the game's D3D11 device unless the wait is proven to be one where no other thread uses the immediate context.
+// v1450 (opt-in build/spacewarp-safe-mid, src/spacewarp_safe_mid.hpp): used again, ONLY for waits inside the game side (exe 459a0), where
+// no worker uses the immediate context, and with the engine's immediate-context lock held for the send. idle_left returns idle_none in
+// every other wait, so a render-side wait never sends (docs/research/STEAMVR-SAFE-SUBMIT.md).
 using LeftFn=std::int64_t(*)() noexcept;  // ns until the pending work is due (<= 0: due now), idle_none: nothing pending
 using WorkFn=void(*)() noexcept;
 inline constexpr std::int64_t idle_none=INT64_MAX;
 inline std::atomic<LeftFn> idle_left{};
 inline std::atomic<WorkFn> idle_work{};
 inline std::atomic<std::uint64_t> idle_runs{},idle_timer_runs{},idle_timed_waits{},idle_fallbacks{};
+inline thread_local bool idle_timer_work=false;  // v1450: true while idle_work runs because the due time came first (inside the wait)
 
 struct Kind {
     std::atomic<std::uint64_t> waits{},slept{},blocked{},woken{},wake{},spin_hits{},spin{},hist[6]{};
@@ -80,7 +84,8 @@ inline bool idle_wait(HANDLE h,DWORD& timeout,DWORD& result) noexcept {
     idle_timed_waits.fetch_add(1,std::memory_order_relaxed);
     const DWORD r=WaitForMultipleObjects(2,handles,FALSE,timeout);
     if(r==WAIT_OBJECT_0+1) {  // the due time came first: the work, then the rest of the wait
-        idle_timer_runs.fetch_add(1,std::memory_order_relaxed);idle_runs.fetch_add(1,std::memory_order_relaxed);work();
+        idle_timer_runs.fetch_add(1,std::memory_order_relaxed);idle_runs.fetch_add(1,std::memory_order_relaxed);
+        idle_timer_work=true;work();idle_timer_work=false;
         if(timeout!=INFINITE) {const auto spent=static_cast<DWORD>(((now()-t0)*1000)/ticks_per_second);timeout=timeout>spent?timeout-spent:0;}
         return false;
     }

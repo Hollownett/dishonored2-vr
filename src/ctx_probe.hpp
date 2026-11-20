@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
+#include "spacewarp_safe_mid.hpp"
 
 namespace d2vr::ctx_probe {
 enum Phase:unsigned {outside,game,render,phases};     // main thread, set by the two phase hooks
@@ -28,6 +29,7 @@ inline std::atomic<std::uint64_t> calls[whos][phases][kinds]{};
 inline std::atomic<std::uint64_t> leaks{0},game_enters{0},render_enters{0};
 inline Sample samples[max_samples];
 inline void note(const void* c,Kind k,const void* ret) noexcept {
+    safe_mid::note_call(c,ret);  // v1450: another thread's call inside a spacewarp mid-point send (one acquire load when no send runs)
     if(!on.load(std::memory_order_relaxed) || !c || c!=context.load(std::memory_order_relaxed)) return;
     const DWORD t=GetCurrentThreadId();
     const unsigned ph=phase.load(std::memory_order_relaxed);
