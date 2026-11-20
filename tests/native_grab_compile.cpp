@@ -1,7 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../src/native_grab.hpp"
+#include <algorithm>
 #include <cassert>
+#include <vector>
 #include <iostream>
 namespace d2vr {struct NativeGrabCheck {static void active(NativeGrab& grab) {grab.active_=true;}};}
 int main() {
@@ -20,6 +22,37 @@ int main() {
     for(unsigned tick=105;tick<170;++tick)discovery.advance({},tick,lookup,validate);
     assert(discovery.cursor()>0 && discovery.cursor()<d2vr::NativeGrabDiscovery::registry_size);
     assert(lookups==67*1024); // Registry wrap stays bounded, no full-registry fallback.
+    {   // v1436: the bulk slot path finds the same bodies as the per-slot path, looks up only non-empty slots, wraps at the registry end
+        // (slot 0 is never scanned) and falls back to the per-slot path when a bulk read fails.
+        constexpr unsigned size=d2vr::NativeGrabDiscovery::registry_size;
+        std::vector<std::uintptr_t> registry(size,0);
+        for(const unsigned i:{1u,2u,500u,1023u,1024u,size-2,size-1}) registry[i]=0x10000+i;
+        const auto body_of=[](unsigned index,std::uintptr_t entity) {
+            d2vr::NativeRigidBody b{};b.entity=entity;b.entity_id=0x10000+index;b.pose.position={.1,0,0};return b;};
+        unsigned per_slot=0,filled_seen=0,bulk_lookups=0,bulk_reads=0;bool bulk_ok=true;
+        const auto slow_lookup=[&](unsigned index)->std::optional<d2vr::NativeRigidBody> {
+            ++per_slot;if(registry[index]) ++filled_seen;
+            return registry[index]?std::optional<d2vr::NativeRigidBody>{body_of(index,registry[index])}:std::nullopt;};
+        const auto fast_lookup=[&](unsigned index,std::optional<std::uintptr_t> slot)->std::optional<d2vr::NativeRigidBody> {
+            const auto entity=slot?*slot:registry[index];if(slot) ++bulk_lookups;else ++per_slot;
+            return entity?std::optional<d2vr::NativeRigidBody>{body_of(index,entity)}:std::nullopt;};
+        const auto keep=[](const d2vr::NativeRigidBody& b)->std::optional<d2vr::NativeRigidBody> {return b;};
+        const auto bulk=[&](unsigned first,unsigned count,std::uintptr_t* out) {
+            ++bulk_reads;if(!bulk_ok || first+count>size) return false;
+            std::copy(registry.begin()+first,registry.begin()+first+count,out);return true;};
+        const auto ids=[](const std::vector<d2vr::NativeRigidBody>& v) {std::vector<std::uint32_t> r;for(const auto& b:v) r.push_back(b.entity_id);std::sort(r.begin(),r.end());return r;};
+        d2vr::NativeGrabDiscovery a,b;
+        for(std::uint64_t tick=1;tick<=40;++tick) {   // 40 slices: the registry (0x3fff slots) wraps twice
+            const auto& x=a.advance({},tick,slow_lookup,keep);
+            const auto& y=b.advance({},tick,fast_lookup,keep,nullptr,bulk,true);
+            assert(ids(x)==ids(y) && a.cursor()==b.cursor());
+        }
+        assert(per_slot==40*1024 && b.bulk_slices_==40 && b.bulk_failures_==0);
+        assert(bulk_lookups==filled_seen && filled_seen>0 && bulk_reads>40);   // only the non-empty slots; some slices took two reads (wrap)
+        bulk_ok=false;per_slot=0;b.advance({},42,fast_lookup,keep,nullptr,bulk,true);
+        assert(b.bulk_failures_==1 && per_slot==1024);   // a failed bulk read: the per-slot path for that slice
+        per_slot=0;b.advance({},43,fast_lookup,keep,nullptr,bulk,false);assert(per_slot==1024 && b.bulk_failures_==1);   // use_bulk off
+    }
     // A lane occupied by native carrying/action state must hand the raw
     // squeeze back without touching the native read ABI, which is not installed
     // in this process: any read here would fault.

@@ -29,6 +29,8 @@
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include <thread>
+#include <type_traits>
 #include "hold_sync.hpp"
 #include "held_render_pose.hpp"
 #include <limits>
@@ -139,6 +141,7 @@ class NativeGrabDiscovery {
     unsigned cursor_{1};std::uint64_t tick_{},slices_{},lifetime_rejections_{};
     std::vector<NativeRigidBody> bodies_;
 public:
+    std::uint64_t bulk_slices_{},bulk_failures_{};   // v1436 (status grab_scan)
     static constexpr unsigned registry_size=0x3fff,slice_size=1024,capacity=64; // full registry in ~16 pose ticks (~0.25 s): a book reached for right after walking up is already known
     struct Diagnostics {unsigned cursor{},cached{};std::uint64_t tick{},slices{},lifetime_rejections{};};
     Diagnostics diagnostics() const {return {cursor_,static_cast<unsigned>(bodies_.size()),tick_,slices_,lifetime_rejections_};}
@@ -146,8 +149,11 @@ public:
     void reset() {cursor_=1;tick_=0;bodies_.clear();}
     // hints (G3, plan Task 8): registry indices near this hand (its stage-0 Use hit owners, its probe hits), looked up every tick before the
     // slice, so the object just reached is cached the same tick (Bonelab: "the scan runs every physics step"). At most 8; 0 is skipped.
-    template<class Lookup,class Validate> const std::vector<NativeRigidBody>& advance(
-            Vec3 hand,std::uint64_t tick,Lookup lookup,Validate validate,const std::array<unsigned,8>* hints=nullptr) {
+    // v1436 (main-thread frame time): `bulk(first, count, out)` (optional, used when use_bulk) reads registry slots [first, first+count)
+    // in one guarded read. A slice then costs one or two reads instead of 1024, empty slots are skipped without a lookup, and a lookup
+    // that takes (index, entity) gets the slot's entity. A failed bulk read falls back to the per-slot path, the only path before v1436.
+    template<class Lookup,class Validate,class Bulk=std::nullptr_t> const std::vector<NativeRigidBody>& advance(
+            Vec3 hand,std::uint64_t tick,Lookup lookup,Validate validate,const std::array<unsigned,8>* hints=nullptr,Bulk bulk=nullptr,bool use_bulk=true) {
         if(!finite(hand) || !tick) {reset();return bodies_;}
         if(tick==tick_)return bodies_;
         tick_=tick;++slices_;
@@ -159,8 +165,10 @@ public:
                body->model!=it->model || body->contact_distance(hand)>grab_retain_distance+3) {++lifetime_rejections_;it=bodies_.erase(it);}
             else {*it=*body;++it;}
         }
-        const auto consider=[&](unsigned index) {
-            const auto body=lookup(index);
+        const auto consider=[&](unsigned index,std::optional<std::uintptr_t> entity) {
+            std::optional<NativeRigidBody> body;
+            if constexpr(std::is_invocable_v<Lookup&,unsigned,std::optional<std::uintptr_t>>) body=lookup(index,entity);
+            else body=lookup(index);
             if(!body || body->contact_distance(hand)>grab_retain_distance+3)return;
             const auto found=std::find_if(bodies_.begin(),bodies_.end(),[&](const auto& b){return b.entity==body->entity;});
             if(found!=bodies_.end()) {*found=*body;return;}
@@ -170,10 +178,24 @@ public:
                 if(body->contact_distance(hand)<farthest->contact_distance(hand))*farthest=*body;
             }
         };
-        if(hints) for(const auto index:*hints) if(index && index<registry_size) consider(index);
+        if(hints) for(const auto index:*hints) if(index && index<registry_size) consider(index,std::nullopt);
+        if constexpr(!std::is_same_v<Bulk,std::nullptr_t>) if(use_bulk) {
+            // the slice as at most two contiguous runs: [cursor_, registry_size) and, after the wrap, [1, ...) (slot 0 is never scanned)
+            std::array<std::uintptr_t,slice_size> slots{};
+            const unsigned first=cursor_,run1=std::min<unsigned>(slice_size,registry_size-first),run2=slice_size-run1;
+            if(bulk(first,run1,slots.data()) && (!run2 || bulk(1u,run2,slots.data()+run1))) {
+                for(unsigned scanned=0;scanned<slice_size;++scanned) {
+                    const auto index=cursor_;if(++cursor_==registry_size)cursor_=1;
+                    if(slots[scanned]) consider(index,slots[scanned]);
+                }
+                ++bulk_slices_;
+                return bodies_;
+            }
+            ++bulk_failures_;
+        }
         for(unsigned scanned=0;scanned<slice_size;++scanned) {
             const auto index=cursor_;if(++cursor_==registry_size)cursor_=1;
-            consider(index);
+            consider(index,std::nullopt);
         }
         return bodies_;
     }
@@ -187,6 +209,37 @@ struct HoldAnchorView {bool active{};Vec3 anchor{};std::uint64_t tick{};bool cap
 class NativeGrab {
     friend struct NativeGrabCheck;
 public:
+    // v1436 (main-thread frame time): the hover/grab discovery's registry scan reads each 1024-slot slice in bulk and each entity's class
+    // once (fast_scan). build/grab-scan-legacy or dev `grabscan off` = v1435; `grabscan abab <ms>` = fast in even steady-clock periods.
+    // scan_us/scan_calls: focus_body's own time per mode ([0] legacy, [1] fast), for the status block grab_scan.
+    inline static std::atomic<bool> fast_scan{true};
+    inline static std::atomic<std::int64_t> scan_abab_ns{0};
+    inline static std::array<std::atomic<UINT64>,2> scan_us{},scan_calls{};
+    static void start_scan_abab(int ms) {
+        scan_abab_ns.store(static_cast<std::int64_t>(std::clamp(ms,100,10000))*1000000);
+        static std::atomic<bool> running{false};
+        if(running.exchange(true)) return;
+        try {
+            std::thread([] {
+                for(;;) {
+                    const auto period=scan_abab_ns.load();
+                    if(!period) {running=false;return;}
+                    const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                    fast_scan.store(((now/period)&1)==0);
+                    Sleep(static_cast<DWORD>(((now/period+1)*period-now)/1000000+1));
+                }
+            }).detach();
+        } catch(...) {running=false;}
+    }
+    static void stop_scan_abab(bool fast) noexcept {scan_abab_ns.store(0);fast_scan.store(fast);}
+    std::string scan_json() const {
+        std::ostringstream o;o.setf(std::ios::fixed);o.precision(2);
+        const auto per=[&](unsigned i) {const auto n=scan_calls[i].load();return n?static_cast<double>(scan_us[i].load())/static_cast<double>(n):0.;};
+        std::uint64_t slices=0,failures=0;for(const auto& lane:lanes_) {slices+=lane.discovery.bulk_slices_;failures+=lane.discovery.bulk_failures_;}
+        o<<"{\"fast\":"<<(fast_scan.load()?"true":"false")<<",\"abab_ms\":"<<scan_abab_ns.load()/1000000<<",\"calls\":["<<scan_calls[0].load()<<","<<scan_calls[1].load()
+         <<"],\"us_per_call\":["<<per(0)<<","<<per(1)<<"],\"bulk_slices\":"<<slices<<",\"bulk_failures\":"<<failures<<"}";
+        return o.str();
+    }
     enum class Gate : unsigned {none,occupied,deferred,inactive,pose_unusable,invalid_grip,not_gameplay,unfocused,
         native_use,epoch_mismatch,source_missing,source_future,source_stale,owner_invalid,authored_view,
         awaiting_release,release_armed,native_no_candidate,native_locked,physical_reserved,physical_held,pending_release,obstruction_pending,obstruction_blocked,
@@ -432,10 +485,24 @@ private:
             return palm_bones?corpse_candidate(read_,base_,entity,p.palm,tuning_,collar):corpse_candidate(read_,base_,entity,p.hand.position,collar);
         };
         const bool hinted=lane.hint_tick && now>=lane.hint_tick && now-lane.hint_tick<=250;
-        const auto& candidates=lane.discovery.advance(p.hand.position,p.tick,[&](unsigned index)->std::optional<NativeRigidBody> {
-            const auto entity=rig::value<std::uintptr_t>(read_,*game+0x3130b0+index*8);
-            const bool guard=entity && rig::typed(read_,base_,*entity,0x1c5e108); // a corpse or knocked-out guard: drag by a limb
-            const bool prop_class=entity && (rig::typed(read_,base_,*entity,0x1c886a8) || rig::typed(read_,base_,*entity,0x1c87d58) || rig::typed(read_,base_,*entity,0x1c5de18));
+        const bool fast=fast_scan.load(std::memory_order_relaxed);   // v1436
+        struct ScanCost {bool fast;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+            ~ScanCost() {scan_us[fast?1:0].fetch_add(static_cast<UINT64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count()),std::memory_order_relaxed);
+                scan_calls[fast?1:0].fetch_add(1,std::memory_order_relaxed);}
+        } scan_cost{fast};
+        const std::uintptr_t registry=*game+0x3130b0;
+        const auto bulk=[&](unsigned first,unsigned count,std::uintptr_t* out) {return read_(registry+first*8u,out,count*sizeof(std::uintptr_t));};
+        const auto& candidates=lane.discovery.advance(p.hand.position,p.tick,[&](unsigned index,std::optional<std::uintptr_t> slot)->std::optional<NativeRigidBody> {
+            const auto entity=slot?slot:rig::value<std::uintptr_t>(read_,registry+index*8);
+            bool guard=false,prop_class=false;
+            if(fast) {   // rig::typed(entity, rva) is pointer(entity) && *entity == base + rva: one read of the class pointer serves the four tests
+                const auto table=entity && rig::pointer(*entity)?rig::value<std::uintptr_t>(read_,*entity):std::nullopt;
+                guard=table && *table==base_+0x1c5e108; // a corpse or knocked-out guard: drag by a limb
+                prop_class=table && (*table==base_+0x1c886a8 || *table==base_+0x1c87d58 || *table==base_+0x1c5de18);
+            } else {
+                guard=entity && rig::typed(read_,base_,*entity,0x1c5e108);
+                prop_class=entity && (rig::typed(read_,base_,*entity,0x1c886a8) || rig::typed(read_,base_,*entity,0x1c87d58) || rig::typed(read_,base_,*entity,0x1c5de18));
+            }
             const bool limb=entity && !guard && !prop_class && severed_limb_entity(read_,base_,*entity);   // v1086: a severed limb
             if(!entity || !(guard || prop_class || limb))return {}; // + arkMovable (bottles, glasses: thrown by hand)
             const auto id=rig::value<std::uint32_t>(read_,*entity+0xa8);
@@ -459,7 +526,7 @@ private:
             if(body.limb>=0) return native_severed_limb_body(read_,base_,body.entity,-1,p.palm.valid?p.palm.palm:p.hand.position);
             if(body.bone<0) return native_rigid_body(read_,base_,body.entity);
             return corpse(body.entity);
-        },hinted?&lane.hints:nullptr);
+        },hinted?&lane.hints:nullptr,bulk,fast);
         // Re-rank every publication: a cached hover must not hide a newly nearer object.
         const auto preferred=lane.focus && (!refresh || lane.focus->contact_distance(p.hand.position)<=grab_acquire_distance)?lane.focus->entity:0;
         std::vector<NativeRigidBody> touching;

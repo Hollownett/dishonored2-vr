@@ -6,14 +6,18 @@
 #include <array>
 #include <cstring>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <string_view>
+#include <thread>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 #include <wrl/client.h>
 #include "bc7_encode.hpp"
 #include "controller_glyph_atlas.hpp"
+#include "render_pass_table.hpp"
 
 namespace d2vr {
 // Quest labels in button prompts for glyph textures the game created before the mod loaded
@@ -100,7 +104,7 @@ class GlyphSwap {
             local[i]=views[i];
             if(views[i]) {owned[i]=lookup(views[i]);if(owned[i]) {local[i]=owned[i].Get();changed=true;}}
         }
-        if(changed) {++swaps;forwarded=local.data();}
+        if(changed) {++swaps;forwarded=local.data();note_swap_pass();}
         const bool is_deferred=c!=immediate_context_.load(std::memory_order_relaxed);
         if(const auto f=filter.load(std::memory_order_relaxed)) if(f(c,start,count,forwarded,is_deferred)) return;
         original_[I](c,start,count,forwarded);
@@ -109,7 +113,7 @@ class GlyphSwap {
         if(const auto o=observer.load(std::memory_order_relaxed)) o(c,start,count,views);
         ID3D11ShaderResourceView* const* forwarded=views;
         // v1040: feature off (the usual case) is a plain passthrough; the 16-entry arrays live only in the swapping path.
-        if(enabled.load(std::memory_order_relaxed) && views && count && count<=16) return swapping_hook<I>(c,start,count,views);
+        if(enabled.load(std::memory_order_relaxed) && views && count && count<=16 && may_bind_glyphs()) return swapping_hook<I>(c,start,count,views);
         // v993: the census sits inside the one owner of slot 8 and sees exactly what is forwarded. Classify by the one
         // immediate context, not by which vtable this hook was installed from: the two can share an implementation.
         const bool is_deferred=c!=immediate_context_.load(std::memory_order_relaxed);
@@ -138,6 +142,56 @@ public:
     inline static std::atomic<void (*)(ID3D11DeviceContext*,UINT,UINT,ID3D11ShaderResourceView* const*)> observer{};
     inline static std::atomic<Filter> filter{}; // v993 PS state census/elision on the final forwarded views
     inline static std::atomic<std::uint64_t> swaps{},identified{},checked{},deferred{},failed{},completed{};
+    // v1434 (engine frame time, docs/ENGINE-DIG-NOTES.md section 10): glyph views are bound only by UI work, i.e. the Iggy passes and work
+    // outside any render pass (the immediate context, the mod's own UI composition). The world passes (FORWARD_WORLD/DYNAMIC, depth,
+    // shadows, post) bind several views per draw and never a glyph, yet each view took the shared map lock and a hash lookup. In a sim
+    // profile that was 12.5 % of FORWARD_WORLD, the pass that ends each eye's render graph. Outside UI passes the hook is now a passthrough.
+    // pass_of: the thread's render pass (RenderPassMap::current_pass, -1 outside a pass or for an unnamed job item). build/glyph-all-passes
+    // or dev `glyphpass off` = v1433 (every pass); `glyphpass abab <ms>` = the filter on in even steady-clock periods (abab_clock.py).
+    using PassOf=int(*)() noexcept;
+    inline static std::atomic<PassOf> pass_of{};
+    inline static std::atomic<bool> pass_filter{true};
+    inline static std::atomic<std::int64_t> filter_abab_ns{0};
+    static constexpr int first_ui_pass=46,last_ui_pass=50;  // IGGY_MANAGE_TEXTURES_PACKS .. POST_IGGY
+    static_assert(std::string_view(render_passes[first_ui_pass].name)=="ARK_RENDERPASS_IGGY_MANAGE_TEXTURES_PACKS" &&
+        std::string_view(render_passes[last_ui_pass].name)=="ARK_RENDERPASS_POST_IGGY","UI pass ids moved");
+    inline static std::array<std::atomic<std::uint64_t>,66> swaps_by_pass{};  // [0] no pass, [1+id] pass id, [65] unknown id
+    static bool may_bind_glyphs() noexcept {
+        if(!pass_filter.load(std::memory_order_relaxed)) return true;
+        const auto f=pass_of.load(std::memory_order_relaxed);
+        if(!f) return true;
+        const int p=f();
+        return p<0 || (p>=first_ui_pass && p<=last_ui_pass);
+    }
+    static void note_swap_pass() noexcept {
+        const auto f=pass_of.load(std::memory_order_relaxed);const int p=f?f():-1;
+        swaps_by_pass[p<0?0:p<64?static_cast<std::size_t>(p)+1:65].fetch_add(1,std::memory_order_relaxed);
+    }
+    static void start_filter_abab(int ms) {
+        filter_abab_ns.store(static_cast<std::int64_t>(std::clamp(ms,100,10000))*1000000);
+        static std::atomic<bool> running{false};
+        if(running.exchange(true)) return;
+        try {
+            std::thread([] {
+                for(;;) {
+                    const auto period=filter_abab_ns.load();
+                    if(!period) {running=false;return;}
+                    const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                    pass_filter.store(((now/period)&1)==0);
+                    Sleep(static_cast<DWORD>(((now/period+1)*period-now)/1000000+1));
+                }
+            }).detach();
+        } catch(...) {running=false;}
+    }
+    static void stop_filter_abab(bool filter_on) noexcept {filter_abab_ns.store(0);pass_filter.store(filter_on);}
+    static std::string pass_json() {
+        std::string o="{\"filter\":";o+=pass_filter.load()?"true":"false";o+=",\"abab_ms\":"+std::to_string(filter_abab_ns.load()/1000000)+",\"swaps_by_pass\":{";
+        bool first=true;
+        for(std::size_t i=0;i<swaps_by_pass.size();++i) if(const auto n=swaps_by_pass[i].load()) {
+            o+=(first?"\"":",\"")+std::string(i==0?"none":i==65?"unknown":render_pass_name(static_cast<unsigned>(i-1)))+"\":"+std::to_string(n);first=false;
+        }
+        return o+"}}";
+    }
     inline static std::atomic<unsigned> pending_readbacks{};
     inline static std::atomic<unsigned> identified_mask{}; // bit i = kXboxGlyphs[i]
     // Render thread; MinHook must be initialised. `feature` keeps the glyph substitution behaviour unchanged when the

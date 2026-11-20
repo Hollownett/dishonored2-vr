@@ -137,3 +137,31 @@ Later static findings (09:20), for whoever resumes this:
 makes clamp(physical cores - 1, 2, 15) workers, 5 on the 6-core/12-thread 5600X, and leaves the six SMT threads unused. See
 `docs/ENGINE-DIG-NOTES.md` section 9.
 
+
+**Update (10:40, 8 workers): the "shelved" verdict holds only at 5 workers.**
+- With `build/job-workers` = 8 there are 9 job threads. The 8-worker timeline has 28.6 thread-ms of items per frame: at least ~3.2 ms
+  for both graphs together, against ~6 ms serial in that window.
+- Each graph's critical path stays a chain of single jobs: eye 1 UMBRA -> SORT -> FORWARD_WORLD (~2.4 ms), eye 0 the shadow items.
+- Running both graphs at once could therefore save ~2 ms on top of the extra workers.
+- The work list of sections 5-9 is unchanged, plus one more hazard: shadow share makes eye 1's TLFLIGHTCULL wait for eye 0's
+  PREPARE/TLFLIGHTCULL.
+- Several days, and the user's call. See `docs/ENGINE-DIG-NOTES.md` section 10.
+
+## 11. P1 code written, not run; stopped (2026-11-20 10:45)
+
+- `src/parallel_eyes.hpp` and its wiring in v1435 (knob `build/parallel-eyes`, off by default) build the second R at a render side's
+  start, after 300 gameplay presents:
+  - `35a4b0`, `34fe00`, `3511a0(R2, 0)`, each prologue checked, under SEH;
+  - then a word-by-word diff against the live R is written to `parallel-eyes-p1.txt` (`missing` = set in R, zero in R2).
+- Static checks before writing it:
+  - the engine's Present `3591b0` ignores the R it receives;
+  - `3590e0`/`2c8230` only tear the context down at shutdown;
+  - in the renderer code (`0x2a0000`-`0x380000`) the only global reference into R's range is `3586a0` reading renderer+0x60A560,
+    which is the renderer member right after R;
+  - besides the `373680` callers, everything reaches R through the pointer it is given.
+- The P1 sim never ran. Another session ("Engine snapshot: game/render overlap behind a flag", started from the user's "Mod work
+  status?" session) was driving the game, and my install collided with its run.
+- The user's other session works on the snapshot overlap, the other deep lever. To avoid two deep engine experiments on one live game,
+  parallel eyes stops here.
+- The never-run P1 code was taken out of the tree again (10:50). It is kept as `D:\d2vr-artifacts\night-2026-11-20\parallel_eyes.hpp`
+  plus the wiring in `v1435-working-tree.patch` in the same folder.

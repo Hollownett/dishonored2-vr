@@ -7156,6 +7156,14 @@ static std::string run_test_command(const std::string& line) {
     if(verb=="jobspin") {unsigned m=0,o=0;if(in>>m) {if(!(in>>o)) o=0;d2vr::job_wake::spin_main_us=std::min(m,500u);d2vr::job_wake::spin_other_us=std::min(o,500u);}  // v1430
         d2vr::job_wake::install(GetModuleHandleW(nullptr));  // review 2026-11-20: the command alone also installs the probe (once per process)
         return d2vr::job_wake::json(frames.load());}
+    if(verb=="grabscan") {std::string v;in>>v;  // v1436: grabscan on|off|abab <ms> (the grab discovery's bulk registry scan; measurement)
+        if(v=="on" || v=="off") d2vr::NativeGrab::stop_scan_abab(v=="on");
+        else if(v=="abab") {int ms=1000;if(!(in>>ms)) ms=1000;d2vr::NativeGrab::start_scan_abab(ms);}
+        return native_grab.scan_json();}
+    if(verb=="glyphpass") {std::string v;in>>v;  // v1434: glyphpass on|off|abab <ms> (glyph lookups only in UI passes; measurement)
+        if(v=="on" || v=="off") d2vr::GlyphSwap::stop_filter_abab(v=="on");
+        else if(v=="abab") {int ms=1000;if(!(in>>ms)) ms=1000;d2vr::GlyphSwap::start_filter_abab(ms);}
+        return d2vr::GlyphSwap::pass_json();}
     if(verb=="asyncpresent") {std::string v;in>>v;if(v=="on" || v=="off") async_present_live=v=="on";return std::string("{\"async_present_live\":")+(async_present_live.load()?"true":"false")+"}";}  // v1428
     if(verb=="spacewarp") { // spacewarp capture N: N triples of eye 0 (real, generated from it, next real) as sw-capture-NN-*.rgba (afw_capture_dir)
         std::string v;in>>v;
@@ -15712,7 +15720,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_fire_seam\":" << (fire_seam_installed?native_fire_seam_trace.summary():std::string("{}"))
                                      << ",\"vr_glyph_replacements\":" << glyph_replacements.load() << ",\"glyph_swaps\":" << d2vr::GlyphSwap::swaps.load() << ",\"glyph_identified\":" << d2vr::GlyphSwap::identified.load() << ",\"glyph_checked\":" << d2vr::GlyphSwap::checked.load() << ",\"glyph_mask\":" << d2vr::GlyphSwap::identified_mask.load() << ",\"glyph_candidates\":" << glyph_candidates.load() << ",\"texture_creates\":" << texture_creates.load() << ",\"glyph_hook\":" << (create_texture2d_target?"true":"false")
                                      << ",\"glyph_readback_deferred\":"<<d2vr::GlyphSwap::deferred.load()<<",\"glyph_readback_failed\":"<<d2vr::GlyphSwap::failed.load()
-                                     << ",\"glyph_readback_completed\":"<<d2vr::GlyphSwap::completed.load()<<",\"glyph_readbacks_pending\":"<<d2vr::GlyphSwap::pending_readbacks.load()
+                                     << ",\"glyph_pass\":"<<d2vr::GlyphSwap::pass_json()<< ",\"grab_scan\":"<<native_grab.scan_json()<< ",\"glyph_readback_completed\":"<<d2vr::GlyphSwap::completed.load()<<",\"glyph_readbacks_pending\":"<<d2vr::GlyphSwap::pending_readbacks.load()
                                      << ",\"grab_decisions_dropped\":"<<native_grab.decision_dropped()
                                      << ",\"frame_timing_dropped\":"<<frame_timing_queue.dropped()
                                      << ",\"frame_timing_write_failed\":"<<(frame_timing_write_failed.load()?"true":"false")
@@ -18825,6 +18833,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::pass_timeline::configure(fs::exists(root/L"build"/L"pass-timeline") && d2vr::overlap_probe::on.load(),output_directory.always()/L"pass-timeline.csv"); // v1433
         d2vr::ctx_probe::on.store(fs::exists(root/L"build"/L"ctx-probe")); // v1427: which thread uses the immediate context in which phase (docs/research/ENGINE-OVERLAP-STEP1.md)
         d2vr::ctx_probe::pass_of.store(&d2vr::RenderPassMap::current_pass);d2vr::ctx_probe::sink.store(&ctx_probe_sink);
+        d2vr::GlyphSwap::pass_of.store(&d2vr::RenderPassMap::current_pass);  // v1434: glyph lookups only in UI passes
+        d2vr::NativeGrab::stop_scan_abab(!fs::exists(root/L"build"/L"grab-scan-legacy"));  // v1436: bulk registry scan
+        d2vr::GlyphSwap::stop_filter_abab(!fs::exists(root/L"build"/L"glyph-all-passes"));
         async_present_requested=fs::exists(root/L"build"/L"async-present"); // v1408 plan 2B.4 step 1
         {const bool spin_knob=fs::exists(root/L"build"/L"job-spin");std::ifstream knob(root/L"build"/L"job-spin");unsigned m=0,o=0; // v1430 (src/job_wake.hpp)
          if(!(knob>>m)) m=0;else if(!(knob>>o)) o=0;

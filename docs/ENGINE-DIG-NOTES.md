@@ -302,3 +302,64 @@ Tested because DLAA blocks the engine's thread ~1.7 ms more than DLSS Quality.
 - 10 workers adds nothing over 8.
 - Set to 8 in the user's `build\job-workers` for the next headset test (manifest `artifacts/repair-v1433-test-candidate.json`).
 - Not checked in the headset: Virtual Desktop's streamer and the runtime share the same 12 threads. Remove the file if it stutters.
+
+## 10. 2026-11-20 10:05-10:40: what the eye graphs' critical path is made of, and the mod's share of it (v1434)
+
+**The chain** (8-worker pass timeline, `docs/research/ENGINE-PARALLEL-EYES.md` section 10; p50 offsets from the graph's submit):
+- GATHER_UMBRA (visibility) ends at 0.86 ms.
+- GATHER_DYN_MODELS (x6) ends at 1.06 ms.
+- SORT runs 1.08-1.43 ms.
+- FORWARD_WORLD runs 1.46-2.39 ms.
+- Graph end at 2.58 ms (eye 1).
+- FORWARD_WORLD finishes last in 72 % of eye 1's graphs. In eye 0's graphs the shadow items finish last in 61 %.
+- Each link is a single job. UMBRA and SORT already fan out internally (sub-jobs, waited on in `32a5ec`). FORWARD_WORLD and
+  FORWARD_DYNAMIC are one recording each (`311aa0`, flag 0/1).
+
+**Mod hooks inside the render jobs.** Read-only sampling of the engine's job threads, attribution only:
+- "Own" mod time means the first non-system frame above the leaf is mod code. Time in the original D3D11 call that a hook forwards
+  belongs to the engine.
+- Own mod time is 7.3 % of all job-item samples:
+  - FORWARD_*: 24 %, of which `GlyphSwap::lookup` 12.5 % (a shared lock and hash lookup per bound texture);
+  - shadow items: 12.5 %, spread over ObjectMotion's classify/written/prepare and the draw hooks (each about 1-2 %; not worth the
+    weapon and rig-mask risk);
+  - IGGY_FULLSCREEN: 36 % (the mod's own world-UI drawing; off the critical path);
+  - every FinishCommandList: ~8 % (observers).
+
+**v1434: GlyphSwap only in UI passes.**
+- Glyph views are bound only by UI work. Every swap in three sims happened in IGGY_FULLSCREEN (status `glyph_pass.swaps_by_pass`).
+- The hook is now a passthrough in render passes 0-45 and 51. It still runs in the Iggy passes 46-50 and outside any pass.
+- Knob `build/glyph-all-passes` = v1433; dev command `glyphpass on|off|abab <ms>`.
+- In-run A/B, 22 pairs over 3 sims (8 workers, DLSS Quality): frame work p50 12.23 vs 12.45 ms, median pair -0.18 ms, faster in 12 of
+  22. A small gain, not statistically proven.
+
+**What is left.**
+- Redundant-state elision was measured with no gain before (v997/v998).
+- Splitting FORWARD_WORLD's recording over two deferred contexts would cut ~0.4-0.5 ms per eye from the chain. It needs a reverse of
+  `311aa0` (6.4 KB) and of the engine's per-context wrapper (`2bba80` creates one), plus an execute-order hook. That is 1-2 days.
+- Running the two eyes' graphs at once is worth more with 8 workers. The 8-worker timeline has 28.6 thread-ms of items over 9 threads,
+  so at least ~3.2 ms against ~6 ms serial: about 2 ms possible.
+  - The cost is still a second renderer plus the hazards in the research doc: GATHER_CASTERS's sub-jobs go to the global context,
+    shadow share makes eye 1 wait on eye 0's light jobs, and shared targets need an execute gate.
+  - Several days. A user decision.
+
+**Main-thread trim in progress (not built yet, 11:00): the grab discovery's registry scan (`src/native_grab.hpp`).**
+- Each pose tick, every hand scans 1,024 of the engine's 16,383 registry slots, each through its own guarded read. It then runs four
+  class tests per entity, each re-reading the class pointer.
+- The v1430 call tree put guarded reads at 3.5 % of the main thread, mostly this scan.
+- The change:
+  - the slice is read in one or two bulk reads;
+  - empty slots are skipped;
+  - the class pointer is read once per entity;
+  - a failed bulk read falls back to the old path.
+- Switches: `build/grab-scan-legacy` and dev command `grabscan on|off|abab <ms>`. Status `grab_scan` reports `us_per_call` per mode.
+- Lab: `native_grab_compile` checks the bulk path over 40 slices including two registry wraps (same bodies, cursor and lookup count as
+  the per-slot path) and the fallback on a failed read. Everything up to an older assertion passed.
+- That older assertion (`grab_focus_candidate({old_target},...)`, line 79 at HEAD) also fails at HEAD. `build\night\lab.cmd` printed
+  LAB_PASS anyway, so check its output for "Assertion failed".
+- Measured at 11:05 (v1436, one sim, `grabscan abab 1000`, DLSS Quality, 8 workers): `focus_body` costs 146.5 us per call with the
+  old scan and 134.3 us with the bulk scan (530 and 786 calls; 730 bulk slices, 0 failures). That is -8 %, about 0.025 ms per frame.
+  The 6 frame pairs cannot resolve that.
+- What the measurement shows: grab focus as a whole is ~0.28 ms of main-thread time per frame (two hands x ~140 us). The registry reads
+  are not the bulk of it. The likely bulk is the per-tick revalidation of up to 64 cached bodies within ~3.3 m (`native_rigid_body` per
+  body). Revalidating far bodies less often would change grab focus, so it needs a headset feel-check first. Not done.
+- The bulk scan stays in (default on, `build/grab-scan-legacy` = old); the test candidate stays v1434.
