@@ -58,4 +58,26 @@ int main() {
     assert(!d2vr::native_executable_cached(at));
     assert(VirtualFree(memory,0,MEM_RELEASE));
     assert(!d2vr::native_readable_range(at,28));
+    // v1300: set associativity. Regions whose 64 KB blocks share a set (64 MB apart) stay cached together, up to four.
+    {
+        static d2vr::NativeRegionCache cache;
+        const auto make=[](std::uintptr_t base,DWORD protect) {
+            MEMORY_BASIC_INFORMATION r{};r.BaseAddress=reinterpret_cast<void*>(base);r.RegionSize=0x10000;r.State=MEM_COMMIT;r.Protect=protect;return r;};
+        constexpr std::uintptr_t stride=std::uintptr_t{d2vr::NativeRegionCache::sets}<<16; // same set
+        const std::uintptr_t a0=0x100000000ULL;
+        static_assert(d2vr::NativeRegionCache::ways==4);
+        for(std::uintptr_t i=0;i<4;++i) cache.add(make(a0+i*stride,PAGE_READWRITE),5000,a0+i*stride+8);
+        for(std::uintptr_t i=0;i<4;++i) assert(cache.find(a0+i*stride+8,8,5001) && cache.find(a0+i*stride+8,8,5001)->readable);
+        cache.add(make(a0+4*stride,PAGE_READONLY),5000,a0+4*stride); // a fifth: replaces one way (round robin from way 0)
+        assert(cache.find(a0+4*stride,8,5001) && cache.find(a0+4*stride,8,5001)->readable);
+        assert(!cache.find(a0+8,8,5001));                           // way 0 was the victim
+        for(std::uintptr_t i=1;i<4;++i) assert(cache.find(a0+i*stride+8,8,5001));
+        cache.add(make(a0+2*stride,PAGE_READONLY),5100,a0+2*stride); // the same region again: replaced in place, no eviction
+        for(std::uintptr_t i=1;i<5;++i) assert(cache.find(a0+i*stride+8,8,5101));
+        cache.forget(a0+3*stride+8);                                    // only the way holding the address
+        assert(!cache.find(a0+3*stride+8,8,5101) && cache.find(a0+1*stride+8,8,5101) && cache.find(a0+2*stride+8,8,5101));
+        cache.add(make(a0+5*stride,PAGE_READWRITE),5100,a0+5*stride); // an emptied way is reused before the round robin
+        assert(cache.find(a0+5*stride+8,8,5101) && cache.find(a0+1*stride+8,8,5101) && cache.find(a0+4*stride,8,5101));
+        assert(!cache.find(a0+1*stride+8,8,5100+d2vr::native_region_readable_ttl_ms+d2vr::native_region_readable_stagger_ms)); // expired after the readable TTL
+    }
 }

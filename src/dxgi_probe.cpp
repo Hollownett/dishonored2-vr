@@ -4255,6 +4255,14 @@ bool write_self_aim(std::uintptr_t address,const void* data,std::size_t size) no
     __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
 
+// Diagnostic (knob build/region-cache-stats): read_self's region-cache hits and why lookups missed (native_readable_range.hpp).
+static std::string region_cache_json() {
+    auto& st=d2vr::region_cache_stats();if(!st.on.load()) return "null";
+    std::ostringstream o;o<<"{\"lookups\":"<<st.lookups.load()<<",\"hit_readable\":"<<st.hit_readable.load()<<",\"hit_unreadable\":"<<st.hit_unreadable.load()
+        <<",\"miss_empty\":"<<st.miss_empty.load()<<",\"miss_expired\":"<<st.miss_expired.load()<<",\"miss_other_region\":"<<st.miss_other_region.load()
+        <<",\"miss_past_end\":"<<st.miss_past_end.load()<<",\"queries\":"<<st.queries.load()<<",\"query_unreadable\":"<<st.query_unreadable.load()<<"}";
+    return o.str();
+}
 // Called on the native Present thread alongside XR retirement.
 void restore_audio_session() noexcept {
     native_audio_listener.clear();
@@ -15871,7 +15879,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_cached_output_size\":[" << cached_dimensions[0] << ',' << cached_dimensions[1] << ']'
                                      << ",\"cached_output_reapplies\":" << cached_output_reapplies.load()
                                      << ",\"cached_output_deferred\":" << cached_output_deferred.load()
-                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
+                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << (async_present_requested?",\"async_present\":"+d2vr::AsyncPresent::instance().json()+",\"game_side_hooked\":"+(game_side_hooked.load()?std::string("true"):std::string("false")):std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
@@ -18949,6 +18957,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             if(d2vr::diag::on() && (!synchronized_log)){synchronized_observer.stop();throw std::runtime_error("Cannot open synchronized observer log");}
         }
     read_self_profiling=fs::exists(root/L"build"/L"read-self-profile");
+    d2vr::region_cache_stats().on=fs::exists(root/L"build"/L"region-cache-stats"); // diagnostic: region-cache miss causes
         {std::ifstream knob(root/L"build"/L"sim-eye-size");uint32_t w{},h{};if(knob>>w>>h && w>=320 && h>=320 && w<=4096 && h<=4096) {d2vr::simxr::recommended_size[0]=w;d2vr::simxr::recommended_size[1]=h;}}
         {std::ifstream knob(root/L"build"/L"sim-fov");float f[4]{};if(knob>>f[0]>>f[1]>>f[2]>>f[3] && f[0]<0 && f[1]>0 && f[2]>0 && f[3]<0) std::copy(f,f+4,d2vr::simxr::optical_fov);}
         if(full_body_requested) {std::ifstream knob(root/L"build"/L"full-body");double back=.08,head=.02;knob>>back>>head;full_body.tune(back,head);
@@ -19800,7 +19809,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"cached_output_written\":" << (cached_output_written?"true":"false")
                << ",\"cached_output_restored\":" << (cached_output_restored.load()?"true":"false")
                << ",\"requested_native_output\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
-               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
+               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << (async_present_requested?",\"async_present\":"+d2vr::AsyncPresent::instance().json()+",\"game_side_hooked\":"+(game_side_hooked.load()?std::string("true"):std::string("false")):std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
