@@ -1,4 +1,4 @@
-# VR v1440 (release, 2026-11-20)
+# VR v1441 (release, 2026-11-20)
 
 ## Spacewarp: the headset stays at its full frame rate, on by default
 
@@ -45,4 +45,4 @@ If a Spacewarp change looks worse to you, each one can be undone with an empty f
 surfaces). Turning Spacewarp off on the Settings page undoes all of it. Say what you saw.
 
 Tested by the author in the headset over Virtual Desktop and SteamVR up to v1438 (Spacewarp, hands, weapons, HUD). The leg changes
-(v1439) and the SteamVR timing (v1440) are tested in the lab and the simulator.
+(v1439) and the SteamVR timing (v1440-v1441) are tested in the lab, the simulator and one SteamVR session.
