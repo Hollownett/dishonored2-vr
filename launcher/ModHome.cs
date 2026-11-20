@@ -12,8 +12,9 @@ namespace DishonoredVR;
 public static class ModHome
 {
     /// <summary>Bump to make every existing install take tools/default_features.json's defaults once (Features.RestoreDefaults) on its next start.
-    /// "1": dual wield and intro skip on; only power gestures, performance mode and logging stay off.</summary>
-    const string DefaultsRevision = "1";
+    /// "1": dual wield and intro skip on; only power gestures, performance mode and logging stay off.
+    /// "2" (v1439, user 2026-11-20: spacewarp "should turn by default for all players"): spacewarp on (Auto).</summary>
+    const string DefaultsRevision = "2";
 
     public static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DishonoredVR");
 

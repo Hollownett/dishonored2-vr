@@ -159,6 +159,16 @@ public sealed class Env
                 "Usable if the game starts. If it closes right at start, download amd_ags_x64.dll from " +
                 "github.com/SCell555/amd-ags-stub/releases/tag/v1.1, put it in your game folder and overwrite."));
         l.Add(new("Game art", true, artState ?? "imported from your install", artState == null ? "" : "Usable without it: the launcher and VR menus use plain styling until the import finishes."));
+        {   // v1439: Spacewarp (on by default) and what else must stay off; red (never blocking) with a mode it cannot use
+            var swFile = P("build", "spacewarp");
+            var sw = File.Exists(swFile);
+            int? aa = null;
+            try { if (File.Exists(SettingsFile)) aa = Prefs.Load(SettingsFile).TemporalAa; } catch (Exception) { }
+            bool always = false;
+            try { always = sw && File.ReadAllText(swFile).Trim() == "always"; } catch (Exception) { }
+            var (name, ok, detail, fix) = FrameGen.SpacewarpCheck(sw, always, aa, rt);
+            l.Add(new(name, ok, detail, fix));
+        }
         return l;
     }
 

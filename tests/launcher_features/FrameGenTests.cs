@@ -56,6 +56,16 @@ public static class FrameGenTests
         check("framegen_manual_smooth_motion_and_lossless", FrameGen.ManualConflicts(null, new HashSet<string>(new[] { "LosslessScaling" }, StringComparer.OrdinalIgnoreCase), true).Count == 2);
         check("framegen_manual_steamvr_alone_is_empty", FrameGen.ManualConflicts(@"D:\steam\steamapps\common\SteamVR\steamxr_win64.json", none, false).Count == 0);
 
+        // v1439: the Setup check row (spacewarp on by default; red, never blocking, only with an anti-aliasing mode it cannot use)
+        var vdRt = @"C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json";
+        var c1 = FrameGen.SpacewarpCheck(true, false, 8, vdRt);
+        check("framegen_check_vd_auto_ok", c1.ok && c1.detail == "Spacewarp Auto" && c1.fix.StartsWith("Virtual Desktop: set Synchronous Spacewarp to Disabled") && c1.fix.Contains("FSR or DLSS"));
+        var c2 = FrameGen.SpacewarpCheck(true, true, 9, null);
+        check("framegen_check_smaa_red", !c2.ok && c2.detail.StartsWith("Spacewarp Always") && c2.fix.StartsWith("Choose an FSR or DLSS"));
+        check("framegen_check_unsaved_aa_ok", FrameGen.SpacewarpCheck(true, false, null, null).ok);
+        check("framegen_check_off", FrameGen.SpacewarpCheck(false, false, 1, vdRt) is { ok: true, detail: "Spacewarp off" });
+        check("framegen_notice_text", FrameGen.NoticeText.Contains("Synchronous Spacewarp to Disabled") && FrameGen.NoticeText.Contains("FSR or DLSS") && FrameGen.NoticeText.Contains("\n\n"));
+
         // NVIDIA Smooth Motion: a read of the real driver profile where there is one (no driver: null); it must never throw
         bool threw = false; (bool? on, string detail) nv = (null, "");
         try { nv = FrameGen.NvidiaSmoothMotion("Dishonored2.exe"); } catch (Exception) { threw = true; }

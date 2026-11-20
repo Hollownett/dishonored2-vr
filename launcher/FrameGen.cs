@@ -205,4 +205,35 @@ public static class FrameGen
     }
 
     public const string StateFileName = "steamvr-smoothing-before";  // build\: SteamVR's override before Spacewarp switched it off
+
+    /// <summary>v1439: the main page's Setup check row for frame generation (user 2026-11-20: spacewarp on by default for all players, with
+    /// a notice to turn the other frame generation off and that it works only with FSR or DLSS anti-aliasing). spacewarp: build\spacewarp
+    /// present; always: its text "always"; aa: the saved anti-aliasing mode (null: none saved yet, the GPU's FSR/DLSS default applies);
+    /// runtime: the active OpenXR runtime's manifest path. Not ok (red, never blocking) only when spacewarp is on with a mode it cannot use.</summary>
+    public static (string name, bool ok, string detail, string fix) SpacewarpCheck(bool spacewarp, bool always, int? aa, string? runtime)
+    {
+        const string name = "Frame generation";
+        if (!spacewarp) return (name, true, "Spacewarp off", "Turn Spacewarp on (Settings page) to keep the headset at its full frame rate when the game cannot.");
+        var aaOk = aa is null or (>= 2 and <= 8);
+        var rt = runtime ?? "";
+        var vd = rt.Contains("vdxr", StringComparison.OrdinalIgnoreCase) || rt.Contains("VirtualDesktop", StringComparison.OrdinalIgnoreCase) || rt.Contains("Virtual Desktop", StringComparison.OrdinalIgnoreCase);
+        var fix = (vd ? "Virtual Desktop: set Synchronous Spacewarp to Disabled (headset app > Settings > Streaming). " : "") +
+                  "Only one frame generation may run: also keep Virtual Desktop's SSW, Meta ASW, NVIDIA Smooth Motion and Lossless Scaling off " +
+                  "(the launcher turns SteamVR's Motion Smoothing off for Dishonored 2 itself). Spacewarp works only with an FSR or DLSS anti-aliasing mode.";
+        if (!aaOk) fix = "Choose an FSR or DLSS anti-aliasing mode on the Settings page: with the current one Spacewarp does nothing. " + fix;
+        return (name, aaOk, (always ? "Spacewarp Always (half rate)" : "Spacewarp Auto") + (aaOk ? "" : ": needs FSR or DLSS anti-aliasing"), fix);
+    }
+
+    /// <summary>v1439: the one-time notice when Spacewarp is on and the player has not seen it yet (marker build\launcher-spacewarp-notice).</summary>
+    public const string NoticeMarker = "launcher-spacewarp-notice";
+    public const string NoticeText =
+        "Spacewarp is on.\n\n" +
+        "When the game cannot hold the headset's frame rate, the mod renders every second frame and generates the ones in " +
+        "between, so the headset stays at its full rate.\n\n" +
+        "Only one frame generation may run at a time:\n" +
+        "- Virtual Desktop: set Synchronous Spacewarp to Disabled (headset app > Settings > Streaming).\n" +
+        "- Meta Link: turn Asynchronous Spacewarp off (Oculus Debug Tool).\n" +
+        "- NVIDIA Smooth Motion and Lossless Scaling: keep them off for Dishonored 2.\n" +
+        "- SteamVR Motion Smoothing: the launcher switches it off for Dishonored 2.\n\n" +
+        "Spacewarp works only with an FSR or DLSS anti-aliasing mode. You can change or turn it off on the Settings page.";
 }

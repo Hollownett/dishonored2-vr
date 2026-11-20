@@ -932,6 +932,7 @@ static d2vr::rig::Arm full_body_material_arm{};
 static std::atomic<bool> full_body_restore_requested{};
 static std::atomic<bool> full_body_tracking_ready{};
 static std::atomic<bool> full_body_stopping{};
+static std::array<std::atomic<UINT64>,3> full_body_upload_phase{};  // v1439: the main thread's phase (ctx_probe: outside, game, render) at each solved body upload; needs build/overlap-probe or ctx-probe
 static std::atomic<UINT64> full_body_uploads{},full_body_arm_uploads{},full_body_visible{},full_body_material_failures{};
 // The finger route, per hand (status JSON finger_ik.route / finger_ik.bend): whether the finger block holds something with this hand (the
 // contact turns must win), what the tracking publication carried (published, with turns, hand empty, forced empty because of the hold), and the
@@ -2867,6 +2868,8 @@ static std::atomic<bool> spacewarp_legacy_edges_knob{false};   // v1424: build/s
 // phase = consecutive renders of that view (the engine stamp +0x77b4 one up). Only with spacewarp on and build/no-spacewarp-movers absent.
 static std::atomic<bool> spacewarp_movers_knob{true};
 static std::atomic<bool> spacewarp_bilinear_knob{false};  // v1429: build/spacewarp-bilinear = the v1428 bilinear colour resample
+static constexpr int spacewarp_legs_lag_default=1;  // v1439: set from the phase measurement
+static std::atomic<int> spacewarp_legs_lag{spacewarp_legs_lag_default};  // v1439: build/spacewarp-legs-lag 0|1 (see the leg history at the spacewarp camera record)
 static std::atomic<bool> spacewarp_no_legs_knob{false},spacewarp_crack2_knob{false},spacewarp_hand_bubble_knob{false};  // v1438: build/no-spacewarp-legs = the body moves rigidly (v1437)
 static std::atomic<bool> spacewarp_no_body_knob{false};  // v1432: build/no-spacewarp-body = no body rule (the player's legs as v1431)
 static std::atomic<bool> spacewarp_baked_overlays_knob{false};static std::atomic<bool> spacewarp_tint_classes_knob{false};  // v1432 diagnostics  // v1432: build/spacewarp-baked-overlays = the eye overlays warped with the scene (v1431)
@@ -5151,6 +5154,7 @@ void invoke_arm_upload(void* model,const void* source,UINT count,FullHandUploadW
                         }
                         if(full_body_material.owns(*binding)) {full_body_material_owner=*binding;full_body_material_arm=snapshot->arms[0];}
                     }
+                    if(full) ++full_body_upload_phase[std::min(d2vr::ctx_probe::phase.load(std::memory_order_relaxed),2u)];  // v1439 diagnostics (every body upload)
                     if(full) if(const auto posed=full_body.body(upload->joints,upload->model_frame,frames.load()+1)) { // one solve per game frame for body and both arms
                         body_palette=*posed;submitted=body_palette.data();++full_body_uploads;image_kind=1;
                     }
@@ -7182,7 +7186,7 @@ static std::string run_test_command(const std::string& line) {
         else if(v=="altlegs" && game_xr) game_xr->spacewarp_capture_alt=4;else if(v=="altcrack" && game_xr) game_xr->spacewarp_capture_alt=5;  // v1438
         else if(v=="althands" && game_xr) game_xr->spacewarp_capture_alt=6;  // v1438
         else if(v=="body") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_no_body_knob=m=="off";}  // v1432 A/B: spacewarp body on|off
-        else if(v=="legs") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_no_legs_knob=m=="off";}  // v1438 A/B: the leg rule on|off
+        else if(v=="legs") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_no_legs_knob=m=="off";else if(m=="lag0" || m=="lag1") spacewarp_legs_lag=m=="lag1"?1:0;}  // v1438/v1439 A/B
         else if(v=="overlays") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_baked_overlays_knob=m=="off";}  // v1432 A/B: spacewarp overlays on|off
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
@@ -12948,6 +12952,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"flat_fallbacks\":" << native_hud_flat_fallbacks.load() << ",\"flat_failures\":" << native_hud_flat_failures.load()
         << ",\"marker_rejected\":" << native_marker_art_rejected.load() << '}'
         << ",\"full_body\":{\"requested\":" << (full_body_requested?"true":"false") << ",\"body_uploads\":" << full_body_uploads.load()
+        << ",\"body_upload_phase\":[" << full_body_upload_phase[0].load() << ',' << full_body_upload_phase[1].load() << ',' << full_body_upload_phase[2].load() << ']'
         << ",\"arm_uploads\":" << full_body_arm_uploads.load() << ",\"visible\":" << full_body_visible.load()
         << ",\"material_failures\":" << full_body_material_failures.load() << ",\"material_reasons\":[" << full_body_material_reasons[0].load() << ',' << full_body_material_reasons[1].load() << ',' << full_body_material_reasons[2].load() << ',' << full_body_material_reasons[3].load() << ',' << full_body_material_reasons[4].load() << ',' << full_body_material_reasons[5].load() << ',' << full_body_material_reasons[6].load() << ',' << full_body_material_reasons[7].load() << ']' << ",\"solves\":" << full_body.solves()
         << ",\"finger_modes\":" << [&]{std::ostringstream o;const auto m=full_body.finger_modes();o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<m[i][0]<<','<<m[i][1]<<','<<m[i][2]<<','<<m[i][3]<<']';}o<<']';return o.str();}()
@@ -14517,18 +14522,27 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
                             if(const auto cameras=alt_cameras.take(number))
                                 for(UINT e=0;e<2;++e) if(cameras->mask&(1u<<e)) game_xr->record_rendered_camera(e,cameras->view[e],number);
-                        {   // v1438: the drawn legs of this real frame and of the previous one (spacewarp's leg rule); a gap of more than one Present: none
-                            static std::uint64_t last_number=0;static std::array<std::array<d2vr::Vec3,3>,2> last{};static bool have_last=false;
+                        {   // v1438/v1439: the drawn legs over the last three real frames (spacewarp's leg rule); a gap of more than one Present restarts
+                            // the history. spacewarp_legs_lag 1: the newest upload is a frame ahead of this Present's image (the engine uploaded the body
+                            // for the next frame before this Present), so the image shows the one before and the newest is where the legs go next
+                            // (interpolated, as exact as the hands); 0: the newest is the image and its last step is repeated (extrapolated)
+                            using LegPose=std::array<std::array<d2vr::Vec3,4>,2>;
+                            static std::uint64_t last_number=0;static std::array<LegPose,3> hist{};static int have=0;
                             d2vr::GameXr::SpacewarpLegs legs{};
                             const auto d=full_body.diagnostic();const char* why="ok";
                             if(d.legs_valid) {
-                                std::array<std::array<d2vr::Vec3,3>,2> now{};bool finite=true;
-                                for(unsigned s=0;s<2;++s) {now[s]={d.leg[s][0],d.leg[s][1],d.leg[s][2]};for(const auto& v:now[s]) finite=finite && d2vr::finite(v);}
+                                LegPose now{};bool finite=true;
+                                for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) {now[s][k]=d.leg[s][k];finite=finite && d2vr::finite(now[s][k]);}
                                 if(finite) {
-                                    if(have_last && number==last_number+1) {legs.valid=true;legs.now=now;legs.prev=last;} else why="gap";
-                                    last=now;have_last=true;last_number=number;
-                                } else {have_last=false;why="not finite";}
-                            } else {have_last=false;why="no body upload";}
+                                    if(have>0 && number==last_number+1) {hist[2]=hist[1];hist[1]=hist[0];have=std::min(have+1,3);} else {have=1;why="gap";}
+                                    hist[0]=now;last_number=number;
+                                } else {have=0;why="not finite";}
+                            } else {have=0;why="no body upload";}
+                            const auto minus=[](const LegPose& a,const LegPose& b) {LegPose r{};for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) r[s][k]=a[s][k]-b[s][k];return r;};
+                            const int lag=spacewarp_legs_lag.load();
+                            if(lag==1 && have>=3) {legs.valid=true;legs.interpolated=true;legs.seg=hist[1];legs.next=minus(hist[0],hist[1]);legs.past=minus(hist[1],hist[2]);}
+                            else if(lag==0 && have>=2) {legs.valid=true;legs.seg=hist[0];legs.past=minus(hist[0],hist[1]);legs.next=legs.past;}
+                            else if(have>0 && std::string_view(why)=="ok") why="history";
                             if(legs.valid && !d.legs_solved) why="ok (engine legs)";
                             game_xr->spacewarp_leg_why=why;
                             game_xr->spacewarp_legs=legs;game_xr->spacewarp_leg_rule=!spacewarp_no_legs_knob.load();game_xr->spacewarp_crack_reach=spacewarp_crack2_knob.load()?2:4;game_xr->spacewarp_hand_scenery=!spacewarp_hand_bubble_knob.load();
@@ -18322,6 +18336,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_bilinear_knob=fs::exists(root/L"build"/L"spacewarp-bilinear");   // v1429
                 spacewarp_no_body_knob=fs::exists(root/L"build"/L"no-spacewarp-body");   // v1432
                 spacewarp_no_legs_knob=fs::exists(root/L"build"/L"no-spacewarp-legs");   // v1438
+                {std::ifstream lagk(root/L"build"/L"spacewarp-legs-lag");int lag=-1;if(lagk>>lag && (lag==0 || lag==1)) spacewarp_legs_lag=lag;else spacewarp_legs_lag=spacewarp_legs_lag_default;}  // v1439
                 spacewarp_crack2_knob=fs::exists(root/L"build"/L"spacewarp-crack2");   // v1438: the v1437 crack reach
                 spacewarp_hand_bubble_knob=fs::exists(root/L"build"/L"spacewarp-hand-bubble");   // v1438: the v1437 hand volumes
                 spacewarp_baked_overlays_knob=fs::exists(root/L"build"/L"spacewarp-baked-overlays");   // v1432

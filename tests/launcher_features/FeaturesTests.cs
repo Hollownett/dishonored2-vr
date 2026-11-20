@@ -59,7 +59,11 @@ LogCleanupTests.Run(Check); // v1047: the Tools page's "Delete logs" (no build f
     var st = Features.State(d, list);
     var offIds = list.Where(f => !st[f.Id].On).Select(f => f.Id).ToArray();
     var newIds = new[] { "grip-alone-grab", "palm-select", "corpse-slip-release", "living-hold", "finger-surface", "finger-ease", "hand-grenade-throw", "hand-mine-aim", "bink-theater", "cutscene-skip-hold", "letterbox-hide" };
-    Check("fresh_install_enables_sprint_and_selected_aa", offIds.OrderBy(x => x).SequenceEqual(new[] { "performance-mode", "afw-renderer", "spacewarp", "power-gestures", "native-temporal-census", "diagnostics", "diagnostic-capture" }.OrderBy(x => x)) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+    Check("fresh_install_enables_sprint_and_selected_aa", offIds.OrderBy(x => x).SequenceEqual(new[] { "performance-mode", "afw-renderer", "power-gestures", "native-temporal-census", "diagnostics", "diagnostic-capture" }.OrderBy(x => x)) && newIds.All(i => st[i].On) && list.Where(f => !f.IsEnable).All(f => !Has(d, f.File)) && !list.Any(f => f.File == "finger-probe-3"));
+}
+{   // v1439 (user 2026-11-20: spacewarp on by default for all players): a fresh home gets build\spacewarp, empty = Auto
+    var d = NewBuild(); Features.Apply(d, list);
+    Check("fresh_install_spacewarp_auto", Has(d, "spacewarp") && File.ReadAllText(Path.Combine(d, "spacewarp")) == "" && F("spacewarp").Default);
 }
 {   // v1046: the old frame-diagnostics row (no-diagnostics) is gone; the one master "diagnostics" switch (build\diagnostics) is off by default.
     var old = new Feature("frame-diagnostics", "no-diagnostics", "disable", "x", "x", true);

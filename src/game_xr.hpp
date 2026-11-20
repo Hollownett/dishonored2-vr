@@ -2303,7 +2303,7 @@ public:
          <<",\"not_kept_why\":\""<<spacewarp_not_kept_why<<"\",\"captures\":"<<spacewarp_captures_saved
          <<",\"presents\":"<<spacewarp_presents<<",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"gated\":"<<spacewarp_gated
          <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"soft_edges\":"<<(spacewarp_soft_edges?"true":"false")<<",\"mover_eyes\":"<<spacewarp_mover_eyes
-         <<",\"body\":"<<(spacewarp_body?"true":"false")<<",\"body_eyes\":"<<spacewarp_body_eyes<<",\"resizes\":"<<spacewarp_resizes<<",\"generated_at_last_resize\":"<<spacewarp_resize_settled_at<<",\"leg_eyes\":"<<spacewarp_leg_eyes<<",\"leg_valid\":"<<spacewarp_leg_valid<<",\"leg_insane\":"<<spacewarp_leg_insane<<",\"leg_noshare\":"<<spacewarp_leg_noshare
+         <<",\"body\":"<<(spacewarp_body?"true":"false")<<",\"body_eyes\":"<<spacewarp_body_eyes<<",\"resizes\":"<<spacewarp_resizes<<",\"generated_at_last_resize\":"<<spacewarp_resize_settled_at<<",\"leg_eyes\":"<<spacewarp_leg_eyes<<",\"leg_valid\":"<<spacewarp_leg_valid<<",\"leg_interpolated\":"<<spacewarp_leg_interpolated<<",\"leg_insane\":"<<spacewarp_leg_insane<<",\"leg_noshare\":"<<spacewarp_leg_noshare
          <<",\"leg_hip\":["<<spacewarp_leg_hip[0]<<','<<spacewarp_leg_hip[1]<<','<<spacewarp_leg_hip[2]<<"],\"leg_root\":["<<spacewarp_leg_root[0]<<','<<spacewarp_leg_root[1]<<','<<spacewarp_leg_root[2]<<"],\"leg_step_m\":"<<spacewarp_leg_step_m<<",\"leg_why\":\""<<spacewarp_leg_why<<"\""<<",\"legs\":"<<(spacewarp_leg_rule?"true":"false")<<",\"body_eye_height\":"<<spacewarp_body_eye_height
          <<",\"body_up_dot\":"<<spacewarp_body_up_dot<<",\"overlays\":"<<(spacewarp_overlays?"true":"false")<<",\"overlay_draws\":"<<spacewarp_overlay_draws
          <<",\"overlay_failures\":"<<spacewarp_overlay_failures<<",\"layers_moved\":"<<spacewarp_layers_moved<<",\"cylinders\":"<<spacewarp_cylinders
@@ -2380,9 +2380,12 @@ public:
     bool spacewarp_overlays{true};bool spacewarp_tint_classes{};  // v1432 diagnostics: build/spacewarp-tint-classes
     std::optional<Vec3> spacewarp_body_root;  // v1432: the player model's root (world, at the feet), set by dxgi_probe each Present; none: no body rule
     // v1438: the drawn legs (world; hip, knee, ankle per leg) of this real frame's body upload and of the previous real frame's (dxgi_probe)
-    struct SpacewarpLegs {bool valid{};std::array<std::array<Vec3,3>,2> now{},prev{};};
+    // v1439: seg = the legs as drawn in this real frame's image (hip, knee, ankle, toe per leg), next = each point's world displacement over one
+    // real frame toward the target slot (to the next upload when it is known, else the last step again), past = its step since the previous
+    // real frame
+    struct SpacewarpLegs {bool valid{},interpolated{};std::array<std::array<Vec3,4>,2> seg{},next{},past{};};
     std::uint64_t sw_settle_until_{},spacewarp_resizes{},spacewarp_resize_settled_at{};  // v1438
-    SpacewarpLegs spacewarp_legs{};bool spacewarp_leg_rule{true};std::uint64_t spacewarp_leg_valid{},spacewarp_leg_insane{},spacewarp_leg_noshare{};std::array<double,3> spacewarp_leg_hip{},spacewarp_leg_root{};double spacewarp_leg_step_m{};const char* spacewarp_leg_why="";int spacewarp_crack_reach{4};bool spacewarp_hand_scenery{true};std::uint64_t spacewarp_leg_eyes{};
+    SpacewarpLegs spacewarp_legs{};bool spacewarp_leg_rule{true};std::uint64_t spacewarp_leg_valid{},spacewarp_leg_insane{},spacewarp_leg_noshare{},spacewarp_leg_interpolated{};std::array<double,3> spacewarp_leg_hip{},spacewarp_leg_root{};double spacewarp_leg_step_m{};const char* spacewarp_leg_why="";int spacewarp_crack_reach{4};bool spacewarp_hand_scenery{true};std::uint64_t spacewarp_leg_eyes{};
     double spacewarp_body_up_dot{},spacewarp_body_eye_height{};std::uint64_t spacewarp_body_eyes{};  // v1432 status (up agreement, the root's depth)  // v1432: the eye overlays redrawn on generated frames (build/spacewarp-baked-overlays: off, v1431 warped them)
     std::uint64_t spacewarp_overlay_draws{},spacewarp_overlay_failures{},spacewarp_layers_moved{},spacewarp_cylinders{};
     double spacewarp_play_mismatch_mm{};  // the two eyes' play spaces (camera * view^-1) apart: a check of the camera/view pairing
@@ -3058,18 +3061,24 @@ public:
                     if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid) ++spacewarp_leg_valid;  // v1438 status: which test let the rule apply
                     if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid && !(mover_share>0)) ++spacewarp_leg_noshare;
                     if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid && mover_share>0) {
-                        static constexpr double radius[3]={.13,.10,.15};  // thigh, shin, the foot's sphere at the ankle
-                        bool sane=true;
-                        for(unsigned side=0;side<2;++side) for(unsigned j=0;j<3;++j) {
-                            const Vec3 n=spacewarp_legs.now[side][j],q=spacewarp_legs.prev[side][j];
-                            if(!(length(n-q)<.5)) sane=false;
-                            const auto a=Si.apply({n.x,n.y,n.z}),b=Si.apply({q.x,q.y,q.z});
-                            p.leg_point[3*side+j]={a[0],a[1],a[2],radius[j]};
-                            p.leg_step[3*side+j]={(a[0]-b[0])*mover_share,(a[1]-b[1])*mover_share,(a[2]-b[2])*mover_share};
+                        static constexpr double radius[4]={.12,.09,.08,0};  // the capsule from each point to the next: thigh, shin, foot
+                        bool sane=true;const auto o=Si.apply({0,0,0});
+                        const auto dir=[&](const Vec3& v) {const auto a=Si.apply({v.x,v.y,v.z});return std::array<double,3>{a[0]-o[0],a[1]-o[1],a[2]-o[2]};};
+                        for(unsigned side=0;side<2;++side) for(unsigned j=0;j<4;++j) {
+                            const Vec3 s=spacewarp_legs.seg[side][j],n=spacewarp_legs.next[side][j],b=spacewarp_legs.past[side][j];
+                            if(!(length(n)<.5) || !(length(b)<.5)) sane=false;
+                            const auto a=Si.apply({s.x,s.y,s.z}),dn=dir(n),db=dir(b);
+                            p.leg_point[4*side+j]={a[0],a[1],a[2],radius[j]};
+                            p.leg_step[4*side+j]={dn[0]*mover_share,dn[1]*mover_share,dn[2]*mover_share};
+                            p.leg_past[4*side+j]={db[0],db[1],db[2]};
                         }
-                        {const Vec3 h=spacewarp_legs.now[0][0];spacewarp_leg_hip={h.x,h.y,h.z};spacewarp_leg_step_m=length(h-spacewarp_legs.prev[0][0]);
+                        {const Vec3 h=spacewarp_legs.seg[0][0];spacewarp_leg_hip={h.x,h.y,h.z};spacewarp_leg_step_m=length(spacewarp_legs.past[0][0]);
                          if(spacewarp_body_root) spacewarp_leg_root={spacewarp_body_root->x,spacewarp_body_root->y,spacewarp_body_root->z};}
-                        if(sane) {p.legs_on=true;++spacewarp_leg_eyes;} else ++spacewarp_leg_insane;
+                        if(sane) {p.legs_on=true;++spacewarp_leg_eyes;if(spacewarp_legs.interpolated) ++spacewarp_leg_interpolated;
+                            // v1439 (sim class tint: a half-disc of floor beside the foot on a slope rose past the cylinder's 6 cm floor and slid
+                            // with the player): the leg capsules hold the legs from hip to toe, so the cylinder keeps only the coat and torso
+                            p.body_floor=.25;}
+                        else ++spacewarp_leg_insane;
                     }
                 }
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {

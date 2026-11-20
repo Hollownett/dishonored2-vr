@@ -798,3 +798,32 @@ and the small improvements of `docs/research/FRAMEGEN-OTHER-MODS.md`.
   makes no generated frame for 1 s after the eye swapchains are resized and counts `resizes` / `generated_at_last_resize` in the status;
   the next headset report with them decides. Each change resized the eye chains once and rebuilt the upscaler once or twice (1.2: render
   1996x2150, then 1997x2151).
+
+## 23. v1439: legs as exact as the hands; spacewarp on by default (2026-11-20)
+
+User, headset v1438: "looks awesome"; left: "legs warp a lot when a player is running or walking ... fix them the same as the arms"; glasses
+double; SteamVR a bit worse than Virtual Desktop; spacewarp on by default for every player, with notices.
+
+- **Why v1438's legs warped.** Every body upload runs in the game phase (sim with `build/overlap-probe`: 2,826 of 2,826 uploads; status
+  `full_body.body_upload_phase`): the engine uploads frame N+1's body before frame N's Present. v1438 put the leg segments where the legs
+  would be a frame later. v1439 keeps three real frames of drawn legs: the image's own pose is the segments, the newest upload is where
+  the legs go (interpolated to the slot, as exact as the hands), the step before it is the previous-frame test (`build/spacewarp-legs-lag`
+  0 = extrapolate from the image's pose; 1 default). Status `leg_interpolated`.
+- **Leg capsules.** Hip, knee, ankle and toe per leg (the toe 0.16 m ahead of and 0.06 m below the ankle in the foot's bind frame):
+  thigh 0.12 m, shin 0.09 m, foot 0.08 m. Anywhere around the player (a running stride leaves the body cylinder), above the floor, unless
+  the previous real frame shows the point still in the world and not where the leg's last step carries it. Own motion beyond the play
+  space's step capped at 0.15 m (a planted foot stays planted at a sprint).
+- **Floor around the feet.** Class tint: on a slope the uphill floor rose past the cylinder's 6 cm floor and slid with the player (a
+  half-disc beside the foot). With the leg capsules on, the cylinder's floor is 0.25 m (coat and torso only).
+- Lab: spacewarp_pass_check 42 pass (legs outside the cylinder; the slope floor). Sim (user-like, Auto): 518/518 submitted, 0 late, 0
+  failures, legs interpolated on 1,032 of 1,032 eyes.
+- **SteamVR vs Virtual Desktop.** The user's v1438 SteamVR session (90 Hz): 36.4 real frames a second, 17 % of generated frames late
+  (game frames over two periods: 13.6 %). The submit thread is VDXR-only (SteamVR's xrWaitFrame queues GPU work on the game's device,
+  the v1421 hang class), so on SteamVR a generated frame waits for the next Present. SteamVR's counter shows its own reprojections too.
+  Not changed: Virtual Desktop stays the recommended runtime.
+- **Glasses.** Not fixed: transparent surfaces write no depth, so a glass is warped at the depth of what is behind it. Needs the
+  transparent surfaces' depth from the engine's forward pass (a later step).
+- **Launcher.** Spacewarp on by default (Auto) for every player: tools/default_features.json default true, ModHome DefaultsRevision 2
+  (every install takes the new defaults once). A Setup check row "Frame generation" (red, never blocking, with an anti-aliasing mode it
+  cannot use), a one-time notice (build/launcher-spacewarp-notice) and the Save/Launch lists say what to switch off and that it needs FSR
+  or DLSS.

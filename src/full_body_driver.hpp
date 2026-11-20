@@ -188,7 +188,7 @@ struct Diagnostic {
     Xf pelvis{},feet[2]{},palm[2]{},wrist[2]{},target_attachment[2]{},grip_to_attachment[2]{};
     // v1438: the drawn legs of the last body upload (world: hip, knee, ankle per leg), for spacewarp's leg rule: the solved pose when the mod
     // drew the body, else the engine's own (the mod's solve declined: the game's animation is drawn)
-    Vec3 leg[2][3]{};bool legs_valid{},legs_solved{};
+    Vec3 leg[2][4]{};bool legs_valid{},legs_solved{};  // v1439: hip, knee, ankle, toe (the toe: 0.16 m ahead of the ankle, 0.06 m below, in the foot's bind frame)
     Vec3 pelvis_forward{},pelvis_left{};
     Vec3 plant[2]{},swing_from[2]{},swing_to[2]{};double phase[2]{},owned[4]{},palm_residual[2]{};
     ArmGate arm_gate[2]{ArmGate::no_solution,ArmGate::no_solution};
@@ -472,16 +472,23 @@ public:
         back_=std::clamp(back,0.,.3);head_scale_=std::clamp(head_scale,.01,1.);
     }
     // v1438: each leg's hip, knee and ankle (femur, tibia, ankle joints of the 20-joint body) through `world` (joint index -> world pose)
-    template<class World> void legs_from_(World world,bool solved) {
+    template<class World> void legs_from_(World world,bool solved) noexcept {
         diag_.legs_valid=false;
-        const auto& sk=solver_.skeleton(0);
-        static const char* names[2][3]={{"left_femur_jnt","left_tibia_jnt","left_ankle_jnt"},{"right_femur_jnt","right_tibia_jnt","right_ankle_jnt"}};
-        for(unsigned i=0;i<2;++i) for(unsigned k=0;k<3;++k) {
-            const int j=sk.find(names[i][k]);
-            if(j<0 || j>=20) return;
-            diag_.leg[i][k]=world(static_cast<std::size_t>(j)).p;
-        }
-        diag_.legs_valid=true;diag_.legs_solved=solved;
+        try {  // Skeleton::find throws for a missing joint (an unfitted skeleton): no legs then, never out of the upload hook
+            const auto& sk=solver_.skeleton(0);
+            static const char* names[2][3]={{"left_femur_jnt","left_tibia_jnt","left_ankle_jnt"},{"right_femur_jnt","right_tibia_jnt","right_ankle_jnt"}};
+            for(unsigned i=0;i<2;++i) {
+                Xf ankle{};
+                for(unsigned k=0;k<3;++k) {
+                    const int j=sk.find(names[i][k]);
+                    if(j<0 || j>=20 || static_cast<std::size_t>(j)>=sk.bind.size()) return;
+                    const Xf x=world(static_cast<std::size_t>(j));diag_.leg[i][k]=x.p;
+                    if(k==2) {ankle=x;ankle.q=body::mul(x.q,body::conj(sk.bind[static_cast<std::size_t>(j)].q));}  // bind -> now (the pelvis rule)
+                }
+                diag_.leg[i][3]=ankle.p+rotated(ankle.q,{.16,0,-.06});  // v1439: the toe, model forward +x, up +z
+            }
+            diag_.legs_valid=true;diag_.legs_solved=solved;
+        } catch(...) {diag_.legs_valid=false;}
     }
     // Animation/render workers: the engine's own body upload for this frame. Returns the
     // replacement model-space joints, or nothing (keep the native upload).

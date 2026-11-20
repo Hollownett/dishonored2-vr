@@ -318,17 +318,29 @@ int main() {
             // v1438 (user, headset v1437: "fix legs warping"): the mod's drawn leg (hip, knee, ankle down the leg's centre line, 1 m below the
             // eye) stepped 0.15 m right since the previous real frame (the walk 0.10 m plus its swing): the leg takes that step, not just the
             // play space's (5 texels, as with a motion vector); the other leg is far away
+            // v1439: four points per leg (hip, knee, ankle, toe; w the capsule radius to the next point) and each point's past step (the
+            // previous frame shows the leg where the play space's 0.10 m step put it)
             d2vr::SpacewarpParams pl=pp;pl.legs_on=true;
-            pl.leg_point[0]={0,.4,-1,.13};pl.leg_point[1]={0,0,-1,.10};pl.leg_point[2]={0,-.4,-1,.15};
-            for(unsigned j=0;j<3;++j) {pl.leg_step[j]={.15,0,0};pl.leg_point[3+j]={5,5,-1,.01};pl.leg_step[3+j]={0,0,0};}
+            pl.leg_point[0]={0,.4,-1,.13};pl.leg_point[1]={0,0,-1,.13};pl.leg_point[2]={0,-.4,-1,.13};pl.leg_point[3]={0,-.45,-1,0};
+            for(unsigned j=0;j<4;++j) {pl.leg_step[j]={.15,0,0};pl.leg_past[j]={.10,0,0};pl.leg_point[4+j]={5,5,-1,.01};pl.leg_step[4+j]={0,0,0};pl.leg_past[4+j]={0,0,0};}
             const auto img4=run(device.Get(),context.Get(),pass,floor_only,pl);
             check(img4.b(39,30)>128 && img4.b(29,30)<64,"legs: a drawn leg without a motion vector moves with its own step (5 texels)");
             check(img4.r(12,30)==12*4,"legs: the floor stays still");
-            for(unsigned j=0;j<3;++j) pl.leg_step[j]={0,0,0};  // a planted foot: no step in the world
+            {   // v1439: a running stride leaves the body cylinder: the leg rule still holds the leg (the cylinder shrunk to 5 cm here)
+                d2vr::SpacewarpParams narrow=pl;narrow.body_radius=.05;const auto img6=run(device.Get(),context.Get(),pass,floor_only,narrow);
+                check(img6.b(39,30)>128 && img6.b(29,30)<64,"legs: a leg outside the body cylinder still moves with its own step");
+            }
+            {   // v1439: the root 0.15 m below the floor (a slope, stairs): with the leg capsules the cylinder's floor is 0.25 m (game_xr), so
+                // the floor beside the leg stays; with v1438's 0.06 m it slid with the play space
+                d2vr::SpacewarpParams slope=pl;slope.body_axis={0,0,-1.85};slope.body_floor=.25;
+                const auto img7=run(device.Get(),context.Get(),pass,floor_only,slope);
+                check(img7.r(25,30)==25*4 && img7.b(39,30)>128,"legs: the floor beside the leg 0.15 m above the root stays (cylinder floor 0.25 m) and the leg still moves");
+                d2vr::SpacewarpParams low=slope;low.body_floor=.06;low.legs_on=false;const auto img8=run(device.Get(),context.Get(),pass,floor_only,low);
+                check(img8.r(25,30)!=25*4,"legs off, cylinder floor 0.06 m: that floor slides with the play space (v1438)");
+            }
+            for(unsigned j=0;j<4;++j) pl.leg_step[j]={0,0,0};  // a planted foot: no step in the world
             const auto img5=run(device.Get(),context.Get(),pass,floor_only,pl);
-            // (this scene's play space steps 0.10 m a slot, past body_cap 0.08: the planted leg keeps within 0.02 m, under a texel; walking
-            // 1.5 m/s steps under 2 cm a slot, inside the cap)
-            check(img5.b(29,30)>128 && img5.b(37,30)<64,"legs: a leg that did not move in the world stays (within the cap) while the play space moves on");
+            check(img5.b(29,30)>128 && img5.b(37,30)<64,"legs: a leg that did not move in the world stays while the play space moves on (leg cap 0.15 m)");
             Scene no_prev=floor_only;no_prev.prev_distance=nullptr;const auto img2b=run(device.Get(),context.Get(),pass,no_prev,p);
             check(img2b.b(29,30)>128,"body: without a previous real frame a texel without a motion vector is left alone (scenery cannot be told apart)");
             d2vr::SpacewarpParams level=p;level.body_up={0,1,0};const auto img3=run(device.Get(),context.Get(),pass,s,level);
