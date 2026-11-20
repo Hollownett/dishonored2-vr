@@ -23,6 +23,7 @@ struct Scene {
     std::function<std::array<float,4>(unsigned,unsigned)> motion;                        // xyz metres, w px
     std::function<unsigned char(unsigned,unsigned)> rig;
     std::function<float(unsigned,unsigned)> prev_distance;                              // v1418: the previous real frame's depth (0: sky)
+    std::function<unsigned char(unsigned,unsigned)> blue;                               // v1424: B instead of the object's 255 / 0 (soft edges)
 };
 struct Image {std::vector<unsigned char> rgba;unsigned char r(unsigned x,unsigned y) const {return rgba[(y*N+x)*4];} unsigned char b(unsigned x,unsigned y) const {return rgba[(y*N+x)*4+2];}};
 
@@ -40,7 +41,7 @@ static Image run(ID3D11Device* device,ID3D11DeviceContext* context,d2vr::Spacewa
     };
     for(unsigned y=0;y<N;++y) for(unsigned x=0;x<N;++x) {
         const unsigned i=y*N+x;const float d=scene.distance(x,y);depth[i]=d>0?1/d:0;
-        colour[i*4]=static_cast<unsigned char>(x*4);colour[i*4+1]=static_cast<unsigned char>(y*4);colour[i*4+2]=scene.object(x,y)?255:0;colour[i*4+3]=255;
+        colour[i*4]=static_cast<unsigned char>(x*4);colour[i*4+1]=static_cast<unsigned char>(y*4);colour[i*4+2]=scene.blue?scene.blue(x,y):scene.object(x,y)?255:0;colour[i*4+3]=255;
         if(scene.motion) {const auto m=scene.motion(x,y);for(int c=0;c<4;++c) motion[i*4+c]=half(m[static_cast<std::size_t>(c)]);}
         if(scene.rig) rig[i]=scene.rig(x,y);
     }
@@ -97,11 +98,13 @@ int main() {
         {   // 4. a mover (rows/cols 20..39, w 10 px, 0.25 m right in the world) on a still plane 2 m ahead, camera still: 4 texels right
             Scene s;const auto in=[](unsigned x,unsigned y) {return x>=20 && x<40 && y>=20 && y<40;};s.object=in;
             s.motion=[in](unsigned x,unsigned y) {return in(x,y)?std::array<float,4>{.25f,0,0,10}:std::array<float,4>{0,0,0,0};};
-            d2vr::SpacewarpParams p{};p.motion_share=1;const auto img=run(device.Get(),context.Get(),pass,s,p);
+            d2vr::SpacewarpParams p{};p.motion_share=1;p.mover_cap=0;const auto img=run(device.Get(),context.Get(),pass,s,p);  // v1426: uncapped
             // (the strip it vacates, 20..23, is stretched from both sides: same depth; the cell next to the wall takes the wall)
             check(img.b(42,30)>128 && img.b(25,30)>128 && img.b(21,30)<64,"mover moved 4 texels right (B at 42 and 25, not at 21)");
             d2vr::SpacewarpParams still{};const auto img0=run(device.Get(),context.Get(),pass,s,still);
             check(img0.b(21,30)>128 && img0.b(41,30)<64,"motion_share 0 leaves the mover in place");
+            d2vr::SpacewarpParams capped{};capped.motion_share=1;const auto img1=run(device.Get(),context.Get(),pass,s,capped);  // v1426: the default 3 cm cap
+            check(img1.b(21,30)>128 && img1.b(41,30)<64,"v1426 mover cap: a 0.25 m step is cut to 3 cm (less than a texel here): no overshoot");
         }
         {   // 5. a drawn hand (rig 255, 1 m ahead, centred at texel 30) moved 0.125 m right by its rigid motion: 4 texels right; the rest of
             // the rig (the same mask beyond the palm's reach) follows the rest motion (here: none)
@@ -207,6 +210,95 @@ int main() {
             check(img.b(16,31)>128 && img.b(21,31)<64,"carried: the shelf beside it, still in the world, stayed");
             d2vr::SpacewarpParams off=p;off.carry_on=false;const auto img0=run(device.Get(),context.Get(),pass,s,off);
             check(img0.b(41,31)>128 && img0.b(45,31)<64,"without the carried rule the box stays (v1422)");
+        }
+        {   // 12. v1424 (user, headset v1423: "around the hands, weapons, carried bodies and the player's own body a silhouette frame, a lot of
+            // ghosting"): soft edges. The colour image's edges are soft (anti-aliasing, the upscaler, the depth's own jitter) while the depth's are
+            // hard: the wall texels next to the hand carry hand colour (B 128, columns 24..25 and 34..35) and the hand's own edge texels carry
+            // wall colour (B 128, columns 26 and 33). The hand (palm reach, true stereo) moves 4 texels right.
+            const auto hand=[](unsigned x,unsigned y) {return x>=26 && x<34 && y>=26 && y<34;};
+            const auto ring=[](unsigned x,unsigned y,unsigned x0,unsigned x1) {return x>=x0 && x<=x1 && y>=x0 && y<=x1;};
+            Scene s;s.distance=[hand](unsigned x,unsigned y) {return hand(x,y)?1.f:3.f;};s.object=hand;
+            s.blue=[hand,ring](unsigned x,unsigned y)->unsigned char {
+                if(hand(x,y)) return ring(x,y,27,32)?255:128;   // the hand's edge texels: half wall
+                return ring(x,y,24,35)?128:0;                    // the wall's rim: half hand
+            };
+            d2vr::SpacewarpParams p{};p.hand_on={true,false};p.hand[0].t={.125,0,0};p.rig_near=.5;
+            const double centre=(30.0/N)*2-1;p.palm[0]={centre,-centre,-1,.3};
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            int ghost=0;for(unsigned x=18;x<30;++x) ghost=std::max(ghost,static_cast<int>(img.b(x,30)));
+            check(ghost<40,"soft edges: where the hand was (and its rim) shows the wall, no silhouette (B up to "+std::to_string(ghost)+")");
+            check(img.b(30,30)>=200 && img.b(37,30)>=200,"soft edges: the moved hand's edges show the hand, not the wall it left (B "+
+                std::to_string(img.b(30,30))+", "+std::to_string(img.b(37,30))+")");
+            check(img.b(34,30)>=200 && img.b(40,30)<140,"soft edges: the hand moved 4 texels right");
+            d2vr::SpacewarpParams still{};still.rig_near=.5;const auto img0=run(device.Get(),context.Get(),pass,s,still);
+            int off=0;for(unsigned x=0;x<N;++x) off=std::max(off,std::abs(static_cast<int>(img0.b(x,30))-static_cast<int>(s.blue(x,30))));
+            check(off<=2,"soft edges: nothing moving, the soft edges come back untouched (B off by "+std::to_string(off)+")");
+            d2vr::SpacewarpParams legacy=p;legacy.soft_edges=false;const auto old=run(device.Get(),context.Get(),pass,s,legacy);
+            int was=0;for(unsigned x=18;x<30;++x) was=std::max(was,static_cast<int>(old.b(x,30)));
+            check(was>=100 && old.b(30,30)<200,"soft edges off (build/spacewarp-legacy-edges): the v1423 silhouette and halo come back (B "+std::to_string(was)+")");
+        }
+        {   // 14. v1424: the shards. The wall behind the hand is striped (B 0 / 80 in 2-texel columns); the hand (B 255) moves 4 texels right.
+            // The strip it uncovers was one seed's colour copied along each fill direction (a streak of 0 or of 80: the shards); now the
+            // background around it blended (between the stripes).
+            const auto hand=[](unsigned x,unsigned y) {return x>=26 && x<34 && y>=26 && y<34;};
+            Scene s;s.distance=[hand](unsigned x,unsigned y) {return hand(x,y)?1.f:3.f;};s.object=hand;
+            s.blue=[hand](unsigned x,unsigned y)->unsigned char {return hand(x,y)?255:(x/2)%2?80:0;};
+            d2vr::SpacewarpParams p{};p.hand_on={true,false};p.hand[0].t={.125,0,0};p.rig_near=.5;
+            const double centre=(30.0/N)*2-1;p.palm[0]={centre,-centre,-1,.3};
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            d2vr::SpacewarpParams legacy=p;legacy.soft_edges=false;const auto old=run(device.Get(),context.Get(),pass,s,legacy);
+            // against the wall the hand hid (the stripes run on vertically behind it)
+            double now_err=0,old_err=0;int hand_left=0;
+            for(unsigned y=27;y<33;++y) for(unsigned x=26;x<30;++x) {
+                const int truth=(x/2)%2?80:0;now_err+=std::abs(img.b(x,y)-truth);old_err+=std::abs(old.b(x,y)-truth);hand_left+=img.b(x,y)>128;
+            }
+            now_err/=24;old_err/=24;
+            check(hand_left==0 && now_err<old_err*.95 && now_err<38,"uncovered strip (v1425: blended, then softened): the hidden striped wall, not the hand nor one seed's streak (off the truth by "+
+                std::to_string(static_cast<int>(now_err))+" levels; one seed's streak, soft edges off: "+std::to_string(static_cast<int>(old_err))+")");
+        }
+        {   // 15. v1425: cracks on a close, steep surface that comes nearer. A hand-held surface (columns 16..47, rows 16..47) slopes from 0.30 m
+            // (left) to 0.45 m (right) in front of a wall at 3 m and moves 4 cm toward the camera: it magnifies by 9-15 %, so whole columns
+            // of cells get no texel. Neighbours two cells apart differ by up to 7 % in depth: past the crack rule's 10 % only at the steep
+            // right... the surface must stay closed (no wall seen through it) except at its outline.
+            const auto in_hand=[](unsigned x,unsigned y) {return x>=16 && x<48 && y>=16 && y<48;};
+            Scene s;s.distance=[in_hand](unsigned x,unsigned y) {return in_hand(x,y)?.25f+.35f*(static_cast<float>(x)-16)/31.f:3.f;};
+            s.object=in_hand;
+            d2vr::SpacewarpParams p{};p.hand_on={true,false};p.hand[0].t={0,0,.04};p.rig_near=.5;
+            p.palm[0]={0,0,-.37,.4};  // the palm in the middle, its reach covering the whole surface
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            int holes=0;for(unsigned y=20;y<44;++y) for(unsigned x=20;x<44;++x) holes+=img.b(x,y)<128;
+            check(holes==0,"close steep surface coming nearer: no wall seen through it ("+std::to_string(holes)+" cells)");
+        }
+        {   // 16. v1425: one surface, two motions. An arm (rows 28..35, columns 8..55, 0.45 m: inside rig_near) over a wall at 3 m. Its hand
+            // end (within 0.1 m of the palm at column 48) moves 4 texels right with the hand; the rest of it with the rest of the rig (still).
+            // A per-texel rule tears the arm at the palm's reach: the wall shows through as a line. The arm must stay closed (it stretches).
+            const auto arm=[](unsigned x,unsigned y) {return x>=8 && x<56 && y>=28 && y<36;};
+            Scene s;s.distance=[arm](unsigned x,unsigned y) {return arm(x,y)?.45f:3.f;};s.object=arm;
+            d2vr::SpacewarpParams p{};p.hand_on={true,false};p.rig_near=.5;p.rest_on=true;
+            const double tx=(48.5/N)*2-1,ty=1-(31.5/N)*2;p.palm[0]={tx*.45,ty*.45,-.45,.1};
+            p.hand[0].t={4*.45/32,0,0};  // 4 texels at 0.45 m
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            int torn=0;for(unsigned y=29;y<35;++y) for(unsigned x=10;x<56;++x) torn+=img.b(x,y)<128;
+            check(torn==0,"one surface, two motions: the arm stays closed where its hand end moves ("+std::to_string(torn)+" cells of wall seen through it)");
+            check(img.b(57,31)>128 && img.b(9,31)>128,"one surface, two motions: the hand end moved 4 texels right, the far end stayed");
+        }
+        {   // 17. v1429: sharpness. Fine detail (B a 4-texel sine, amplitude 100) on a wall, the camera turned half a texel: bilinear lowers the
+            // detail's contrast (to half at this phase) in every generated frame, Catmull-Rom keeps ~25 % more within the 2x2 clamp (45 Hz shimmer)
+            Scene s;s.blue=[](unsigned x,unsigned) {return static_cast<unsigned char>(128+100*std::sin(2*3.14159265358979*x/4));};  // crests on texels
+            const double a=std::atan(1.0/N);d2vr::SpacewarpParams p{};p.m={std::cos(a),0,std::sin(a),0,1,0,-std::sin(a),0,std::cos(a)};
+            const auto amp=[&](const Image& img) {int lo=255,hi=0;for(unsigned x=16;x<48;++x) {lo=std::min(lo,static_cast<int>(img.b(x,32)));hi=std::max(hi,static_cast<int>(img.b(x,32)));}return hi-lo;};
+            const auto sharp=run(device.Get(),context.Get(),pass,s,p);
+            d2vr::SpacewarpParams soft=p;soft.sharp_resample=false;const auto blur=run(device.Get(),context.Get(),pass,s,soft);
+            check(amp(sharp)>=amp(blur)+15 && amp(sharp)<=200,"sharp resample: fine detail half a texel off keeps more contrast ("+std::to_string(amp(sharp))+" of 200; bilinear "+std::to_string(amp(blur))+"), never past the source");
+        }
+        {   // 13. v1424: the same hand against the sky moves 4 texels right: the sky it uncovers is sky, not the hand looked up again
+            const auto hand=[](unsigned x,unsigned y) {return x>=26 && x<34 && y>=26 && y<34;};
+            Scene s;s.distance=[hand](unsigned x,unsigned y) {return hand(x,y)?1.f:0.f;};s.object=hand;
+            d2vr::SpacewarpParams p{};p.hand_on={true,false};p.hand[0].t={.125,0,0};p.rig_near=.5;
+            const double centre=(30.0/N)*2-1;p.palm[0]={centre,-centre,-1,.3};
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            int ghost=0;for(unsigned x=20;x<30;++x) ghost=std::max(ghost,static_cast<int>(img.b(x,30)));
+            check(ghost<40 && img.b(35,30)>128,"sky: the hand moved, the sky it left shows sky (B up to "+std::to_string(ghost)+")");
         }
         {   // 6. sky only, the camera turned: every pixel is a direction (rotation-only look-up)
             Scene s;s.distance=[](unsigned,unsigned) {return 0.f;};

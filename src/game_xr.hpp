@@ -2267,7 +2267,7 @@ public:
          <<",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"skip\":\""<<spacewarp_skip<<"\",\"not_kept\":"<<spacewarp_not_kept
          <<",\"not_kept_why\":\""<<spacewarp_not_kept_why<<"\",\"captures\":"<<spacewarp_captures_saved
          <<",\"presents\":"<<spacewarp_presents<<",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"gated\":"<<spacewarp_gated
-         <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes
+         <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"soft_edges\":"<<(spacewarp_soft_edges?"true":"false")<<",\"mover_eyes\":"<<spacewarp_mover_eyes
          <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
          <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")
          <<",\"thread_frames\":"<<spacewarp_thread_frames<<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg
@@ -2295,6 +2295,8 @@ public:
     bool spacewarp_enabled{},spacewarp_always{};
     std::uint64_t spacewarp_generated{},spacewarp_submitted{},spacewarp_late{},spacewarp_unusable{},spacewarp_failures{},spacewarp_cuts{};
     std::uint64_t spacewarp_held_far_eyes{};  // v1418: generated eyes that had their previous real frame (the held-far-part rule on)
+    std::uint64_t spacewarp_mover_eyes{};  // v1426: generated eyes with a motion texture (movers extrapolated)
+    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,2> sw_motion_srv_{};std::array<ID3D11Texture2D*,2> sw_motion_key_{};  // v1426
     // v1419: why generated frames were late: the game frame came back too near the real frame's slot (late_wait), or the runtime's wait
     // already gave a later slot (late_slot); and generated eyes with a weapon body (weapon_eyes)
     std::uint64_t spacewarp_late_wait{},spacewarp_late_slot{},spacewarp_weapon_eyes{};
@@ -2332,6 +2334,9 @@ public:
     // sim check shrinks it so the moving hand itself must be found by the held-far-part rule), the rule off (spacewarp-no-held-far), and
     // the pixels it took tinted (spacewarp-tint-held)
     double spacewarp_palm_reach{};bool spacewarp_held_far{true},spacewarp_tint_held{};
+    bool spacewarp_soft_edges{true};  // v1424: build/spacewarp-legacy-edges turns the rim / moving-edge handling off
+    std::atomic<int> spacewarp_capture_alt{0};  // v1426: `spacewarp capture`'s generated-alt: 0 the other edge rule, 1 without movers, 2 the other resample
+    bool spacewarp_sharp{true};  // v1429: Catmull-Rom colour resample (build/spacewarp-bilinear: off)
     double spacewarp_play_mismatch_mm{};  // the two eyes' play spaces (camera * view^-1) apart: a check of the camera/view pairing
     const char* spacewarp_skip="";       // why the last real frame got no generated frame (status)
     std::uint64_t spacewarp_not_kept{};const char* spacewarp_not_kept_why="";  // gameplay Presents that could not feed a generated frame, and why
@@ -2931,6 +2936,9 @@ public:
                     locomotion=(O*old->O.inverse()).power(std::clamp(static_cast<double>(slot_time-display)/static_cast<double>(display-old->time),0.,1.));
                 for(unsigned k=3;k>0;--k) hist[k]=hist[k-1];
                 hist[0]={true,O,display,alternate_frame};
+                // v1426 movers: the share of the motion texture's span (this eye's previous real frame to this one) that reaches the target slot
+                const double mover_share=hist[1].valid && hist[1].frame+1==alternate_frame && display>hist[1].time?
+                    std::clamp(static_cast<double>(slot_time-display)/static_cast<double>(display-hist[1].time),0.,1.):0.;
                 const SwRigid head=sw_from_pose(at[1][eye].pose)*sw_from_pose(at[0][eye].pose).inverse();
                 const auto motion=spacewarp_eye_motion(S,V,locomotion,head,grip_step);
                 SpacewarpParams p{};
@@ -2978,7 +2986,7 @@ public:
                 }
                 if(weapon_here) ++spacewarp_weapon_eyes;
                 const auto& prev=sw_prev_[eye];
-                p.debug_tint_held=spacewarp_tint_held;
+                p.debug_tint_held=spacewarp_tint_held;p.soft_edges=spacewarp_soft_edges;p.sharp_resample=spacewarp_sharp;
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
                     p.prev_on=true;p.prev_tan=prev.tan;p.prev_m10=prev.m10;p.prev_m11=prev.m11;
                     const auto Pi=prev.S.inverse();p.prev_world=to_pass(Pi*S);
@@ -2997,6 +3005,18 @@ public:
                  if(FAILED(device->CreateShaderResourceView(stale_depth_[eye].Get(),&v,&depth))) return skip("depth view");}
                 SpacewarpInputs in{sw_colour_srv_[eye].Get(),depth.Get(),nullptr,nullptr,stale_depth_width_[eye],stale_depth_height_[eye]};
                 if(p.prev_on) {in.prev_depth=sw_prev_srv_[eye].Get();in.prev_width=prev.width;in.prev_height=prev.height;}
+                {   // v1426 (true stereo): movers (NPCs, props, physics) by this eye's motion texture of this Present (paired receipts, the engine's
+                    // motion vectors less the camera's): world metres since its previous render, times the share up to the target slot
+                    const StaleMotion mv=stale_motion(eye);
+                    if(mv.texture && mover_share>0 && mv.width==stale_depth_width_[eye] && mv.height==stale_depth_height_[eye]) {
+                        if(sw_motion_key_[eye]!=mv.texture) {
+                            sw_motion_srv_[eye].Reset();sw_motion_key_[eye]=nullptr;
+                            D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;v.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
+                            if(SUCCEEDED(device->CreateShaderResourceView(mv.texture,&v,&sw_motion_srv_[eye]))) sw_motion_key_[eye]=mv.texture;
+                        }
+                        if(sw_motion_srv_[eye]) {in.motion=sw_motion_srv_[eye].Get();p.motion_share=mover_share;p.world_to_source=S.inverse().r;++spacewarp_mover_eyes;}
+                    }
+                }
                 XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};uint32_t index{};
                 checked(xrAcquireSwapchainImage(chains_[eye],&acquire,&index),"Acquire spacewarp eye");
                 XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -3014,6 +3034,14 @@ public:
                     if(drawn && eye==0 && spacewarp_capture_requested.load()>0 && !afw_capture_dir.empty()) {  // `spacewarp capture`
                         wchar_t n[64];swprintf_s(n,L"sw-capture-%02d-",sw_capture_index_);
                         afw_capture_save_(sw_colour_[0].Get(),std::wstring(n)+L"real");afw_capture_save_(target,std::wstring(n)+L"generated");
+                        {   // v1424 A/B on the same inputs: the frame with the other edge rule (generated-alt), then this one drawn again for submission
+                            auto alt=p;auto alt_in=in;
+                            if(spacewarp_capture_alt==1) {alt_in.motion=nullptr;alt.motion_share=0;}  // v1426: the same frame without movers
+                            else if(spacewarp_capture_alt==2) alt.sharp_resample=!p.sharp_resample;  // v1429: the other resample
+                            else alt.soft_edges=!p.soft_edges;
+                            if(sw_pass_->run(context_.Get(),alt_in,alt,rtv.Get(),width_,height_)) afw_capture_save_(target,std::wstring(n)+L"generated-alt");
+                            drawn=sw_pass_->run(context_.Get(),in,p,rtv.Get(),width_,height_);
+                        }
                         sw_capture_pending_=true;sw_capture_frame_=alternate_frame;
                     }
                 } catch(...) {xrReleaseSwapchainImage(chains_[eye],&release);throw;}

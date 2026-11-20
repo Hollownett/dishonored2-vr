@@ -13,6 +13,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "shader_cache.hpp"
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -327,8 +328,7 @@ class StaleEyeWarp {
     }
     static Ptr<ID3DBlob> compile(const std::string& source,const char* entry,const char* profile) {
         Ptr<ID3DBlob> binary,errors;
-        const auto result=D3DCompile(source.data(),source.size(),"D2VR stale eye warp",nullptr,nullptr,entry,profile,
-            D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&binary,&errors);
+        const auto result=shader_cache::compile(source,"D2VR stale eye warp",entry,profile,D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3,&binary,&errors);  // v1428
         if(FAILED(result)) throw std::runtime_error(std::string("Stale eye warp shader ")+entry+": "+
             (errors?std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()):"compile failed"));
         return binary;
@@ -404,9 +404,7 @@ public:
     std::uint64_t fit_passes{},fit_corrections{};
     std::vector<HandFit> hand_fits;
     void poll_hand_fits() {ContextState::Scope scope(state_);collect_fits();}
-    explicit StaleEyeWarp(ID3D11Device* device):device_(device),state_(device) {
-        device_->GetImmediateContext(&context_);
-        const std::string source=R"HLSL(
+    static const std::string& shader_source() {static const std::string text=R"HLSL(
 Texture2D sourceTex : register(t0);
 Texture2D<float> depthTex : register(t1);
 Texture2D freshTex : register(t2);
@@ -1026,7 +1024,18 @@ float4 WarpPS(Vertex v) : SV_TARGET {
     const float3 sf=float3(dot(fresh[0].xyz,t),dot(fresh[1].xyz,t),dot(fresh[2].xyz,t));
     return Smooth(freshTex,clamp(sf.z>1e-6?sf.xy/sf.z:t.xy,size.zw,validRect.zw-size.zw));
 }
-)HLSL";
+)HLSL";return text;}
+    // v1428: fill the shader cache (shader_cache.hpp) off the main thread, during the menus: the first gameplay frame then loads the
+    // bytecode instead of compiling ~11 s on the main thread. Any thread, no device.
+    static void warm_cache() noexcept {
+        // each entry on its own: one failing does not skip the others (review 2026-11-20)
+        const auto one=[](const char* entry,const char* profile) noexcept {try {(void)compile(shader_source(),entry,profile);} catch(...) {}};
+        one("WarpVS","vs_5_0");one("WarpPS","ps_5_0");
+        for(const char* e:{"FitSample","FitCoarse","FitFine","FitPick"}) one(e,"cs_5_0");
+    }
+    explicit StaleEyeWarp(ID3D11Device* device):device_(device),state_(device) {
+        device_->GetImmediateContext(&context_);
+        const std::string& source=shader_source();  // v1428: static (warm_cache compiles it without a device)
         auto v=compile(source,"WarpVS","vs_5_0"),p=compile(source,"WarpPS","ps_5_0");
         checked(device_->CreateVertexShader(v->GetBufferPointer(),v->GetBufferSize(),nullptr,&vertex_),"vertex shader");
         checked(device_->CreatePixelShader(p->GetBufferPointer(),p->GetBufferSize(),nullptr,&pixel_),"pixel shader");

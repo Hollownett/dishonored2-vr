@@ -20,6 +20,7 @@
 #include <d3d11_1.h>
 #include <MinHook.h>
 #include <intrin.h>
+#include "ctx_probe.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1740,6 +1741,7 @@ private:
     }
 
     template<int I> static void STDMETHODCALLTYPE set_vs_hook(ID3D11DeviceContext* c,ID3D11VertexShader* vs,ID3D11ClassInstance* const* classes,UINT n) {
+        ctx_probe::note(c,ctx_probe::Kind::set_vs,_ReturnAddress());
         // Bookkeeping first (every call, including one the wide filter elides), then the filter on the forwarded arguments.
         const bool skip=observe_then_filter([&] {
             if(ContextState* s=state(c);s && vs!=s->vs) {s->vs=vs;s->layout=vs?layout_(vs):0;}
@@ -1761,6 +1763,7 @@ private:
         }
     }
     template<int I> static void STDMETHODCALLTYPE set_cb_hook(ID3D11DeviceContext* c,UINT start,UINT n,ID3D11Buffer* const* buffers) {
+        ctx_probe::note(c,ctx_probe::Kind::set_cb,_ReturnAddress());
         // ObjectMotion forwards the game's pointers unchanged here; the filter compares exactly those. Its own pool binds are
         // reported through wide_direct_cb_observer.
         const bool skip=observe_then_filter([&] {track(c,start,n,buffers,nullptr);},[&] {
@@ -1770,11 +1773,13 @@ private:
         if(!skip) set_cb_[I](c,start,n,buffers);
     }
     template<int I> static void STDMETHODCALLTYPE set_cb1_hook(ID3D11DeviceContext1* c,UINT start,UINT n,ID3D11Buffer* const* buffers,const UINT* first,const UINT* num) {
+        ctx_probe::note(c,ctx_probe::Kind::set_cb,_ReturnAddress());
         if(const auto observe=wide_cb1_observer.load(std::memory_order_relaxed))
             observe(reinterpret_cast<ID3D11DeviceContext*>(c),start,n,buffers,first,num);
         track(c,start,n,buffers,first);set_cb1_[I](c,start,n,buffers,first,num);
     }
     template<int I> static HRESULT STDMETHODCALLTYPE map_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* out) {
+        ctx_probe::note(c,ctx_probe::Kind::map,_ReturnAddress());
         const HRESULT hr=map_[I](c,r,sub,type,flags,out);
         if(SUCCEEDED(hr) && type==D3D11_MAP_WRITE_DISCARD && out && out->pData && r && on())
             if(Learned* e=shadowed(r)) pending_[pending_next_++&3]={c,r,out->pData,e};
@@ -1783,15 +1788,18 @@ private:
         return hr;
     }
     template<int I> static void STDMETHODCALLTYPE unmap_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub) {
+        ctx_probe::note(c,ctx_probe::Kind::unmap,_ReturnAddress());
         if(r) for(auto& p:pending_) if(p.resource==r && p.context==c) {p.resource=nullptr;written(c,r,p.data,*p.entry);break;}
         if(r && tl_inst_.r==r && tl_inst_.c==c) {place_instances(c,r,tl_inst_.data,tl_inst_.bytes,map_[I],unmap_[I]);tl_inst_={};}   // v1308: before the engine's data leaves
         unmap_[I](c,r,sub);
     }
     template<int I> static void STDMETHODCALLTYPE update_hook(ID3D11DeviceContext* c,ID3D11Resource* r,UINT sub,const D3D11_BOX* box,const void* src,UINT rp,UINT dp) {
+        ctx_probe::note(c,ctx_probe::Kind::update,_ReturnAddress());
         if(!box && src && r && on()) if(Learned* e=shadowed(r)) written(c,r,src,*e);
         update_[I](c,r,sub,box,src,rp,dp);
     }
     template<int I> static void STDMETHODCALLTYPE update1_hook(ID3D11DeviceContext1* c,ID3D11Resource* r,UINT sub,const D3D11_BOX* box,const void* src,UINT rp,UINT dp,UINT flags) {
+        ctx_probe::note(c,ctx_probe::Kind::update,_ReturnAddress());
         if(!box && src && r && on()) if(Learned* e=shadowed(r)) written(c,r,src,*e);
         update1_[I](c,r,sub,box,src,rp,dp,flags);
     }

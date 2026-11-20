@@ -13,3 +13,4 @@ tests/player_clip_fixture.hpp
 
 /tests/launcher_features/obj/
 /tests/launcher_features/bin/
+shader-cache/

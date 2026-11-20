@@ -5,6 +5,8 @@
 #include <array>
 #include <optional>
 #include <atomic>
+#include <intrin.h>
+#include "ctx_probe.hpp"
 #include "temporal_eye_job.hpp"
 
 namespace d2vr {
@@ -98,6 +100,7 @@ private:
         return hr;
     }
     static void STDMETHODCALLTYPE execute_hook(ID3D11DeviceContext* c,ID3D11CommandList* list,BOOL restore) {
+        ctx_probe::note(c,ctx_probe::Kind::execute_list,_ReturnAddress());
         const auto barrier=execute_barrier.load(std::memory_order_relaxed);
         if(barrier) barrier(c);
         if(const auto o=census_execute.load(std::memory_order_relaxed)) o(list);

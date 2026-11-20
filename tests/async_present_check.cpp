@@ -4,10 +4,14 @@
 #include <atomic>
 #include "../src/async_present.hpp"
 using namespace d2vr;
-#define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
+// _Exit: a failed check must not run static destructors (the instance's worker thread is still joinable, and std::terminate hid the
+// message behind 0xC0000409 until 2026-11-20).
+#define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::fflush(stdout);std::_Exit(1);}}while(0)
 
-static std::atomic<int> presents{0};static std::atomic<DWORD> present_thread{0};static std::atomic<HRESULT> next_result{S_OK};
-static HRESULT WINAPI fake_present(IDXGISwapChain*,UINT,UINT) {Sleep(5);present_thread=GetCurrentThreadId();++presents;return next_result.load();}
+// The n-th Present returns results[n] (S_OK unless set before its kick). 2026-11-20: one shared "next result" raced: the test reset it
+// while the worker was still inside the failing Present, which then returned S_OK, and the check at the next kick failed.
+static std::atomic<int> presents{0};static std::atomic<DWORD> present_thread{0};static HRESULT results[16]{};
+static HRESULT WINAPI fake_present(IDXGISwapChain*,UINT,UINT) {Sleep(5);present_thread=GetCurrentThreadId();const int n=presents++;return n<16?results[n]:S_OK;}
 
 struct FakeChain final : IDXGISwapChain { // only AddRef/Release are used
     std::atomic<ULONG> refs{1};
@@ -42,15 +46,13 @@ int main() {
     a.wait();
     CHECK(!a.in_flight() && presents==1 && present_thread!=GetCurrentThreadId() && chain.refs==1);
     // an error reaches the caller one Present later
-    next_result=DXGI_ERROR_DEVICE_REMOVED;
+    results[1]=DXGI_ERROR_DEVICE_REMOVED;
     CHECK(a.kick(&chain,0,0,false)==S_OK);
-    next_result=S_OK;
     CHECK(a.kick(&chain,0,0,false)==DXGI_ERROR_DEVICE_REMOVED); // kick waits for the previous Present first
     a.wait();
     // a paced mirror's WAS_STILL_DRAWING is success
-    next_result=DXGI_ERROR_WAS_STILL_DRAWING;
+    results[3]=DXGI_ERROR_WAS_STILL_DRAWING;
     a.kick(&chain,0,8,true);a.wait();
-    next_result=S_OK;
     CHECK(a.kick(&chain,0,0,false)==S_OK);a.wait();
     CHECK(presents==5 && chain.refs==1);
     // guard waits are counted only when a Present is in flight

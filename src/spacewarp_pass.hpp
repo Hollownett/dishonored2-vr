@@ -24,6 +24,7 @@
 // replay against the CPU prototype: tools/spacewarp_replay.cpp (SW_GPU=1).
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include "shader_cache.hpp"
 #include <wrl/client.h>
 #include <array>
 #include <cstdint>
@@ -80,12 +81,24 @@ struct SpacewarpParams {
     // the play space's step puts it (prev_rest: source camera -> the previous camera, the point carried back with the play space), and not
     // where it would be had it stood still in the world (prev_world), takes the rest-of-rig motion. Needs prev_on.
     bool carry_on{};SpacewarpRigid prev_rest{};double carry_reach{1.6},carry_slack{.03};
+    // v1424: rims and moving edges (the Edge pass). Off (build/spacewarp-legacy-edges): every texel drawn with its own colour, as v1423.
+    bool soft_edges{true};
+    // v1426: a mover's extrapolated displacement is capped (metres): walking NPCs (1.5 m/s: 1.7 cm a slot) pass, a sword swing that reverses
+    // between real frames (5-10 m/s) cannot overshoot far (sim: a guard's raised arm carried up while the next real frame swung it down)
+    double mover_cap{.03};
+    // v1429: the colour is resampled with Catmull-Rom (5 bilinear taps) clamped to the 2x2 texels around the point, not bilinear: a generated
+    // frame as sharp as the real ones (bilinear at fractional positions softened fine detail every other frame: 45 Hz shimmer). Off: bilinear.
+    bool sharp_resample{true};
 };
 
 class SpacewarpPass {
 public:
-    static constexpr int fill_passes=2;static constexpr std::uint32_t fill_reach=48;  // texels each fill pass searches per direction
+    // v1429: three passes (144 texels): a close hand moving fast (5 m/s at 0.4 m: ~125 render texels a slot) left the middle of its hole
+    // unfilled, and an unfilled cell looks its direction up in the source: the hand at its old place
+    static constexpr int fill_passes=3;static constexpr std::uint32_t fill_reach=48;  // texels each fill pass searches per direction
     explicit SpacewarpPass(ID3D11Device* device);
+    static const std::string& shader_source();
+    static void warm_cache() noexcept;  // v1428: fill the shader cache off the main thread
     // Draws the extrapolated image into `target` (out_width x out_height). false: a resource could not be made (nothing drawn).
     bool run(ID3D11DeviceContext* c,const SpacewarpInputs& in,const SpacewarpParams& p,ID3D11RenderTargetView* target,unsigned out_width,unsigned out_height);
     std::uint64_t passes{};
@@ -96,26 +109,30 @@ private:
         float M[3][4],C[4],W2S[3][4],H0[3][4],H1[3][4],RR[3][4],palm0[4],palm1[4];
         std::uint32_t flags[4];                               // hand0, hand1, rest, motion | rig << 1
         float out[4];
-        std::uint32_t step[4];                                // crack/fill: x pass parity (unused), y distance; z encode sRGB
+        std::uint32_t step[4];                                // x v1424 soft edges on; crack/fill: y distance; z encode sRGB; w tint
         float CM[3][4],colour_tan[4];                         // the colour image's camera (rows of colour_m) and FOV
         float PW[3][4],PH0[3][4],PH1[3][4],prev_tan[4],prev_terms[4],prev_grid[4],grip0[4],grip1[4];  // v1418; terms: m10, m11, hand_far, hand_back
         std::uint32_t prev_flags[4];                          // v1418: on, hand0, hand1
         float wa0[4],wb0[4],wa1[4],wb1[4];                    // v1419: the weapon bodies (wa.w: radius, 0 none)
         float PR[3][4],carry[4];                              // v1423: carried-with-the-player test; carry: reach, slack per metre, on
+        float misc[4];                                        // v1426: x mover cap (metres)
     };
     static_assert(sizeof(Constants)%16==0,"constant buffer size");
     struct Grid {Ptr<ID3D11Texture2D> t;Ptr<ID3D11UnorderedAccessView> u;Ptr<ID3D11ShaderResourceView> s;};
     bool grids_(unsigned w,unsigned h);
     Ptr<ID3D11Device> device_;
-    Ptr<ID3D11ComputeShader> clear_,splat_depth_,splat_index_,crack_,fill_;
+    Ptr<ID3D11ComputeShader> clear_,splat_depth_,splat_index_,crack_,fill_,classify_,edge_,blend_cs_,blur_cs_;
     Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> resolve_;
     Ptr<ID3D11Buffer> constants_;Ptr<ID3D11SamplerState> linear_;
     std::array<Grid,2> depth_,index_;  // ping-pong: [0] the splat's, [1] the other side of each crack/fill pass
+    std::array<Grid,2> word_;          // v1424: [0] Classify's classes, [1] Edge's texel words (render size, R32_UINT)
+    Grid blend_;                       // v1424: each uncovered cell's blended background (render size, RGBA16F; w 1 = valid)
+    Grid disp_;                        // v1425: each texel's displacement (render size, RGBA32F), Edge's output
+    Grid blend2_;                      // v1425: BlurBlend's other side (RGBA16F)
     unsigned grid_w_{},grid_h_{};
 };
 
-inline SpacewarpPass::SpacewarpPass(ID3D11Device* device):device_(device) {
-    const std::string source=R"HLSL(
+inline const std::string& SpacewarpPass::shader_source() {static const std::string text=R"HLSL(
 cbuffer Sw : register(b0) {
     float4 srcTan; float4 dstTan; float4 grid; float4 terms;
     float4 M[3]; float4 C; float4 W2S[3]; float4 H0[3]; float4 H1[3]; float4 RR[3]; float4 palm0; float4 palm1;
@@ -123,6 +140,7 @@ cbuffer Sw : register(b0) {
     float4 PW[3]; float4 PH0[3]; float4 PH1[3]; float4 prevTan; float4 prevTerms; float4 prevGrid; float4 grip0; float4 grip1; uint4 prevFlags;
     float4 wa0; float4 wb0; float4 wa1; float4 wb1;
     float4 PR[3]; float4 carryTerms;
+    float4 misc;
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> motionTex : register(t1);
@@ -131,10 +149,23 @@ Texture2D<float4> colourTex : register(t3);
 Texture2D<uint> depthIn : register(t4);
 Texture2D<uint> indexIn : register(t5);
 Texture2D<float> prevDepth : register(t6);
+Texture2D<uint> wordTex : register(t7);    // v1424: each source texel's word (Edge's output): class, tint, rim, edge and its inward direction
+Texture2D<uint> classTex : register(t8);   // v1424: Classify's output (class, tint), Edge's input
 SamplerState linearClamp : register(s0);
 RWTexture2D<uint> depthOut : register(u0);
 RWTexture2D<uint> indexOut : register(u1);
+RWTexture2D<uint> wordOut : register(u2);
+Texture2D<float4> blendTex : register(t9);     // v1424: Blend's output, read by Resolve
+RWTexture2D<float4> blendOut : register(u3);
+Texture2D<float4> blurIn : register(t11);      // v1425: BlurBlend's input (one direction per pass)
+Texture2D<float4> dispTex : register(t10);     // v1425: each texel's displacement (Edge's output, the class's motion feathered on one surface)
+RWTexture2D<float4> dispOut : register(u4);
 static const uint EMPTY=0xffffffffu, SKY=0x80000000u, FILLED=0x40000000u, INDEX=0x3fffffffu;
+// v1424 texel word: bits 0-2 the class (0 still, 1 hand 0, 2 hand 1, 3 the rest of the rig, 4 its motion texture, 7 sky), bit 3 held-rule
+// tint, bit 4 rim (a texel within EDGE_R of a nearer surface that moves differently: its colour is part that surface's), bit 5 a moving
+// surface's edge (its colour is part what lies behind it), bits 6-8 that edge's inward direction (k * 45 degrees, texel x right, y down)
+static const uint CLASS=7u, SKYCLASS=7u, TINT=8u, RIM=16u, FGEDGE=32u, FEATHER=512u;  // v1425: bit 9, the displacement is dispTex's
+static const int EDGE_R=2;
 
 float Ahead(float d) {return terms.y/(d+terms.x);}
 float3 Ray(float4 t,float2 uv) {return float3(t.x+uv.x*(t.y-t.x),t.z+uv.y*(t.w-t.z),-1);}
@@ -184,37 +215,112 @@ int WeaponHand(float3 P) {
     if(flags.y!=0u && wa1.w>0 && SegmentDistance(P,wa1.xyz,wb1.xyz)<=wa1.w) return 1;
     return -1;
 }
-// The texel's displacement in source camera metres (the rules in this header's comment)
-float3 Displace(uint2 t,float3 P) {
+// The texel's class (the rules in this header's comment; v1424: decided once per texel, its displacement from the class)
+uint ClassOf(uint2 t,float3 P) {
     const float4 mo=(flags.w&1u)?motionTex[t]:0;
-    const float3 motion=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z;
     const float d0=palm0.w>0?distance(P,palm0.xyz):1e9,d1=palm1.w>0?distance(P,palm1.xyz):1e9;
     int heldBy=WeaponHand(P);if(heldBy<0) heldBy=FarHand(P,d0,d1);
-    if(heldBy==0) return Rigid(H0,P)-P;
-    if(heldBy==1) return Rigid(H1,P)-P;
+    if(heldBy==0) return 1u|TINT;
+    if(heldBy==1) return 2u|TINT;
     // v1423: what the player carries, confirmed by the previous real frame, moves with the rest of the rig
     if(prevFlags.x!=0u && carryTerms.z>0) {
         const float r=length(P);
-        if(r>=C.w && r<carryTerms.x && PrevShows(PR,P,carryTerms.y*r)==1 && PrevShows(PW,P,0)!=1) return flags.z!=0u?Rigid(RR,P)-P:0;
+        if(r>=C.w && r<carryTerms.x && PrevShows(PR,P,carryTerms.y*r)==1 && PrevShows(PW,P,0)!=1) return flags.z!=0u?3u:0u;
     }
     // without a rig mask (true stereo): what lies within a drawn palm's reach, or nearer than C.w metres, is the player's rig
     const bool nearRig=C.w>0 && (length(P)<C.w || d0<=palm0.w || d1<=palm1.w);
     const uint rig=(flags.w&2u)?rigTex[t]:(nearRig?1u:0u);
     if(rig!=0u) {
-        if(flags.x!=0u && d0<=palm0.w && d0<=d1) return Rigid(H0,P)-P;
-        if(flags.y!=0u && d1<=palm1.w) return Rigid(H1,P)-P;
-        if(mo.w>=.5 && terms.z>0) return motion;
-        if(flags.z!=0u) return Rigid(RR,P)-P;
-        return 0;
+        if(flags.x!=0u && d0<=palm0.w && d0<=d1) return 1u;
+        if(flags.y!=0u && d1<=palm1.w) return 2u;
+        if(mo.w>=.5 && terms.z>0) return 4u;
+        if(flags.z!=0u) return 3u;
+        return 0u;
     }
-    return mo.w>=terms.w?motion:0;
+    return mo.w>=terms.w && terms.z>0?4u:0u;
 }
-// The cell a source texel lands in and its 1/z bits (sky: 1, the farthest non-empty); false: outside the target or behind it
+// The texel's displacement in source camera metres, from its class
+float3 DisplaceW(uint w,uint2 t,float3 P) {
+    const uint c=w&CLASS;
+    if(c==1u) return Rigid(H0,P)-P;
+    if(c==2u) return Rigid(H1,P)-P;
+    if(c==3u) return Rigid(RR,P)-P;
+    if(c==4u) {
+        const float4 mo=motionTex[t];float3 m=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z;
+        const float l=length(m);if(misc.x>0 && l>misc.x) m*=misc.x/l;  // v1426: the mover cap
+        return m;
+    }
+    return 0;
+}
+[numthreads(8,8,1)] void Classify(uint3 id : SV_DispatchThreadID) {
+    if(any(id.xy>=uint2(grid.xy))) return;
+    wordOut[id.xy]=depthTex[id.xy]<=1e-7?SKYCLASS:ClassOf(id.xy,SourcePoint(id.xy));
+}
+// v1424 (user, headset v1423: "around the hands, weapons, carried bodies and my own body a silhouette frame, a lot of ghosting"): the colour
+// image's edges are soft (anti-aliasing, the upscaler, the depth's own jitter) while the depth's are hard. Where two neighbours move
+// differently (by more than half a texel), the farther one within EDGE_R texels of the nearer is a rim: its colour is part the nearer
+// surface's, so it is not drawn (its cells are filled from beyond it) and no filled cell shows it. The nearer one's edge texel takes its
+// colour from further inside (bits 6-8), not the background it leaves. A thin thing seen with background on both sides keeps its own.
+[numthreads(8,8,1)] void Edge(uint3 id : SV_DispatchThreadID) {
+    const int2 p=int2(id.xy); if(any(p>=int2(grid.xy))) return;
+    uint w=classTex[p]; const uint c=w&CLASS; const bool sky=c==SKYCLASS;
+    const float3 D=sky?0:DisplaceW(w,uint2(p),SourcePoint(uint2(p)));
+    if(step.x==0u) {wordOut[p]=w;return;}  // build/spacewarp-legacy-edges
+    const float z=sky?1e30:Ahead(depthTex[p]);
+    const float texel=(srcTan.y-srcTan.x)*grid.z;  // tangent per texel
+    bool rim=false; float2 away=0; float behind=0;
+    [loop] for(int y=-EDGE_R;y<=EDGE_R;++y) [loop] for(int x=-EDGE_R;x<=EDGE_R;++x) {
+        const int2 n=p+int2(x,y);
+        if((x==0 && y==0) || any(n<0) || any(n>=int2(grid.xy))) continue;
+        const uint wn=classTex[n]; const uint cn=wn&CLASS; if(cn==c) continue;
+        const bool skyn=cn==SKYCLASS; const float zn=skyn?1e30:Ahead(depthTex[n]);
+        const float3 Dn=skyn?0:DisplaceW(wn,uint2(n),SourcePoint(uint2(n)));
+        const float gap=length(Dn-D);
+        if(zn<z*.95-.01) {if(gap>.5*texel*zn) rim=true;}
+        else if(zn>z*1.05+.01 && gap>.5*texel*z) {away+=float2(x,y)*rsqrt(float(x*x+y*y)); behind+=1;}
+    }
+    if(rim) w|=RIM;
+    else if(!sky && behind>0 && length(away)>.5*behind) {
+        const uint dir=uint(round(atan2(-away.y,-away.x)/.78539816)+8)%8u;
+        w|=FGEDGE|(dir<<6);
+    }
+    // v1425 (sim crops: thin lines of the wall through a sleeve): one surface split between two classes (the part of an arm within the palm's
+    // reach moves with the hand, the rest with the body) tore along the class boundary whenever the two motions differed. Within 4 texels of
+    // such a boundary on the same surface (depth within 5 %), the displacement is the tent-weighted mean of that surface's texels around it:
+    // the surface stretches across the boundary instead of tearing. Only between the player's own parts (the hands, the rest of the rig):
+    // a mover on a wall, or a carried body on the floor, keeps its hard boundary. Depth edges keep theirs (the rim rules above).
+    float3 Df=D;
+    const bool own=c>=1u && c<=3u;  // hand 0, hand 1, the rest of the rig
+    if(own) {
+        bool seam=false;
+        [loop] for(int y=-4;y<=4 && !seam;y+=2) [loop] for(int x=-4;x<=4;x+=2) {
+            const int2 n=p+int2(x,y); if(any(n<0) || any(n>=int2(grid.xy))) continue;
+            const uint cn=classTex[n]&CLASS; if(cn==c || cn<1u || cn>3u) continue;
+            if(abs(Ahead(depthTex[n])-z)<=.05*z+.005) {seam=true;break;}
+        }
+        if(seam) {
+            float3 sum=0; float wsum=0;
+            [loop] for(int y=-4;y<=4;++y) [loop] for(int x=-4;x<=4;++x) {
+                const int2 n=p+int2(x,y); if(any(n<0) || any(n>=int2(grid.xy))) continue;
+                const uint wn=classTex[n]; if((wn&CLASS)<1u || (wn&CLASS)>3u) continue;
+                const float dn=depthTex[n]; if(abs(Ahead(dn)-z)>.05*z+.005) continue;
+                const float wt=5-float(max(abs(x),abs(y)));
+                sum+=DisplaceW(wn,uint2(n),SourcePoint(uint2(n)))*wt; wsum+=wt;
+            }
+            if(wsum>0) {Df=sum/wsum;w|=FEATHER;dispOut[p]=float4(Df,0);}  // only feathered texels write (and read) the texture
+        }
+    }
+    wordOut[p]=w;
+}
+// v1425: a texel's displacement: Edge's feathered one, else its class's
+float3 Disp(uint w,uint2 t,float3 P) {return (w&FEATHER)?dispTex[t].xyz:DisplaceW(w,t,P);}
+// The cell a source texel lands in and its 1/z bits (sky: 1, the farthest non-empty); false: outside the target or behind it, or a rim
 bool Land(uint2 t,out uint2 cell,out uint bits) {
     cell=0; bits=0;
+    const uint w=wordTex[t]; if(w&RIM) return false;
     const float2 uv=(float2(t)+.5)*grid.zw; const float d=depthTex[t]; float3 q;
     if(d<=1e-7) {q=MulMT(Ray(srcTan,uv)); bits=1u;}
-    else {const float3 P=Ray(srcTan,uv)*Ahead(d); q=MulMT(P+Displace(t,P)-C.xyz); bits=asuint(1/max(-q.z,1e-6));}
+    else {const float3 P=Ray(srcTan,uv)*Ahead(d); q=MulMT(P+Disp(w,t,P)-C.xyz); bits=asuint(1/max(-q.z,1e-6));}  // v1425: feathered where Edge said so
     float2 o; if(!ToImage(dstTan,q,o)) return false;
     const float2 f=floor(o*grid.xy); if(any(f<0) || any(f>=grid.xy)) return false;
     cell=uint2(f); return true;
@@ -269,6 +375,8 @@ bool Surface(uint idx) {return idx!=EMPTY && (idx&(SKY|FILLED))==0u;}
     }
     depthOut[p]=bd; indexOut[p]=bi;
 }
+)HLSL"
+R"HLSL(  // (split: MSVC caps one string literal at 16 KB)
 struct Vertex {float4 position : SV_POSITION; float2 uv : TEXCOORD0;};
 Vertex FullVS(uint id : SV_VertexID) {Vertex v; v.uv=float2((id<<1)&2,id&2); v.position=float4(v.uv*float2(2,-2)+float2(-1,1),0,1); return v;}
 float2 TexelUv(uint idx) {const uint i=idx&INDEX; return (float2(i%uint(grid.x),i/uint(grid.x))+.5)*grid.zw;}
@@ -278,6 +386,71 @@ bool Seen(float3 Pk,out uint2 tt) {
     tt=min(uint2(sk*grid.xy),uint2(grid.xy)-1); const float d=depthTex[tt]; if(d<=1e-7) return false;
     const float a=Ahead(d); return abs(a+Pk.z)<=.02*a;
 }
+// v1429: Catmull-Rom from 5 bilinear taps (the corner taps dropped, weights renormalised), clamped to the 2x2 texels around the point
+// (no ringing or halo at an edge). uv in 0..1 of the colour image.
+float3 SharpSample(float2 uv) {
+    uint w,h;colourTex.GetDimensions(w,h);const float2 size=float2(w,h);
+    const float2 pos=uv*size,t1=floor(pos-.5)+.5,f=pos-t1;
+    const float2 w0=f*(-.5+f*(1-.5*f)),w1=1+f*f*(-2.5+1.5*f),w2=f*(.5+f*(2-1.5*f)),w3=f*f*(-.5+.5*f);
+    const float2 w12=w1+w2,t12=(t1+w2/w12)/size,t0=(t1-1)/size,t3=(t1+2)/size;
+    float3 c=colourTex.SampleLevel(linearClamp,float2(t0.x,t12.y),0).rgb*(w0.x*w12.y)
+            +colourTex.SampleLevel(linearClamp,float2(t12.x,t0.y),0).rgb*(w12.x*w0.y)
+            +colourTex.SampleLevel(linearClamp,t12,0).rgb*(w12.x*w12.y)
+            +colourTex.SampleLevel(linearClamp,float2(t3.x,t12.y),0).rgb*(w3.x*w12.y)
+            +colourTex.SampleLevel(linearClamp,float2(t12.x,t3.y),0).rgb*(w12.x*w3.y);
+    c/=(w0.x*w12.y+w12.x*w0.y+w12.x*w12.y+w3.x*w12.y+w12.x*w3.y);
+    const int2 b=clamp(int2(floor(pos-.5)),int2(0,0),int2(size)-2);
+    const float3 a00=colourTex.Load(int3(b,0)).rgb,a10=colourTex.Load(int3(b+int2(1,0),0)).rgb,a01=colourTex.Load(int3(b+int2(0,1),0)).rgb,a11=colourTex.Load(int3(b+int2(1,1),0)).rgb;
+    return clamp(c,min(min(a00,a10),min(a01,a11)),max(max(a00,a10),max(a01,a11)));
+}
+// v1424: a grid cell's texel colour (linear light) through the colour camera: a surface texel at its point, a sky texel in its direction
+float3 TexelColour(uint idx) {
+    const uint i=idx&INDEX; const uint2 t=uint2(i%uint(grid.x),i/uint(grid.x));
+    const float3 Pt=(idx&SKY)?Ray(srcTan,TexelUv(idx)):SourcePoint(t);
+    float2 s; if(!ToImage(colourTan,MulCT(Pt),s)) s=TexelUv(idx);
+    return colourTex.SampleLevel(linearClamp,saturate(s),0).rgb;
+}
+// v1424 (the shards and streaks where a moving thing was): an uncovered cell's colour blends the background around it, the first drawn
+// (not filled) cell in each of 8 directions that is not nearer than 3/4 of the cell's own depth (the thing that moved is) and moves like
+// the cell's own seed (a mover on a wall at the wall's depth is not its background), weighted by 1/distance. false: none found (the seed's
+// own colour then)
+uint WordOf(uint idx) {const uint i=idx&INDEX; return wordTex[uint2(i%uint(grid.x),i/uint(grid.x))];}
+bool Uncovered(uint2 cell,uint seed,out float3 rgb) {
+    rgb=0; float wsum=0; const float zc=Z(depthIn[cell]); const uint cls=WordOf(seed)&CLASS;
+    const int2 dirs[8]={int2(1,0),int2(-1,0),int2(0,1),int2(0,-1),int2(1,1),int2(-1,-1),int2(1,-1),int2(-1,1)};
+    [loop] for(int k=0;k<8;++k) {
+        [loop] for(int s=1;s<=96;++s) {  // v1429: 96 (wider holes)
+            const int2 n=int2(cell)+dirs[k]*s; if(any(n<0) || any(n>=int2(grid.xy))) break;
+            const uint ni=indexIn[n]; if(ni==EMPTY || (ni&FILLED)) continue;
+            if(Z(depthIn[n])<.75*zc || (WordOf(ni)&CLASS)!=cls) break;
+            const float wgt=1/float(s); rgb+=TexelColour(ni)*wgt; wsum+=wgt; break;
+        }
+    }
+    if(wsum<=0) return false;
+    rgb/=wsum; return true;
+}
+// v1424: once per uncovered cell (render size, not per output pixel): its blended background
+[numthreads(8,8,1)] void Blend(uint3 id : SV_DispatchThreadID) {
+    const uint2 p=id.xy; if(any(p>=uint2(grid.xy))) return;
+    const uint idx=depthIn[p]!=0u?indexIn[p]:EMPTY;
+    float3 rgb=0; bool ok=false;
+    if(step.x!=0u && idx!=EMPTY && (idx&FILLED)) ok=Uncovered(p,idx,rgb);
+    blendOut[p]=float4(rgb,ok?1+float(WordOf(idx)&CLASS):0);  // w: 1 + the seed's class (BlurBlend mixes only equal ones)
+}
+// v1425: the blend's 8-direction seams (a star in each uncovered area) softened: a tent blur over the uncovered cells only (drawn cells
+// neither contribute nor change), filled from the same class of background, 7 taps, along x when step.y is 1, along y when 2
+[numthreads(8,8,1)] void BlurBlend(uint3 id : SV_DispatchThreadID) {
+    const int2 p=int2(id.xy); if(any(p>=int2(grid.xy))) return;
+    const float4 c0=blurIn[p]; if(c0.w<=0) {blendOut[p]=c0;return;}
+    const int2 dir=step.y==1u?int2(1,0):int2(0,1);
+    float3 sum=0; float n=0;
+    [unroll] for(int k=-3;k<=3;++k) {
+        const int2 q=p+dir*k; if(any(q<0) || any(q>=int2(grid.xy))) continue;
+        const float4 v=blurIn[q]; if(v.w!=c0.w) continue;
+        const float wt=4-abs(float(k)); sum+=v.rgb*wt; n+=wt;
+    }
+    blendOut[p]=float4(sum/n,c0.w);
+}
 float4 Resolve(Vertex v) : SV_TARGET {
     const float2 uv=v.position.xy*outSize.zw;
     const uint2 cell=min(uint2(uv*grid.xy),uint2(grid.xy)-1);
@@ -286,28 +459,57 @@ float4 Resolve(Vertex v) : SV_TARGET {
     // ray at the cell's depth, back into the source (minus the texel's displacement), wherever the source sees that point (its depth there
     // agrees within 2 %: also in a filled cell on a magnified surface, if its seed did not move); else the texel's own point (a hole behind something that moved
     // shows its background seed, never the foreground in front of it). Then looked up in the colour image through its own camera.
-    float3 P;bool tint=false;
-    if(idx==EMPTY || (idx&SKY)) P=MulM(Ray(dstTan,uv));
-    else {
-        const uint i=idx&INDEX; const uint2 t=uint2(i%uint(grid.x),i/uint(grid.x)); const float3 Ps=SourcePoint(t);
-        if(step.w!=0u) tint=WeaponHand(Ps)>=0 || FarHand(Ps,palm0.w>0?distance(Ps,palm0.xyz):1e9,palm1.w>0?distance(Ps,palm1.xyz):1e9)>=0;
-        const float3 d=Displace(t,Ps),Pk=MulM(Ray(dstTan,uv)*Z(depthIn[cell]))+C.xyz-d;
+    float3 P;bool tint=false,blended=false;float2 inward=0;float3 blend=0;
+    if(idx==EMPTY || (idx&SKY)) {
+        P=MulM(Ray(dstTan,uv));
+        // v1424: a sky cell whose direction the source shows covered by something that moved (or by a rim) shows its own sky texel instead:
+        // the sky a moving hand uncovers is not the hand looked up again
+        float2 s0;
+        if(idx!=EMPTY && ToImage(srcTan,P,s0) && all(s0>=0) && all(s0<1)) {
+            const uint w0=wordTex[min(uint2(s0*grid.xy),uint2(grid.xy)-1)];
+            if((w0&CLASS)!=SKYCLASS || (w0&RIM)!=0u) P=Ray(srcTan,TexelUv(idx));
+        }
+    } else {
+        const uint i=idx&INDEX; const uint2 t=uint2(i%uint(grid.x),i/uint(grid.x)); const float3 Ps=SourcePoint(t); const uint w=wordTex[t];
+        if(step.w!=0u) tint=(w&TINT)!=0u;
+        const float3 d=Disp(w,t,Ps),Pk=MulM(Ray(dstTan,uv)*Z(depthIn[cell]))+C.xyz-d;
         // a filled cell takes the back-projected point only from still parts of the source (its seed and the texel it lands on): the
-        // place a mover left shows its seed's colour, never the mover seen again
+        // place a mover left shows its seed's colour, never the mover seen again. v1424: no cell takes it from a rim texel either.
         uint2 tt; bool use=Seen(Pk,tt);
-        if(use && (idx&FILLED)) use=all(d==0) && all(Displace(tt,SourcePoint(tt))==0);
+        if(use) {
+            const uint wt=wordTex[tt];
+            if(wt&RIM) use=false;
+            else if(idx&FILLED) use=all(d==0) && all(Disp(wt,tt,SourcePoint(tt))==0);
+        }
         P=use?Pk:Ps;
+        if(!use && (idx&FILLED) && step.x!=0u) {const float4 b=blendTex[cell];if(b.w>0) {blended=true;blend=b.rgb;}}  // v1424: not one seed's streak (Blend)
+        // v1424: a moving surface's edge texel shows the colour 1.5 texels further in, not the background it was drawn over
+        if(!(idx&FILLED) && (w&FGEDGE)) {const float a=float((w>>6)&7u)*.78539816;inward=float2(cos(a),sin(a))*1.5;}
     }
     float2 s; if(!ToImage(colourTan,MulCT(P),s)) s=uv;
-    float3 rgb=colourTex.SampleLevel(linearClamp,saturate(s),0).rgb;
+    s+=inward*grid.zw*float2((srcTan.y-srcTan.x)/(colourTan.y-colourTan.x),(srcTan.w-srcTan.z)/(colourTan.w-colourTan.z));
+    float3 rgb;  // v1429 (an if, not a ternary: HLSL evaluates both sides of ?:)
+    if(blended) rgb=blend;
+    else if(misc.y>0) rgb=SharpSample(saturate(s));
+    else rgb=colourTex.SampleLevel(linearClamp,saturate(s),0).rgb;
     if(tint) rgb=lerp(rgb,float3(1,0,1),.6);
     if(step.z!=0u) rgb=rgb<=.0031308?rgb*12.92:1.055*pow(max(rgb,1e-8),1/2.4)-.055;  // a UNORM target holding sRGB values
     return float4(rgb,1);
 }
-)HLSL";
+)HLSL";return text;}
+inline void SpacewarpPass::warm_cache() noexcept {
+    try {
+        const auto& text=shader_source();
+        for(const char* e:{"Clear","SplatDepth","SplatIndex","Crack","Fill","Classify","Edge","Blend","BlurBlend"}) {Ptr<ID3DBlob> b,er;(void)shader_cache::compile(text,"spacewarp",e,"cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,&b,&er);}
+        {Ptr<ID3DBlob> b,er;(void)shader_cache::compile(text,"spacewarp","FullVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,&b,&er);}
+        {Ptr<ID3DBlob> b,er;(void)shader_cache::compile(text,"spacewarp","Resolve","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,&b,&er);}
+    } catch(...) {}
+}
+inline SpacewarpPass::SpacewarpPass(ID3D11Device* device):device_(device) {
+    const std::string& source=shader_source();  // v1428: static (warm_cache)
     const auto compile=[&](const char* entry,const char* target) {
         Ptr<ID3DBlob> blob,errors;
-        if(FAILED(D3DCompile(source.data(),source.size(),"spacewarp",nullptr,nullptr,entry,target,D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&blob,&errors)))
+        if(FAILED(shader_cache::compile(source,"spacewarp",entry,target,D3DCOMPILE_OPTIMIZATION_LEVEL3,&blob,&errors)))  // v1428: disk cache
             throw std::runtime_error(std::string("spacewarp shader ")+entry+": "+(errors?static_cast<const char*>(errors->GetBufferPointer()):"compile failed"));
         return blob;
     };
@@ -316,6 +518,7 @@ float4 Resolve(Vertex v) : SV_TARGET {
         if(FAILED(device_->CreateComputeShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&out))) throw std::runtime_error(std::string("spacewarp CS ")+entry);
     };
     cs("Clear",clear_);cs("SplatDepth",splat_depth_);cs("SplatIndex",splat_index_);cs("Crack",crack_);cs("Fill",fill_);
+    cs("Classify",classify_);cs("Edge",edge_);cs("Blend",blend_cs_);cs("BlurBlend",blur_cs_);  // v1424, v1425
     {const auto b=compile("FullVS","vs_5_0");if(FAILED(device_->CreateVertexShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&vs_))) throw std::runtime_error("spacewarp VS");}
     {const auto b=compile("Resolve","ps_5_0");if(FAILED(device_->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&resolve_))) throw std::runtime_error("spacewarp PS");}
     D3D11_BUFFER_DESC cb{};cb.ByteWidth=sizeof(Constants);cb.Usage=D3D11_USAGE_DYNAMIC;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;cb.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
@@ -326,13 +529,22 @@ float4 Resolve(Vertex v) : SV_TARGET {
 
 inline bool SpacewarpPass::grids_(unsigned w,unsigned h) {
     if(w==grid_w_ && h==grid_h_ && depth_[0].t) return true;
-    for(auto* set:{&depth_,&index_}) for(auto& g:*set) g={};
+    for(auto* set:{&depth_,&index_,&word_}) for(auto& g:*set) g={};
+    blend_={};disp_={};blend2_={};
     grid_w_=grid_h_=0;
     D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=1;d.ArraySize=1;d.Format=DXGI_FORMAT_R32_UINT;d.SampleDesc.Count=1;
     d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
-    for(auto* set:{&depth_,&index_}) for(auto& g:*set)
+    for(auto* set:{&depth_,&index_,&word_}) for(auto& g:*set)
         if(FAILED(device_->CreateTexture2D(&d,nullptr,&g.t)) || FAILED(device_->CreateUnorderedAccessView(g.t.Get(),nullptr,&g.u)) ||
            FAILED(device_->CreateShaderResourceView(g.t.Get(),nullptr,&g.s))) return false;
+    d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;  // v1425: displacements
+    if(FAILED(device_->CreateTexture2D(&d,nullptr,&disp_.t)) || FAILED(device_->CreateUnorderedAccessView(disp_.t.Get(),nullptr,&disp_.u)) ||
+       FAILED(device_->CreateShaderResourceView(disp_.t.Get(),nullptr,&disp_.s))) return false;
+    d.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;  // v1424: Blend's colours
+    if(FAILED(device_->CreateTexture2D(&d,nullptr,&blend_.t)) || FAILED(device_->CreateUnorderedAccessView(blend_.t.Get(),nullptr,&blend_.u)) ||
+       FAILED(device_->CreateShaderResourceView(blend_.t.Get(),nullptr,&blend_.s))) return false;
+    if(FAILED(device_->CreateTexture2D(&d,nullptr,&blend2_.t)) || FAILED(device_->CreateUnorderedAccessView(blend2_.t.Get(),nullptr,&blend2_.u)) ||
+       FAILED(device_->CreateShaderResourceView(blend2_.t.Get(),nullptr,&blend2_.s))) return false;
     grid_w_=w;grid_h_=h;return true;
 }
 
@@ -351,7 +563,7 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     }
     f4(k.C,p.c[0],p.c[1],p.c[2],in.rig?0:p.rig_near);f4(k.palm0,p.palm[0][0],p.palm[0][1],p.palm[0][2],p.palm[0][3]);f4(k.palm1,p.palm[1][0],p.palm[1][1],p.palm[1][2],p.palm[1][3]);
     k.flags[0]=p.hand_on[0];k.flags[1]=p.hand_on[1];k.flags[2]=p.rest_on;k.flags[3]=(in.motion?1u:0u)|(in.rig?2u:0u);
-    f4(k.out,out_width,out_height,1.0/out_width,1.0/out_height);k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_held?1u:0u;
+    f4(k.out,out_width,out_height,1.0/out_width,1.0/out_height);k.step[0]=p.soft_edges?1u:0u;f4(k.misc,p.mover_cap,p.sharp_resample?1:0,0,0);k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_held?1u:0u;
     {const auto& cm=p.colour_camera?p.colour_m:std::array<double,9>{1,0,0,0,1,0,0,0,1};const auto& ct=p.colour_camera?p.colour_tan:p.source_tan;
      for(int i=0;i<3;++i) f4(k.CM[i],cm[i*3],cm[i*3+1],cm[i*3+2],0);f4(k.colour_tan,ct[0],ct[1],ct[2],ct[3]);}
     f4(k.wa0,p.weapon[0][0],p.weapon[0][1],p.weapon[0][2],p.weapon[0][6]);f4(k.wb0,p.weapon[0][3],p.weapon[0][4],p.weapon[0][5],0);  // v1419
@@ -382,6 +594,20 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     const UINT gx=(in.width+7)/8,gy=(in.height+7)/8;
     const auto bind_out=[&](int side) {ID3D11UnorderedAccessView* u[2]{depth_[side].u.Get(),index_[side].u.Get()};c->CSSetUnorderedAccessViews(0,2,u,nullptr);};
     const auto bind_in=[&](int side) {ID3D11ShaderResourceView* s[2]{side>=0?depth_[side].s.Get():nullptr,side>=0?index_[side].s.Get():nullptr};c->CSSetShaderResources(4,2,s);};
+    {   // v1424: each texel's class once, then its rim / edge word (Edge reads the classes as t8, writes u2; the rest read the words as t7)
+        ID3D11UnorderedAccessView* none[1]{};ID3D11ShaderResourceView* nones[2]{};c->CSSetShaderResources(7,2,nones);
+        ID3D11UnorderedAccessView* cls[1]{word_[0].u.Get()};c->CSSetUnorderedAccessViews(2,1,cls,nullptr);
+        c->CSSetShader(classify_.Get(),nullptr,0);c->Dispatch(gx,gy,1);
+        c->CSSetUnorderedAccessViews(2,1,none,nullptr);
+        ID3D11ShaderResourceView* classes[1]{word_[0].s.Get()};c->CSSetShaderResources(8,1,classes);
+        ID3D11UnorderedAccessView* words[1]{word_[1].u.Get()};c->CSSetUnorderedAccessViews(2,1,words,nullptr);
+        ID3D11UnorderedAccessView* disps[1]{disp_.u.Get()};c->CSSetUnorderedAccessViews(4,1,disps,nullptr);  // v1425
+        c->CSSetShader(edge_.Get(),nullptr,0);c->Dispatch(gx,gy,1);
+        c->CSSetUnorderedAccessViews(4,1,none,nullptr);
+        ID3D11ShaderResourceView* displacements[1]{disp_.s.Get()};c->CSSetShaderResources(10,1,displacements);
+        c->CSSetUnorderedAccessViews(2,1,none,nullptr);
+        ID3D11ShaderResourceView* texel_words[2]{word_[1].s.Get(),nullptr};c->CSSetShaderResources(7,2,texel_words);
+    }
     bind_in(-1);bind_out(0);
     c->CSSetShader(clear_.Get(),nullptr,0);c->Dispatch(gx,gy,1);
     c->CSSetShader(splat_depth_.Get(),nullptr,0);c->Dispatch(gx,gy,1);
@@ -393,17 +619,35 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     };
     step(crack_.Get());step(crack_.Get());
     for(int i=0;i<fill_passes;++i) {if(!upload(fill_reach)) return false;step(fill_.Get());}  // a second pass reaches on from filled seeds
-    {ID3D11UnorderedAccessView* none[2]{};c->CSSetUnorderedAccessViews(0,2,none,nullptr);ID3D11ShaderResourceView* nones[7]{};c->CSSetShaderResources(0,7,nones);c->CSSetShader(nullptr,nullptr,0);}
+    if(p.soft_edges) {   // v1424: the uncovered cells' blended background, from the final grid (t4/t5), the colour (t3) and the texel words (t7)
+        ID3D11UnorderedAccessView* none[2]{};c->CSSetUnorderedAccessViews(0,2,none,nullptr);bind_in(side);
+        ID3D11SamplerState* samplers[]{linear_.Get()};c->CSSetSamplers(0,1,samplers);
+        ID3D11UnorderedAccessView* b[1]{blend_.u.Get()};c->CSSetUnorderedAccessViews(3,1,b,nullptr);
+        c->CSSetShader(blend_cs_.Get(),nullptr,0);c->Dispatch(gx,gy,1);
+        ID3D11UnorderedAccessView* nb[1]{};c->CSSetUnorderedAccessViews(3,1,nb,nullptr);bind_in(-1);
+        // v1425: blur the blend along x (blend_ -> blend2_), then along y (blend2_ -> blend_)
+        c->CSSetShader(blur_cs_.Get(),nullptr,0);ID3D11ShaderResourceView* nsrv[1]{};
+        for(int pass_=0;pass_<2;++pass_) {
+            if(!upload(pass_?2u:1u)) return false;
+            Grid& from=pass_?blend2_:blend_;Grid& to=pass_?blend_:blend2_;
+            ID3D11ShaderResourceView* src[1]{from.s.Get()};c->CSSetShaderResources(11,1,src);
+            ID3D11UnorderedAccessView* dst[1]{to.u.Get()};c->CSSetUnorderedAccessViews(3,1,dst,nullptr);
+            c->Dispatch(gx,gy,1);
+            c->CSSetUnorderedAccessViews(3,1,nb,nullptr);c->CSSetShaderResources(11,1,nsrv);
+        }
+    }
+    {ID3D11UnorderedAccessView* none[2]{};c->CSSetUnorderedAccessViews(0,2,none,nullptr);ID3D11ShaderResourceView* nones[12]{};c->CSSetShaderResources(0,12,nones);c->CSSetShader(nullptr,nullptr,0);}
     // resolve at the output size
     D3D11_VIEWPORT vp{0,0,static_cast<float>(out_width),static_cast<float>(out_height),0,1};c->RSSetViewports(1,&vp);
     c->OMSetRenderTargets(1,&target,nullptr);c->OMSetBlendState(nullptr,nullptr,0xffffffff);c->OMSetDepthStencilState(nullptr,0);c->RSSetState(nullptr);
     c->IASetInputLayout(nullptr);c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     c->HSSetShader(nullptr,nullptr,0);c->DSSetShader(nullptr,nullptr,0);c->GSSetShader(nullptr,nullptr,0);
     c->VSSetShader(vs_.Get(),nullptr,0);c->PSSetShader(resolve_.Get(),nullptr,0);
-    ID3D11ShaderResourceView* ps[7]{in.depth,in.motion,in.rig,in.colour,depth_[side].s.Get(),index_[side].s.Get(),previous[0]};c->PSSetShaderResources(0,7,ps);
+    ID3D11ShaderResourceView* ps[11]{in.depth,in.motion,in.rig,in.colour,depth_[side].s.Get(),index_[side].s.Get(),previous[0],word_[1].s.Get(),nullptr,blend_.s.Get(),disp_.s.Get()};
+    c->PSSetShaderResources(0,11,ps);
     ID3D11SamplerState* samplers[]{linear_.Get()};c->PSSetSamplers(0,1,samplers);
     c->Draw(3,0);
-    ID3D11ShaderResourceView* nones[7]{};c->PSSetShaderResources(0,7,nones);
+    ID3D11ShaderResourceView* nones[11]{};c->PSSetShaderResources(0,11,nones);
     ++passes;return true;
 }
 } // namespace d2vr

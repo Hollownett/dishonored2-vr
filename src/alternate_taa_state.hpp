@@ -63,6 +63,7 @@ struct Receipt {
     std::uint32_t phase{};
     bool reset{}, admitted{};
     std::uint32_t previous_counter{}; // v1206: the engine frame of this eye's render that `previous` is (== key.native_counter on a reset)
+    bool paired{}; // v1426: a paired-stereo render's receipt (dxgi_probe paired_pass_receipt): no other-eye test, no admission
 };
 
 class History {

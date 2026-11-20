@@ -182,6 +182,9 @@ static HandChainTrace::V trace_v(const d2vr::Vec3& v) {return {v.x,v.y,v.z};}
 #include "full_body_driver.hpp"
 #include "hand_route.hpp"
 #include "frame_order_trace.hpp"
+#include "ctx_probe.hpp"
+#include "job_wake.hpp"
+#include "core_isolation.hpp"
 #include "weapon_image_place.hpp"
 #include "arm_flicker.hpp"
 #include "hand_clamp_feed.hpp"
@@ -1530,6 +1533,8 @@ static void alt_motion_snapshot_json(std::ostream& o,const d2vr::alternate_taa::
 // v1151: the alternate receipt of this TAA dispatch's render (the motion texture's cameras), when it names `eye`.
 // Only alternate-eye one-view frames (pass_display set, the pass view is the alternate single view): paired mode never reads or counts here.
 static bool alternate_on() noexcept;
+static void paired_prev_probe_note(int eye,std::uintptr_t view) noexcept;  // v1426 probe
+static std::optional<d2vr::alternate_taa::Receipt> paired_pass_receipt(int eye) noexcept;  // v1426: spacewarp movers
 static std::optional<d2vr::alternate_taa::Receipt> alt_pass_receipt(int eye) noexcept {
     if(eye<0 || eye>1 || !alternate_on() || !d2vr::TaaDispatchHook::pass_display || !d2vr::TaaDispatchHook::pass_view ||
        d2vr::TaaDispatchHook::pass_view!=alternate_taa_runtime.single_view.load()) return std::nullopt;
@@ -1622,9 +1627,11 @@ bool taa_dispatch_handler(ID3D11DeviceContext* c,int eye,UINT x,UINT y,UINT z,d2
             fsr_taa.last_vfov[static_cast<std::size_t>(eye)]=fsr_vfov[static_cast<std::size_t>(eye)].load();
         }
         // v1151: the render's receipt gives the motion texture its cameras (alternate one-view frames; not with build/no-stale-eye-motion)
+        if(!alternate_on()) paired_prev_probe_note(eye,d2vr::TaaDispatchHook::pass_view);  // v1426 probe
         const auto receipt=stale_eye_motion_knob || alt_motion_left.load(std::memory_order_relaxed)?alt_pass_receipt(eye):std::nullopt;
+        const auto motion_receipt=receipt && stale_eye_motion_knob?receipt:paired_pass_receipt(eye);  // v1426: paired stereo, spacewarp movers
         try {if(fsr_taa.replace(c,eye,b,fsr_vfov[static_cast<std::size_t>(eye)].load(),fsr_jitter_sign[0]*j[0]*taa_jitter_scale[0],fsr_jitter_sign[1]*j[1]*taa_jitter_scale[1],
-                                alt_motion_probe_take(c,eye,b,receipt),stale_eye_motion_knob?receipt:std::nullopt)) return true;}
+                                alt_motion_probe_take(c,eye,b,receipt),motion_receipt)) return true;}
         catch(...) {}
         // No native shared-history dispatch while an eye's own upscaler is
         // unprepared, resizing, or cannot split its deferred command list.
@@ -2113,6 +2120,7 @@ static void start_running_knobs(const fs::path& root,const fs::path& output) {
     note<<"knob build/legacy-wrist-hud "<<(legacy_wrist_hud?"present: v1012 two-wrist inner-side layout\n":"absent: left-wrist watch\n");
     note<<"knob build/wrist-hud-size "<<wrist_hud_size_cm<<" cm (clamped 4..15)\n";
     note<<"knob build/wrist-hud-backdrop "<<(wrist_hud_backdrop?"present: dark card behind the game cluster\n":"absent: no backdrop; only the game's own cluster art\n");
+    note<<"knob build/ctx-probe "<<(fs::exists(root/L"build"/L"ctx-probe")?"present: immediate-context calls counted per thread kind and engine phase (status ctx_probe, ctx-probe.jsonl)\n":"absent: no probe\n");
     note<<"knob build/no-wrist-haptic "<<(no_wrist_haptic?"present: no watch appearance tick\n":"absent: a short haptic tick when the watch appears\n");
 }
 // Last tracked palette per side (model space): a brief tracked-pose gap reuses
@@ -2551,7 +2559,9 @@ static bool async_present_requested=false;static std::atomic<bool> game_side_hoo
 using GameSideFn=std::uint64_t(__fastcall*)(void*,void*,void*,void*);
 static GameSideFn original_game_side{};
 static std::uint64_t __fastcall game_side_hook(void* a,void* b,void* c,void* d) {
+    d2vr::ctx_probe::game_enters.fetch_add(1,std::memory_order_relaxed);d2vr::ctx_probe::phase.store(d2vr::ctx_probe::game,std::memory_order_relaxed); // v1427 ctx-probe
     const auto r=original_game_side(a,b,c,d);
+    d2vr::ctx_probe::phase.store(d2vr::ctx_probe::outside,std::memory_order_relaxed);
     d2vr::AsyncPresent::instance().wait(); // the immediate context is free again before the main loop's next steps
     return r;
 }
@@ -2568,7 +2578,11 @@ using RenderSideFn=std::uint64_t(__fastcall*)(void*,void*,void*,void*);
 static RenderSideFn original_render_side{};
 static std::uint64_t __fastcall render_side_hook(void* a,void* b,void* c,void* d) {
     d2vr::AsyncPresent::instance().wait();
-    return original_render_side(a,b,c,d);
+    d2vr::ctx_probe::render_enters.fetch_add(1,std::memory_order_relaxed);d2vr::ctx_probe::phase.store(d2vr::ctx_probe::render,std::memory_order_relaxed); // v1427 ctx-probe
+    const auto r=original_render_side(a,b,c,d);
+    d2vr::ctx_probe::phase.store(d2vr::ctx_probe::outside,std::memory_order_relaxed);
+    d2vr::AsyncPresent::instance().kick_deferred();  // v1428: the frame's desktop Present, now that the render side is done with the context
+    return r;
 }
 using NextFn=std::uint64_t(__fastcall*)(void*,void*,void*,void*);
 static NextFn original_next{};
@@ -2583,17 +2597,87 @@ static bool install_pinned_hook(std::uintptr_t base,std::uintptr_t rva,const std
     if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);return false;}
     return true;
 }
+static constexpr std::array<unsigned char,16> game_side_prologue{0x48,0x8b,0xc4,0x57,0x48,0x81,0xec,0xa0,0x00,0x00,0x00,0x48,0xc7,0x40,0x88,0xfe};
+static constexpr std::array<unsigned char,16> next_side_prologue{0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,0x48,0x8b,0xf9,0x48,0x8b,0x0d};
+static constexpr std::array<unsigned char,16> render_side_prologue{0x40,0x53,0x48,0x83,0xec,0x20,0xc6,0x41,0x59,0x00,0x48,0x8b,0xd9,0x48,0x8b,0x0d};
+// v1427 ctx-probe: the same two detours (they also set the probe's phase), installed once each; async-present reuses an installed one.
+static bool ctx_probe_game_hooked=false,ctx_probe_render_hooked=false;
+static void install_ctx_probe_phase_hooks(std::uintptr_t base) noexcept {
+    if(!base || !d2vr::ctx_probe::on.load()) return;
+    if(!ctx_probe_game_hooked) ctx_probe_game_hooked=install_pinned_hook(base,0x459a0,game_side_prologue,reinterpret_cast<void*>(&game_side_hook),reinterpret_cast<void**>(&original_game_side));
+    if(!ctx_probe_render_hooked) ctx_probe_render_hooked=install_pinned_hook(base,0x458c0,render_side_prologue,reinterpret_cast<void*>(&render_side_hook),reinterpret_cast<void**>(&original_render_side));
+}
 static bool install_game_side_hook(std::uintptr_t base) noexcept {
     if(game_side_hooked.load() || !base || async_present_mode==0) return game_side_hooked.load();
-    static constexpr std::array<unsigned char,16> game_prologue{0x48,0x8b,0xc4,0x57,0x48,0x81,0xec,0xa0,0x00,0x00,0x00,0x48,0xc7,0x40,0x88,0xfe};
-    static constexpr std::array<unsigned char,16> next_prologue{0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,0x48,0x8b,0xf9,0x48,0x8b,0x0d};
-    static constexpr std::array<unsigned char,16> render_prologue{0x40,0x53,0x48,0x83,0xec,0x20,0xc6,0x41,0x59,0x00,0x48,0x8b,0xd9,0x48,0x8b,0x0d};
     const bool ok=async_present_mode==3?
-        install_pinned_hook(base,0x458c0,render_prologue,reinterpret_cast<void*>(&render_side_hook),reinterpret_cast<void**>(&original_render_side)):
+        (ctx_probe_render_hooked || install_pinned_hook(base,0x458c0,render_side_prologue,reinterpret_cast<void*>(&render_side_hook),reinterpret_cast<void**>(&original_render_side))):
         async_present_mode==2?
-        install_pinned_hook(base,0x45650,next_prologue,reinterpret_cast<void*>(&next_hook),reinterpret_cast<void**>(&original_next)):
-        install_pinned_hook(base,0x459a0,game_prologue,reinterpret_cast<void*>(&game_side_hook),reinterpret_cast<void**>(&original_game_side));
+        install_pinned_hook(base,0x45650,next_side_prologue,reinterpret_cast<void*>(&next_hook),reinterpret_cast<void**>(&original_next)):
+        (ctx_probe_game_hooked || install_pinned_hook(base,0x459a0,game_side_prologue,reinterpret_cast<void*>(&game_side_hook),reinterpret_cast<void**>(&original_game_side)));
     game_side_hooked.store(ok);return ok;
+}
+// v1428: the first async-Present violation and the engine lock counters (declared here for ctx_probe_json)
+static std::atomic<bool> async_present_live{true};  // v1428: dev command `asyncpresent on|off` (in-run A/B of the knob build/async-present)
+static std::atomic<bool> async_violation_taken{false};static DWORD async_violation_tid{};static void* async_violation_stack[14]{};static unsigned short async_violation_depth{};
+static std::atomic<std::uint64_t> engine_context_locks{0},engine_context_spins{0};
+// v1427 ctx-probe output: the first leak samples as they happen (ctx-probe.jsonl) and the status object.
+static std::string ctx_probe_ret_text(const void* ret) {
+    const auto a=reinterpret_cast<std::uintptr_t>(ret);std::ostringstream o;o<<std::hex;
+    if(image_base && a>=image_base) {
+        const auto* dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(image_base);
+        const auto* nt=reinterpret_cast<const IMAGE_NT_HEADERS*>(image_base+static_cast<std::uintptr_t>(dos->e_lfanew));
+        if(a<image_base+nt->OptionalHeader.SizeOfImage) {o<<"exe+0x"<<(a-image_base);return o.str();}
+    }
+    HMODULE m{};
+    if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(ret),&m) && m) {o<<"mod+0x"<<(a-reinterpret_cast<std::uintptr_t>(m));return o.str();}
+    o<<"0x"<<a;return o.str();
+}
+static std::string ctx_probe_sample_json(const d2vr::ctx_probe::Sample& s) {
+    namespace cp=d2vr::ctx_probe;
+    std::ostringstream o;
+    o<<"{\"tick\":"<<s.tick<<",\"frame\":"<<s.frame<<",\"tid\":"<<s.tid<<",\"who\":\""<<cp::who_names[s.who%cp::whos]
+     <<"\",\"phase\":\""<<cp::phase_names[s.phase%cp::phases]<<"\",\"kind\":\""<<cp::kind_names[s.kind%cp::kinds]
+     <<"\",\"ret\":\""<<ctx_probe_ret_text(s.ret)<<"\",\"stack\":[";
+    for(unsigned i=0;i<s.depth && i<14;++i) o<<(i?",":"")<<"\""<<ctx_probe_ret_text(s.stack[i])<<"\"";
+    o<<"]";
+    {std::wstring name;HANDLE th=OpenThread(THREAD_QUERY_LIMITED_INFORMATION,FALSE,s.tid);
+     if(th) {PWSTR d{};if(SUCCEEDED(GetThreadDescription(th,&d)) && d) {name=d;LocalFree(d);} CloseHandle(th);}
+     std::string n;for(wchar_t ch:name) n+=ch>=32 && ch<127 && ch!='"' && ch!='\\'?static_cast<char>(ch):'?';o<<",\"thread\":\""<<n<<"\"";}
+    o<<"}";
+    return o.str();
+}
+static void ctx_probe_sink(const d2vr::ctx_probe::Sample& s) noexcept { // a hook thread, at most 64 times; a short append, no lock the Present thread holds
+    try {
+        static std::mutex m;std::lock_guard<std::mutex> l(m);
+        const auto path=output_directory/L"ctx-probe.jsonl";
+        if(path.empty()) return;
+        std::ofstream(path,std::ios::app)<<ctx_probe_sample_json(s)<<"\n";
+    } catch(...) {}
+}
+static std::string ctx_probe_json() {
+    namespace cp=d2vr::ctx_probe;
+    if(!cp::on.load()) return "null";
+    std::ostringstream o;
+    o<<"{\"engine_lock\":{\"locks\":"<<engine_context_locks.load()<<",\"spins\":"<<engine_context_spins.load()<<"},\"async_violation\":{\"tid\":"<<async_violation_tid<<",\"stack\":[";
+    for(unsigned i=0;i<async_violation_depth && i<14;++i) o<<(i?",":"")<<"\""<<ctx_probe_ret_text(async_violation_stack[i])<<"\"";
+    o<<"]},\"main_tid\":"<<cp::main_tid.load()<<",\"async_tid\":"<<cp::async_tid.load()<<",\"phase_hooks\":["<<(ctx_probe_game_hooked?"true":"false")<<","<<(ctx_probe_render_hooked?"true":"false")
+     <<"],\"leaks\":"<<cp::leaks.load()<<",\"game_enters\":"<<cp::game_enters.load()<<",\"render_enters\":"<<cp::render_enters.load()<<",\"kinds\":[";
+    for(unsigned k=0;k<cp::kinds;++k) o<<(k?",":"")<<"\""<<cp::kind_names[k]<<"\"";
+    o<<"],\"calls\":{";
+    for(unsigned w=0;w<cp::whos;++w) {
+        o<<(w?",":"")<<"\""<<cp::who_names[w]<<"\":{";
+        for(unsigned p=0;p<cp::phases;++p) {
+            o<<(p?",":"")<<"\""<<cp::phase_names[p]<<"\":[";
+            for(unsigned k=0;k<cp::kinds;++k) o<<(k?",":"")<<cp::calls[w][p][k].load();
+            o<<"]";
+        }
+        o<<"}";
+    }
+    o<<"},\"samples\":[";
+    const auto n=static_cast<unsigned>(std::min<std::uint64_t>(cp::leaks.load(),cp::max_samples));
+    for(unsigned i=0;i<n;++i) o<<(i?",":"")<<ctx_probe_sample_json(cp::samples[i]);
+    o<<"]}";
+    return o.str();
 }
 static void nvidia_vrs_observer(void* context,int pass,void* view,bool begin) noexcept {
     if(pass!=27 && pass!=28) return;
@@ -2619,6 +2703,34 @@ static std::unique_ptr<d2vr::GameXr> game_xr;
 // v1420: the spacewarp submit thread's xrBeginFrame/xrEndFrame touch the game's immediate context (GameXr::dxgi_gate): the game's own
 // DXGI Present never runs beside them
 // v1423: the arm-freeze evidence, in both status files
+// v1426 probe (paired stereo, spacewarp motion for movers): what each eye's view object holds as its previous view-projection
+// (+0x7590) at its TAA dispatch: this eye's own last current one (+0x7510 at its previous dispatch), the other eye's, or neither.
+struct PairedPrevProbe {
+    std::mutex m;std::array<std::array<float,16>,2> last{};std::array<bool,2> have{};
+    std::array<std::uint64_t,2> n{},own{},other{},neither{},views{};std::array<std::uintptr_t,2> view{};std::array<double,2> own_err{},other_err{};
+};
+static PairedPrevProbe paired_prev_probe;
+static void paired_prev_probe_note(int eye,std::uintptr_t view) noexcept {
+    if(eye<0 || eye>1 || !view) return;
+    try {
+        std::array<float,16> cur{},prev{};
+        if(!read_self(view+d2vr::alternate_taa::current_matrix_offsets[2],cur.data(),64) || !read_self(view+d2vr::alternate_taa::previous_matrix_offsets[2],prev.data(),64)) return;
+        const auto diff=[](const std::array<float,16>& a,const std::array<float,16>& b) {double d=0,m=1e-6;for(int i=0;i<16;++i) {d=std::max(d,double(std::abs(a[i]-b[i])));m=std::max(m,double(std::abs(b[i])));} return d/m;};
+        std::lock_guard<std::mutex> l(paired_prev_probe.m);auto& q=paired_prev_probe;const auto e=static_cast<std::size_t>(eye);
+        ++q.n[e];if(q.view[e]!=view) {q.view[e]=view;++q.views[e];}
+        const double own=q.have[e]?diff(prev,q.last[e]):1e9,other=q.have[e^1]?diff(prev,q.last[e^1]):1e9;
+        q.own_err[e]=own;q.other_err[e]=other;
+        if(own<1e-5) ++q.own[e];else if(other<1e-5) ++q.other[e];else ++q.neither[e];
+        q.last[e]=cur;q.have[e]=true;
+    } catch(...) {}
+}
+static std::string paired_prev_probe_json() {
+    std::lock_guard<std::mutex> l(paired_prev_probe.m);const auto& q=paired_prev_probe;std::ostringstream o;
+    o<<"{\"n\":["<<q.n[0]<<','<<q.n[1]<<"],\"own\":["<<q.own[0]<<','<<q.own[1]<<"],\"other\":["<<q.other[0]<<','<<q.other[1]
+     <<"],\"neither\":["<<q.neither[0]<<','<<q.neither[1]<<"],\"views\":["<<q.views[0]<<','<<q.views[1]<<"],\"last_own_err\":["<<q.own_err[0]<<','<<q.own_err[1]
+     <<"],\"last_other_err\":["<<q.other_err[0]<<','<<q.other_err[1]<<"]}";
+    return o.str();
+}
 static std::string arm_freeze_json() {
     std::ostringstream o;
     o<<"{\"stale\":"<<full_body.stale_json()<<",\"publish_gap_max_ms\":"<<arm_publish_gap_max_ms.load()<<",\"publish_gaps_250\":"<<arm_publish_gaps_250.load()
@@ -2704,8 +2816,36 @@ static d2vr::PendingViews<d2vr::WarpPlaySpace> alt_play; // v1184: the play spac
 // Spacewarp (docs/SPACEWARP-PLAN-2026-11-19.md section 10): knob build/spacewarp (text "always": hold half rate). True stereo only (off
 // in performance mode); needs the FSR/DLSS per-eye depth copies. Setup records both eyes' game cameras into alt_cameras, the Present
 // hands them and the depth copies to GameXr, which generates the frames in between.
-static bool spacewarp_knob=false,spacewarp_always_knob=false;
+static bool spacewarp_knob=false;static std::atomic<bool> spacewarp_always_knob{false};  // v1424: also the dev command `spacewarp always|auto`
 static double spacewarp_palm_reach_knob=0;static bool spacewarp_no_held_far_knob=false,spacewarp_tint_held_knob=false; // v1418 diagnostics (GameXr fields)
+static std::atomic<bool> spacewarp_legacy_edges_knob{false};   // v1424: build/spacewarp-legacy-edges, or the dev command `spacewarp edges off`
+// v1426 (spacewarp movers, true stereo): the paired render's receipt for its motion texture: this eye's view object's current and previous
+// camera (probe 2026-11-20, sim: each eye keeps one view object and its previous view-projection is its own last current, 710 of 711), the
+// phase = consecutive renders of that view (the engine stamp +0x77b4 one up). Only with spacewarp on and build/no-spacewarp-movers absent.
+static std::atomic<bool> spacewarp_movers_knob{true};
+static std::atomic<bool> spacewarp_bilinear_knob{false};  // v1429: build/spacewarp-bilinear = the v1428 bilinear colour resample
+static std::atomic<bool> spacewarp_recent{false};  // v1426: spacewarp generated a frame within the last second (Present thread): only then are motion textures made
+static std::optional<d2vr::alternate_taa::Receipt> paired_pass_receipt(int eye) noexcept {
+    // (review 2026-11-20: the phase is counted while spacewarp idles too, so a new engagement does not start with 4 renders without movers;
+    // only the receipt, which costs the motion pass, waits for a generated frame within the last second)
+    if(eye<0 || eye>1 || alternate_on() || !spacewarp_knob || !spacewarp_movers_knob.load()) return std::nullopt;
+    const auto view=d2vr::TaaDispatchHook::pass_view;if(!view) return std::nullopt;
+    try {
+        namespace at=d2vr::alternate_taa;at::Receipt r{};std::uint32_t stamp{};
+        if(!at::read_snapshot(read_self,view,r.current) || !read_self(view+at::stamp_offset,&stamp,4)) return std::nullopt;
+        for(std::size_t i=0;i<3;++i) if(!read_self(view+at::previous_matrix_offsets[i],r.previous.matrices[i].data(),64)) return std::nullopt;
+        if(!read_self(view+at::previous_position_offset,r.previous.position.data(),12) || !read_self(view+at::previous_jitter_offset,r.previous.jitter.data(),8) ||
+           !at::finite(r.previous)) return std::nullopt;
+        static std::mutex m;static std::array<std::uintptr_t,2> last_view{};static std::array<std::uint32_t,2> last_stamp{},phase{};
+        {std::lock_guard<std::mutex> l(m);const auto e=static_cast<std::size_t>(eye);
+         if(last_view[e]==view && stamp==last_stamp[e]+1) ++phase[e];
+         else if(!(last_view[e]==view && stamp==last_stamp[e])) phase[e]=0;   // the same render again keeps its phase
+         last_view[e]=view;last_stamp[e]=stamp;r.phase=phase[e];}
+        r.reset=r.phase==0;r.key.eye=eye;r.key.view=view;r.key.native_counter=stamp;r.paired=true;
+        if(!spacewarp_recent.load()) return std::nullopt;
+        return r;
+    } catch(...) {return std::nullopt;}
+}
 static bool spacewarp_no_thread_knob=false; // v1420: build/spacewarp-no-thread = submit generated frames at the next Present (v1419)
 static std::array<d2vr::SpacewarpWeaponLocal,2> spacewarp_weapons{};static std::mutex spacewarp_weapons_mutex; // v1419: Setup writes, Present hands to GameXr
 // v1422 (user, headset v1421: "objects I carry artifact a lot with frame generation"): each hand's held thing as a body like a weapon's (its
@@ -3040,9 +3180,28 @@ static d2vr::HandBodyProbeRunner::Sample hand_body_probe_sample(std::uint64_t ti
 }
 static std::atomic<ID3D11DeviceContext*> gpu_game_context{nullptr};
 static std::atomic<bool> async_present_violated{false};
+// v1428: the first violation's thread and stack (status ctx_probe.async_violation with the ctx-probe knob)
 static void async_present_guard(ID3D11DeviceContext* context) noexcept { // safety net: an immediate-context call while a Present is in flight
     auto& a=d2vr::AsyncPresent::instance();
-    if(a.in_flight() && context==gpu_game_context.load(std::memory_order_relaxed)) {a.note_violation();async_present_violated.store(true);} // v1410: count, never wait here
+    // v1428 (E1b, 2026-11-20: the only violation was the worker itself: the Present it runs, Steam overlay and DXGI, sets viewports on the
+    // immediate context): the worker's own calls belong to the Present in flight
+    if(a.in_flight() && context==gpu_game_context.load(std::memory_order_relaxed) && GetCurrentThreadId()!=a.worker_thread()) {
+        if(!async_violation_taken.exchange(true)) {async_violation_tid=GetCurrentThreadId();async_violation_depth=RtlCaptureStackBackTrace(1,14,async_violation_stack,nullptr);}
+        a.note_violation();async_present_violated.store(true);} // v1410: count, never wait here
+}
+// v1428: the engine's immediate-context spinlock (exe 36a6f0 / 36b4e0 on the object at 0x1432FC580: enable byte +0x63AC4A, lock int
+// +0x63AC4C), taken by the async Present worker around its Present. Pinned to this exe build (sha256 b671f824...).
+static thread_local bool engine_context_held=false;  // unlock only what this thread locked (the enable byte may change between)
+static void engine_context_lock() noexcept {
+    if(!image_base) return;
+    const auto enabled=reinterpret_cast<volatile std::uint8_t*>(image_base+0x39371CA);auto* flag=reinterpret_cast<volatile LONG*>(image_base+0x39371CC);
+    if(!*enabled) return;
+    while(InterlockedCompareExchange(flag,1,0)!=0) {YieldProcessor();engine_context_spins.fetch_add(1,std::memory_order_relaxed);}  // acquired only 0 -> 1 (review)
+    engine_context_held=true;engine_context_locks.fetch_add(1,std::memory_order_relaxed);
+}
+static void engine_context_unlock() noexcept {
+    if(!engine_context_held) return;
+    engine_context_held=false;InterlockedExchange(reinterpret_cast<volatile LONG*>(image_base+0x39371CC),0);
 }
 static std::mutex gpu_mutex;
 static std::ofstream gpu_csv;
@@ -3142,6 +3301,7 @@ static void spacewarp_safe_point(ID3D11DeviceContext* context) noexcept {
     busy=true;if(game_xr) game_xr->spacewarp_safe_point();busy=false;
 }
 template<unsigned Binding> void WINAPI viewports_hook(ID3D11DeviceContext* context,UINT count,const D3D11_VIEWPORT* viewports) {
+    d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::viewports,_ReturnAddress());
     spacewarp_safe_point(context);
     async_present_guard(context);GpuCallbackDepth depth_guard;
     reinterpret_cast<ViewportsFn>(gpu_bindings.original(0,Binding))(context,count,viewports);
@@ -3217,6 +3377,7 @@ static void note_rt_bind(ID3D11DeviceContext* context,UINT count,ID3D11RenderTar
     for(UINT i=0;i<slot.count;++i) slot.rt[i]=targets[i];
 }
 template<unsigned Binding> void WINAPI targets_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth) {
+    d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::targets,_ReturnAddress());
     spacewarp_safe_point(context);
     async_present_guard(context);GpuCallbackDepth depth_guard;
     try {observe_paired_target_change(context,count,targets);} catch(...) {record_callback_error("OMSetRenderTargets hook: paired target observer threw");}
@@ -3229,6 +3390,7 @@ template<unsigned Binding> void WINAPI targets_hook(ID3D11DeviceContext* context
 }
 
 template<unsigned Binding> void WINAPI targets_uav_hook(ID3D11DeviceContext* context,UINT count,ID3D11RenderTargetView* const* targets,ID3D11DepthStencilView* depth,UINT start,UINT uav_count,ID3D11UnorderedAccessView* const* uavs,const UINT* initial) {
+    d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::targets_uav,_ReturnAddress());
     GpuCallbackDepth depth_guard;
     // v1287: D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL binds pixel-shader UAVs only; the RTVs and DSV stay, so no target observer has a
     // change to see (it is no target count: trace_targets took 0xffffffff for one and failed the session, silently, in the settled GPU
@@ -3468,6 +3630,7 @@ template<unsigned Binding> void rig_mask_targets_uav(ID3D11DeviceContext* c,UINT
     if(census_on.load(std::memory_order_relaxed)) {ps_state.barrier(c);wide_state.barrier(c);}
 }
 template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* context,UINT count,UINT start,INT base) {
+    d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::draw_indexed,_ReturnAddress());
     async_present_guard(context);GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_indexed",count,1,false,start,base);d2vr::spyglass_art_probe().observe(context,count,true);
     if(skip_letterbox_draw(context,count)) return;
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162: before the note's skin swap
@@ -3485,6 +3648,7 @@ template<unsigned Binding> void WINAPI draw_indexed_hook(ID3D11DeviceContext* co
     note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,INT base,UINT first) {
+    d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::draw_indexed_inst,_ReturnAddress());
     async_present_guard(context);
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_indexed_instanced",count,instances,false,start,base,first);
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
@@ -3532,6 +3696,7 @@ template<unsigned Binding> void WINAPI draw_instanced_hook(ID3D11DeviceContext* 
     note.submitted();
 }
 template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UINT count,UINT start) {
+    d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::draw,_ReturnAddress());
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,1);trace_draw(context,"draw_vertices",count,1,true);d2vr::spyglass_art_probe().observe(context,count,false);
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
@@ -3542,6 +3707,7 @@ template<unsigned Binding> void WINAPI draw_hook(ID3D11DeviceContext* context,UI
     cross_eye.after();
 }
 template<unsigned Binding> void WINAPI draw_vertices_instanced_hook(ID3D11DeviceContext* context,UINT count,UINT instances,UINT start,UINT first) {
+    d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::draw_inst,_ReturnAddress());
     GpuCallbackDepth depth_guard;visibility_stamp_before(context);note_draw_phase(count,instances);trace_draw(context,"draw_instanced_vertices",count,instances,true);
     d2vr::RigMask::Scope rig_mask(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass()); // v1162
     d2vr::CrossEyeHistory::Scope cross_eye(context,d2vr::RenderPassMap::current_view(),d2vr::RenderPassMap::current_pass(),cross_eye_paired_eye()); // v1180/v1181: census / per-eye history (knobs)
@@ -6935,12 +7101,27 @@ static std::string run_test_command(const std::string& line) {
             <<"\" helper "<<p.helper_running()<<" status "<<p.status()<<" left "<<d2vr::psvr2::name(p.last()[0])<<" right "<<d2vr::psvr2::name(p.last()[1])<<" changes "<<p.profile_changes.load();
         return o.str();
     }
+    if(verb=="cores") {std::string v;in>>v;  // v1430: cores off|soft|hard, or cores abab soft|hard <ms> (measurement)
+        if(v=="abab") {std::string w;int ms=1000;in>>w;if(!(in>>ms)) ms=1000;d2vr::core_isolation::abab_period_ms=ms;d2vr::core_isolation::abab_mode=w=="hard"?2:1;d2vr::core_isolation::start();}
+        else if(v=="off" || v=="soft" || v=="hard") {d2vr::core_isolation::abab_mode=0;d2vr::core_isolation::mode=v=="hard"?2:v=="soft"?1:0;d2vr::core_isolation::start();d2vr::core_isolation::apply_now();}
+        return d2vr::core_isolation::json();}
+    if(verb=="vrs") {std::string v;in>>v;auto& vrs=d2vr::NvVrs::instance();  // v1431: vrs on|off|abab <ms> (needs build/nvidia-vrs at session start)
+        if(v=="on" || v=="off") {vrs.abab_ns=0;vrs.live=v=="on";}
+        else if(v=="abab") {int ms=1000;if(!(in>>ms)) ms=1000;vrs.abab_ns=static_cast<std::int64_t>(std::clamp(ms,100,10000))*1000000;}
+        return vrs.json();}
+    if(verb=="jobspin") {unsigned m=0,o=0;if(in>>m) {if(!(in>>o)) o=0;d2vr::job_wake::spin_main_us=std::min(m,500u);d2vr::job_wake::spin_other_us=std::min(o,500u);}  // v1430
+        d2vr::job_wake::install(GetModuleHandleW(nullptr));  // review 2026-11-20: the command alone also installs the probe (once per process)
+        return d2vr::job_wake::json(frames.load());}
+    if(verb=="asyncpresent") {std::string v;in>>v;if(v=="on" || v=="off") async_present_live=v=="on";return std::string("{\"async_present_live\":")+(async_present_live.load()?"true":"false")+"}";}  // v1428
     if(verb=="spacewarp") { // spacewarp capture N: N triples of eye 0 (real, generated from it, next real) as sw-capture-NN-*.rgba (afw_capture_dir)
         std::string v;in>>v;
         if(v=="capture" && game_xr) {
             int n=4;in>>n;if(game_xr->afw_capture_dir.empty()) game_xr->afw_capture_dir=output_directory.always().wstring();
             game_xr->spacewarp_capture_requested=std::clamp(n,1,32);
-        }
+        } else if(v=="edges") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_legacy_edges_knob=m=="off";}  // v1424 A/B: spacewarp edges on|off
+        else if(v=="always") spacewarp_always_knob=true;else if(v=="auto") spacewarp_always_knob=false;  // v1424 sim A/B (the knob file is untouched)
+        else if(v=="altmovers" && game_xr) game_xr->spacewarp_capture_alt=1;else if(v=="altedges" && game_xr) game_xr->spacewarp_capture_alt=0;  // v1426
+        else if(v=="altsharp" && game_xr) game_xr->spacewarp_capture_alt=2;  // v1429
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
     if(verb=="afw") { // AFW renderer: afw [on|off|status] | afw tune <threshold|jitter|gap|reset> <value>
@@ -13790,7 +13971,11 @@ void sample_stereo(IDXGISwapChain* chain,UINT64 number,const DXGI_SWAP_CHAIN_DES
                     ComPtr<ID3D11Device> device;chain->GetDevice(IID_PPV_ARGS(&device));
                     install_glyph_hook(device.Get());
                     if(d2vr::CrossEyeHistory::census.load()) d2vr::CrossEyeHistory::install(device.Get()); // v1186: copy/clear writes (census knob only)
-                    if(taa_history_installed && !d2vr::TaaDispatchHook::installed() && d2vr::TaaDispatchHook::install(device.Get())) {
+                    // v1428 (sim profile, diagnostics off: this block runs every Present until a stereo frame is captured, which needs diagnostics,
+                    // and a failing install retried each time cost ~2 % of the main thread in MinHook's address checks): retried once a second
+                    static UINT64 taa_install_next=0;
+                    if(taa_history_installed && !d2vr::TaaDispatchHook::installed() && GetTickCount64()>=taa_install_next &&
+                       (d2vr::TaaDispatchHook::install(device.Get()) || (taa_install_next=GetTickCount64()+1000,false))) {
                         d2vr::TaaDispatchHook::handler=&taa_dispatch_handler;
                         d2vr::TaaDispatchHook::depth_observer=[](ID3D11DeviceContext* c,ID3D11DepthStencilView* v,UINT f,FLOAT d,UINT8 stencil) {fsr_taa.observe_depth(v,c,f,d,stencil);};
                         d2vr::TaaDispatchHook::finish_observer=[](ID3D11DeviceContext* c,ID3D11CommandList* l) {if(native_gpu_requested)render_pass_map.finished(c,l);fsr_taa.finished(c,l);world_ui_completion.finished(c,l);if(native_note_completion.finished(c,l))native_note_trace_event("finish",0,0,c,l);native_hud_art_capture.finished(c,l);render_perf_finished(nullptr,c,l);};
@@ -14166,6 +14351,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                     gpu_game_context.store(context.Get(),std::memory_order_release);
                     gpu_game_device.store(device.Get(),std::memory_order_release);
                     gpu_render_thread.store(GetCurrentThreadId(),std::memory_order_release);
+                    d2vr::job_wake::main_tid.store(GetCurrentThreadId(),std::memory_order_relaxed);d2vr::core_isolation::main_tid.store(GetCurrentThreadId(),std::memory_order_relaxed);  // v1430
+                    if(d2vr::ctx_probe::on.load(std::memory_order_relaxed)) { // v1427
+                        d2vr::ctx_probe::context.store(context.Get(),std::memory_order_release);d2vr::ctx_probe::main_tid.store(GetCurrentThreadId(),std::memory_order_release);
+                        d2vr::ctx_probe::async_tid.store(d2vr::AsyncPresent::instance().worker_thread(),std::memory_order_release);d2vr::ctx_probe::frame.store(frames.load(),std::memory_order_relaxed);
+                    }
                     if(paired_requested) {
                         std::unique_lock<std::mutex> xr_lock(log_mutex);
                         if(!capturing.load()) {xr_lock.unlock();return gated_present(chain,interval,flags);}
@@ -14255,13 +14445,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             for(UINT slot_eye=0;slot_eye<2;++slot_eye) if(alt_slot->mask&(1u<<slot_eye))
                                 game_xr->record_rendered_view(slot_eye,alt_slot->view[slot_eye],alt_slot->display_time[slot_eye],alt_slot->locate_cpu_time[slot_eye]);
                         if(game_xr) {game_xr->spacewarp_enabled=spacewarp_knob && !alternate_on();game_xr->spacewarp_always=spacewarp_always_knob;
-                            game_xr->spacewarp_palm_reach=spacewarp_palm_reach_knob;game_xr->spacewarp_held_far=!spacewarp_no_held_far_knob;game_xr->spacewarp_tint_held=spacewarp_tint_held_knob;
+                            game_xr->spacewarp_palm_reach=spacewarp_palm_reach_knob;game_xr->spacewarp_held_far=!spacewarp_no_held_far_knob;game_xr->spacewarp_tint_held=spacewarp_tint_held_knob;game_xr->spacewarp_soft_edges=!spacewarp_legacy_edges_knob;game_xr->spacewarp_sharp=!spacewarp_bilinear_knob;
                             if(spacewarp_knob) {std::lock_guard<std::mutex> l(spacewarp_weapons_mutex);game_xr->spacewarp_weapon=spacewarp_weapons;}
-                            game_xr->spacewarp_thread=!spacewarp_no_thread_knob;}
+                            game_xr->spacewarp_thread=!spacewarp_no_thread_knob;
+                            {static std::uint64_t last_generated=0;static UINT64 last_tick=0;const auto generated=game_xr->spacewarp_generated;const auto tick=GetTickCount64();  // v1426
+                             if(generated!=last_generated) {last_generated=generated;last_tick=tick;} spacewarp_recent=last_tick && tick-last_tick<1000;}}
                         if(spacewarp_knob && !alternate_on() && pair_ready && alt_slot && game_xr) { // spacewarp: both eyes' game cameras and depth of this Present
                             if(const auto cameras=alt_cameras.take(number))
                                 for(UINT e=0;e<2;++e) if(cameras->mask&(1u<<e)) game_xr->record_rendered_camera(e,cameras->view[e],number);
-                            for(UINT e=0;e<2;++e) {UINT dw{},dh{};if(const auto depth=fsr_taa.eye_depth(static_cast<int>(e),dw,dh)) game_xr->stale_eye_depth(e,depth.Get(),dw,dh,number);}
+                            for(UINT e=0;e<2;++e) {UINT dw{},dh{};if(const auto depth=fsr_taa.eye_depth(static_cast<int>(e),dw,dh)) game_xr->stale_eye_depth(e,depth.Get(),dw,dh,number);
+                                UINT mw{},mh{};const auto motion=spacewarp_movers_knob.load()?fsr_taa.eye_motion(static_cast<int>(e),mw,mh):nullptr;  // v1426: movers
+                                game_xr->stale_eye_motion(e,motion.Get(),mw,mh,number);}
                         }
                         if(alternate_on() && pair_ready && alt_slot && game_xr && alt_fresh>=0) { // v792: the stale eye's view at the fresh eye's Setup
                             const auto other=static_cast<UINT>(1-alt_fresh);
@@ -15352,7 +15546,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           << ",\"game_layers_submitted\":" << xr_submitted
                                           << ",\"spacewarp\":" << (game_xr && spacewarp_knob?game_xr->spacewarp_brief_json():std::string("null")) // headset evidence without diagnostics
                                           << ",\"hands\":" << (game_xr?game_xr->hands_brief_json():std::string("null")) // v1421: grip tracking, and who drove the arms
-                                          << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json() // v1423
+                                          << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json() << ",\"ctx_probe\":" << ctx_probe_json() // v1423
+                                          << ",\"paired_prev_probe\":" << paired_prev_probe_json() // v1426
+                                          << ",\"job_wake\":" << d2vr::job_wake::json(frames.load()) << ",\"core_isolation\":" << d2vr::core_isolation::json() // v1430
                                           << ",\"arms\":{\"frames\":" << arm_owner_frames.load() << ",\"authored\":[" << authored_arm_frames[0].load() << ',' << authored_arm_frames[1].load()
                                           << "],\"attack_presses\":" << attack_intent.presses()
                                           // v1421: what held a drawn hand back (the wall clamp, the arm's reach, a snap back), which pose it was drawn at, the blade's world contacts
@@ -15394,7 +15590,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"tracked_arms_requested\":" << (tracked_arms_requested?"true":"false")
                                      << ",\"native_arm_pose_calls\":[" << arm_pose_calls[0].load() << ',' << arm_pose_calls[1].load() << ']'
                                      << ",\"native_arm_pose_fallbacks\":[" << arm_pose_fallbacks[0].load() << ',' << arm_pose_fallbacks[1].load() << ']'
-                                     << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json()
+                                     << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json() << ",\"ctx_probe\":" << ctx_probe_json() << ",\"paired_prev_probe\":" << paired_prev_probe_json() << ",\"job_wake\":" << d2vr::job_wake::json(frames.load()) << ",\"core_isolation\":" << d2vr::core_isolation::json()
                                      << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                                      << ",\"native_controller_reads\":" << controller_bridge.reads()
                                      << ",\"native_virtual_controller_reads\":" << controller_bridge.virtual_reads()
@@ -17389,10 +17585,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     const unsigned mirror_every=desktop_mirror_every.load(std::memory_order_relaxed);
     const bool mirror_skip=mirror_every>1 && xr_requested && capturing.load() && timing_gameplay && game_xr && game_xr->last_layer_submitted &&
         !(flags&DXGI_PRESENT_TEST) && (++mirror_phase%mirror_every)!=0;
-    const bool present_async=!mirror_skip && async_present_requested && game_side_hooked.load(std::memory_order_relaxed) && xr_requested &&
+    const bool present_async=!mirror_skip && async_present_requested && async_present_live.load(std::memory_order_relaxed) && game_side_hooked.load(std::memory_order_relaxed) && xr_requested &&
         capturing.load() && timing_gameplay && game_xr && game_xr->last_layer_submitted && !(flags&DXGI_PRESENT_TEST) &&
-        !async_present_violated.load(std::memory_order_relaxed) && d2vr::AsyncPresent::instance().start(original_present); // v1408/v1410
-    auto result=mirror_skip?S_OK:present_async?d2vr::AsyncPresent::instance().kick(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced),desktop_xr_paced):
+        !async_present_violated.load(std::memory_order_relaxed) && (d2vr::AsyncPresent::instance().set_engine_lock(engine_context_lock,engine_context_unlock),
+        d2vr::AsyncPresent::instance().start(original_present)); // v1408/v1410; v1428: the engine's context lock around the worker's Present
+    // v1428: deferred to the render side's return (render_side_hook), where the worker gets it
+    // (review 2026-11-20: only render_side_hook kicks a deferred Present: the other bisect modes hand it over at once, as before)
+    const bool defer_present=async_present_mode==3 || ctx_probe_render_hooked;
+    auto result=mirror_skip?S_OK:
+        present_async && defer_present && d2vr::AsyncPresent::instance().defer(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced),desktop_xr_paced)?
+            d2vr::AsyncPresent::instance().last_result():
+        present_async && !defer_present?d2vr::AsyncPresent::instance().kick(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced),desktop_xr_paced):
         gated_present(chain,desktop_interval,d2vr::xr_desktop_present_flags(flags,desktop_xr_paced));
     if(mirror_skip) desktop_mirror_skips.fetch_add(1,std::memory_order_relaxed);
     if(desktop_xr_paced && result==DXGI_ERROR_WAS_STILL_DRAWING) {result=S_OK;++desktop_mirror_drops;}
@@ -18029,6 +18232,17 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_palm_reach_knob=reach && (reach>>metres) && metres>=.02 && metres<=.5?metres:0;
                 spacewarp_no_held_far_knob=fs::exists(root/L"build"/L"spacewarp-no-held-far");
                 spacewarp_tint_held_knob=fs::exists(root/L"build"/L"spacewarp-tint-held");
+                spacewarp_legacy_edges_knob=fs::exists(root/L"build"/L"spacewarp-legacy-edges");   // v1424
+                spacewarp_movers_knob=!fs::exists(root/L"build"/L"no-spacewarp-movers");   // v1426
+                spacewarp_bilinear_knob=fs::exists(root/L"build"/L"spacewarp-bilinear");   // v1429
+                {   // v1428: compiled shaders cached under the mod folder; the big ones compiled into it on a background thread during the menus
+                    // (sim profile: ~11-15 s of D3DCompile on the main thread at the first gameplay frame, every session)
+                    static std::once_flag warm;
+                    std::call_once(warm,[&] {
+                        d2vr::shader_cache::dir()=(root/L"shader-cache").wstring();
+                        try {std::thread([] {SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);d2vr::StaleEyeWarp::warm_cache();d2vr::SpacewarpPass::warm_cache();}).detach();} catch(...) {}
+                    });
+                }
                 spacewarp_no_thread_knob=fs::exists(root/L"build"/L"spacewarp-no-thread");
             }
             d2vr::alternate_parity_flip=fs::exists(root/L"build"/L"alt-parity-flip"); // v790 diagnostic: the right eye on even frames
@@ -18551,7 +18765,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         d2vr::RenderPassMap::cpu_timing_enable(fs::exists(root/L"build"/L"pass-cpu-timing"),frames.load()); // v1399 (plan check L2)
         {std::ifstream knob(root/L"build"/L"desktop-mirror-every");unsigned n=desktop_mirror_default;if(knob && !(knob>>n)) n=desktop_mirror_default; // v1406: absent or empty = the default
             desktop_mirror_every.store(std::clamp(n,1u,8u),std::memory_order_relaxed);}
+        d2vr::ctx_probe::on.store(fs::exists(root/L"build"/L"ctx-probe")); // v1427: which thread uses the immediate context in which phase (docs/research/ENGINE-OVERLAP-STEP1.md)
+        d2vr::ctx_probe::pass_of.store(&d2vr::RenderPassMap::current_pass);d2vr::ctx_probe::sink.store(&ctx_probe_sink);
         async_present_requested=fs::exists(root/L"build"/L"async-present"); // v1408 plan 2B.4 step 1
+        {const bool spin_knob=fs::exists(root/L"build"/L"job-spin");std::ifstream knob(root/L"build"/L"job-spin");unsigned m=0,o=0; // v1430 (src/job_wake.hpp)
+         if(!(knob>>m)) m=0;else if(!(knob>>o)) o=0;
+         if(spin_knob || fs::exists(root/L"build"/L"job-wake")) {d2vr::job_wake::spin_main_us=std::min(m,500u);d2vr::job_wake::spin_other_us=std::min(o,500u);
+             note_resolution("job_wake: install %s, spin main %u us, other %u us",d2vr::job_wake::install(GetModuleHandleW(nullptr))?"ok":"FAILED",m,o);}}
+        {std::ifstream knob(root/L"build"/L"core-isolation");std::string v;if(knob) {knob>>v;d2vr::core_isolation::mode=v=="hard"?2:v=="off"?0:1;d2vr::core_isolation::start();}} // v1430: default text = soft
         {std::ifstream knob(root/L"build"/L"async-present");std::string mode;knob>>mode;async_present_mode=mode=="none"?0:mode=="next"?2:mode=="game"?1:3;} // v1408b/v1410: default "render"
         {std::ifstream knob(root/L"build"/L"nvidia-vrs");nvidia_vrs_requested=static_cast<bool>(knob);nvidia_vrs_tried=false;nvidia_vrs_config={}; // v1403 plan 2A.5
          float inner{},outer{};std::string token;if(knob>>inner>>outer && inner>=.1f && inner<=.9f && outer>inner && outer<=1.5f) {nvidia_vrs_config.inner=inner;nvidia_vrs_config.outer=outer;}
@@ -18589,6 +18810,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 render_pass_map.set_static_shadow_cache(cache_knob?&static_shadow_cache:nullptr);
             }
             const bool pass_map_installed=render_pass_map.install(image_base);
+            install_ctx_probe_phase_hooks(image_base); // v1427 (before async-present, which reuses an installed detour)
             if(async_present_requested) install_game_side_hook(image_base); // v1408
             if(shadow_share_requested) shadow_share.set_installed(pass_map_installed && shadow_share_eye_hook_ok);
         }
@@ -19224,7 +19446,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"native_arm_copy_calls\":[" << arm_copy_calls[0].load() << ',' << arm_copy_calls[1].load() << ']'
                << ",\"native_arm_pose_calls\":[" << arm_pose_calls[0].load() << ',' << arm_pose_calls[1].load() << ']'
                << ",\"native_arm_pose_fallbacks\":[" << arm_pose_fallbacks[0].load() << ',' << arm_pose_fallbacks[1].load() << ']'
-                                     << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json()
+                                     << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json() << ",\"ctx_probe\":" << ctx_probe_json() << ",\"paired_prev_probe\":" << paired_prev_probe_json() << ",\"job_wake\":" << d2vr::job_wake::json(frames.load()) << ",\"core_isolation\":" << d2vr::core_isolation::json()
                << ",\"native_arm_reach_clamps\":[" << arm_pose_clamps[0].load() << ',' << arm_pose_clamps[1].load() << ']'
                << ",\"tracked_arm_units_per_metre\":1.0,\"tracked_arm_metric_scale_verified\":false"
                << ",\"avatar_calibration_applied\":" << (avatar_calibration_applied?"true":"false")

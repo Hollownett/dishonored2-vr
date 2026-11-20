@@ -619,3 +619,89 @@ push. Offline, walking 4.5 m/s with a 0.4 m swing at 45 Hz: the hand trails the 
 Sim (`run_hands`, final v1423, `D:\d2vr-artifacts\sw-v1423b`): 530/530 generated frames submitted at safe points, 0 late, 0 failures;
 the clamp held 2/4 single frames (22 ms), none drawn on the answered line: the sim's controllers do not swing like a player's, so the
 fix is shown offline only. Not headset-tested.
+
+## 18. Soft edges: the silhouettes around moving things (v1424, 2026-11-20)
+
+**Report (v1423 headset):** "everything is very good"; only ghosting remains: around the body, the hands, weapons, carried objects and
+bodies, corpses and the player's own body, a silhouette-like frame realigned with the position, a lot of ghosting.
+
+**Cause.** The colour image's edges are soft (anti-aliasing, DLSS/FSR upscaling from the render size, and the depth's own sub-texel jitter)
+while the depth's edges are hard. Wherever two neighbours move differently (a hand, a weapon, a carried body or the player's legs over
+the still world), (1) the background texels next to the moving thing carry its colour: they stay where they are and draw its old outline;
+(2) the hole it leaves was filled with the first background texel at the hole's border, which is exactly that tinted rim: the old
+silhouette filled with streaks of the thing's colour; (3) the thing's own edge texels carry the old background's colour along with it (a
+halo); (4) a sky cell looked its direction up in the source, which showed the hand itself where it had been. Lab (`spacewarp_pass_check`
+tests 12-13, a hand with soft edges moved 4 texels): old silhouette B 128, halo B 128, sky ghost B 255 (want 0, 255, 0).
+
+**v1424.** Two compute passes before the splat: Classify stores each texel's class once (still, hand 0/1, the rest of the rig, its motion
+texture, sky; the displacement follows from the class, so the per-texel rules no longer run 2-4 times per texel); Edge marks, only where
+neighbours' displacements differ by more than half a texel, (a) every farther texel within 2 texels of a nearer differently-moving surface
+as a rim: it is not drawn, its cells are filled from beyond it, and no filled cell or back-projection takes its colour; (b) a moving
+surface's edge texel (one side only, not a thin thing seen from both): its colour is read 1.5 texels further in. A sky cell whose direction
+the source shows covered by a moving thing or a rim shows its own sky texel. Nothing changes where nothing moves differently (lab: a still
+scene with soft edges comes back exact). Lab: silhouette 0, halo gone (255), sky 0; all 22 earlier checks unchanged. Knob
+`build/spacewarp-legacy-edges` (or the dev command `spacewarp edges off|on`) = v1423; status `spacewarp.soft_edges`.
+
+**Uncovered areas.** The place a moving thing left was filled with one border texel's colour copied along each fill direction: shards and
+streaks in the thing's old outline (sim crops). v1424 colours an uncovered cell with the background around it instead: in each of 8
+directions the first drawn cell that is not nearer than 3/4 of the cell's depth and moves like its seed, blended by 1/distance (a Blend
+compute pass once per uncovered cell at render size; per output pixel it cost 0.64 ms). Lab test 14: a striped wall hidden by the hand
+comes back 27 levels off the truth (one seed's streak: 40).
+
+**Measured.** Lab `spacewarp_pass_check`: all checks pass. GPU (RTX 5070, 1672x1800 render, 2496x2688 output, a large hand 0.6 m away
+moving 5 cm): 0.83 ms per eye with the new rule, 0.67 ms without (+0.16 ms). Sim A/B on the same frames (`spacewarp capture` now also
+saves `generated-alt`, the frame with the other rule; dev command `spacewarp always` holds half rate without touching the knob file):
+20 triples walking/running in the user's save, 0.03-0.3 % of pixels differ; there the new rule is 24.0 levels from the next real frame,
+the old 29.6; crops: the old rule's dark streak shards in uncovered areas are gone, a faint star pattern from the 8-direction blend
+remains. Thin crossing crack lines on very close magnified surfaces appear with both rules (not this change). Not headset-tested.
+
+**v1425: one surface, two motions; softer fills.** (1) Sim crops showed thin lines of the wall through a sleeve: an arm is one surface,
+but the part within the palm's reach moved with the hand and the rest with the body, so the surface tore along the class boundary
+whenever the two motions differed (lab test 16: 6 cells of wall through the arm). Edge now feathers the displacement within 4 texels of
+such a boundary on one surface (depth within 5 %), only between the player's own parts (hands, the rest of the rig; a mover on a wall
+or a carried body on the floor keeps its hard boundary): the arm stretches (lab: 0 cells). Feathered texels carry a flag and their
+displacement in an RGBA32F texture; all others keep their class's. (2) The 8-direction blend left a star in each uncovered area: a
+7-tap tent blur along x then y over uncovered cells filled from the same class of background softens it (lab 14 now 35 levels off the
+hidden stripes: a blur trades their structure for smoothness; the streak was 40). Blend/blur are skipped with the rule off.
+GPU per eye (bench): 1.07 ms on, 0.79 ms off. Sim same-frame A/B (15 triples): where the rules differ the new is 25.5 levels from the
+next real frame, the old 28.2; crops: no shards or star seams; 392/392 submitted, 0 late, 0 failures. Not headset-tested.
+
+## 19. Movers in true stereo (v1426, 2026-11-20 night)
+
+NPCs, props and physics objects were not extrapolated in true stereo (no motion texture): at half rate they showed at the same place in a
+real and a generated frame (45 Hz judder, a double image when the eyes follow them). Performance mode already had the motion texture
+(`eye_motion_pass.hpp`: the engine's motion vectors less the camera's, world metres since the eye's previous render), built from
+alternate-eye receipts only.
+
+**Probe** (`paired_prev_probe` in the status, sim 2026-11-20): in paired stereo each eye keeps one view object and its previous
+view-projection (+0x7590) is that eye's own last current one (+0x7510): 710 of 711 TAA dispatches per eye (the miss is the first). So the
+engine's camera history is per eye in paired stereo and the motion pass's camera subtraction can use it directly.
+
+**v1426.** At each eye's TAA dispatch in paired stereo, while spacewarp generated a frame within the last second
+(`paired_pass_receipt`, `dxgi_probe.cpp`): a receipt with that view object's current and previous camera, phase = consecutive renders
+(engine stamp +0x77b4); the motion pass runs on it without the alternate mode's other-eye test (`fsr_taa.hpp`, `Receipt::paired`). The
+texture goes to the spacewarp frame (`game_xr.hpp`: `in.motion`, `world_to_source` = the source camera's world-to-camera rotation,
+`motion_share` = (slot - display) / (display - the previous real display)). A mover's extrapolated step is capped at 3 cm
+(`SpacewarpParams::mover_cap`): the first sim A/B without a cap carried a guard's raised sword arm on up while the next real frame swung it
+down (14 % of the image changed, flicker 6.9 vs 3.9). With the cap, same-frame A/B (dev command `spacewarp altmovers`: the capture's
+generated-alt is the frame without movers), 14 triples walking past guards: movers change 1-5 % of the image, there 40.1 vs 41.6 levels
+from the next real frame (10 of 14 triples better), flicker about equal; without movers fast close NPC limbs left rectangular smear
+blocks. Lab: test 4 (uncapped semantics) and the cap. Knob `build/no-spacewarp-movers` = v1425. Status: `spacewarp.mover_eyes`. Not
+headset-tested; fast reversing NPC animation (attacks) still cannot be predicted.
+
+## 20. Sharper generated frames, wider fills, no compile stall (v1427-v1429, 2026-11-20 night)
+
+- **Sharp resample (v1429).** The generated frame looked its colour up bilinearly at fractional positions: fine detail was softer in every
+  generated frame than in the real ones (a 45 Hz sharp/soft shimmer). Resolve now uses Catmull-Rom from 5 bilinear taps, clamped to the
+  2x2 texels around the point (no ringing or halo at an edge). Lab test 17 (a 4-texel pattern, camera turned half a texel): contrast 151 of
+  200 vs 123 bilinear. GPU +0.03 ms per eye. Knob `build/spacewarp-bilinear` = the old resample; capture A/B `spacewarp altsharp`.
+  The sim's standing captures sit on whole texels, so they show no difference; the gain is for continuous head motion (headset).
+- **Wider fills (v1429).** Three fill passes (144 texels) and a 96-cell blend search: a close hand moving fast (5 m/s at 0.4 m: ~125
+  render texels a slot) left the middle of its hole unfilled, and an unfilled cell looks its direction up in the source (the hand at its
+  old place). GPU per eye with everything on: 1.13 ms (bench: large hand, 1672x1800 render, 2496x2688 output; 0.85 ms rule off).
+- **No compile stall (v1428).** Every session's first gameplay frame spent 11-15 s in D3DCompile on the main thread (StaleEyeWarp's
+  shaders, which the canted-to-straight resample needs every frame; the spacewarp pass ~1 s more when it first engaged). Compiled
+  bytecode is cached under the mod folder (`shader-cache/`, `src/shader_cache.hpp`, keyed by source, entry, profile and flags) and a
+  background thread fills the cache during the menus. Sim: first gameplay Present 0.3 ms (was 15.2 s), no Present over 0.5 s.
+- Spacewarp sanity (v1429 sim, Always): 412/412 generated frames submitted, 0 late, 0 failures, movers on 818 eyes.
+- Engine-side experiments of the night: `docs/ENGINE-DIG-NOTES.md` section 7.

@@ -130,6 +130,7 @@ public:
     std::atomic<std::uint64_t> motion_rig_masks{}; // v1162: motion passes that used the rig mask for the arm rule
     std::atomic<std::uint64_t> motion_rig_moving{}; // v1166: of those, rig pixels with real motion (rig_motion valid)
     bool eye_rig_motion(int eye) {std::lock_guard<std::mutex> lock(mutex_);return (eye==0 || eye==1) && (*eyes_)[static_cast<std::size_t>(eye)].rig_motion;} // v1166
+    std::atomic<std::uint64_t> motion_paired{};  // v1426: motion textures made from paired-stereo receipts (spacewarp movers)
     std::atomic<std::uint64_t> motion_passes{},motion_refused{},motion_srv_misses{},motion_other_tests{},motion_no_other{}; // v1154: passes with the other-eye still test; v1158: renders without it (no texture) // v1151: motion textures written; renders with a receipt that made none
     // Perf-mode motion Phase 0 (dxgi_probe knob build/alt-motion-probe, diagnostics only): handed to replace() by the TAA dispatch it
     // belongs to; that eye's next FSR/DLSS dispatch writes <stem>-mv.rg16f (raw engine motion vectors), <stem>-depth.r32 (the Eye::depth
@@ -1192,7 +1193,7 @@ private:
             const bool view_render=RigMask::take_view_draws()>0;
             // v1179: rig motion validity is per pixel (mask 255 = a draw with the eye's own previous palette and rows); with the feature on,
             // rig_motion says only that 255 pixels carry own motion (no per-render tally any more)
-            const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed) && job.receipt && !job.receipt->reset;
+            const bool rig_motion_now=RigMask::motion.load(std::memory_order_relaxed) && job.receipt && !job.receipt->reset && !job.receipt->paired;  // v1426: alternate receipts only
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> rig_depth;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rig_target;Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> rig_keys; // v1288: the UAV replay's mask keys (u2)
             if(view_render && rig_copy_.p && rig_cb_.p && e.rig_uav.p && e.rig_count_uav.p && e.rig_count_staging[0].p && RigMask::target(depth_resource_.p,rig_depth,rig_target,&rig_keys)) {
                 float k[4]{0,0,static_cast<float>(depth_w),static_cast<float>(depth_h)};rig_mask_eps(depth_srv_format_,k[0],k[1]);
@@ -1211,7 +1212,7 @@ private:
                 // v1209: rig pixels marked wild (252) get zero motion in the TAA's motion input, before the motion pass and the upscaler
                 if(e.mv_key==job.motion.p) RigMask::guard(c,job.motion.p,e.rig_srv.p,depth_w,depth_h);
                 const float far_value[4]{};if(rig_target) c->ClearRenderTargetView(rig_target.Get(),far_value); // the next render's rig depth starts empty (v1288 keys: zeroed by the copy)
-                e.rig_count_display[e.rig_count_serial%e.rig_count_staging.size()]=job.receipt?job.receipt->key.display:0;
+                e.rig_count_display[e.rig_count_serial%e.rig_count_staging.size()]=job.receipt && !job.receipt->paired?job.receipt->key.display:0;
                 c->CopyResource(e.rig_count_staging[e.rig_count_serial%e.rig_count_staging.size()].p,e.rig_count.p);++e.rig_count_serial;++rig_live_renders;
                 e.rig_valid=true;e.rig_live=true;++rig_copies;
                 e.rig_motion=rig_motion_now; // v1166: every rig prepass draw of this render had the eye's own previous palette and rows
@@ -1242,12 +1243,14 @@ private:
             EyeMotionConstants k{};
             // v1154: the other eye's last receipt, when it is the render one Present before this one (its current = the other eye at N-1)
             const auto& other=last_receipt_[static_cast<std::size_t>(job.eye^1)];
-            const bool other_ok=other && other->key.eye==(job.eye^1) && other->key.display+1==job.receipt->key.display;
+            // v1426: a paired render has no other-eye test (each eye's previous camera is its own; probe 2026-11-20)
+            const bool other_ok=job.receipt->paired || (other && other->key.eye==(job.eye^1) && other->key.display+1==job.receipt->key.display);
             // v1158: no other-eye snapshot one Present earlier (a reset, a history start, a skipped dispatch): no texture this render (the
             // warp's mover rules then stay off; movers lag a frame as without the textures)
             if(!other_ok) ++motion_no_other;
-            else if(eye_motion_constants(job.receipt->current,job.receipt->previous,depth_w,depth_h,k,&other->current)) {
-                if(other_ok && k.other_step[3]>0) ++motion_other_tests;
+            else if(eye_motion_constants(job.receipt->current,job.receipt->previous,depth_w,depth_h,k,job.receipt->paired?nullptr:&other->current)) {
+                if(other_ok && !job.receipt->paired && k.other_step[3]>0) ++motion_other_tests;
+                if(job.receipt->paired) ++motion_paired;
                 if(e.mv_key!=job.motion.p) {
                     ++motion_srv_misses; // v1153 status: whether the engine rotates its motion-vector texture
                     e.mv_srv.reset();e.mv_key=nullptr;ID3D11Device* dev{};c->GetDevice(&dev);ID3D11ShaderResourceView* v{};

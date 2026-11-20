@@ -16,6 +16,7 @@
 #include <d3d11.h>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <mutex>
@@ -43,6 +44,7 @@ public:
     void begin(ID3D11DeviceContext*,int) noexcept {}
     void end(ID3D11DeviceContext*) noexcept {}
     bool enabled() const noexcept {return false;}
+    std::atomic<bool> live{true};std::atomic<std::int64_t> abab_ns{0};
     std::string json() {return "{\"enabled\":false,\"reason\":\"no_nvapi_sdk\"}";}
 };
 #else
@@ -97,8 +99,15 @@ public:
         ++surface_builds_;
     }
     // Job threads (RenderPassMap observer): begin/end of one scene pass on its deferred context.
+    // v1431 measurement switches (dev command `vrs on|off|abab <ms>`): `live` off skips begin(); abab alternates by the clock itself, on in
+    // even periods of steady_clock (the clock of xr-frame-timing.csv start_cpu_ns), so frames are classified from their own timestamps.
+    std::atomic<bool> live{true};std::atomic<std::int64_t> abab_ns{0};
     void begin(ID3D11DeviceContext* context,int eye) noexcept {
         if(!enabled_.load(std::memory_order_acquire) || eye<0 || eye>1 || !context) return;
+        if(const auto period=abab_ns.load(std::memory_order_relaxed)) {
+            const auto t=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            if((t/period)&1) {off_jobs_.fetch_add(1,std::memory_order_relaxed);return;}
+        } else if(!live.load(std::memory_order_relaxed)) {off_jobs_.fetch_add(1,std::memory_order_relaxed);return;}
         ID3D11NvShadingRateResourceView* view;
         {std::lock_guard<std::mutex> lock(mutex_);view=eyes_[eye].view;}
         if(!view) {skipped_.fetch_add(1,std::memory_order_relaxed);return;}
@@ -126,7 +135,8 @@ public:
         std::ostringstream o;o.precision(4);
         o<<"{\"enabled\":"<<(enabled_.load()?"true":"false")<<",\"reason\":\""<<reason_<<"\",\"inner\":"<<config_.inner<<",\"outer\":"<<config_.outer
          <<",\"quarter\":"<<(config_.quarter?"true":"false")<<",\"applied\":"<<applied_.load()<<",\"skipped\":"<<skipped_.load()
-         <<",\"surface_builds\":"<<surface_builds_<<",\"coarse_share\":["<<eyes_[0].coarse_share<<','<<eyes_[1].coarse_share<<"]}";
+         <<",\"surface_builds\":"<<surface_builds_<<",\"coarse_share\":["<<eyes_[0].coarse_share<<','<<eyes_[1].coarse_share<<"]"
+         <<",\"live\":"<<(live.load()?"true":"false")<<",\"abab_ms\":"<<abab_ns.load()/1000000<<",\"off_jobs\":"<<off_jobs_.load()<<"}";
         return o.str();
     }
 private:
@@ -134,7 +144,7 @@ private:
     void fail(const char* why) noexcept {reason_=why;enabled_.store(false,std::memory_order_release);}
     std::mutex mutex_;Config config_{};ID3D11Device* device_{};bool ready_{};std::string reason_{"off"};
     std::atomic<bool> enabled_{false};std::array<Eye,2> eyes_{};
-    std::atomic<std::uint64_t> applied_{},skipped_{};std::uint64_t surface_builds_{};
+    std::atomic<std::uint64_t> applied_{},skipped_{},off_jobs_{};std::uint64_t surface_builds_{};
     std::vector<ID3D11NvShadingRateResourceView*> retired_;std::vector<ID3D11Texture2D*> retired_textures_;
 };
 #endif

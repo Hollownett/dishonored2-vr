@@ -32,6 +32,11 @@ job waits: 158570 / 158586 / 158468 (ZwWaitForSingleObject)
 CPU topology: 3fbf0 calls 0xde2c0 (GetLogicalProcessorInformation via GetProcAddress) and WRITES the cvar jobs_numThreads (it is an output)
 ```
 
+**Order correction (2026-11-20, verified in the disassembly; `docs/research/ENGINE-OVERLAP-STAGE2.md` section 0).** Inside `361bc0` the
+Present path `3591b0` (call at `361c63`) runs BEFORE `361d60`/RenderSingleView (call at `361cda`). The engine presents frame N at the head of
+frame N+1's render side, after game side N+1. Only small steps follow the render graph (`369420`, `2ecd00`, `2bcd70`). The mod's XR
+submit and pacing wait therefore sit between the game side and the render graph of the next frame.
+
 **Shares of the main thread** (stack walks; the sampling slows frames, so read shares, not ms):
 
 | part | share |
@@ -125,4 +130,117 @@ Lessons:
 - **Small mod-side items:**
   - the mod's body/hand features (~0.1 ms);
   - per-frame GPU allocations (~0.1 ms).
+- **Thread wake-ups, core sharing, the "VSSetShader wait"** (section 8):
+  - wake-up latency is 3.6 us mean;
+  - giving the main thread its own core changed nothing (12 interleaved pairs);
+  - the VSSetShader wait was a raw-stack-scan artifact.
 - **The desktop mirror** costs ~0.7 ms per Present, but the user does not want the desktop window thinned by default ("no cut desktop"); thinning stays opt-in via `build/desktop-mirror-every`.
+
+## 7. Night of 2026-11-20: the probe, the engine lock, a stable asynchronous Present (v1427-v1428)
+
+Design: `docs/research/ENGINE-OVERLAP-STEP1.md`. All runs: the user's save, `run_hands`, paired stereo, spacewarp off.
+
+**E0, ctx-probe (knob `build/ctx-probe`, `src/ctx_probe.hpp`; status `ctx_probe`, `ctx-probe.jsonl` with stacks).** Phase detours on
+`459a0` (game side) and `458c0` (render side), counters per thread kind x phase x call kind on the game's immediate context.
+- The main thread makes no immediate-context call inside the game side (0).
+- Engine render-graph workers call OMSetRenderTargets and ExecuteCommandList on it inside the render side (266k / 239k calls).
+- Outside both sides only one kind of call happens: an engine worker (entry `7a1e1`/`a0095`) running a job through `2ea4aa` (next to
+  Iggy's GDraw) -> `362531` -> `35ea43`, which takes the engine's own immediate-context spinlock (`36a6f0`/`36b4e0` on `0x1432FC580`:
+  enable byte `+0x63AC4A`, lock int `+0x63AC4C`, `lock cmpxchg` 0->1, unlock stores 0) and calls ExecuteCommandList (vtable `+0x1D0`) on
+  `[0x1432D4EF8]`. The OMSetRenderTargets the probe counted there is the mod's own ExecuteCommandList hook chain inside that call.
+- The background-task hypothesis is confirmed with a twist: background immediate-context use exists, but always under that lock.
+
+**E1 (`build/async-present=render` + probe).** No access violation in paired stereo (the v1408-v1410 AVs were not this). The safety net
+still switched the feature off after one Present: (1) the worker's own Present (Steam overlay + DXGI) sets viewports through the mod's
+hooks, which counted it as a violation (fixed: the worker's calls are its own); (2) the render side goes on using the immediate context
+after its Present (`5e16e` -> `361b97` -> ... -> RSSetViewports), so a Present handed off inside the render side overlaps it. v1428: the
+Present hook only records the call (`AsyncPresent::defer`); `render_side_hook` hands it to the worker when the render side returns
+(`kick_deferred`); the worker holds the engine spinlock around its Present; the next render-side entry waits. Result (E1d): 1256 of 1256
+gameplay Presents asynchronous, 0 violations, 0 lock spins, no crash.
+
+**But no gain.** Frame work p50 11.48 ms with and without it (p90 17.42 vs 16.33). The worker's Present takes ~1.35 ms (it competes for
+the 6 cores) and on 25 % of frames the next render side waits for it (~2 ms): that eats the ~0.6 ms it saves. Kept opt-in
+(`build/async-present`, dev command `asyncpresent on|off`). The remaining overlap that could pay is stage 2 (render jobs beside the next
+game side), not attempted.
+
+**Also measured:** diagnostics on vs off, frame work p50 12.77 vs 12.84 ms (no cost on the main thread).
+
+**Fixed on the way (v1428):**
+- Every session's first gameplay frame spent ~11-15 s in D3DCompile on the main thread (StaleEyeWarp's shaders for the
+  canted-to-straight resample; the spacewarp pass ~1 s more when it first engaged). Compiled bytecode is now cached under the mod
+  folder (`shader-cache/`, `src/shader_cache.hpp`) and a background thread fills it during the menus: sim, first gameplay Present 0.3 ms,
+  no Present over 0.5 s in the whole run.
+- With diagnostics off the stereo-capture block never completes (its frame capture needs diagnostics), so it ran every Present and
+  retried a failing `TaaDispatchHook::install` each time (~2 % of the main thread in MinHook's address checks). The install is now retried
+  once a second. Why that install fails without diagnostics (MH_CreateHook on Dispatch) is not known; whether FSR/DLSS replace the TAA in
+  that configuration should be checked (the sims here ran without the upscaler).
+
+**Main-thread profile, v1429, the user's config (diagnostics on, spacewarp off, 8 s of `run_hands`):** 37 % of the samples in mod frames:
+`ObjectMotion::set_vs_hook` 10.9 %, `GameXr::present` 2.1 % (the one-frame-in-flight fence wait), then many items under 2 % each
+(`read_self_raw`, `native_grab`, `native_readable_range_cached`, RenderPassMap, glyph swap, object motion's Map/cbuffer hooks).
+**Correction (section 8):** that profile came from `tools/thread_profile.py`, which attributes a waiting thread to the first non-system
+address it finds by scanning raw stack memory. The `set_vs_hook` share (and section 6's "wait inside VSSetShader") was a stale return
+address left in the stack, not a wait in that hook. Real stack walks never pass through it.
+
+## 8. Later on 2026-11-20 (03:10-04:05): three thread levers measured, none pays (v1430, all opt-in, off by default)
+
+All runs: the user's save, `run_hands`, spacewarp off unless stated. "User-like" means the user's headset eye size `--eye-size "2496 2688"`.
+
+**Job wake-up latency (`src/job_wake.hpp`, knobs `build/job-wake` = measure, `build/job-spin` = "<main us> <other us>", dev command
+`jobspin <main> <other>`).** The engine's threads sleep in KERNEL32 `WaitForSingleObject` (wrappers `158450`/`158570`/`158590`) and are woken
+by `SetEvent`/`ReleaseSemaphore`. The probe patches only the exe's import table and times every wait and the signal that ended it.
+- Main thread: ~49 waits per gameplay frame, ~8 of which sleep; wake-up latency mean 3.6 us (87 % under 5 us, 13 % 5-20 us).
+- Workers: same picture, mean 3.8 us.
+- So wake-ups cost the main thread ~0.03 ms per frame. Spinning before the wait (50 us main, 20 us workers) changed nothing measurable.
+  The Balanced power plan is not slowing the job chain.
+
+**Core isolation (`src/core_isolation.hpp`, knob `build/core-isolation` = `soft`|`hard`, dev command `cores off|soft|hard` and
+`cores abab soft|hard <ms>` for measurement).**
+- A read-only probe of every thread's priority, affinity and ideal processor found that nothing is pinned. All threads use affinity
+  `0xfff`. The 5 job workers (start `7a220`) have ideal processors 0/5/7/9/11 and the main thread has 1. CPUs 0 and 1 are one physical
+  core, so the main thread's preferred core is shared with a worker.
+- `hard` gives the main thread core 1 (CPUs 2 and 3) alone and keeps every other thread of the process off it.
+- The mod switched hard isolation on and off every second and logged each switch (status `core_isolation.switches`). This gave 12
+  interleaved pairs at user-like DLSS Quality: median on-off +0.02 ms, faster in 6 of 12.
+- No effect. SMT sharing does not slow the critical path. Analysis script pattern: pair each 1 s segment with the next one.
+
+**Real call tree of the main thread (`tools/stack_tree.py`, StackWalk64; v1430, user-like DLSS Quality).**
+- Render side 82 %, game side 17 %. The 16 % "wait in `GameXr::present`" is `xrWaitFrame`: the sampling slows frames until the pacer
+  locks to half rate (a known artifact).
+- Without it, the mod's exclusive share is ~13 %. The largest items:
+  - guarded game-memory reads, 3.5 %: `VirtualQuery` on cache misses 1.9 %, the reads 1.6 %, mostly `NativeGrab::focus_body`'s discovery;
+  - the sim-only scripted eye dumps (`capture_xr_transfer`, 21 MB every 2 s), 0.8 %;
+  - `GlyphSwap::lookup`, 0.6 %;
+  - per-frame file opens and `fs::exists` polls, ~0.5 %.
+- At most ~0.3-0.5 ms is left to trim, in many small cuts.
+
+**The user's own lever is the upscaler, not the engine threads (same sim, only `--aa-mode` changed, spacewarp off):**
+
+| setting | frame work p50 / p80 | engine gap p50 | frames under 11.1 ms |
+|---|---|---|---|
+| DLAA (the user's choice, mode 7) | 13.97 / 17.64 ms | 13.33 ms | 12 % |
+| DLSS Quality (mode 8) | 12.24 / 13.89 ms | 11.61 ms | 36 % |
+
+- With DLAA the pacer locks to half rate even without spacewarp: the GPU load blocks the engine's thread for ~1.7 ms more per frame.
+- The user's v1423 headset session matches the DLAA row: engine gap p50 13.84 ms; 8,800 of 9,125 gameplay presents generated (45 real +
+  45 spacewarp), only 8 late.
+- At these frame times no CPU trim below ~3 ms changes what the headset shows. Auto unlocks only when the 80th percentile of the work
+  drops under 8.9 ms.
+
+**What is left for the engine: stage 2, statically assessed (`docs/research/ENGINE-OVERLAP-STAGE2.md`).**
+- Submit and wait of the render graph are separate functions (`2c8310` / `2c8440`, back to back at `358202`/`35820a`).
+- The hand-off from the game to the renderer is single-buffered and pointer-based:
+  - `45650` rebuilds the world/view object `142BC58A0` in place;
+  - the gather `35dc60` and RenderSingleView read live game objects.
+- Game side N+1 beside render side N therefore needs, beyond a helper thread:
+  - a snapshot cut after the gather;
+  - `45650` delayed until the render finishes;
+  - a mutex between Iggy's tick (`2cc90` -> `100ccd0`, game side) and its draw (IGGY pass callbacks `31a710`/`31a8e0`): the guard is a
+    busy flag `[player+0x3584]`, not a thread check;
+  - care with `IsMainThread` (`166670`).
+- The "tail only" variant has nothing to overlap, because Present comes first.
+- Verdict: a multi-day project with crash risk, and up to ~2.4 ms at best. Profile what the pass jobs read from game objects before
+  starting.
+- Half-rate simulation needs the user's go-ahead on 45 Hz movement.
+- Neither brings this PC to 90 real fps at DLAA. Spacewarp's 90 is the frame rate the headset shows.
+
