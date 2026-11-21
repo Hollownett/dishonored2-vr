@@ -14,7 +14,7 @@ Work down this list, one change at a time, until the motion looks smooth to you.
 1. **Spacewarp: Auto** (the default) and the **headset at 90 Hz**. When the game falls short of 90 fps, it runs at 45 and the
    mod draws every frame in between, so the headset still gets 90 images a second.
 2. **Resolution: 1.00x.** This is the biggest lever on the graphics card.
-3. **Anti-aliasing: DLSS Quality** (NVIDIA RTX), **FSR 4 Quality** (where your GPU can run FSR 4) **or FSR 3 Quality**. These
+3. **Anti-aliasing: DLSS Quality** (NVIDIA RTX), **FSR 4 Quality** (AMD Radeon, where it can run) **or FSR 3 Quality**. These
    render fewer pixels and upscale them.
 4. **Game, Shadow Quality: Low.** Shadows were about half of the game's GPU work in one heavy scene.
 5. **Monitor view: Off.**
@@ -70,8 +70,8 @@ multiply, so raise only one of them.
 ### Anti-aliasing
 
 Smooths jagged edges. The temporal modes (FSR, DLSS) also clean up shimmer over several frames, and their quality modes render
-fewer pixels and upscale them. On first start the default follows your GPU: DLSS Quality on NVIDIA RTX, FSR 4 native where your
-GPU can run it (the mod checks), otherwise FSR 3 native.
+fewer pixels and upscale them. On first start the default follows your GPU: DLSS Quality on NVIDIA RTX, FSR 4 native on an AMD
+Radeon that can run it (the mod checks), otherwise FSR 3 native.
 
 | Mode | What it does | GPU cost | With Spacewarp |
 |---|---|---|---|
@@ -80,7 +80,7 @@ GPU can run it (the mod checks), otherwise FSR 3 native.
 | FSR 3 - balanced (67%) | AMD's upscaler from 67% of the width and height | low | yes |
 | FSR 3 - quality (77%) | the same from 77% | medium | yes |
 | FSR 3 - native | full resolution, no upscaling | high | yes |
-| FSR 4 - quality / native | the newer FSR, where your GPU can run it | medium / high | yes |
+| FSR 4 - quality / native | AMD's newer FSR, on Radeon cards that can run it | medium / high | yes |
 | SMAA - edge anti-aliasing | edges only, no temporal pass: no ghosting, more shimmer | very low | no |
 | Off | nothing: the fastest, edges shimmer | none | no |
 | Game TAA | the game's own: moving things leave ghost trails in VR, not recommended | low | no |
