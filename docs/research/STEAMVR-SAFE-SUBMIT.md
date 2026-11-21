@@ -640,3 +640,43 @@ the boots' toe caps, the upper chest, and scenery beside a leaning player. All 1
   - `own_device.timing_stalls` (should be 0);
   - SteamVR's `xrclient_Dishonored2.txt`: no "two scene textures" warning;
   - `vrcompositor.txt`: the time-out share.
+
+## 16. v1456 in the headset, and v1457: on by default on SteamVR (2026-11-21 15:45)
+
+**User** (SteamVR over Steam Link, Quest 2): "I tested it in Steam VR and it looks really nice now". There were three game runs; Spacewarp
+was on in the first two, by the user's account, and off in the third.
+
+**Data** [data]:
+- **SteamVR's client log** (`xrclient_Dishonored2.txt`, all three runs): no "two scene textures" warning, no
+  `AlreadySubmitted`; only three input-binding warnings.
+- **SteamVR's compositor** (`vrcompositor.txt`), per run:
+
+| run | presents | timed out | dropped |
+|---|---|---|---|
+| pid 39996 (Spacewarp on) | 16,995 | 363 (2.1 %) | 0 |
+| pid 51248 (Spacewarp on) | 13,252 | 493 (3.7 %) | 0 |
+| pid 49804 (Spacewarp off) | 13,980 | 432 (3.1 %) | 0 |
+
+  For comparison: v1451 had 11-17 % and v1455 50 %.
+- **The mod's status** survives for the third run only. The status and timing files are overwritten by each run; the first two runs'
+  spacewarp counters are lost.
+  - own device on, 39,003 copies, 0 failures, 12 chains, 13,436 frames, 0 timing stalls;
+  - Spacewarp off; SteamVR's Motion Smoothing filled in: real frames at 49.5 fps, 65 % two vsyncs apart, 0 repeated display times.
+
+**v1457** (commits `a47a046` and `ef8ee54`):
+- **The default (no `build/xr-own-device`) is 3: SteamVR only** (the runtime name contains "SteamVR"). Other runtimes keep the game's
+  device; the status `why` reads "off: by default on SteamVR only". The file still selects: empty or `on` = every runtime but
+  Virtual Desktop; `all`; `off`.
+- **Mid points switched on this way send only on the own device** (`safe_mid::own_device_only`). So Meta Link and the rest keep
+  v1445's Present-time points unless `build/spacewarp-safe-mid` asks for more.
+- **The status texts are escaped** (`d2vr::json_text`). The default's reason quoted `"on"` and made `xr-live-status.json`
+  unreadable in the first default sim (`v1457-default`). The launcher reads that file during play.
+- **Lab:** all 10 pass, including `xr_own_device_check` (+3 `json_text`) and `spacewarp_safe_mid_check` (the own-device-only gate).
+- **Simulator** (`v1457-default2`: `xr-own-device` moved aside, `spacewarp always`, `spacewarp-force-inline`) [data]:
+  - the status parses;
+  - own device off with the default's reason;
+  - 2,970 of 3,007 generated frames sent, 0 late slots, 0 failures;
+  - StartProbe returned 0; saves unchanged.
+- **Packaged** in the worktree: launcher `9801e7ce...`, DLL `1ba55331...`. Not installed: the main checkout keeps the
+  headset-tested v1456.
+- **Release notes:** `docs/VR-v1457-RELEASE.md`. **Performance guide:** `docs/PERFORMANCE.md`, now explaining every setting.

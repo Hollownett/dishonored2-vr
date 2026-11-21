@@ -978,6 +978,12 @@ Present, 633 late slots. Full analysis: `docs/research/STEAMVR-SAFE-SUBMIT.md`.
   - Lab-checked on the RTX 5070 (`xr_own_device_check`). Simulator: 2,049 of 2,050 generated frames submitted from the waiting
     thread, 0 late, 16,059 copies, 0 failures, 0 recoveries. Not yet run in the headset.
   - **v1454** = v1453 + section 30's v1460 (body and legs), merged for one headset build.
+- **v1455 headset:** two frame threads broke SteamVR's timing (doc section 15).
+- **v1456:** every SteamVR frame call is back on the render thread; on the own device the generated frame goes out from any of the
+  render thread's waits, render graphs included; and a display-time watchdog.
+  - Headset (three SteamVR runs, two with Spacewarp on): no refused frame, SteamVR timed out 2-4 % of the time (v1451: 11-17 %).
+- **v1457:** the own device is on by default on SteamVR only; the status texts are escaped (doc section 16). Release notes:
+  `docs/VR-v1457-RELEASE.md`.
 
 ## 30. v1460: the player's body and legs as the hands (2026-11-21)
 
