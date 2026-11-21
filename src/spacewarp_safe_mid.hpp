@@ -75,12 +75,16 @@ inline std::atomic<bool> violated{false};             // an immediate-context ca
 // render graphs included (render_wait): the generated frame goes out at its due time from wherever the main thread waits. All of the
 // runtime's frame calls stay on the main thread (v1453's waiting thread ending frames broke SteamVR's frame timing).
 inline std::atomic<bool> own_device{false};
+// v1457: the mid points were switched on by build/xr-own-device (the default), not by build/spacewarp-safe-mid: they send only while the
+// session is on the own device, so a runtime without it keeps v1445's Present-time points
+inline std::atomic<bool> own_device_only{false};
 inline std::atomic<DWORD> main_tid{0};                // the Present thread (the engine's main thread)
 
 // May a frame go out at point p? (Present-time points always may: they are v1445's.)
 inline bool allowed(Point p) noexcept {
     if(!mid_point(p)) return true;
     const bool own=own_device.load(std::memory_order_relaxed);
+    if(own_device_only.load(std::memory_order_relaxed) && !own) return false;  // v1457
     if(violated.load(std::memory_order_relaxed) && !own) return false;
     if((p==render_wait || p==render_wait_timer) && !own) return false;  // v1456: only on the own device
     const unsigned m=mask.load(std::memory_order_relaxed);

@@ -1,5 +1,5 @@
 #pragma once
-// v1453 (SteamVR spacewarp; docs/research/STEAMVR-SAFE-SUBMIT.md section 11; knob build/xr-own-device, OFF by default): the OpenXR
+// v1453 (SteamVR spacewarp; docs/research/STEAMVR-SAFE-SUBMIT.md sections 11, 14-16; knob build/xr-own-device, ON by default since v1457, "off" turns it off): the OpenXR
 // session on the mod's own D3D11 device, on the game's adapter, so the runtime's frame calls never touch the game's device. Then spacewarp's
 // waiting thread can wait for and send each generated frame in its slot on any runtime, as it does on Virtual Desktop (v1420), and the
 // v1421/v1444 lock cycles (a runtime call on the game's immediate context beside the engine's own) cannot form.

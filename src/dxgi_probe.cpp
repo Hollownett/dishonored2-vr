@@ -2919,7 +2919,7 @@ static std::atomic<bool> spacewarp_movers_knob{true};
 static std::atomic<bool> spacewarp_bilinear_knob{false};  // v1429: build/spacewarp-bilinear = the v1428 bilinear colour resample
 static constexpr int spacewarp_legs_lag_default=1;  // v1439: set from the phase measurement
 static std::atomic<int> spacewarp_legs_lag{spacewarp_legs_lag_default};  // v1439: build/spacewarp-legs-lag 0|1 (see the leg history at the spacewarp camera record)
-static int xr_own_device_knob=0;  // v1453: build/xr-own-device (empty/"on": every runtime but Virtual Desktop; "all": every runtime): the session on the mod's own device
+static int xr_own_device_knob=3;  // v1453: build/xr-own-device (empty/"on": every runtime but Virtual Desktop; "all": every runtime; "off": the game's device): the session on the mod's own device. v1457: no file = 3, SteamVR only (GameXr::own_device_wanted)
 static bool spacewarp_inline_knob=true,spacewarp_force_inline_knob=false;  // v1444: on (build/spacewarp-no-inline: off; v1441-v1443 opt-in), build/spacewarp-force-inline (sim)
 static std::atomic<bool> spacewarp_no_legs_knob{false},spacewarp_crack2_knob{false},spacewarp_hand_bubble_knob{false};  // v1438: build/no-spacewarp-legs = the body moves rigidly (v1437)
 static std::atomic<bool> spacewarp_no_body_knob{false};  // v1432: build/no-spacewarp-body = no body rule (the player's legs as v1431)
@@ -18493,12 +18493,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_no_legs_knob=fs::exists(root/L"build"/L"no-spacewarp-legs");   // v1438
                 spacewarp_legacy_body_knob=fs::exists(root/L"build"/L"spacewarp-legacy-body");   // v1460: v1445's body rule
                 spacewarp_inline_knob=!fs::exists(root/L"build"/L"spacewarp-no-inline");spacewarp_force_inline_knob=fs::exists(root/L"build"/L"spacewarp-force-inline");  // v1440 (v1444: on by default)
-                {std::ifstream own_knob(root/L"build"/L"xr-own-device");std::string own_mode;  // v1453: OFF by default
-                 if(own_knob) {own_knob>>own_mode;xr_own_device_knob=own_mode=="all"?2:own_mode=="off"?0:1;} else xr_own_device_knob=0;}
+                {std::ifstream own_knob(root/L"build"/L"xr-own-device");std::string own_mode;  // v1457: ON by default (headset 2026-11-21: SteamVR steady, its spacewarp on time); "off" turns it off
+                 if(own_knob) {own_knob>>own_mode;xr_own_device_knob=own_mode=="all"?2:own_mode=="off"?0:1;} else xr_own_device_knob=3;}
                 {std::ifstream mid_knob(root/L"build"/L"spacewarp-safe-mid");std::string mid_mode;safe_mid_knob=static_cast<bool>(mid_knob);  // v1450: SteamVR mid-frame points, OFF by default
                  if(mid_knob) mid_knob>>mid_mode;d2vr::safe_mid::mask.store(safe_mid_knob?d2vr::safe_mid::mask_of(mid_mode):d2vr::safe_mid::mask_off);
                  // v1456: the own device's SteamVR path sends its generated frames at these points: build/xr-own-device switches them on
-                 if(!safe_mid_knob && xr_own_device_knob>0) {safe_mid_knob=true;d2vr::safe_mid::mask.store(d2vr::safe_mid::mask_all);}}
+                 // v1457: switched on this way, the mid points send only while the session is on the own device (safe_mid::own_device_only):
+                 // a runtime without it (Meta Link, ...) keeps v1445's Present-time points
+                 if(!safe_mid_knob && xr_own_device_knob>0) {safe_mid_knob=true;d2vr::safe_mid::mask.store(d2vr::safe_mid::mask_all);d2vr::safe_mid::own_device_only.store(true);}}
                 {std::ifstream lagk(root/L"build"/L"spacewarp-legs-lag");int lag=-1;if(lagk>>lag && (lag==0 || lag==1)) spacewarp_legs_lag=lag;else spacewarp_legs_lag=spacewarp_legs_lag_default;}  // v1439
                 spacewarp_crack2_knob=fs::exists(root/L"build"/L"spacewarp-crack2");   // v1438: the v1437 crack reach
                 spacewarp_hand_bubble_knob=fs::exists(root/L"build"/L"spacewarp-hand-bubble");   // v1438: the v1437 hand volumes

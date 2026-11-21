@@ -2476,9 +2476,10 @@ public:
     // v1420: set by the probe before it constructs a GameXr: spacewarp with its submit thread is wanted. The constructor then switches D3D11
     // multithread protection on (VDXR or the simulator only), before the probe installs its context hooks (spacewarp_thread_ready_).
     inline static bool d3d_protection_wanted{};
-    // v1453 (build/xr-own-device; src/xr_own_device.hpp): the session on the mod's own D3D11 device. 0 off (default), 1 every runtime
-    // except Virtual Desktop (whose own runtime never touches the game's device), 2 every runtime (the simulator, tests). Read once, at
-    // construction, before the session is created.
+    // v1453 (build/xr-own-device; src/xr_own_device.hpp): the session on the mod's own D3D11 device. 0 off ("off"), 1 every runtime
+    // except Virtual Desktop (whose own runtime never touches the game's device), 2 every runtime (the simulator, tests), 3 SteamVR only
+    // (v1457: the probe's default, no file; headset-tested on SteamVR only). Read once, at construction, before the session is created.
+    // The member stays 0 for fixtures that set nothing.
     inline static int own_device_wanted{0};
     // v1453, the fallback: an image the own device cannot mirror, or two own-device sessions in a row that close before
     // own_device_proving_frames real frames ended (a runtime or driver that fails with it), turn the own device off for the rest of the
@@ -2852,7 +2853,8 @@ public:
             ID3D11Device* session_device=device;
             if(own_device_wanted>0) {
                 const bool vdxr=xr_runtime_name.find("VirtualDesktop")!=std::string::npos;
-                if(vdxr && own_device_wanted<2) own_device_why_="not needed (Virtual Desktop)";
+                if(vdxr && own_device_wanted!=2) own_device_why_="not needed (Virtual Desktop)";
+                else if(own_device_wanted==3 && xr_runtime_name.find("SteamVR")==std::string::npos) own_device_why_="off: by default on SteamVR only (build/xr-own-device \"on\" for this runtime)";
                 else if(!own_device_blocked.empty()) own_device_why_="off after failures: "+own_device_blocked;
                 else if(own_.create(device)) {session_device=own_.device();own_device_active_=true;own_device_why_="on";}
                 else own_device_why_="failed: "+own_.why();

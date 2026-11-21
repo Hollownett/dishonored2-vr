@@ -123,6 +123,12 @@ int main() {
         sm::game_enter(t0+14*ms);sm::arm(t0+20*ms);sm::game_exit(t0+15*ms);sm::render_enter(t0+15*ms+ms/10);sm::graph_submit(t0+16*ms);
         check(!sm::wait_phase_ok() && sm::game_wait_left(t0+17*ms,jw::idle_none)==jw::idle_none,"back on the game's device: no render-side wait (v1444's freeze)");
         sm::graph_return(t0+21*ms);sm::render_exit(t0+21*ms);sm::abandon();
+        // v1457: switched on by build/xr-own-device's default, the mid points send only on the own device
+        sm::own_device_only=true;
+        check(!sm::allowed(sm::graph_end) && !sm::allowed(sm::game_wait) && sm::allowed(sm::present_start),"own-device-only: no mid point on the game's device (v1445's Present-time points stay)");
+        sm::own_device=true;
+        check(sm::allowed(sm::graph_end) && sm::allowed(sm::game_wait) && sm::allowed(sm::render_wait_timer),"... and all of them on the own device");
+        sm::own_device=false;sm::own_device_only=false;
     }
     {   // the exclusive window: another thread's call on the immediate context inside a send
         reset_counts();int immediate=0,deferred=0;
