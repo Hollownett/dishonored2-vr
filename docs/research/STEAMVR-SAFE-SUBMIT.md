@@ -419,3 +419,39 @@ they want the stability Virtual Desktop has.
   `grid_handoffs`). Outside half a period to four periods, the clock time stays.
 - **`hook_end` point.** A frame that comes due inside the Present hook goes out at the hook's exit, not at the first graph's end.
 - **Lab:** `spacewarp_safe_mid_check`, 43 checks. Not headset-tested.
+
+## 13. v1451 in the headset, and v1452 (2026-11-21 03:15)
+
+**Session** (pid 31808): Spacewarp Auto. Steam Link set by the user to "Target Bandwidth" 145 Mbit/s and an encoded width of 960 px.
+
+**The mod** [data]:
+- **Late: 3,632 of 13,720 (26 %).** v1450: 31 %; v1445: 56 %.
+  - Late slots 3,583, `late_wait` 49.
+  - 3,556 grid handoffs.
+- **The chains are gone.** The frame-timing CSV (the first 926 gameplay frames) has no two handed slots in a row; v1450 had runs of 86.
+- **Real frames:** 93 % at two periods, 7 % at three.
+- **Auto** locked 14 times and unlocked 13. 7 % of frames ran at full rate without generated frames, which this PC cannot hold on
+  SteamVR.
+
+| point | sent | late slot | delay after the due time | xrWaitFrame |
+|---|---|---|---|---|
+| `graph_end` | 2,683 | 1,687 (39 %) | 1.8 ms mean (v1450: 7.0) | 0.6 ms mean |
+| `game_wait` + timer | 4,208 | 731 (15 %) | about 0.2 ms | 0.2-0.3 ms |
+| `game_end` + `render_start` | 191 | 16 (8 %) | | |
+| Present-time points | 3,001 | 201 (6 %) | | |
+| `hook_end` (new) | 5 | 948 (99.5 %) | 5.4 ms | **6.6 ms mean** |
+
+- **`hook_end` was a mistake.** Those frames were late before they were generated, and each send blocked the game for 6.6 ms inside
+  the Present hook. v1452 removes the point; the grid rule stays.
+- **SteamVR's display times** lie on the 90 Hz grid to within 0.1 ms. So a late slot is SteamVR moving the frame to a later vsync,
+  not a jittery estimate.
+
+**Steam Link** [data]:
+- decode 9.6-9.8 ms median, over the 11.1 ms budget on 27-29 % of frames (v1450 session: 12-16 ms, 62-86 %);
+- the headset still received only 65-68 fps;
+- latency 30-35 ms.
+
+**Where this leaves the inline route.** About three quarters of generated frames on time, against Virtual Desktop's 99.8 % with
+spacewarp's waiting thread. Sends from the engine's phase points cannot follow SteamVR's slot rules more closely. Virtual Desktop's
+behaviour on SteamVR needs section 11's route: the session on the mod's own device, with the waiting thread sending each generated
+frame as SteamVR opens its slot.

@@ -14380,9 +14380,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
     struct SafeMidHook {  // v1450: the Present hook as a phase of the main thread's loop (build/spacewarp-safe-mid)
         bool on{safe_mid_here()};
         SafeMidHook() {if(on) d2vr::safe_mid::hook_enter(d2vr::GameXr::cpu_time_ns());}
-        // v1451: a frame that came due inside this hook goes out at its exit (outside GameXr::present, no graph in flight), not at the
-        // first graph's end several milliseconds later
-        ~SafeMidHook() {if(on) {spacewarp_mid_point(d2vr::safe_mid::hook_end);d2vr::safe_mid::hook_exit(d2vr::GameXr::cpu_time_ns());}}
+        // v1451 sent a frame that came due inside this hook at its exit. v1452 does not: in the user's v1451 SteamVR session 948 of 953
+        // such sends came back late slots (those frames were late before they were generated), and SteamVR's xrWaitFrame blocked the
+        // game 6.6 ms on average each time, inside the Present hook.
+        ~SafeMidHook() {if(on) d2vr::safe_mid::hook_exit(d2vr::GameXr::cpu_time_ns());}
     } safe_mid_hook;
     auto selected=game_chain.load(std::memory_order_acquire);
     if(!selected && capturing.load() && !(flags&DXGI_PRESENT_TEST)) {
