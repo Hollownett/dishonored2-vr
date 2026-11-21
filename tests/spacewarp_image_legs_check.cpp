@@ -37,8 +37,14 @@ int main() {
         driver.publish(tracking,{});
         if(!driver.body(native_body,identity_frame)) throw std::runtime_error("first solve");
         const int femur[2]={body_skeleton.find("left_femur_jnt"),body_skeleton.find("right_femur_jnt")},ankle[2]={body_skeleton.find("left_ankle_jnt"),body_skeleton.find("right_ankle_jnt")};
+        const int toes_end[2]={body_skeleton.find("left_toes_end_jnt"),body_skeleton.find("right_toes_end_jnt")};
+        // v1439's toe point for a drawn ankle (FullBodyDriver::leg_points_ without foot_line)
+        const auto d_toe=[&](unsigned s,Vec3 ankle_p,const std::array<Transform,20>& palette) {
+            const auto x=to_xf(palette[static_cast<std::size_t>(ankle[s])]);
+            return ankle_p+rotated(body::mul(x.q,body::conj(body_skeleton.bind[static_cast<std::size_t>(ankle[s])].q)),Vec3{.16,0,-.06});
+        };
         std::optional<Driver::ImageJoints> previous;
-        double moved_max=0,upload_vs_image_max=0,upload_vs_previous_min=1e9,drawn_vs_joints_max=0;unsigned images=0;
+        double moved_max=0,upload_vs_image_max=0,upload_vs_previous_min=1e9,drawn_vs_joints_max=0,tip_gap_max=0,old_tip_gap_min=1e9,heel_below_min=1e9;unsigned images=0;
         for(std::uint64_t frame=1;frame<=12;++frame) {
             // render side `frame`: its Setup publishes the head walked on (3 cm a frame at 45 Hz: 1.35 m/s, the hands carried along), its
             // eye-0 Begin begins the image, and its skin copy draws image_body
@@ -52,17 +58,26 @@ int main() {
             ++images;
             for(unsigned s=0;s<2;++s) {  // image_joints is what the skin copy draws (identity frame: model space = world)
                 drawn_vs_joints_max=std::max(drawn_vs_joints_max,length(rig::position((*drawn)[static_cast<std::size_t>(femur[s])])-joints->leg[s][0]));
-                drawn_vs_joints_max=std::max(drawn_vs_joints_max,length(rig::position((*drawn)[static_cast<std::size_t>(ankle[s])])-joints->leg[s][2]));
+                const auto drawn_ankle=rig::position((*drawn)[static_cast<std::size_t>(ankle[s])]);
+                drawn_vs_joints_max=std::max(drawn_vs_joints_max,length(drawn_ankle-joints->ankle[s]));
+                // the foot capsule (heel end to tip, 8 cm: game_xr) holds the drawn toe tip (toes_end_jnt); v1439's (ankle to its toe point)
+                // did not; and its heel end lies below the ankle
+                const auto segment=[](Vec3 p,Vec3 a,Vec3 b) {const auto ab=b-a;const double t=std::clamp(dot(p-a,ab)/std::max(dot(ab,ab),1e-12),0.,1.);return length(p-(a+ab*t));};
+                const auto tip=rig::position((*drawn)[static_cast<std::size_t>(toes_end[s])]);
+                tip_gap_max=std::max(tip_gap_max,segment(tip,joints->leg[s][2],joints->leg[s][3]));
+                old_tip_gap_min=std::min(old_tip_gap_min,segment(tip,drawn_ankle,d_toe(s,drawn_ankle,*drawn)));
+                heel_below_min=std::min(heel_below_min,drawn_ankle.z-joints->leg[s][2].z);
             }
             // game side frame+1, before the Present of image `frame`: the engine's arm and body uploads (keyed for the next frame)
             static_cast<void>(driver.arm_frozen(0,native_arm[0],identity_frame,0,frame+1));
             static_cast<void>(driver.body(native_body,identity_frame,frame+1));
             const auto d=driver.diagnostic();
             if(!d.legs_valid || !d.legs_solved) {check(false,"upload "+std::to_string(frame+1)+": no solved legs");continue;}
-            double to_image=0,to_previous=0;
-            for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) {
-                to_image=std::max(to_image,length(d.leg[s][k]-joints->leg[s][k]));
-                if(previous) to_previous=std::max(to_previous,length(d.leg[s][k]-previous->leg[s][k]));
+            double to_image=0,to_previous=0;  // hip, knee, ankle (the upload's last points are the ankle and v1439's toe, the image's the foot line)
+            for(unsigned s=0;s<2;++s) for(unsigned k=0;k<3;++k) {
+                const auto image_point=k<2?joints->leg[s][k]:joints->ankle[s];
+                to_image=std::max(to_image,length(d.leg[s][k]-image_point));
+                if(previous) to_previous=std::max(to_previous,length(d.leg[s][k]-(k<2?previous->leg[s][k]:previous->ankle[s])));
             }
             upload_vs_image_max=std::max(upload_vs_image_max,to_image);
             if(previous) {
@@ -75,6 +90,9 @@ int main() {
         char line[300];
         check(images==12,"every image began has its joints ("+std::to_string(images)+" of 12)");
         std::snprintf(line,sizeof line,"image_joints are the legs the skin copy draws (hip, ankle: at most %.4f mm apart)",drawn_vs_joints_max*1000);check(drawn_vs_joints_max<1e-5,line);
+        std::snprintf(line,sizeof line,"the foot capsule holds the drawn toe tip (%.0f mm from its line, radius 80; v1439's: %.0f mm) and starts %.0f mm under the ankle",
+            tip_gap_max*1000,old_tip_gap_min*1000,heel_below_min*1000);
+        check(tip_gap_max<.08 && old_tip_gap_min>.08 && heel_below_min>.06,line);
         std::snprintf(line,sizeof line,"the walk moves the drawn legs (up to %.1f mm per frame)",moved_max*1000);check(moved_max>.01,line);
         std::snprintf(line,sizeof line,"the upload before image N's Present re-uses image N's solve: its legs are image N's (at most %.4f mm apart)",upload_vs_image_max*1000);
         check(upload_vs_image_max<1e-5,line);

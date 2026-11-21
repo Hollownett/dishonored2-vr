@@ -128,6 +128,12 @@ struct SpacewarpParams {
     // (torso_neck_h above the root), torso_rho at and below the pelvis's (torso_pelvis_h): standing, the solver keeps the pelvis over the
     // feet and the torso leans (rho ~0); moving, the pelvis follows the neck (rho ~1). Off: the play space's step only (v1432).
     bool torso_on{};std::array<double,3> torso_step{};double torso_rho{1},torso_pelvis_h{},torso_neck_h{};
+    // v1460: the torso's own scenery test. torso_past_on: the pelvis's and the neck's world steps since the previous real frame (source axes)
+    // are known; a cylinder texel that the previous real frame shows standing still in the world and not where the torso's own last step puts
+    // it (that step at its height, between the pelvis's and the neck's) is scenery. v1432's test carried the point with the play space alone,
+    // which cannot tell a wall from the torso while the player stands and leans (the cylinder now stands under the drawn pelvis, which follows
+    // the head). Off: v1432's test.
+    bool torso_past_on{};std::array<double,3> torso_past_pelvis{},torso_past_neck{};
     // v1438 (docs/research/FRAMEGEN-OTHER-MODS.md item 2: thin cracks on very close magnified surfaces): Crack bridges a hole between two
     // cells of one surface up to crack_reach cells away on each side, past 2 only between source neighbours (v1437: 2)
     int crack_reach{4};
@@ -165,6 +171,7 @@ private:
         float legs[4],leg_p[8][4],leg_d[8][4],leg_b[8][4];    // v1439: x on, z cap; each leg's hip, knee, ankle, toe (w radius), slot steps, past steps
                                                               // v1460: legs y 1 = legs_local, w its floor
         float torso[4],torso_lean[4];                         // v1460: xyz the torso step (w on); x rho, y pelvis height, z neck height
+        float torso_past_p[4],torso_past_n[4];                // v1460: the pelvis's and the neck's past world steps (n.w on)
     };
     static_assert(sizeof(Constants)%16==0,"constant buffer size");
     struct Grid {Ptr<ID3D11Texture2D> t;Ptr<ID3D11UnorderedAccessView> u;Ptr<ID3D11ShaderResourceView> s;};
@@ -193,6 +200,7 @@ cbuffer Sw : register(b0) {
     float4 bodyUp; float4 body; float4 bodyAxis;  // v1432: the player's body cylinder (bodyUp.w on; body: radius, floor, top, cap; the root)
     float4 legs; float4 legP[8]; float4 legD[8]; float4 legB[8];  // v1439: the drawn legs (SpacewarpParams::legs_on); v1460 legs.y legs_local, legs.w its floor
     float4 torso; float4 torsoLean;  // v1460: the torso step (w on); rho, pelvis height, neck height (SpacewarpParams::torso_on)
+    float4 torsoPastP; float4 torsoPastN;  // v1460: the pelvis's and the neck's world steps since the previous real frame (torsoPastN.w on)
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> motionTex : register(t1);
@@ -298,6 +306,11 @@ float3 TorsoStep(float3 P) {
     const float3 q=P+torso.xyz*wt;
     return (flags.z!=0u?Rigid(RR,q):q)-P;
 }
+// v1460: a torso point's world step since the previous real frame: the pelvis's at and below its height, the neck's at and above its own
+float3 TorsoPast(float3 P) {
+    const float h=dot(P-bodyAxis.xyz,bodyUp.xyz),span=torsoLean.z-torsoLean.y;
+    return lerp(torsoPastP.xyz,torsoPastN.xyz,span>.05?saturate((h-torsoLean.y)/span):1);
+}
 // The texel's class (the rules in this header's comment; v1424: decided once per texel, its displacement from the class)
 uint ClassOf(uint2 t,float3 P) {
     const float4 mo=(flags.w&1u)?motionTex[t]:0;
@@ -330,8 +343,12 @@ uint ClassOf(uint2 t,float3 P) {
                 // frame shows scenery there (sim 2026-11-20: rubble a few cm above the root inside the cylinder slid with the player): confirmed
                 // still in the world and not where the play space's step puts it. A leg overlapping its own previous place matches both: body.
                 // without a usable previous frame (after a gap or a cut) scenery cannot be told apart: no body texel then (review)
-                if(prevFlags.x!=0u && carryTerms.z>0 && !(PrevShows(PW,P,0)==1 && PrevShows(PR,P,carryTerms.y*length(P))!=1)) {
-                    return torso.w>0?6u:3u;  // (v1439: the drawn legs are taken above, before the cylinder); v1460: the torso with the head
+                // v1460: with the torso's own past step known, "carried" means where that step puts it (TorsoPast), not the play space's alone
+                if(prevFlags.x!=0u && carryTerms.z>0) {
+                    const bool still=PrevShows(PW,P,0)==1;
+                    const bool scenery=still && (torso.w>0 && torsoPastN.w>0?PrevShows(PW,P-TorsoPast(P),.01+.01*length(P))!=1:
+                                                                            PrevShows(PR,P,carryTerms.y*length(P))!=1);
+                    if(!scenery) return torso.w>0?6u:3u;  // (v1439: the drawn legs are taken above, before the cylinder); v1460: the torso with the head
                 }
             }
         }
@@ -713,7 +730,9 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_classes?2u:p.debug_tint_held?1u:0u;
     if(p.body_on) {f4(k.body_up,p.body_up[0],p.body_up[1],p.body_up[2],1);f4(k.body,p.body_radius,p.body_floor,p.body_top,p.body_cap);  // v1432
                    f4(k.body_axis,p.body_axis[0],p.body_axis[1],p.body_axis[2],0);
-                   if(p.torso_on) {f4(k.torso,p.torso_step[0],p.torso_step[1],p.torso_step[2],1);f4(k.torso_lean,p.torso_rho,p.torso_pelvis_h,p.torso_neck_h,0);}  // v1460
+                   if(p.torso_on) {f4(k.torso,p.torso_step[0],p.torso_step[1],p.torso_step[2],1);f4(k.torso_lean,p.torso_rho,p.torso_pelvis_h,p.torso_neck_h,0);  // v1460
+                       if(p.torso_past_on) {f4(k.torso_past_p,p.torso_past_pelvis[0],p.torso_past_pelvis[1],p.torso_past_pelvis[2],0);
+                                            f4(k.torso_past_n,p.torso_past_neck[0],p.torso_past_neck[1],p.torso_past_neck[2],1);}}
                    if(p.legs_on) {f4(k.legs,1,p.legs_local?1:0,p.leg_cap,p.legs_floor);  // v1439; v1460 legs_local, its floor
                        for(unsigned i=0;i<8;++i) {f4(k.leg_p[i],p.leg_point[i][0],p.leg_point[i][1],p.leg_point[i][2],p.leg_point[i][3]);
                            f4(k.leg_d[i],p.leg_step[i][0],p.leg_step[i][1],p.leg_step[i][2],0);f4(k.leg_b[i],p.leg_past[i][0],p.leg_past[i][1],p.leg_past[i][2],0);}}}

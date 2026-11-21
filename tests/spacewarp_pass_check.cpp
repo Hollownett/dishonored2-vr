@@ -424,6 +424,27 @@ int main() {
             const auto img3=run(device.Get(),context.Get(),pass,wall,p);
             check(img3.b(27,30)>128 && img3.b(33,30)<64,"torso: scenery in the cylinder (the previous frame shows it still in the world) stays");
         }
+        {   // 22. v1460: the torso's own scenery test. Standing (no locomotion: the play space did not move, so "carried with the play space" and
+            // "still in the world" are the same test and v1432's could never call anything in the cylinder scenery), the player leans: head,
+            // camera and torso moved 0.05 m right since the previous real frame and the head moves on 0.03 m to the slot. A wall patch in the
+            // cylinder (columns 26..28, 0.6 m) stood still: the previous frame shows it 2.7 texels further right. A torso block (40..47) moved
+            // with the torso: the previous frame shows it where it is now. The wall must stay, the torso move with the head (1.6 texels).
+            const auto wall=[](unsigned x,unsigned y) {return x>=26 && x<=28 && y>=24 && y<=39;};
+            const auto torso=[](unsigned x,unsigned y) {return x>=40 && x<=47 && y>=24 && y<=39;};
+            Scene s;s.distance=[=](unsigned x,unsigned y) {return wall(x,y) || torso(x,y)?.6f:1.7f;};s.object=[=](unsigned x,unsigned y) {return wall(x,y) || torso(x,y);};
+            s.prev_distance=[=](unsigned x,unsigned y) {return (x>=3 && wall(x-3,y)) || torso(x,y)?.6f:1.7f;};
+            d2vr::SpacewarpParams p{};p.rest_on=true;p.body_on=true;p.body_up={0,0,1};p.body_axis={0,0,-1.7};p.body_radius=.5;p.body_top=1.4;
+            p.prev_on=true;p.prev_tan={-1,1,1,-1};p.prev_m10=0;p.prev_m11=1;p.prev_world.t={.05,0,0};p.prev_rest.t={.05,0,0};p.carry_on=true;
+            p.torso_on=true;p.torso_step={.03,0,0};p.torso_pelvis_h=.7;p.torso_neck_h=1.1;p.torso_rho=1;
+            p.torso_past_on=true;p.torso_past_pelvis={.05,0,0};p.torso_past_neck={.05,0,0};
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            // (the wall's edge texel next to where it stood in the previous frame passes, as every previous-frame test does: PrevShows takes
+            // the 2 x 2 texels around a point)
+            check(img.b(26,30)>128 && img.b(27,30)>128,"torso scenery test: a wall in the cylinder that stood still while the player leaned stays");
+            check(img.b(43,30)>128 && img.b(40,30)<64,"torso scenery test: the torso that moved with the head still follows it (1.6 texels right)");
+            d2vr::SpacewarpParams old=p;old.torso_past_on=false;const auto img0=run(device.Get(),context.Get(),pass,s,old);
+            check(img0.b(26,30)<64 && img0.b(29,30)>128,"without the torso's own step (v1432's test) the same wall moves with the head");
+        }
         {   // 13. v1424: the same hand against the sky moves 4 texels right: the sky it uncovers is sky, not the hand looked up again
             const auto hand=[](unsigned x,unsigned y) {return x>=26 && x<34 && y>=26 && y<34;};
             Scene s;s.distance=[hand](unsigned x,unsigned y) {return hand(x,y)?1.f:0.f;};s.object=hand;

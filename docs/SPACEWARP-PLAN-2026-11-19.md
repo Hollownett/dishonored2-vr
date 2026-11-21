@@ -985,8 +985,41 @@ Lab: `spacewarp_pass_check` 12 new checks (tests 20-21: a leg's own step on the 
 below 0.25 m moving (v1439: stood still), the floor inside a foot capsule kept, the torso with the head's step, its lean share at the
 pelvis, scenery in the cylinder kept) and all 42 earlier ones unchanged; `spacewarp_body_check` 10, `spacewarp_image_legs_check` 6,
 `spacewarp_math_check`, `full_body_driver_check`, `full_body_frame_latch_check`, `full_body_contact_arm_check` pass (the last three
-built again: `full_body_driver.hpp` lacked `<sstream>` since v1423). Not measured yet: a sim A/B on the same frames and the headset.
+built again: `full_body_driver.hpp` lacked `<sstream>` since v1423).
+
+**Sims (v1460, 2026-11-21 13:07-13:15, the user's save, `look_down_walk_body2`: `spacewarp always`, same-frame A/B `spacewarp altbody2`,
+`--knob spacewarp --disable alternate-eye`; saves verified unchanged, knobs cleaned, v1453 put back byte for byte; captures in
+`D:\d2vr-artifacts\sw-v1460-ab` and `...\sw-v1460-tint`).**
+- 2,900 generated, 2,899 submitted, 0 late, 0 failures; the torso rule on 5,800 of 5,800 generated eyes, the image legs on 5,784.
+- **`leg_phase` [3009, 1, 1]: in the game the upload legs v1439 read were the presented image's own in 3,009 of 3,011 frames** (the
+  previous image's once). The v1439 timing fault is confirmed.
+- The A/B scores cannot separate the rules here (new tool `tools/spacewarp_capture_ab.py`: flicker, and a progress measure, 0 = repeats
+  the real frame, 0.5 = halfway): they draw different pixels on only 0.01-0.06 % of each image, and there both score flicker 1.34 and
+  progress 0.27. The simulated runtime returns the same head pose for every time, so the torso step is always 0 in the sim, and the sim
+  save's walk barely swings the legs (as at v1438/v1439). The torso and the swing are for the headset.
+- Class tint (`spacewarp-tint-classes`; the generated frame tinted by the v1460 classes, generated-alt by v1445's): over 8 triples 26k
+  pixels of boots and legs went from still world and 49k from capped mover (v1445 gave a boot the engine's motion vector, capped at
+  3 cm) to the leg rule, and 330k from the play space's step to the torso. What v1460 left as still world was a wooden post in front of
+  the player: v1445's cylinder stood on the native root a locomotion step ahead and had dragged it along with the body. Seen there and
+  fixed in v1461: the boot's toe cap was still a capped mover (outside v1439's foot capsule), and the upper chest and shoulders (above the
+  cylinder's top, 30 cm under the eye) were still the near rig, moved with the play space only. Also seen, not this change: during a walk
+  turn the fingers of a hand lay outside its palm sphere (rest-of-rig yellow) in both rules.
+
+**v1461 (the same switches).**
+- **The foot as drawn.** The image's foot capsule runs from under the heel to the toe tip (`FullBodyDriver::leg_points_` foot_line:
+  the bind boot reaches 0.253 m ahead of and 0.123 m below the ankle); v1439's toe point left the toe tip 112 mm from its capsule's line
+  (radius 80 mm) and the heel out. The shin capsule ends under the heel, 10 cm wide (was 9). The upload legs (the v1445 rule, the phase
+  check) keep v1439's points.
+- **The whole torso with the head.** The image rule's cylinder reaches up to 15 cm under the eye (the neck is 11 cm under it).
+- **The torso's own scenery test.** v1432's "carried with the play space" equals "still in the world" while the player stands, so it never
+  called anything in the cylinder scenery; with the cylinder now under the drawn pelvis, which follows the head, a wall beside a leaning
+  player would have moved with the head. A cylinder texel is scenery when the previous real frame shows it still in the world and not
+  where the torso's own last step puts it (the pelvis's and the neck's world steps since the previous image, by height), as for the legs.
+- Lab: `spacewarp_pass_check` test 22 (a wall beside a standing, leaning player stays, the torso still follows the head; v1432's test moves
+  the wall), `spacewarp_image_legs_check` (the foot capsule holds the drawn toe tip: 40 mm from its line; v1439's 112 mm), all earlier
+  checks pass. Not run in the game yet.
 
 Known limits: a leg's step is still extrapolated from the last real frame, so a foot that plants overshoots by up to ~1 cm at a run for
 one generated frame; the torso's own turn outside the dead zone and its sideways tilt when standing (the solver's ~8 % of a sideways
-step) are not followed; arms past the palm's reach keep v1445's rules.
+step) are not followed; arms past the palm's reach keep v1445's rules; a wall that slides along itself beside the leaning torso (parallel
+to the lean) passes the torso's scenery test, as a floor sliding under a foot passes the legs'.

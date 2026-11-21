@@ -14595,8 +14595,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         body.prev_valid=true;body.prev_pelvis=image_prev->pelvis;body.prev_neck=image_prev->neck;
                                         for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) body.prev_leg[s][k]=image_prev->leg[s][k];
                                     }
-                                    if(d.legs_valid) {
-                                        const auto mean_mm=[&](const Joints& j) {double sum=0;for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) sum+=d2vr::length(d.leg[s][k]-j.leg[s][k]);return sum/8*1000;};
+                                    if(d.legs_valid) {  // hip, knee and ankle (the image's last two leg points are the foot line, the upload's the ankle and v1439's toe)
+                                        const auto mean_mm=[&](const Joints& j) {double sum=0;
+                                            for(unsigned s=0;s<2;++s) sum+=d2vr::length(d.leg[s][0]-j.leg[s][0])+d2vr::length(d.leg[s][1]-j.leg[s][1])+d2vr::length(d.leg[s][2]-j.ankle[s]);
+                                            return sum/6*1000;};
                                         const double to_now=mean_mm(*now),to_prev=body.prev_valid?mean_mm(*image_prev):-1;
                                         auto& phase=game_xr->spacewarp_leg_phase;
                                         if(to_now<1) ++phase[0];else if(body.prev_valid && to_prev<1) ++phase[1];else ++phase[2];

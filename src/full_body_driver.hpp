@@ -475,7 +475,12 @@ public:
     // v1438: each leg's hip, knee and ankle (femur, tibia, ankle joints of the 20-joint body) through `world` (joint index -> world pose)
     // v1460: the points themselves (leg_points_), shared with image_joints. false: a joint is missing (an unfitted skeleton). Skeleton::find
     // throws for a missing joint: callers catch.
-    template<class World> bool leg_points_(Vec3 (&out)[2][4],World world) const {
+    // foot_line (v1460, the image's legs): points 2-3 are the foot as drawn, from under the heel to the toe tip, instead of the ankle and v1439's
+    // toe point. The bind boot reaches 0.253 m ahead of and 0.123 m below the ankle (toes_end_jnt) and its heel ~0.07 m behind it: v1439's
+    // toe point (0.16 ahead, 0.06 below) with its 8 cm capsule left the toe cap's front and the heel out of the leg rule (sim class tint
+    // 2026-11-21: the toe cap a capped mover while the rest of the boot was the leg's). The skin keeps the boot's own size (inverse binds are
+    // not scaled), so neither offset scales. ankles: each ankle joint (the shin capsule now ends under the heel; the phase check needs it).
+    template<class World> bool leg_points_(Vec3 (&out)[2][4],World world,Vec3* ankles=nullptr,bool foot_line=false) const {
         const auto& sk=solver_.skeleton(0);
         static const char* names[2][3]={{"left_femur_jnt","left_tibia_jnt","left_ankle_jnt"},{"right_femur_jnt","right_tibia_jnt","right_ankle_jnt"}};
         for(unsigned i=0;i<2;++i) {
@@ -486,7 +491,9 @@ public:
                 const Xf x=world(static_cast<std::size_t>(j));out[i][k]=x.p;
                 if(k==2) {ankle=x;ankle.q=body::mul(x.q,body::conj(sk.bind[static_cast<std::size_t>(j)].q));}  // bind -> now (the pelvis rule)
             }
-            out[i][3]=ankle.p+rotated(ankle.q,{.16,0,-.06});  // v1439: the toe, model forward +x, up +z
+            if(ankles) ankles[i]=ankle.p;
+            if(foot_line) {out[i][2]=ankle.p+rotated(ankle.q,{-.053,0,-.083});out[i][3]=ankle.p+rotated(ankle.q,{.227,0,-.093});}  // model forward +x, up +z
+            else out[i][3]=ankle.p+rotated(ankle.q,{.16,0,-.06});  // v1439: the toe, model forward +x, up +z
         }
         return true;
     }
@@ -500,21 +507,22 @@ public:
     // at `frame` (begin_image), world, exactly what the render's skin copy draws (image_body: export_body(image_out_) in the live frame). Since
     // v861 the drawn body is that image's own solve, not a tick's upload: a game-side upload between the image and its Present re-uses the same
     // publication's solve, so the upload legs spacewarp read since v1438 were this image's, and v1439's "a frame ahead" was a frame behind.
-    // legs: hip, knee, ankle, toe per side (leg_points_); pelvis (center_root_jnt), neck (center_neck_jnt), origin (joint 0: under the pelvis
-    // on the ground); scale: the solver's avatar scale. Nothing without that image (no begin_image this frame, another fit).
-    struct ImageJoints {Vec3 leg[2][4]{};Vec3 pelvis{},neck{},origin{};double scale{1};};
+    // legs: hip, knee, under the heel, toe tip per side (leg_points_ foot_line); ankle: each ankle joint; pelvis (center_root_jnt), neck
+    // (center_neck_jnt), origin (joint 0: under the pelvis on the ground); scale: the solver's avatar scale. Nothing without that image (no
+    // begin_image this frame, another fit).
+    struct ImageJoints {Vec3 leg[2][4]{};Vec3 ankle[2]{};Vec3 pelvis{},neck{},origin{};double scale{1};};
     std::optional<ImageJoints> image_joints(std::uint64_t frame) const {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_ || image_out_.body.size()!=20) return {};
         try {
             ImageJoints j{};
-            if(!leg_points_(j.leg,[&](std::size_t k) {return image_out_.body[k];})) return {};
+            if(!leg_points_(j.leg,[&](std::size_t k) {return image_out_.body[k];},j.ankle,true)) return {};
             const auto& sk=solver_.skeleton(0);
             const int pelvis=sk.find("center_root_jnt"),neck=sk.find("center_neck_jnt");
             if(pelvis<0 || pelvis>=20 || neck<0 || neck>=20) return {};
             j.pelvis=image_out_.body[static_cast<std::size_t>(pelvis)].p;j.neck=image_out_.body[static_cast<std::size_t>(neck)].p;j.origin=image_out_.body[0].p;
             j.scale=std::isfinite(image_out_.scale) && image_out_.scale>0?image_out_.scale:1.;
-            bool finite_all=finite(j.pelvis) && finite(j.neck) && finite(j.origin);
+            bool finite_all=finite(j.pelvis) && finite(j.neck) && finite(j.origin) && finite(j.ankle[0]) && finite(j.ankle[1]);
             for(const auto& side:j.leg) for(const auto& p:side) finite_all=finite_all && finite(p);
             if(!finite_all) return {};
             return j;
