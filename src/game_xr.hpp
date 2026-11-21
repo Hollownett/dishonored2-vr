@@ -2314,7 +2314,11 @@ public:
          <<",\"held_far_eyes\":"<<spacewarp_held_far_eyes<<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"soft_edges\":"<<(spacewarp_soft_edges?"true":"false")<<",\"mover_eyes\":"<<spacewarp_mover_eyes
          <<",\"body\":"<<(spacewarp_body?"true":"false")<<",\"body_eyes\":"<<spacewarp_body_eyes<<",\"resizes\":"<<spacewarp_resizes<<",\"generated_at_last_resize\":"<<spacewarp_resize_settled_at<<",\"leg_eyes\":"<<spacewarp_leg_eyes<<",\"leg_valid\":"<<spacewarp_leg_valid<<",\"leg_interpolated\":"<<spacewarp_leg_interpolated<<",\"leg_insane\":"<<spacewarp_leg_insane<<",\"leg_noshare\":"<<spacewarp_leg_noshare
          <<",\"leg_hip\":["<<spacewarp_leg_hip[0]<<','<<spacewarp_leg_hip[1]<<','<<spacewarp_leg_hip[2]<<"],\"leg_root\":["<<spacewarp_leg_root[0]<<','<<spacewarp_leg_root[1]<<','<<spacewarp_leg_root[2]<<"],\"leg_step_m\":"<<spacewarp_leg_step_m<<",\"leg_why\":\""<<spacewarp_leg_why<<"\""<<",\"legs\":"<<(spacewarp_leg_rule?"true":"false")<<",\"body_eye_height\":"<<spacewarp_body_eye_height
-         <<",\"body_up_dot\":"<<spacewarp_body_up_dot<<",\"overlays\":"<<(spacewarp_overlays?"true":"false")<<",\"overlay_draws\":"<<spacewarp_overlay_draws
+         <<",\"body_up_dot\":"<<spacewarp_body_up_dot
+         <<",\"body2\":"<<(spacewarp_body2?"true":"false")<<",\"torso_eyes\":"<<spacewarp_torso_eyes<<",\"torso_step_mm\":"<<spacewarp_torso_step_mm<<",\"torso_rho\":"<<spacewarp_torso_rho
+         <<",\"leg_image_eyes\":"<<spacewarp_leg_image_eyes<<",\"leg_planted\":"<<spacewarp_leg_planted
+         <<",\"leg_phase\":["<<spacewarp_leg_phase[0]<<','<<spacewarp_leg_phase[1]<<','<<spacewarp_leg_phase[2]<<"],\"leg_phase_mm\":["<<spacewarp_leg_phase_mm[0]<<','<<spacewarp_leg_phase_mm[1]<<']'
+         <<",\"overlays\":"<<(spacewarp_overlays?"true":"false")<<",\"overlay_draws\":"<<spacewarp_overlay_draws
          <<",\"overlay_failures\":"<<spacewarp_overlay_failures<<",\"layers_moved\":"<<spacewarp_layers_moved<<",\"cylinders\":"<<spacewarp_cylinders
          <<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
          <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"inline\":"<<(spacewarp_inline_path()?"true":"false")<<",\"inline_frames\":"<<spacewarp_inline_frames<<",\"inline_late\":"<<spacewarp_inline_late
@@ -2430,6 +2434,7 @@ public:
     double spacewarp_palm_reach{};bool spacewarp_held_far{true},spacewarp_tint_held{};
     bool spacewarp_soft_edges{true};  // v1424: build/spacewarp-legacy-edges turns the rim / moving-edge handling off
     std::atomic<int> spacewarp_capture_alt{0};  // v1426: `spacewarp capture`'s generated-alt: 0 the other edge rule, 1 without movers, 2 the other resample, 3 v1432 the other body rule
+                                                // (4 no legs, 5 the v1437 crack, 6 the v1437 hand volumes, v1460: 7 the other body2 rule: v1445's or the image's)
     bool spacewarp_sharp{true};  // v1429: Catmull-Rom colour resample (build/spacewarp-bilinear: off)
     bool spacewarp_body{true};  // v1432: the player's body rule (spacewarp_pass.hpp SpacewarpParams::body_on; build/no-spacewarp-body: off)
     bool spacewarp_overlays{true};bool spacewarp_tint_classes{};  // v1432 diagnostics: build/spacewarp-tint-classes
@@ -2439,6 +2444,20 @@ public:
     // real frame toward the target slot (to the next upload when it is known, else the last step again), past = its step since the previous
     // real frame
     struct SpacewarpLegs {bool valid{},interpolated{};std::array<std::array<Vec3,4>,2> seg{},next{},past{};};
+    // v1460 (user: "fix the player's body and legs warp in spacewarp mode, do the same as for the hands"): the drawn body of this real frame's
+    // image and of the previous real frame's (dxgi_probe, FullBodyDriver::image_joints: what the skin copy drew, world): legs (hip, knee, ankle,
+    // toe), the pelvis, the neck, the body's origin on the ground, the avatar scale. The default body rule since v1460 (spacewarp_body2).
+    struct SpacewarpImageBody {bool valid{},prev_valid{};std::array<std::array<Vec3,4>,2> leg{},prev_leg{};Vec3 pelvis{},neck{},origin{},prev_pelvis{},prev_neck{};double scale{1};};
+    SpacewarpImageBody spacewarp_image_body{};
+    // v1460: the image body rule (legs from the image, moved like the hands: their own step in the play space plus the locomotion; the torso
+    // with the tracked head). false (build/spacewarp-legacy-body, dev `spacewarp body2 off`): v1445's upload legs and play-space torso.
+    bool spacewarp_body2{true};
+    double spacewarp_body_back{.08};  // v1460: the full-body solver's eye-back offset (build/full-body; FullBodyDriver::tune), for the torso's anchor
+    // v1460 status: generated eyes with the torso step / the image legs; the last torso step (mm) and its lean share (pelvis vs neck); the last
+    // eye's planted leg points (of 8); dxgi_probe's phase check of the upload legs v1439 read: equal to this image's (0), the previous image's
+    // (1), neither (2), and the last mean distances to this image's and the previous image's (mm)
+    std::uint64_t spacewarp_torso_eyes{},spacewarp_leg_image_eyes{};double spacewarp_torso_step_mm{},spacewarp_torso_rho{1};unsigned spacewarp_leg_planted{};
+    std::array<std::uint64_t,3> spacewarp_leg_phase{};std::array<double,2> spacewarp_leg_phase_mm{};
     std::uint64_t sw_settle_until_{},spacewarp_resizes{},spacewarp_resize_settled_at{};  // v1438
     SpacewarpLegs spacewarp_legs{};bool spacewarp_leg_rule{true};std::uint64_t spacewarp_leg_valid{},spacewarp_leg_insane{},spacewarp_leg_noshare{},spacewarp_leg_interpolated{};std::array<double,3> spacewarp_leg_hip{},spacewarp_leg_root{};double spacewarp_leg_step_m{};const char* spacewarp_leg_why="";int spacewarp_crack_reach{4};bool spacewarp_hand_scenery{true};std::uint64_t spacewarp_leg_eyes{};
     double spacewarp_body_up_dot{},spacewarp_body_eye_height{};std::uint64_t spacewarp_body_eyes{};  // v1432 status (up agreement, the root's depth)  // v1432: the eye overlays redrawn on generated frames (build/spacewarp-baked-overlays: off, v1431 warped them)
@@ -3010,6 +3029,18 @@ public:
                 }
                 if(ok) grip_step[side]=sw_from_pose(g[1].pose)*sw_from_pose(g[0].pose).inverse();  // an untracked grip holds still
             }
+            // v1460: the torso's step from the image's time to the slot's (local space), the way each hand gets its grip's: the full-body
+            // solver's torso anchor for the tracked centre eye at both times (spacewarp_math.hpp spacewarp_torso_anchor; the two eyes' midpoint,
+            // eye 0's orientation). Over 0.3 m in one slot (tracking lost, a recentre): none.
+            std::array<double,3> torso_local{};bool torso_ok=false;
+            {
+                std::array<SwRigid,2> centre{};
+                for(int k=0;k<2;++k) {centre[k]=sw_from_pose(at[k][0].pose);const auto r=sw_from_pose(at[k][1].pose);for(int i=0;i<3;++i) centre[k].t[i]=(centre[k].t[i]+r.t[i])/2;}
+                torso_local=spacewarp_torso_step(centre[0],centre[1],spacewarp_body_back,spacewarp_image_body.valid?spacewarp_image_body.scale:1.);
+                const double n=std::sqrt(torso_local[0]*torso_local[0]+torso_local[1]*torso_local[1]+torso_local[2]*torso_local[2]);
+                torso_ok=std::isfinite(n) && n<.3;if(!torso_ok) torso_local={};
+                if(spacewarp_body2) spacewarp_torso_step_mm=torso_ok?n*1000:0;
+            }
             std::array<SwRigid,2> play{};
             for(UINT eye=0;eye<2;++eye) {
                 const auto& cam=rendered_cameras_[eye].pose;
@@ -3099,37 +3130,101 @@ public:
                 p.debug_tint_held=spacewarp_tint_held;p.debug_tint_classes=spacewarp_tint_classes;p.soft_edges=spacewarp_soft_edges;p.sharp_resample=spacewarp_sharp;
                 // v1432: the player's body, a cylinder on the player model's root (dxgi_probe render_player_root: world, at the feet). Up in
                 // source camera coordinates is the game world's up (+z) seen from S: S's rotation transposed times (0, 0, 1) = its third row.
-                if(spacewarp_body && spacewarp_body_root) {
-                    const auto axis=Si.apply({spacewarp_body_root->x,spacewarp_body_root->y,spacewarp_body_root->z});
+                // v1460 (user: "fix the player's body and legs warp in spacewarp mode, do the same as for the hands"; image_rule): the body as
+                // this image drew it (dxgi_probe: FullBodyDriver::image_joints). The cylinder stands on the drawn body's own origin; the torso
+                // moves with the tracked head's step to the slot (torso_local, as a hand with its grip's); each leg point with its own step in
+                // the play space since the previous image, carried by the locomotion (a planted foot stays in the world). image_rule false
+                // (build/spacewarp-legacy-body; the capture A/B `altbody2`): v1445's rule. count: this is the frame submitted (status).
+                const auto fill_body=[&](SpacewarpParams& q,bool image_rule,bool count) {
+                    const auto& ib=spacewarp_image_body;
+                    const bool image=image_rule && ib.valid;
+                    const std::optional<Vec3> root=image?std::optional<Vec3>(ib.origin):spacewarp_body_root;
+                    if(!spacewarp_body || !root) return;
+                    const auto axis=Si.apply({root->x,root->y,root->z});
                     const std::array<double,3> up{S.r[6],S.r[7],S.r[8]};
                     const double eye_height=-(axis[0]*up[0]+axis[1]*up[1]+axis[2]*up[2]);  // the eye (the source origin) above the root
-                    const std::array<double,3> local_up{V.r[3],V.r[4],V.r[5]};
-                    spacewarp_body_up_dot=up[0]*local_up[0]+up[1]*local_up[1]+up[2]*local_up[2];spacewarp_body_eye_height=eye_height;
-                    if(eye_height>.4 && eye_height<2.6) {p.body_on=true;p.body_up=up;p.body_axis=axis;p.body_top=eye_height-.3;++spacewarp_body_eyes;}
-                    // v1438: each drawn leg segment and its joints' steps to the target slot (a step over 0.5 m is a cut: no leg rule)
-                    if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid) ++spacewarp_leg_valid;  // v1438 status: which test let the rule apply
-                    if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid && !(mover_share>0)) ++spacewarp_leg_noshare;
-                    if(p.body_on && spacewarp_leg_rule && spacewarp_legs.valid && mover_share>0) {
-                        static constexpr double radius[4]={.12,.09,.08,0};  // the capsule from each point to the next: thigh, shin, foot
-                        bool sane=true;const auto o=Si.apply({0,0,0});
-                        const auto dir=[&](const Vec3& v) {const auto a=Si.apply({v.x,v.y,v.z});return std::array<double,3>{a[0]-o[0],a[1]-o[1],a[2]-o[2]};};
+                    if(count) {const std::array<double,3> local_up{V.r[3],V.r[4],V.r[5]};
+                        spacewarp_body_up_dot=up[0]*local_up[0]+up[1]*local_up[1]+up[2]*local_up[2];spacewarp_body_eye_height=eye_height;}
+                    if(!(eye_height>.4 && eye_height<2.6)) return;
+                    q.body_on=true;q.body_up=up;q.body_axis=axis;q.body_top=eye_height-.3;if(count) ++spacewarp_body_eyes;
+                    static constexpr double radius[4]={.12,.09,.08,0};  // the capsule from each point to the next: thigh, shin, foot
+                    const auto o=Si.apply({0,0,0});
+                    const auto dir=[&](const Vec3& v) {const auto a=Si.apply({v.x,v.y,v.z});return std::array<double,3>{a[0]-o[0],a[1]-o[1],a[2]-o[2]};};
+                    const auto height=[&](const std::array<double,3>& a) {return (a[0]-axis[0])*up[0]+(a[1]-axis[1])*up[1]+(a[2]-axis[2])*up[2];};
+                    const auto legacy_legs=[&] {   // v1438/v1439 (v1445): the upload legs
+                        // v1438: each drawn leg segment and its joints' steps to the target slot (a step over 0.5 m is a cut: no leg rule)
+                        if(!spacewarp_leg_rule || !spacewarp_legs.valid) return;
+                        if(count) ++spacewarp_leg_valid;  // v1438 status: which test let the rule apply
+                        if(!(mover_share>0)) {if(count) ++spacewarp_leg_noshare;return;}
+                        bool sane=true;
                         for(unsigned side=0;side<2;++side) for(unsigned j=0;j<4;++j) {
                             const Vec3 s=spacewarp_legs.seg[side][j],n=spacewarp_legs.next[side][j],b=spacewarp_legs.past[side][j];
                             if(!(length(n)<.5) || !(length(b)<.5)) sane=false;
                             const auto a=Si.apply({s.x,s.y,s.z}),dn=dir(n),db=dir(b);
-                            p.leg_point[4*side+j]={a[0],a[1],a[2],radius[j]};
-                            p.leg_step[4*side+j]={dn[0]*mover_share,dn[1]*mover_share,dn[2]*mover_share};
-                            p.leg_past[4*side+j]={db[0],db[1],db[2]};
+                            q.leg_point[4*side+j]={a[0],a[1],a[2],radius[j]};
+                            q.leg_step[4*side+j]={dn[0]*mover_share,dn[1]*mover_share,dn[2]*mover_share};
+                            q.leg_past[4*side+j]={db[0],db[1],db[2]};
                         }
-                        {const Vec3 h=spacewarp_legs.seg[0][0];spacewarp_leg_hip={h.x,h.y,h.z};spacewarp_leg_step_m=length(spacewarp_legs.past[0][0]);
-                         if(spacewarp_body_root) spacewarp_leg_root={spacewarp_body_root->x,spacewarp_body_root->y,spacewarp_body_root->z};}
-                        if(sane) {p.legs_on=true;++spacewarp_leg_eyes;if(spacewarp_legs.interpolated) ++spacewarp_leg_interpolated;
+                        if(count) {const Vec3 h=spacewarp_legs.seg[0][0];spacewarp_leg_hip={h.x,h.y,h.z};spacewarp_leg_step_m=length(spacewarp_legs.past[0][0]);
+                            if(spacewarp_body_root) spacewarp_leg_root={spacewarp_body_root->x,spacewarp_body_root->y,spacewarp_body_root->z};}
+                        if(sane) {q.legs_on=true;if(count) {++spacewarp_leg_eyes;if(spacewarp_legs.interpolated) ++spacewarp_leg_interpolated;}
                             // v1439 (sim class tint: a half-disc of floor beside the foot on a slope rose past the cylinder's 6 cm floor and slid
                             // with the player): the leg capsules hold the legs from hip to toe, so the cylinder keeps only the coat and torso
-                            p.body_floor=.25;}
-                        else ++spacewarp_leg_insane;
+                            q.body_floor=.25;}
+                        else if(count) ++spacewarp_leg_insane;
+                    };
+                    if(!image_rule) {legacy_legs();return;}
+                    // v1460: the previous real frame's play space (this eye's history, shifted above: [1] is the previous real frame)
+                    const bool prev_play=hist[1].valid && hist[1].frame+1==alternate_frame && display>hist[1].time;
+                    const SwRigid carry=prev_play?O*hist[1].O.inverse():SwRigid{};  // a point fixed in the play space: previous -> now (world)
+                    const bool history=image && ib.prev_valid && prev_play;
+                    if(torso_ok) {   // the torso with the head (local -> source camera axes: V's rotation transposed)
+                        const SwRigid Vi=V.inverse();
+                        q.torso_on=true;
+                        for(int i=0;i<3;++i) q.torso_step[i]=Vi.r[i*3]*torso_local[0]+Vi.r[i*3+1]*torso_local[1]+Vi.r[i*3+2]*torso_local[2];
+                        if(image) {   // the lean share: how far the pelvis followed the neck in the play space over the last real frame
+                            const auto pelvis=Si.apply({ib.pelvis.x,ib.pelvis.y,ib.pelvis.z}),neck=Si.apply({ib.neck.x,ib.neck.y,ib.neck.z});
+                            q.torso_pelvis_h=height(pelvis);q.torso_neck_h=height(neck);q.torso_rho=1;
+                            if(history) {
+                                const auto step=[&](const Vec3& now,const Vec3& before) {
+                                    const auto c=carry.apply({before.x,before.y,before.z});return std::array<double,3>{now.x-c[0],now.y-c[1],now.z-c[2]};};
+                                const auto dp=step(ib.pelvis,ib.prev_pelvis),dn=step(ib.neck,ib.prev_neck);
+                                const double nn=dn[0]*dn[0]+dn[1]*dn[1]+dn[2]*dn[2];
+                                if(nn>.003*.003) q.torso_rho=std::clamp((dp[0]*dn[0]+dp[1]*dn[1]+dp[2]*dn[2])/nn,0.,1.);
+                            }
+                            if(count) spacewarp_torso_rho=q.torso_rho;
+                        }
+                        if(count) ++spacewarp_torso_eyes;
                     }
-                }
+                    // without this image's own body (build/legacy-tick-skin draws the tick's upload, or no eye-0 Begin matched): the upload legs
+                    if(!image) {legacy_legs();return;}
+                    if(!spacewarp_leg_rule || !history) return;
+                    if(count) ++spacewarp_leg_valid;
+                    if(!(mover_share>0)) {if(count) ++spacewarp_leg_noshare;return;}
+                    const double span=static_cast<double>(display-hist[1].time)*1e-9;  // seconds between the two images
+                    bool sane=span>0;unsigned planted=0;
+                    for(unsigned side=0;side<2;++side) for(unsigned j=0;j<4;++j) {
+                        const Vec3 x=ib.leg[side][j],xp=ib.prev_leg[side][j];
+                        const double moved=length(x-xp);if(!(moved<.5)) sane=false;
+                        const auto a=Si.apply({x.x,x.y,x.z}),c=Si.apply(carry.apply({xp.x,xp.y,xp.z})),db=dir(x-xp);
+                        const double speed=span>0?moved/span:0;if(speed<.2) ++planted;
+                        const auto r=spacewarp_leg_own(a,c,db,mover_share,speed,motion.rest);
+                        q.leg_point[4*side+j]={a[0],a[1],a[2],radius[j]};q.leg_step[4*side+j]=r;q.leg_past[4*side+j]=db;
+                    }
+                    if(count) {const Vec3 h=ib.leg[0][0];spacewarp_leg_hip={h.x,h.y,h.z};spacewarp_leg_step_m=length(ib.leg[0][0]-ib.prev_leg[0][0]);
+                        spacewarp_leg_root={root->x,root->y,root->z};spacewarp_leg_planted=planted;}
+                    if(!sane) {if(count) ++spacewarp_leg_insane;return;}
+                    q.legs_on=true;q.legs_local=true;q.legs_floor=.015;q.body_floor=.25;  // the cylinder: the coat and torso (v1439)
+                    if(count) {++spacewarp_leg_eyes;++spacewarp_leg_image_eyes;}
+                };
+                // v1460: the body fields back to their defaults (the capture A/B fills the other rule into a copy)
+                const auto clear_body=[](SpacewarpParams& q) {
+                    const SpacewarpParams d{};
+                    q.body_on=d.body_on;q.body_up=d.body_up;q.body_axis=d.body_axis;q.body_radius=d.body_radius;q.body_floor=d.body_floor;q.body_top=d.body_top;q.body_cap=d.body_cap;
+                    q.legs_on=d.legs_on;q.leg_point=d.leg_point;q.leg_step=d.leg_step;q.leg_past=d.leg_past;q.leg_cap=d.leg_cap;q.legs_local=d.legs_local;q.legs_floor=d.legs_floor;
+                    q.torso_on=d.torso_on;q.torso_step=d.torso_step;q.torso_rho=d.torso_rho;q.torso_pelvis_h=d.torso_pelvis_h;q.torso_neck_h=d.torso_neck_h;
+                };
+                fill_body(p,spacewarp_body2,true);
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
                     p.prev_on=true;p.prev_tan=prev.tan;p.prev_m10=prev.m10;p.prev_m11=prev.m11;
                     const auto Pi=prev.S.inverse();p.prev_world=to_pass(Pi*S);
@@ -3185,6 +3280,7 @@ public:
                             else if(spacewarp_capture_alt==4) alt.legs_on=false;  // v1438: without the leg rule
                             else if(spacewarp_capture_alt==5) alt.crack_reach=2;  // v1438: the v1437 crack reach
                             else if(spacewarp_capture_alt==6) alt.hand_scenery=false;  // v1438: the v1437 hand volumes
+                            else if(spacewarp_capture_alt==7) {clear_body(alt);fill_body(alt,!spacewarp_body2,false);}  // v1460: the other body rule (v1445's or the image's)
                             else alt.soft_edges=!p.soft_edges;
                             if(sw_pass_->run(context_.Get(),alt_in,alt,rtv.Get(),width_,height_)) afw_capture_save_(target,std::wstring(n)+L"generated-alt");
                             drawn=sw_pass_->run(context_.Get(),in,p,rtv.Get(),width_,height_);

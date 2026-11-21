@@ -115,6 +115,19 @@ struct SpacewarpParams {
     // standing still in the world and not where the leg's last step carries it. Its own motion beyond the play space's step is capped at
     // leg_cap.
     bool legs_on{};std::array<std::array<double,4>,8> leg_point{};std::array<std::array<double,3>,8> leg_step{},leg_past{};double leg_cap{.15};
+    // v1460 (user: "fix the player's body and legs warp in spacewarp mode, do the same as for the hands"):
+    // legs_local: leg_step is each point's own motion beyond the locomotion (the rest motion): a leg texel is drawn at rest(P + step), capped
+    // at leg_cap, the way a hand texel is drawn at L (V^-1 dG V) P (game_xr: the step in the play space, a planted foot's kept in the world).
+    // Off: v1439's world displacement to the slot. legs_floor: with legs_local, the leg capsules hold texels from this height above the root
+    // (v1439 used the cylinder's 0.25 m floor, which also cut the ankles and feet out of the leg rule: they stood still in every generated
+    // frame); the floor itself (below it) stays.
+    bool legs_local{};double legs_floor{.015};
+    // v1460: the torso. Inside the body cylinder a texel without a motion vector (not scenery) is drawn at rest(P + w * torso_step) instead of
+    // rest(P): the full-body solver hangs the torso from the tracked head, so it moves with the head's step from the image's time to the
+    // slot's (game_xr spacewarp_torso_step, source camera coordinates), as a hand with its grip's. w: 1 at and above the neck's height
+    // (torso_neck_h above the root), torso_rho at and below the pelvis's (torso_pelvis_h): standing, the solver keeps the pelvis over the
+    // feet and the torso leans (rho ~0); moving, the pelvis follows the neck (rho ~1). Off: the play space's step only (v1432).
+    bool torso_on{};std::array<double,3> torso_step{};double torso_rho{1},torso_pelvis_h{},torso_neck_h{};
     // v1438 (docs/research/FRAMEGEN-OTHER-MODS.md item 2: thin cracks on very close magnified surfaces): Crack bridges a hole between two
     // cells of one surface up to crack_reach cells away on each side, past 2 only between source neighbours (v1437: 2)
     int crack_reach{4};
@@ -150,6 +163,8 @@ private:
         float misc[4];                                        // v1426: x mover cap (metres)
         float body_up[4],body[4],body_axis[4];                // v1432: up (w on); x radius, y floor, z top, w cap; the root (source)
         float legs[4],leg_p[8][4],leg_d[8][4],leg_b[8][4];    // v1439: x on, z cap; each leg's hip, knee, ankle, toe (w radius), slot steps, past steps
+                                                              // v1460: legs y 1 = legs_local, w its floor
+        float torso[4],torso_lean[4];                         // v1460: xyz the torso step (w on); x rho, y pelvis height, z neck height
     };
     static_assert(sizeof(Constants)%16==0,"constant buffer size");
     struct Grid {Ptr<ID3D11Texture2D> t;Ptr<ID3D11UnorderedAccessView> u;Ptr<ID3D11ShaderResourceView> s;};
@@ -176,7 +191,8 @@ cbuffer Sw : register(b0) {
     float4 PR[3]; float4 carryTerms;
     float4 misc;
     float4 bodyUp; float4 body; float4 bodyAxis;  // v1432: the player's body cylinder (bodyUp.w on; body: radius, floor, top, cap; the root)
-    float4 legs; float4 legP[8]; float4 legD[8]; float4 legB[8];  // v1439: the drawn legs (SpacewarpParams::legs_on)
+    float4 legs; float4 legP[8]; float4 legD[8]; float4 legB[8];  // v1439: the drawn legs (SpacewarpParams::legs_on); v1460 legs.y legs_local, legs.w its floor
+    float4 torso; float4 torsoLean;  // v1460: the torso step (w on); rho, pelvis height, neck height (SpacewarpParams::torso_on)
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> motionTex : register(t1);
@@ -196,8 +212,9 @@ RWTexture2D<float4> blendOut : register(u3);
 Texture2D<float4> blurIn : register(t11);      // v1425: BlurBlend's input (one direction per pass)
 Texture2D<float4> dispTex : register(t10);     // v1425: each texel's displacement (Edge's output, the class's motion feathered on one surface)
 RWTexture2D<float4> dispOut : register(u4);
-static const uint EMPTY=0xffffffffu, SKY=0x80000000u, FILLED=0x40000000u, INDEX=0x3fffffffu;  // v1432: class 5 = the player's body
-// v1424 texel word: bits 0-2 the class (0 still, 1 hand 0, 2 hand 1, 3 the rest of the rig, 4 its motion texture, 7 sky), bit 3 held-rule
+static const uint EMPTY=0xffffffffu, SKY=0x80000000u, FILLED=0x40000000u, INDEX=0x3fffffffu;  // v1432: class 5 = the player's body; v1460: 6 = the torso
+// v1424 texel word: bits 0-2 the class (0 still, 1 hand 0, 2 hand 1, 3 the rest of the rig, 4 its motion texture, 5 v1432 the body (legs),
+// 6 v1460 the torso, 7 sky), bit 3 held-rule
 // tint, bit 4 rim (a texel within EDGE_R of a nearer surface that moves differently: its colour is part that surface's), bit 5 a moving
 // surface's edge (its colour is part what lies behind it), bits 6-8 that edge's inward direction (k * 45 degrees, texel x right, y down)
 static const uint CLASS=7u, SKYCLASS=7u, TINT=8u, RIM=16u, FGEDGE=32u, FEATHER=512u;  // v1425: bit 9, the displacement is dispTex's
@@ -274,6 +291,13 @@ bool LegStep(float3 P,out float3 m,out float3 b) {
     }
     return best<1;
 }
+// v1460: a torso texel's displacement (class 6): drawn at rest(P + w * torso step), w from the pelvis's share at its height to 1 at the neck's
+float3 TorsoStep(float3 P) {
+    const float h=dot(P-bodyAxis.xyz,bodyUp.xyz),span=torsoLean.z-torsoLean.y;
+    const float wt=span>.05?lerp(saturate(torsoLean.x),1,saturate((h-torsoLean.y)/span)):1;
+    const float3 q=P+torso.xyz*wt;
+    return (flags.z!=0u?Rigid(RR,q):q)-P;
+}
 // The texel's class (the rules in this header's comment; v1424: decided once per texel, its displacement from the class)
 uint ClassOf(uint2 t,float3 P) {
     const float4 mo=(flags.w&1u)?motionTex[t]:0;
@@ -287,7 +311,7 @@ uint ClassOf(uint2 t,float3 P) {
     // last step) stays
     if(legs.x>0 && bodyUp.w>0 && d0>palm0.w && d1>palm1.w) {
         float3 lm,lb;
-        if(LegStep(P,lm,lb) && dot(P-bodyAxis.xyz,bodyUp.xyz)>body.y) {
+        if(LegStep(P,lm,lb) && dot(P-bodyAxis.xyz,bodyUp.xyz)>(legs.y>0?legs.w:body.y)) {  // v1460: the legs' own floor (the feet too)
             const bool scenery=prevFlags.x!=0u && PrevShows(PW,P,0)==1 && PrevShows(PW,P-lb,.01+.01*length(P))!=1;
             if(!scenery) return 5u|LEGW;
         }
@@ -307,7 +331,7 @@ uint ClassOf(uint2 t,float3 P) {
                 // still in the world and not where the play space's step puts it. A leg overlapping its own previous place matches both: body.
                 // without a usable previous frame (after a gap or a cut) scenery cannot be told apart: no body texel then (review)
                 if(prevFlags.x!=0u && carryTerms.z>0 && !(PrevShows(PW,P,0)==1 && PrevShows(PR,P,carryTerms.y*length(P))!=1)) {
-                    return 3u;  // (v1439: the drawn legs are taken above, before the cylinder)
+                    return torso.w>0?6u:3u;  // (v1439: the drawn legs are taken above, before the cylinder); v1460: the torso with the head
                 }
             }
         }
@@ -339,9 +363,15 @@ float3 DisplaceW(uint w,uint2 t,float3 P) {
     if(c==1u) return Rigid(H0,P)-P;
     if(c==2u) return Rigid(H1,P)-P;
     if(c==3u) return Rigid(RR,P)-P;
+    if(c==6u) return TorsoStep(P);  // v1460
     if(c==5u) {  // v1432: the play space's step plus the texel's own motion beyond it (the walk cycle), only that part capped
         const float3 rest=flags.z!=0u?Rigid(RR,P)-P:0;
         float3 r;
+        if((w&LEGW) && legs.y>0) {  // v1460: the leg's own step (capped), carried by the locomotion: rest(P + step), as a hand
+            float3 lm,lb; LegStep(P,lm,lb);
+            const float l=length(lm); if(legs.z>0 && l>legs.z) lm*=legs.z/l;
+            return (flags.z!=0u?Rigid(RR,P+lm):P+lm)-P;
+        }
         if(w&LEGW) {float3 lm,lb; LegStep(P,lm,lb); r=lm-rest;}  // v1438/v1439: the drawn leg's step
         else {const float4 mo=motionTex[t]; r=float3(dot(W2S[0].xyz,mo.xyz),dot(W2S[1].xyz,mo.xyz),dot(W2S[2].xyz,mo.xyz))*terms.z-rest;}
         const float l=length(r),cap=(w&LEGW)?legs.z:body.w; if(cap>0 && l>cap) r*=cap/l;  // v1439: the legs' own cap
@@ -392,19 +422,19 @@ float3 DisplaceW(uint w,uint2 t,float3 P) {
     // the surface stretches across the boundary instead of tearing. Only between the player's own parts (the hands, the rest of the rig):
     // a mover on a wall, or a carried body on the floor, keeps its hard boundary. Depth edges keep theirs (the rim rules above).
     float3 Df=D;
-    const bool own=(c>=1u && c<=3u) || c==5u;  // hand 0, hand 1, the rest of the rig, v1432 the body
+    const bool own=(c>=1u && c<=3u) || c==5u || c==6u;  // hand 0, hand 1, the rest of the rig, v1432 the body, v1460 the torso
     if(own) {
         bool seam=false;
         [loop] for(int y=-4;y<=4 && !seam;y+=2) [loop] for(int x=-4;x<=4;x+=2) {
             const int2 n=p+int2(x,y); if(any(n<0) || any(n>=int2(grid.xy))) continue;
-            const uint cn=classTex[n]&CLASS; if(cn==c || ((cn<1u || cn>3u) && cn!=5u)) continue;
+            const uint cn=classTex[n]&CLASS; if(cn==c || ((cn<1u || cn>3u) && cn!=5u && cn!=6u)) continue;
             if(abs(Ahead(depthTex[n])-z)<=.05*z+.005) {seam=true;break;}
         }
         if(seam) {
             float3 sum=0; float wsum=0;
             [loop] for(int y=-4;y<=4;++y) [loop] for(int x=-4;x<=4;++x) {
                 const int2 n=p+int2(x,y); if(any(n<0) || any(n>=int2(grid.xy))) continue;
-                const uint wn=classTex[n]; if(((wn&CLASS)<1u || (wn&CLASS)>3u) && (wn&CLASS)!=5u) continue;
+                const uint wn=classTex[n]; if(((wn&CLASS)<1u || (wn&CLASS)>3u) && (wn&CLASS)!=5u && (wn&CLASS)!=6u) continue;
                 const float dn=depthTex[n]; if(abs(Ahead(dn)-z)>.05*z+.005) continue;
                 const float wt=5-float(max(abs(x),abs(y)));
                 sum+=DisplaceW(wn,uint2(n),SourcePoint(uint2(n)))*wt; wsum+=wt;
@@ -607,6 +637,7 @@ float4 Resolve(Vertex v) : SV_TARGET {
         else if(tintClass==3u) rgb=lerp(rgb,float3(1,1,0),.5);
         else if(tintClass==4u) rgb=lerp(rgb,float3(0,1,1),.5);
         else if(tintClass==5u) rgb=lerp(rgb,float3(1,0,1),.6);
+        else if(tintClass==6u) rgb=lerp(rgb,float3(1,.5,0),.6);  // v1460: the torso, orange
     } else if(tint) rgb=lerp(rgb,float3(1,0,1),.6);
     if(step.z!=0u) rgb=rgb<=.0031308?rgb*12.92:1.055*pow(max(rgb,1e-8),1/2.4)-.055;  // a UNORM target holding sRGB values
     return float4(rgb,1);
@@ -682,7 +713,8 @@ inline bool SpacewarpPass::run(ID3D11DeviceContext* c,const SpacewarpInputs& in,
     k.step[2]=p.encode_srgb?1u:0u;k.step[3]=p.debug_tint_classes?2u:p.debug_tint_held?1u:0u;
     if(p.body_on) {f4(k.body_up,p.body_up[0],p.body_up[1],p.body_up[2],1);f4(k.body,p.body_radius,p.body_floor,p.body_top,p.body_cap);  // v1432
                    f4(k.body_axis,p.body_axis[0],p.body_axis[1],p.body_axis[2],0);
-                   if(p.legs_on) {f4(k.legs,1,0,p.leg_cap,0);  // v1439
+                   if(p.torso_on) {f4(k.torso,p.torso_step[0],p.torso_step[1],p.torso_step[2],1);f4(k.torso_lean,p.torso_rho,p.torso_pelvis_h,p.torso_neck_h,0);}  // v1460
+                   if(p.legs_on) {f4(k.legs,1,p.legs_local?1:0,p.leg_cap,p.legs_floor);  // v1439; v1460 legs_local, its floor
                        for(unsigned i=0;i<8;++i) {f4(k.leg_p[i],p.leg_point[i][0],p.leg_point[i][1],p.leg_point[i][2],p.leg_point[i][3]);
                            f4(k.leg_d[i],p.leg_step[i][0],p.leg_step[i][1],p.leg_step[i][2],0);f4(k.leg_b[i],p.leg_past[i][0],p.leg_past[i][1],p.leg_past[i][2],0);}}}
     {const auto& cm=p.colour_camera?p.colour_m:std::array<double,9>{1,0,0,0,1,0,0,0,1};const auto& ct=p.colour_camera?p.colour_tan:p.source_tan;

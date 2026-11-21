@@ -82,6 +82,52 @@ inline SpacewarpEyeMotion spacewarp_eye_motion(const SwRigid& S,const SwRigid& V
     return m;
 }
 inline SpacewarpRigid to_pass(const SwRigid& r) {return {r.r,r.t};}
+// v1460 (user: "fix the player's body and legs warp in spacewarp mode, do the same as for the hands"): where the full-body solver hangs the
+// torso for a tracked centre eye (local space, OpenXR axes: +y up; eye = local-from-view). body_ik.hpp: the neck target lands exactly under the
+// eye moved `back` metres along the level view (FullBodyDriver::solve_locked; level as the solver takes it, robust looking straight down:
+// forward + up * -forward.up), less the head joint's offset (the eye 3.28 cm ahead of and 0.8 cm above it: turned with the head) and the
+// neck's (10.53 cm under the head and 3.02 cm behind it: turned by half the head's rotation over the torso's yaw). torso_yaw: the torso's
+// heading (a rotation about +y); within the solver's 40 deg dead zone the chest does not turn with the head, so a step holds it (lab:
+// tests/spacewarp_body_check.cpp, the solver's own neck). scale: the skeleton's avatar scale (BodySolver scale_). The torso follows this
+// point the way a drawn hand follows its grip.
+inline SwRigid spacewarp_level_heading(const SwRigid& eye,std::array<double,2>* flat=nullptr) {  // the eye's heading about +y (the solver's level view)
+    const std::array<double,3> f{-eye.r[2],-eye.r[5],-eye.r[8]},u{eye.r[1],eye.r[4],eye.r[7]};  // the view's forward (-z) and up (+y)
+    const double hx=f[0]-u[0]*f[1],hz=f[2]-u[2]*f[1],hl=std::hypot(hx,hz);
+    SwRigid yaw;if(flat) *flat={0,0};
+    if(hl>1e-6) {
+        const double c=-hz/hl,s=-hx/hl;yaw.r={c,0,s, 0,1,0, -s,0,c};  // about +y, taking -z to the level heading
+        if(flat) *flat={hx/hl,hz/hl};
+    }
+    return yaw;
+}
+inline std::array<double,3> spacewarp_torso_anchor(const SwRigid& eye,const SwRigid& torso_yaw,double back,double scale) {
+    std::array<double,3> a=eye.t;std::array<double,2> flat{};(void)spacewarp_level_heading(eye,&flat);
+    a[0]-=back*flat[0];a[2]-=back*flat[1];
+    SwRigid turn=eye;turn.t={0,0,0};
+    const SwRigid half=torso_yaw*(torso_yaw.inverse()*turn).power(.5);
+    const auto r1=turn.apply({0,.008*scale,-.0328*scale}),r2=half.apply({0,.1053*scale,-.0302*scale});
+    for(int i=0;i<3;++i) a[i]-=r1[i]+r2[i];
+    return a;
+}
+// v1460: the torso's step (local space) from one tracked centre-eye pose to another, the torso's heading held at the first's
+inline std::array<double,3> spacewarp_torso_step(const SwRigid& from,const SwRigid& to,double back,double scale) {
+    const auto yaw=spacewarp_level_heading(from);
+    const auto a=spacewarp_torso_anchor(from,yaw,back,scale),b=spacewarp_torso_anchor(to,yaw,back,scale);
+    return {b[0]-a[0],b[1]-a[1],b[2]-a[2]};
+}
+// v1460: a drawn leg point's own motion to the slot, in source camera coordinates, beyond the locomotion L (the pass draws it at L(P + r)).
+// p: the point in this image; carried: the same point of the previous image carried by the play space's step since (O_now O_prev^-1), both in
+// source coordinates; world_step: its world step since the previous image (source axes); share: the slot's share of that step; speed: its world
+// speed (m/s). A moving point takes its step in the play space (as a hand its grip's), carried by L like everything the player carries; a
+// planted one (slower than 0.2 m/s) stays where it is in the world: L(P + r) = P + share * world_step. Between 0.2 and 0.8 m/s a blend.
+inline std::array<double,3> spacewarp_leg_own(const std::array<double,3>& p,const std::array<double,3>& carried,const std::array<double,3>& world_step,
+                                              double share,double speed,const SwRigid& L) {
+    std::array<double,3> local{},world{};
+    const auto x=std::clamp((speed-.2)/.6,0.,1.),w=x*x*(3-2*x);
+    const auto there=L.inverse().apply({p[0]+share*world_step[0],p[1]+share*world_step[1],p[2]+share*world_step[2]});
+    for(int i=0;i<3;++i) {local[i]=share*(p[i]-carried[i]);world[i]=there[i]-p[i];}
+    return {world[0]+(local[0]-world[0])*w,world[1]+(local[1]-world[1])*w,world[2]+(local[2]-world[2])*w};
+}
 // v1419: a hand's weapon body for spacewarp (dxgi_probe: the weapon collision model's visible blade line or gun barrel), in the drawn grip's
 // frame (forward, left, up; metres): the segment a-b and its radius. valid false: that hand holds no weapon.
 struct SpacewarpWeaponLocal {bool valid{};std::array<double,3> a{},b{};double radius{};};
