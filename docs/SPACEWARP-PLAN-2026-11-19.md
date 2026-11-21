@@ -976,3 +976,62 @@ Present, 633 late slots. Full analysis: `docs/research/STEAMVR-SAFE-SUBMIT.md`.
   - It falls back to the game's device when the runtime refuses the device, the device cannot be made, an image cannot be mirrored, or
     two sessions in a row fail early.
   - Lab-checked on the RTX 5070 (`xr_own_device_check`). Not yet run in the simulator or the headset.
+
+## 30. v1460: the player's body and legs as the hands (2026-11-21)
+
+User: "fix players body and legs warp (do same as for hands) in spacewarp mode". The hands and held weapons look right in generated
+frames; the body and legs do not.
+
+**How each part reached a generated frame (v1445).** A hand is moved rigidly by its controller's tracked change from the image's own
+time to the slot's, inside the locomotion: `L (V^-1 dG V)`. The torso (the body cylinder, no motion vectors) took `L` alone. The legs
+took a world step per capsule from the upload history (v1439, `spacewarp-legs-lag` 1). Four faults, from the code and the lab:
+- **The leg capsules sat one real frame behind the drawn legs.** Since v861 the body a render draws is that image's own solve
+  (`FullBodyDriver::begin_image` at its eye-0 Begin; `image_body` rewrites the skin array). The engine runs game side N+1 before it
+  presents image N (ENGINE-DIG-NOTES section 2), and that game side's body upload finds the publication already solved and re-uses it.
+  So at the Present of image N the newest upload legs (`diagnostic().leg`) are image N's own. v1439 took them for the next frame's,
+  placed the capsules at image N-1's legs and moved them by half of the last step. Lab (`tests/spacewarp_image_legs_check.cpp`, the real
+  driver in the engine's call order, walking 1.35 m/s at 45 Hz): the upload legs equal image N's to 0.0001 mm and lie 30-60 mm from
+  image N-1's, where v1439 put the capsules (radius 8-12 cm). The leading part of a moving leg fell outside them.
+- **The feet and ankles had no leg rule at all.** v1439 raised the cylinder's floor to 0.25 m so a slope's floor would not slide, and
+  the leg test used the same floor (`body.y`). The ankle (12 cm) and the foot lie below it: they were still world in every generated
+  frame, so a swinging foot stayed behind.
+- **The torso ignored the head.** The solver hangs the torso from the tracked eye (`body_ik.hpp`: the neck lands exactly under it). In a
+  generated frame the camera moved with the head's tracked step but the torso did not: every lean, crouch or head turn left it a slot
+  behind.
+- **The legs' world step against an averaged camera.** The camera's locomotion is a three-frame average; a world step carries the last
+  step's. With the game's uneven steps the legs drifted against the torso by half the difference.
+
+**v1460 (`build/spacewarp-legacy-body` = v1445; dev `spacewarp body2 on|off`; capture A/B `spacewarp altbody2`).**
+- **The body the image drew.** `FullBodyDriver::image_joints(frame)`: the legs (hip, knee, ankle, toe), pelvis, neck and ground origin of
+  the image that began at `frame`, exactly what `image_body` draws. dxgi_probe keeps this image's and the previous image's. The body
+  cylinder stands on the image body's own origin (v1445: the native root at Present time, a step ahead).
+- **Legs as the hands** (`SpacewarpParams::legs_local`, `spacewarp_math.hpp spacewarp_leg_own`). Each leg point's own step in the play
+  space since the previous image (`p - O O_prev^-1 p_prev`, times the slot's share), carried by the locomotion: the pass draws it at
+  `L(P + r)`, as a hand at `L (V^-1 dG V) P`. A point moving under 0.2 m/s keeps its world place (a planted foot stays on the floor
+  whatever the averaged locomotion does); 0.2-0.8 m/s blends. The capsules hold texels from 1.5 cm above the root
+  (`legs_floor`): the feet are the leg's again, the floor below them still stays. Cap 0.15 m as v1439.
+- **The torso with the head** (texel class 6, orange in the class tint). `spacewarp_torso_step`: the solver's neck anchor for the
+  tracked centre eye at the image's time and at the slot's, as a hand's grip pose at both times: the eye moved back `back` (8 cm,
+  `build/full-body`) along the level view, the head joint 3.3 cm behind and 0.8 cm under the eye, the neck 10.5 cm under the head turned
+  by half the head's rotation over the torso's yaw (held over the step: the solver's chest stays within its 40 deg dead zone), scaled with
+  the avatar. A torso texel moves by `L(P + w * step)`, `w` from the lean share at the pelvis's height to 1 at the neck's: the share is how
+  far the pelvis followed the neck in the play space over the last real frame (standing, the solver keeps the pelvis over the feet and
+  leans the torso: ~0; moving: ~1). Lab (`tests/spacewarp_body_check.cpp`, the real `BodySolver`): against the solver's own neck step the
+  anchor is 0.09-0.91 mm off (lean 1.1 cm, pitch 3 deg level and looking down, yaw 3 deg, an HMD swinging on a real neck, a combined step
+  with a 1.09 avatar scale); the eye's own step is 0.9-7.2 mm off.
+- Status `pacer.spacewarp`: `body2`, `torso_eyes`, `torso_step_mm`, `torso_rho`, `leg_image_eyes`, `leg_planted` (of 8 points),
+  `leg_why` ("ok (image)"), and `leg_phase` / `leg_phase_mm`: at each Present the upload legs v1439 read compared with this image's [0]
+  and the previous image's [1], or neither [2]. The first sim or headset session confirms the order in the game: [0] should take almost
+  every frame.
+- Without this image's own body (`build/legacy-tick-skin`, or no eye-0 Begin matched), the legs fall back to v1445's upload legs; the
+  torso rule stays.
+
+Lab: `spacewarp_pass_check` 12 new checks (tests 20-21: a leg's own step on the play space's, a planted leg kept in the world, a foot
+below 0.25 m moving (v1439: stood still), the floor inside a foot capsule kept, the torso with the head's step, its lean share at the
+pelvis, scenery in the cylinder kept) and all 42 earlier ones unchanged; `spacewarp_body_check` 10, `spacewarp_image_legs_check` 6,
+`spacewarp_math_check`, `full_body_driver_check`, `full_body_frame_latch_check`, `full_body_contact_arm_check` pass (the last three
+built again: `full_body_driver.hpp` lacked `<sstream>` since v1423). Not measured yet: a sim A/B on the same frames and the headset.
+
+Known limits: a leg's step is still extrapolated from the last real frame, so a foot that plants overshoots by up to ~1 cm at a run for
+one generated frame; the torso's own turn outside the dead zone and its sideways tilt when standing (the solver's ~8 % of a sideways
+step) are not followed; arms past the palm's reach keep v1445's rules.

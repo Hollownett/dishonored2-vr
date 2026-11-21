@@ -368,6 +368,62 @@ int main() {
             d2vr::SpacewarpParams old=p;old.hand_scenery=false;const auto img0=run(device.Get(),context.Get(),pass,s,old);
             check(img0.b(33,35)>128,"hand bubble off (v1437): the table edge moved with the hand");
         }
+        {   // 20. v1460 (user: "fix the player's body and legs warp in spacewarp mode, do the same as for the hands"): legs_local. Looking straight
+            // down as in test 18, the play space's step to the slot is 0.10 m; the previous real frame shows each thing where the play space's
+            // step put it. A leg point's step is its own motion beyond that step: the pass draws it at rest(P + step).
+            const auto leg=[](unsigned x,unsigned y) {return x>=28 && x<=35 && y>=20 && y<=43;};
+            Scene s;s.distance=[leg](unsigned x,unsigned y) {return leg(x,y)?1.f:1.7f;};s.object=leg;s.prev_distance=s.distance;
+            d2vr::SpacewarpParams p{};p.rest_on=true;p.rest.t={.10,0,0};p.body_on=true;p.body_up={0,0,1};p.body_axis={0,0,-1.7};p.body_radius=.5;p.body_top=1.4;
+            p.prev_on=true;p.prev_tan={-1,1,1,-1};p.prev_m10=0;p.prev_m11=1;p.prev_world.t={.10,0,0};p.carry_on=true;
+            p.legs_on=true;p.legs_local=true;p.body_floor=.25;
+            p.leg_point[0]={0,.4,-1,.13};p.leg_point[1]={0,0,-1,.13};p.leg_point[2]={0,-.4,-1,.13};p.leg_point[3]={0,-.45,-1,0};
+            for(unsigned j=0;j<4;++j) {p.leg_step[j]={.05,0,0};p.leg_past[j]={.10,0,0};p.leg_point[4+j]={5,5,-1,.01};}
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            check(img.b(39,30)>128 && img.b(29,30)<64,"legs_local: the leg's own 0.05 m on the play space's 0.10 m (5 texels right)");
+            check(img.r(12,30)==12*4,"legs_local: the floor stays still");
+            d2vr::SpacewarpParams planted=p;for(unsigned j=0;j<4;++j) planted.leg_step[j]={-.10,0,0};  // spacewarp_leg_own's planted foot: rest^-1(P) - P
+            const auto img1=run(device.Get(),context.Get(),pass,s,planted);
+            check(img1.b(29,30)>128 && img1.b(37,30)<64,"legs_local: a planted leg (own step = minus the play space's) stays in the world");
+            // a foot 0.10 m above the root (1.6 m away; one 0.25 m capsule from (0, .4) to (0, -.4)): v1439's leg rule took texels only above the
+            // cylinder's 0.25 m floor, so the foot stood still in every generated frame. legs_local: above legs_floor (1.5 cm)
+            const auto foot=[](unsigned x,unsigned y) {return x>=30 && x<=33 && y>=20 && y<=43;};
+            Scene f;f.distance=[foot](unsigned x,unsigned y) {return foot(x,y)?1.6f:1.7f;};f.object=foot;f.prev_distance=f.distance;
+            d2vr::SpacewarpParams pf=p;for(unsigned j=0;j<4;++j) {pf.leg_point[j]={0,.4-.8*std::min(j,2u)/2.0,-1.6,j<3?.4:0};pf.leg_step[j]={.05,0,0};}
+            const auto img2=run(device.Get(),context.Get(),pass,f,pf);
+            check(img2.b(34,30)>128 && img2.b(31,30)<64,"legs_local: a foot 0.10 m above the root moves with its step (3 texels right)");
+            // (column 38: 0.35 m beside the foot's line, 0.10 m under it, inside its 0.4 m capsule; 5 texels from the foot, no rim)
+            check(img2.r(38,30)==38*4,"legs_local: the floor inside the foot's capsule (below legs_floor) stays");
+            d2vr::SpacewarpParams nofloor=pf;nofloor.legs_floor=-1;const auto img3=run(device.Get(),context.Get(),pass,f,nofloor);
+            check(img3.r(38,30)<38*4-4,"legs_local with no leg floor: the same floor moves with the foot (R "+std::to_string(img3.r(38,30))+"; the floor rule is what keeps it)");
+            d2vr::SpacewarpParams old=pf;old.legs_local=false;for(unsigned j=0;j<4;++j) old.leg_step[j]={.15,0,0};  // v1439: the world step
+            const auto img4=run(device.Get(),context.Get(),pass,f,old);
+            check(img4.b(31,30)>128 && img4.b(34,30)<64,"v1439 rule: the same foot below the cylinder's 0.25 m floor stays behind (the bug)");
+        }
+        {   // 21. v1460: the torso. Looking straight down, a torso block (columns 20..35, rows 24..39, 0.6 m away: 1.1 m above the root) in the
+            // body cylinder, no motion vectors, carried with the play space (0.10 m to the slot) in the previous frame. With the torso step
+            // (0.06 m: the head's) it moves 0.16 m (8.5 texels), the play space's step alone 0.10 m (5.3 texels)
+            const auto torso=[](unsigned x,unsigned y) {return x>=20 && x<=35 && y>=24 && y<=39;};
+            Scene s;s.distance=[torso](unsigned x,unsigned y) {return torso(x,y)?.6f:1.7f;};s.object=torso;s.prev_distance=s.distance;
+            d2vr::SpacewarpParams p{};p.rest_on=true;p.rest.t={.10,0,0};p.body_on=true;p.body_up={0,0,1};p.body_axis={0,0,-1.7};p.body_radius=.5;p.body_top=1.4;
+            p.prev_on=true;p.prev_tan={-1,1,1,-1};p.prev_m10=0;p.prev_m11=1;p.prev_world.t={.10,0,0};p.carry_on=true;
+            p.torso_on=true;p.torso_step={.06,0,0};p.torso_pelvis_h=.7;p.torso_neck_h=1.1;p.torso_rho=0;
+            const auto img=run(device.Get(),context.Get(),pass,s,p);
+            check(img.b(30,30)>128 && img.b(27,30)<64 && img.b(43,30)>128,"torso: moves with the play space and the head's step (8.5 texels right)");
+            d2vr::SpacewarpParams off=p;off.torso_on=false;const auto img0=run(device.Get(),context.Get(),pass,s,off);
+            check(img0.b(27,30)>128 && img0.b(41,30)<64,"torso off (v1432): the play space's step only (5.3 texels right)");
+            d2vr::SpacewarpParams lean=p;lean.torso_pelvis_h=1.1;lean.torso_neck_h=1.5;  // at the pelvis's height, standing (rho 0): no head step
+            const auto img1=run(device.Get(),context.Get(),pass,s,lean);
+            check(img1.b(27,30)>128 && img1.b(41,30)<64,"torso at the pelvis's height, standing (rho 0): the play space's step only");
+            d2vr::SpacewarpParams walk=lean;walk.torso_rho=1;const auto img2=run(device.Get(),context.Get(),pass,s,walk);
+            check(img2.b(30,30)>128 && img2.b(27,30)<64,"torso at the pelvis's height, moving (rho 1): the head's step too");
+            // a crate in the cylinder (columns 26..29) that the previous frame shows still in the world (5 texels right there: the camera moved
+            // 0.10 m since) and not where the play space would have carried it: scenery, it stays
+            const auto crate=[](unsigned x,unsigned y) {return x>=26 && x<=29 && y>=24 && y<=39;};
+            Scene wall;wall.distance=[crate](unsigned x,unsigned y) {return crate(x,y)?.6f:1.7f;};wall.object=crate;
+            wall.prev_distance=[crate](unsigned x,unsigned y) {return x>=5 && crate(x-5,y)?.6f:1.7f;};
+            const auto img3=run(device.Get(),context.Get(),pass,wall,p);
+            check(img3.b(27,30)>128 && img3.b(33,30)<64,"torso: scenery in the cylinder (the previous frame shows it still in the world) stays");
+        }
         {   // 13. v1424: the same hand against the sky moves 4 texels right: the sky it uncovers is sky, not the hand looked up again
             const auto hand=[](unsigned x,unsigned y) {return x>=26 && x<34 && y>=26 && y<34;};
             Scene s;s.distance=[hand](unsigned x,unsigned y) {return hand(x,y)?1.f:0.f;};s.object=hand;

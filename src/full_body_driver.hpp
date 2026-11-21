@@ -19,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <memory>
+#include <sstream>  // stale_json (v1423); without it the header's own lab checks did not build
 
 namespace d2vr::fullbody {
 using body::Xf;
@@ -472,23 +473,52 @@ public:
         back_=std::clamp(back,0.,.3);head_scale_=std::clamp(head_scale,.01,1.);
     }
     // v1438: each leg's hip, knee and ankle (femur, tibia, ankle joints of the 20-joint body) through `world` (joint index -> world pose)
+    // v1460: the points themselves (leg_points_), shared with image_joints. false: a joint is missing (an unfitted skeleton). Skeleton::find
+    // throws for a missing joint: callers catch.
+    template<class World> bool leg_points_(Vec3 (&out)[2][4],World world) const {
+        const auto& sk=solver_.skeleton(0);
+        static const char* names[2][3]={{"left_femur_jnt","left_tibia_jnt","left_ankle_jnt"},{"right_femur_jnt","right_tibia_jnt","right_ankle_jnt"}};
+        for(unsigned i=0;i<2;++i) {
+            Xf ankle{};
+            for(unsigned k=0;k<3;++k) {
+                const int j=sk.find(names[i][k]);
+                if(j<0 || j>=20 || static_cast<std::size_t>(j)>=sk.bind.size()) return false;
+                const Xf x=world(static_cast<std::size_t>(j));out[i][k]=x.p;
+                if(k==2) {ankle=x;ankle.q=body::mul(x.q,body::conj(sk.bind[static_cast<std::size_t>(j)].q));}  // bind -> now (the pelvis rule)
+            }
+            out[i][3]=ankle.p+rotated(ankle.q,{.16,0,-.06});  // v1439: the toe, model forward +x, up +z
+        }
+        return true;
+    }
     template<class World> void legs_from_(World world,bool solved) noexcept {
         diag_.legs_valid=false;
-        try {  // Skeleton::find throws for a missing joint (an unfitted skeleton): no legs then, never out of the upload hook
-            const auto& sk=solver_.skeleton(0);
-            static const char* names[2][3]={{"left_femur_jnt","left_tibia_jnt","left_ankle_jnt"},{"right_femur_jnt","right_tibia_jnt","right_ankle_jnt"}};
-            for(unsigned i=0;i<2;++i) {
-                Xf ankle{};
-                for(unsigned k=0;k<3;++k) {
-                    const int j=sk.find(names[i][k]);
-                    if(j<0 || j>=20 || static_cast<std::size_t>(j)>=sk.bind.size()) return;
-                    const Xf x=world(static_cast<std::size_t>(j));diag_.leg[i][k]=x.p;
-                    if(k==2) {ankle=x;ankle.q=body::mul(x.q,body::conj(sk.bind[static_cast<std::size_t>(j)].q));}  // bind -> now (the pelvis rule)
-                }
-                diag_.leg[i][3]=ankle.p+rotated(ankle.q,{.16,0,-.06});  // v1439: the toe, model forward +x, up +z
-            }
-            diag_.legs_valid=true;diag_.legs_solved=solved;
+        try {  // never out of the upload hook
+            if(leg_points_(diag_.leg,world)) {diag_.legs_valid=true;diag_.legs_solved=solved;}
         } catch(...) {diag_.legs_valid=false;}
+    }
+    // v1460 (spacewarp, user: "fix the player's body and legs warp, do the same as for the hands"): the legs and torso of the image that began
+    // at `frame` (begin_image), world, exactly what the render's skin copy draws (image_body: export_body(image_out_) in the live frame). Since
+    // v861 the drawn body is that image's own solve, not a tick's upload: a game-side upload between the image and its Present re-uses the same
+    // publication's solve, so the upload legs spacewarp read since v1438 were this image's, and v1439's "a frame ahead" was a frame behind.
+    // legs: hip, knee, ankle, toe per side (leg_points_); pelvis (center_root_jnt), neck (center_neck_jnt), origin (joint 0: under the pelvis
+    // on the ground); scale: the solver's avatar scale. Nothing without that image (no begin_image this frame, another fit).
+    struct ImageJoints {Vec3 leg[2][4]{};Vec3 pelvis{},neck{},origin{};double scale{1};};
+    std::optional<ImageJoints> image_joints(std::uint64_t frame) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_ || image_out_.body.size()!=20) return {};
+        try {
+            ImageJoints j{};
+            if(!leg_points_(j.leg,[&](std::size_t k) {return image_out_.body[k];})) return {};
+            const auto& sk=solver_.skeleton(0);
+            const int pelvis=sk.find("center_root_jnt"),neck=sk.find("center_neck_jnt");
+            if(pelvis<0 || pelvis>=20 || neck<0 || neck>=20) return {};
+            j.pelvis=image_out_.body[static_cast<std::size_t>(pelvis)].p;j.neck=image_out_.body[static_cast<std::size_t>(neck)].p;j.origin=image_out_.body[0].p;
+            j.scale=std::isfinite(image_out_.scale) && image_out_.scale>0?image_out_.scale:1.;
+            bool finite_all=finite(j.pelvis) && finite(j.neck) && finite(j.origin);
+            for(const auto& side:j.leg) for(const auto& p:side) finite_all=finite_all && finite(p);
+            if(!finite_all) return {};
+            return j;
+        } catch(...) {return {};}
     }
     // Animation/render workers: the engine's own body upload for this frame. Returns the
     // replacement model-space joints, or nothing (keep the native upload).

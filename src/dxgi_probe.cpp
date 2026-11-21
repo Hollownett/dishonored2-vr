@@ -2923,6 +2923,9 @@ static int xr_own_device_knob=0;  // v1453: build/xr-own-device (empty/"on": eve
 static bool spacewarp_inline_knob=true,spacewarp_force_inline_knob=false;  // v1444: on (build/spacewarp-no-inline: off; v1441-v1443 opt-in), build/spacewarp-force-inline (sim)
 static std::atomic<bool> spacewarp_no_legs_knob{false},spacewarp_crack2_knob{false},spacewarp_hand_bubble_knob{false};  // v1438: build/no-spacewarp-legs = the body moves rigidly (v1437)
 static std::atomic<bool> spacewarp_no_body_knob{false};  // v1432: build/no-spacewarp-body = no body rule (the player's legs as v1431)
+// v1460: build/spacewarp-legacy-body = v1445's body rule (the upload legs with spacewarp-legs-lag, the torso with the play space only); dev
+// `spacewarp body2 on|off`. full_body_back: the full-body solver's eye-back offset (build/full-body), for spacewarp's torso anchor.
+static std::atomic<bool> spacewarp_legacy_body_knob{false};static double full_body_back=.08;
 static std::atomic<bool> spacewarp_baked_overlays_knob{false};static std::atomic<bool> spacewarp_tint_classes_knob{false};  // v1432 diagnostics  // v1432: build/spacewarp-baked-overlays = the eye overlays warped with the scene (v1431)
 static std::atomic<bool> spacewarp_recent{false};  // v1426: spacewarp generated a frame within the last second (Present thread): only then are motion textures made
 static std::optional<d2vr::alternate_taa::Receipt> paired_pass_receipt(int eye) noexcept {
@@ -7303,6 +7306,8 @@ static std::string run_test_command(const std::string& line) {
         else if(v=="althands" && game_xr) game_xr->spacewarp_capture_alt=6;  // v1438
         else if(v=="body") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_no_body_knob=m=="off";}  // v1432 A/B: spacewarp body on|off
         else if(v=="legs") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_no_legs_knob=m=="off";else if(m=="lag0" || m=="lag1") spacewarp_legs_lag=m=="lag1"?1:0;}  // v1438/v1439 A/B
+        else if(v=="body2") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_legacy_body_knob=m=="off";}  // v1460 A/B: the image body rule on|off (off = v1445)
+        else if(v=="altbody2" && game_xr) game_xr->spacewarp_capture_alt=7;  // v1460: generated-alt = the other body2 rule
         else if(v=="overlays") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_baked_overlays_knob=m=="off";}  // v1432 A/B: spacewarp overlays on|off
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
@@ -14676,6 +14681,34 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             if(legs.valid && !d.legs_solved) why="ok (engine legs)";
                             game_xr->spacewarp_leg_why=why;
                             game_xr->spacewarp_legs=legs;game_xr->spacewarp_leg_rule=!spacewarp_no_legs_knob.load();game_xr->spacewarp_crack_reach=spacewarp_crack2_knob.load()?2:4;game_xr->spacewarp_hand_scenery=!spacewarp_hand_bubble_knob.load();
+                            {   // v1460 (user: "fix the player's body and legs warp in spacewarp mode, do the same as for the hands"): the body as this
+                                // Present's image drew it (it began at frames == number-1: FullBodyDriver::image_joints, what the skin copy drew since
+                                // v861) and as the previous real frame's image drew it. The phase check of the upload legs above (status leg_phase):
+                                // equal to this image's [0] (the game-side upload re-used this image's solve: the newest upload is the image itself,
+                                // not a frame ahead of it), to the previous image's [1] (what v1439 assumed), or neither [2].
+                                using Joints=d2vr::fullbody::Driver::ImageJoints;
+                                static std::uint64_t image_last=0;static std::optional<Joints> image_prev;
+                                const std::optional<Joints> now=number>0?full_body.image_joints(number-1):std::nullopt;
+                                d2vr::GameXr::SpacewarpImageBody body{};
+                                if(now) {
+                                    body.valid=true;body.scale=now->scale;body.pelvis=now->pelvis;body.neck=now->neck;body.origin=now->origin;
+                                    for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) body.leg[s][k]=now->leg[s][k];
+                                    if(image_prev && image_last+1==number) {
+                                        body.prev_valid=true;body.prev_pelvis=image_prev->pelvis;body.prev_neck=image_prev->neck;
+                                        for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) body.prev_leg[s][k]=image_prev->leg[s][k];
+                                    }
+                                    if(d.legs_valid) {
+                                        const auto mean_mm=[&](const Joints& j) {double sum=0;for(unsigned s=0;s<2;++s) for(unsigned k=0;k<4;++k) sum+=d2vr::length(d.leg[s][k]-j.leg[s][k]);return sum/8*1000;};
+                                        const double to_now=mean_mm(*now),to_prev=body.prev_valid?mean_mm(*image_prev):-1;
+                                        auto& phase=game_xr->spacewarp_leg_phase;
+                                        if(to_now<1) ++phase[0];else if(body.prev_valid && to_prev<1) ++phase[1];else ++phase[2];
+                                        game_xr->spacewarp_leg_phase_mm={to_now,to_prev};
+                                    }
+                                }
+                                image_prev=now;image_last=number;
+                                game_xr->spacewarp_image_body=body;game_xr->spacewarp_body2=!spacewarp_legacy_body_knob.load();game_xr->spacewarp_body_back=full_body_back;
+                                if(game_xr->spacewarp_body2) game_xr->spacewarp_leg_why=!now?"no image body":!body.prev_valid?"image history":"ok (image)";
+                            }
                         }
                             for(UINT e=0;e<2;++e) {UINT dw{},dh{};if(const auto depth=fsr_taa.eye_depth(static_cast<int>(e),dw,dh)) game_xr->stale_eye_depth(e,depth.Get(),dw,dh,number);
                                 UINT mw{},mh{};const auto motion=spacewarp_movers_knob.load()?fsr_taa.eye_motion(static_cast<int>(e),mw,mh):nullptr;  // v1426: movers
@@ -18446,6 +18479,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 spacewarp_bilinear_knob=fs::exists(root/L"build"/L"spacewarp-bilinear");   // v1429
                 spacewarp_no_body_knob=fs::exists(root/L"build"/L"no-spacewarp-body");   // v1432
                 spacewarp_no_legs_knob=fs::exists(root/L"build"/L"no-spacewarp-legs");   // v1438
+                spacewarp_legacy_body_knob=fs::exists(root/L"build"/L"spacewarp-legacy-body");   // v1460: v1445's body rule
                 spacewarp_inline_knob=!fs::exists(root/L"build"/L"spacewarp-no-inline");spacewarp_force_inline_knob=fs::exists(root/L"build"/L"spacewarp-force-inline");  // v1440 (v1444: on by default)
                 {std::ifstream own_knob(root/L"build"/L"xr-own-device");std::string own_mode;  // v1453: OFF by default
                  if(own_knob) {own_knob>>own_mode;xr_own_device_knob=own_mode=="all"?2:own_mode=="off"?0:1;} else xr_own_device_knob=0;}
@@ -18901,7 +18935,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
     read_self_profiling=fs::exists(root/L"build"/L"read-self-profile");
         {std::ifstream knob(root/L"build"/L"sim-eye-size");uint32_t w{},h{};if(knob>>w>>h && w>=320 && h>=320 && w<=4096 && h<=4096) {d2vr::simxr::recommended_size[0]=w;d2vr::simxr::recommended_size[1]=h;}}
         {std::ifstream knob(root/L"build"/L"sim-fov");float f[4]{};if(knob>>f[0]>>f[1]>>f[2]>>f[3] && f[0]<0 && f[1]>0 && f[2]>0 && f[3]<0) std::copy(f,f+4,d2vr::simxr::optical_fov);}
-        if(full_body_requested) {std::ifstream knob(root/L"build"/L"full-body");double back=.08,head=.02;knob>>back>>head;full_body.tune(back,head);}
+        if(full_body_requested) {std::ifstream knob(root/L"build"/L"full-body");double back=.08,head=.02;knob>>back>>head;full_body.tune(back,head);
+            full_body_back=std::isfinite(back)?std::clamp(back,0.,.3):.08;}   // v1460: as tune() clamps it (spacewarp's torso anchor)
         full_body.legacy_single_gun_clip(fs::exists(root/L"build"/L"legacy-single-gun-clip")); // v1104 off switch: one kept gun clip for every type
         physical_crouch_enabled=!fs::exists(root/L"build"/L"no-physical-crouch");physical_crouch.reset();crouch_lift_m=0;physical_drop_valid=false;
         if(head_requested) d2vr::PostTonemapPass::install(image_base); // re-enables in a later session
