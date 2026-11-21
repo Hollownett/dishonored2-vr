@@ -31,7 +31,8 @@ of six sims, and the user's v1445 SteamVR session (read-only: its status and fra
   the structural fix and takes SteamVR's per-frame cost off the main thread. Estimated at about 2-4 days for a first stage; recommended
   as the next step after v1450's headset test.
 - **Built in v1453** (section 14), opt-in `build/xr-own-device`, after v1450-v1452's headset sessions plateaued at about three quarters
-  of generated frames on time. Lab-checked on the RTX 5070; not yet run in the simulator or the headset.
+  of generated frames on time. Lab-checked on the RTX 5070. In the simulator, all 2,049 generated frames went out from the waiting
+  thread with 0 late; not yet run in the headset.
 
 ## 1. The problem, measured
 
@@ -532,8 +533,19 @@ frame as SteamVR opens its slot.
   - 200 frames beside another thread on D2;
   - reset.
 - `spacewarp_safe_mid_check` and `job_wake_idle_check` pass.
-- **Not run yet:** the simulator (it binds D2 with `all`; `simulated_xr.hpp` now accepts a second device on the same adapter) and the
-  headset. Only the headset shows whether SteamVR presents the generated frames on time.
+- **Simulator** (2026-11-21 13:00, run `v1453-own-device`, scenario `head_turn_walk`, knobs `xr-own-device` empty and `spacewarp`
+  `always`, the user's diagnostics on) [data]. `simulated_xr.hpp` now accepts a second device on the same adapter.
+  - Own device: `on`, `why` "on", 10 chains mirrored, 16,059 copies, 0 failures, 4,016 real frames ended on it, 0 strikes.
+  - Spacewarp: 2,050 generated, 2,049 submitted, every one begun and ended by the waiting thread (`thread_ended` 2,050). 0 late,
+    0 late slots, 0 failures, 0 inline frames.
+  - Real frames: 2,049 two periods apart, each with one generated frame between; 77 one period apart (no generated frame: start and
+    loads).
+  - 0 session recoveries. The 3 `recoverable_faults` are the usual start and load notes (empty frames before the eyes had sources);
+    earlier sims had 1-3.
+  - Eye captures from the mirrors: picture content (mean RGB about 56/46/37, no black pixels). The simulator does not read back what
+    it receives, so pixel delivery into the runtime's images rests on the lab check above.
+  - The simulator's timing is not SteamVR's. Only the headset shows whether SteamVR presents the generated frames on time.
+- **Not run yet:** the headset.
 
 **What to read after a SteamVR session with the knob on:**
 - `own_device.on` true, `why` "on", `blocked` empty, `failures` 0.

@@ -975,7 +975,9 @@ Present, 633 late slots. Full analysis: `docs/research/STEAMVR-SAFE-SUBMIT.md`.
   - Spacewarp's waiting thread then waits for, begins and ends each generated frame in its slot on SteamVR, as on Virtual Desktop.
   - It falls back to the game's device when the runtime refuses the device, the device cannot be made, an image cannot be mirrored, or
     two sessions in a row fail early.
-  - Lab-checked on the RTX 5070 (`xr_own_device_check`). Not yet run in the simulator or the headset.
+  - Lab-checked on the RTX 5070 (`xr_own_device_check`). Simulator: 2,049 of 2,050 generated frames submitted from the waiting
+    thread, 0 late, 16,059 copies, 0 failures, 0 recoveries. Not yet run in the headset.
+  - **v1454** = v1453 + section 30's v1460 (body and legs), merged for one headset build.
 
 ## 30. v1460: the player's body and legs as the hands (2026-11-21)
 
