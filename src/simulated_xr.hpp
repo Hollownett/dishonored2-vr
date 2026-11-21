@@ -120,7 +120,13 @@ inline XrResult XRAPI_CALL requirements(XrInstance,XrSystemId,XrGraphicsRequirem
 inline XrResult XRAPI_CALL create_session(XrInstance,const XrSessionCreateInfo* info,XrSession* out) {
     if(session_created || !info->next) return invalid();
     const auto* binding=static_cast<const XrGraphicsBindingD3D11KHR*>(info->next);
-    if(binding->type!=XR_TYPE_GRAPHICS_BINDING_D3D11_KHR || binding->device!=device.Get()) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    if(binding->type!=XR_TYPE_GRAPHICS_BINDING_D3D11_KHR || !binding->device) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    if(binding->device!=device.Get()) {  // v1453 (build/xr-own-device): another device on the same adapter; the swapchains go on it
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
+        if(FAILED(binding->device->QueryInterface(IID_PPV_ARGS(&dxgi))) || FAILED(dxgi->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc)) ||
+           desc.AdapterLuid.LowPart!=luid.LowPart || desc.AdapterLuid.HighPart!=luid.HighPart) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+        device=binding->device;
+    }
     session_created=true;*out=session;push_state(XR_SESSION_STATE_READY);push_state(XR_SESSION_STATE_FOCUSED);return XR_SUCCESS;
 }
 inline XrResult XRAPI_CALL destroy_session(XrSession) {

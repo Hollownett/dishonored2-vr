@@ -30,6 +30,8 @@ of six sims, and the user's v1445 SteamVR session (read-only: its status and fra
 - **The other route** (section 11): bind the XR session to the mod's own D3D11 device, so SteamVR never touches the game's device. It is
   the structural fix and takes SteamVR's per-frame cost off the main thread. Estimated at about 2-4 days for a first stage; recommended
   as the next step after v1450's headset test.
+- **Built in v1453** (section 14), opt-in `build/xr-own-device`, after v1450-v1452's headset sessions plateaued at about three quarters
+  of generated frames on time. Lab-checked on the RTX 5070; not yet run in the simulator or the headset.
 
 ## 1. The problem, measured
 
@@ -455,3 +457,94 @@ they want the stability Virtual Desktop has.
 spacewarp's waiting thread. Sends from the engine's phase points cannot follow SteamVR's slot rules more closely. Virtual Desktop's
 behaviour on SteamVR needs section 11's route: the session on the mod's own device, with the waiting thread sending each generated
 frame as SteamVR opens its slot.
+
+## 14. v1453: the session on the mod's own device (opt-in `build/xr-own-device`, 2026-11-21)
+
+**User** (2026-11-21): build the bigger fix, and make SteamVR's spacewarp work for most players, not only on this PC.
+
+**Knob** `build/xr-own-device`, read once when the probe creates a GameXr:
+- empty or `on`: every runtime except Virtual Desktop, whose runtime never touches the game's device;
+- `all`: every runtime, Virtual Desktop and the simulator included;
+- `off`, or no file: off, as before. The default stays off until a headset test.
+
+**The device** (`src/xr_own_device.hpp`, `d2vr::XrOwnDevice`):
+- D2 is created on the game device's adapter, so `xrGetD3D11GraphicsRequirementsKHR`'s LUID check holds. It has the game's feature
+  level, BGRA support and `D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS` (its work is a few copies and the runtime's
+  calls; the v1421 hang ran through the driver's threaded optimisation). D3D11 multithread protection is on.
+- **Two** shared `ID3D11Fence`s, where section 11 had one:
+  - A, signalled on D1: the mirror's content is complete;
+  - B, signalled on D2: the copy has read the mirror. Without B, D1 could redraw a mirror while its last copy was still queued on D2.
+- Creation ends with a round trip: a 16 x 16 mirror, copied between the fences. Any failure keeps nothing, and the status says why.
+
+**Mirrors:**
+- For each runtime image, a texture on D1 with that image's description (typeless formats included) and `D3D11_RESOURCE_MISC_SHARED`,
+  opened on D2.
+- It uses a legacy shared handle (`GetSharedHandle`), not the NT handle of section 11: one call, no security attributes, and any
+  single-mip 2D format on the lab's hardware. Mipmapped, multisampled and array images are refused; every GameXr swapchain is
+  single-mip, single-sample and one layer.
+- `enumerate_images_()` replaces all nine `xrEnumerateSwapchainImages` sites and hands GameXr the mirrors. So every render path (eyes,
+  spacewarp, overlays, wrist watch, menus) keeps drawing on D1, on the render thread, unchanged.
+
+**Order, inside the v1393 lease wrappers** (Present thread):
+- **acquire:** the index joins the chain's queue. OpenXR acquires in order, waits for the oldest acquired image and releases the oldest
+  waited one.
+- **wait:** D1 waits on the GPU for B, up to that image's last copy. With three images per chain, that copy finished two or three
+  frames ago.
+- **release:**
+  1. D1 signals A and flushes;
+  2. D2 waits for A on the GPU, copies the mirror into the runtime's image, signals B and flushes;
+  3. the runtime's `xrReleaseSwapchainImage` follows.
+  - The CPU never waits.
+- `settle_lease_` (abandoned frames) and the destroy paths keep the mirror queue in step. `close()` drops the device after
+  `xrDestroySession`, never before it.
+
+**The generated frame:**
+- With the own device, `spacewarp_thread_ready_()` accepts any runtime. The waiting thread waits for the generated frame's slot and
+  begins and ends that frame itself, at once: v1420's Virtual Desktop design, now on SteamVR (status `thread_ended`).
+- A wait that returns the real frame's slot is handed to the real frame, as before.
+- The thread's calls never overlap `present()`'s OpenXR calls: `present()` collects the thread's frame before its first call. D2 is
+  used by one thread at a time; multithread protection covers the runtime's own threads.
+- The real frame, pacing, locomotion and turning are unchanged.
+
+**Fallback, for PCs where this fails:**
+- If `xrCreateSession` refuses D2, the same construction binds D1 (`why`: "runtime refused it (code)").
+- If D2 cannot be made, for example without shared fences (Windows 10 1703 or later and driver support), D1 is bound (`why`: "failed:
+  ...").
+- If an image cannot be mirrored, that session fails and recovers, and every later session in that game run binds D1 (`blocked`
+  names the image and the failing call).
+- If two own-device sessions in a row close before 900 real frames (10 s at 90 Hz), the own device stays off for the rest of the game's
+  run (`blocked`). A session that ends 900 frames clears the strikes.
+
+**Status** `spacewarp.own_device` (both status files): `on`, `why`, `copies`, `failures`, `chains`, `thread_ended`, `frames`,
+`strikes`, `blocked`.
+
+**Checks:**
+- Build: 16 warnings, the baseline.
+- Lab `xr_own_device_check` (21 checks, hardware, the RTX 5070):
+  - creation and multithread protection;
+  - typeless mirrors on D1, with the runtime image's description;
+  - the game device's colours reaching each runtime image after the fences;
+  - re-enumeration reusing the mirrors;
+  - two images held at once;
+  - a release without a wait copying nothing;
+  - unknown chains ignored;
+  - mipmapped and array images refused, with the refusal named;
+  - 200 frames beside another thread on D2;
+  - reset.
+- `spacewarp_safe_mid_check` and `job_wake_idle_check` pass.
+- **Not run yet:** the simulator (it binds D2 with `all`; `simulated_xr.hpp` now accepts a second device on the same adapter) and the
+  headset. Only the headset shows whether SteamVR presents the generated frames on time.
+
+**What to read after a SteamVR session with the knob on:**
+- `own_device.on` true, `why` "on", `blocked` empty, `failures` 0.
+- `copies`: two per real frame (the eyes), one per overlay redraw, and two per generated frame.
+- spacewarp `thread_ended` close to `generated`, against section 13's 26 % late:
+  - `late` and `late_slot` small;
+  - `inline_frames` near 0, since the inline path is not used.
+- Frame-timing CSV: one generated frame per slot between real frames.
+- The GPU timers for the copies' cost: expected under 0.3 ms per frame on the RTX 5070.
+
+**Risks left:**
+- SteamVR with a session device that never presents a window is normal for VR applications, but untested here, over Steam Link included.
+- Older drivers: shared fences and typeless sharing. Both fail at creation or at the first mirror, and the fallback binds D1.
+- Memory: the mirrors double the swapchain memory (about 130 MB for the eye chains at the user's size).

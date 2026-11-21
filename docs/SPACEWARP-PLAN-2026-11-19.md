@@ -966,3 +966,13 @@ Present, 633 late slots. Full analysis: `docs/research/STEAMVR-SAFE-SUBMIT.md`.
   - **v1451** takes the next due time from SteamVR's slot grid after a late slot, and adds a `hook_end` point (doc section 12).
   - **Steam Link** itself decoded 12-16 ms per frame on the Quest 2 in that session (budget 11.1). It streamed 2748 x 2880 per eye,
     10-bit, up to 350 Mbit/s, with SteamVR at 150 % resolution. So the headset got only 62-75 fps whatever the mod sent.
+- **v1451 headset:** 26 % late. The grid rule ended the chains of late frames. The new `hook_end` point backfired: 99.5 % late slots,
+  each blocking the Present hook for 6.6 ms. **v1452** removes it (doc section 13). The inline route plateaus at about three quarters of
+  generated frames on time, against Virtual Desktop's 99.8 %.
+- **v1453** (opt-in `build/xr-own-device`; doc section 14): section 11's route, built.
+  - The XR session runs on the mod's own D3D11 device on the game's adapter. Every swapchain image is drawn into a shared mirror on the
+    game's device and copied across two shared fences at release.
+  - Spacewarp's waiting thread then waits for, begins and ends each generated frame in its slot on SteamVR, as on Virtual Desktop.
+  - It falls back to the game's device when the runtime refuses the device, the device cannot be made, an image cannot be mirrored, or
+    two sessions in a row fail early.
+  - Lab-checked on the RTX 5070 (`xr_own_device_check`). Not yet run in the simulator or the headset.

@@ -11,6 +11,7 @@
 #include "alternate_eye.hpp"
 #include "frame_pacer.hpp"
 #include "spacewarp_safe_mid.hpp"
+#include "xr_own_device.hpp"
 #include "refresh_rate_policy.hpp"
 #include "stale_eye_warp.hpp"
 #include "spacewarp_math.hpp"
@@ -567,6 +568,7 @@ private:
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         if(chain==chains_[0] || chain==chains_[1]) eye_released_since_capture_=true; // whatever is released here was a faulted frame's image
         while(lease->waited) {
+            if(own_device_active_) own_.released(chain_key_(chain));  // v1453: the mirror's queue follows the runtime's
             if(XR_FAILED(raw_release_image_(chain,&release))) return false;
             --lease->waited;--lease->acquired;++settled_images;
         }
@@ -574,6 +576,7 @@ private:
             XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=0;
             const auto ready=raw_wait_image_(chain,&wait);
             if(XR_FAILED(ready) || ready==XR_TIMEOUT_EXPIRED) return false;
+            if(own_device_active_) {own_.waited(chain_key_(chain));own_.released(chain_key_(chain));}  // v1453
             if(XR_FAILED(raw_release_image_(chain,&release))) {++lease->waited;return false;}
             --lease->acquired;++settled_images;
         }
@@ -585,18 +588,39 @@ private:
         if(!self_managed_chain_(chain) && !settle_lease_(chain)) return XR_ERROR_CALL_ORDER_INVALID;
         const auto result=raw_acquire_image_(chain,info,index);
         if(XR_SUCCEEDED(result)) ++lease_(chain).acquired;
+        if(XR_SUCCEEDED(result) && own_device_active_ && index) own_.acquired(chain_key_(chain),*index);  // v1453
         return result;
     }
     XrResult xrWaitSwapchainImage(XrSwapchain chain,const XrSwapchainImageWaitInfo* info) {
         const auto result=raw_wait_image_(chain,info);
         if(XR_SUCCEEDED(result) && result!=XR_TIMEOUT_EXPIRED) if(auto* lease=find_lease_(chain);lease && lease->waited<lease->acquired) ++lease->waited;
+        // v1453: the game device's next draws into this image's mirror wait for its last copy into the runtime's image
+        if(XR_SUCCEEDED(result) && result!=XR_TIMEOUT_EXPIRED && own_device_active_) own_.waited(chain_key_(chain));
         return result;
     }
     XrResult xrReleaseSwapchainImage(XrSwapchain chain,const XrSwapchainImageReleaseInfo* info) {
+        if(own_device_active_) own_.released(chain_key_(chain));  // v1453: the mirror's content into the runtime's image, across the fences
         const auto result=raw_release_image_(chain,info);
         if(XR_SUCCEEDED(result)) if(auto* lease=find_lease_(chain)) {if(lease->waited) --lease->waited;if(lease->acquired) --lease->acquired;}
         if(XR_SUCCEEDED(result) && chain && (chain==chains_[0] || chain==chains_[1])) eye_released_since_capture_=true;
         return result;
+    }
+    // v1453: xrEnumerateSwapchainImages, and with the own device (build/xr-own-device) each image handed back as its mirror on the game's
+    // device, so every render path keeps drawing on the game's device. A mirror that cannot be made fails the call (the caller's error).
+    auto enumerate_images_() {
+        const auto raw=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);
+        return [this,raw](XrSwapchain chain,uint32_t capacity,uint32_t* count,XrSwapchainImageBaseHeader* images)->XrResult {
+            const XrResult result=raw(chain,capacity,count,images);
+            if(XR_FAILED(result) || !own_device_active_ || !capacity || !images || !count || !*count) return result;
+            auto* d3d=reinterpret_cast<XrSwapchainImageD3D11KHR*>(images);
+            std::vector<ID3D11Texture2D*> textures(*count);for(uint32_t i=0;i<*count;++i) textures[i]=d3d[i].texture;
+            if(!own_.mirror(chain_key_(chain),textures.data(),*count)) {  // the next session binds the game's device
+                try {own_device_blocked="an image could not be mirrored ("+own_.mirror_failure()+")";} catch(...) {}
+                return XR_ERROR_RUNTIME_FAILURE;
+            }
+            for(uint32_t i=0;i<*count;++i) d3d[i].texture=textures[i];
+            return result;
+        };
     }
     PFN_xrGetCurrentInteractionProfile xrGetCurrentInteractionProfile{};PFN_xrPathToString xrPathToString{}; // optional: a runtime without them keeps the suggested profile
     UINT width_{},height_{};
@@ -757,7 +781,7 @@ private:
         info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=640;info.height=560;
         info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
         create_overlay_chain(info,settings_chain_,"Create settings panel");
-        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        auto enumerate=enumerate_images_();uint32_t count{};
         checked(enumerate(settings_chain_,0,&count,nullptr),"Count settings panel images");
         settings_images_.resize(count);for(auto& image:settings_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
         checked(enumerate(settings_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(settings_images_.data())),"Read settings panel images");
@@ -954,7 +978,7 @@ private:
     void destroy_overlay_chain(XrSwapchain chain,const char* name) {
         count_chain_op();std::array<std::uint32_t,2> size{};if(const auto known=chain_sizes_.find(chain);known!=chain_sizes_.end()) size=known->second;
         log_chain_event_(false,name,size[0],size[1],chain); // logged before the call: a destroy that hangs the runtime is still on record
-        chain_sizes_.erase(chain);chain_generations_.erase(chain);forget_lease_(chain);checked(xrDestroySwapchain(chain),name);
+        chain_sizes_.erase(chain);chain_generations_.erase(chain);forget_lease_(chain);if(own_device_active_) own_.forget(chain_key_(chain));checked(xrDestroySwapchain(chain),name);
     }
     // A quad/cylinder swapchain is exactly the size of what it shows (SteamVR rejects sub-rects): rebuilt here, between frames, when that size changes.
     void rebuild_overlay_chain(XrSwapchain& chain,std::vector<XrSwapchainImageD3D11KHR>& images,UINT& have_width,UINT& have_height,UINT width,UINT height,const std::string& label) {
@@ -966,7 +990,7 @@ private:
         info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         info.width=width;info.height=height;info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
         create_overlay_chain(info,chain,("Create "+label).c_str());
-        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        auto enumerate=enumerate_images_();uint32_t count{};
         checked(enumerate(chain,0,&count,nullptr),("Count "+label+" images").c_str());
         images.resize(count);for(auto& i:images) i.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
         checked(enumerate(chain,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),("Read "+label+" images").c_str());
@@ -1091,7 +1115,7 @@ private:
             info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=32;info.height=32;
             info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
             create_overlay_chain(info,chain,"Create small quad");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+            auto enumerate=enumerate_images_();uint32_t count{};
             checked(enumerate(chain,0,&count,nullptr),"Count small quad images");
             images.resize(count);for(auto& image:images) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
             checked(enumerate(chain,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"Read small quad images");
@@ -1425,7 +1449,7 @@ private:
             info.format=format_;info.width=canvas_width;info.height=canvas_height;
             info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
             create_overlay_chain(info,chain,"Create wrist HUD");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+            auto enumerate=enumerate_images_();uint32_t count{};
             checked(enumerate(chain,0,&count,nullptr),"Count wrist HUD images");
             images.resize(count);for(auto& i:images) i.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
             checked(enumerate(chain,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),"Read wrist HUD images");
@@ -1493,7 +1517,7 @@ private:
             info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=width;info.height=height;
             info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
             create_overlay_chain(info,hint_chain_,"Create controls card");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+            auto enumerate=enumerate_images_();uint32_t count{};
             checked(enumerate(hint_chain_,0,&count,nullptr),"Count controls card images");
             hint_images_.resize(count);for(auto& image:hint_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
             checked(enumerate(hint_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(hint_images_.data())),"Read controls card images");
@@ -1551,7 +1575,7 @@ private:
         info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=info.height=blank_texture_size;
         info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
         create_overlay_chain(info,blank_chain_,"Create black fallback quad");
-        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        auto enumerate=enumerate_images_();uint32_t count{};
         checked(enumerate(blank_chain_,0,&count,nullptr),"Count black fallback images");
         blank_images_.resize(count);for(auto& image:blank_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
         checked(enumerate(blank_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(blank_images_.data())),"Read black fallback images");
@@ -1588,7 +1612,7 @@ private:
             info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=info.height=size;
             info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
             create_overlay_chain(info,dot_chain_,"Create wheel dot");
-            auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+            auto enumerate=enumerate_images_();uint32_t count{};
             checked(enumerate(dot_chain_,0,&count,nullptr),"Count wheel dot images");
             dot_images_.resize(count);for(auto& image:dot_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
             checked(enumerate(dot_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(dot_images_.data())),"Read wheel dot images");
@@ -1639,7 +1663,7 @@ private:
         info.format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;info.width=info.height=size;
         info.sampleCount=1;info.faceCount=1;info.arraySize=1;info.mipCount=1;
         create_overlay_chain(info,vignette_chain_,"Create comfort vignette");
-        auto enumerate=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);uint32_t count{};
+        auto enumerate=enumerate_images_();uint32_t count{};
         checked(enumerate(vignette_chain_,0,&count,nullptr),"Count comfort vignette images");
         vignette_images_.resize(count);for(auto& image:vignette_images_) image.type=XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
         checked(enumerate(vignette_chain_,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(vignette_images_.data())),"Read comfort vignette images");
@@ -2321,9 +2345,17 @@ public:
          <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"inline\":"<<(spacewarp_inline_path()?"true":"false")<<",\"inline_frames\":"<<spacewarp_inline_frames<<",\"inline_late\":"<<spacewarp_inline_late<<",\"grid_handoffs\":"<<spacewarp_grid_handoffs
          <<",\"inline_wait_us_max\":"<<spacewarp_inline_wait_us_max<<",\"inline_wait_us_mean\":"<<(spacewarp_inline_measured?spacewarp_inline_wait_us_sum/spacewarp_inline_measured:0)
          <<",\"inline_after_us_max\":"<<spacewarp_inline_after_us_max<<",\"inline_after_us_mean\":"<<(spacewarp_inline_measured?spacewarp_inline_after_us_sum/spacewarp_inline_measured:0)
-         <<",\"inline_fence_frames\":"<<spacewarp_fence_frames<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")
+         <<",\"inline_fence_frames\":"<<spacewarp_fence_frames<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"mt_was\":"<<(spacewarp_mt_was?"true":"false")<<",\"own_device\":"<<own_device_json_()
          <<",\"thread_frames\":"<<spacewarp_thread_frames<<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg
          <<",\"safe_frames\":"<<spacewarp_safe_frames<<",\"fallback_frames\":"<<spacewarp_fallback_frames<<",\"due_us_last\":"<<spacewarp_due_us_last<<",\"due_us_max\":"<<spacewarp_due_us_max<<"}}";
+        return o.str();
+    }
+    // v1453: the session's own device (build/xr-own-device)
+    std::string own_device_json_() const {
+        std::ostringstream o;
+        o<<"{\"on\":"<<(own_device_active_?"true":"false")<<",\"why\":\""<<own_device_why_<<"\",\"copies\":"<<own_.copies()
+         <<",\"failures\":"<<own_.failures()<<",\"chains\":"<<own_.chains()<<",\"thread_ended\":"<<spacewarp_thread_ended.load()
+         <<",\"frames\":"<<own_frames_ended_<<",\"strikes\":"<<own_device_strikes<<",\"blocked\":\""<<own_device_blocked<<"\"}";
         return o.str();
     }
     // The spacewarp counters for xr-live-status.json without diagnostics (the headset test's evidence)
@@ -2336,7 +2368,7 @@ public:
          <<"\",\"gameplay_presents\":"<<spacewarp_gameplay_presents<<",\"not_kept\":"<<spacewarp_not_kept<<",\"not_kept_why\":\""<<spacewarp_not_kept_why
          <<"\",\"play_mismatch_mm\":"<<spacewarp_play_mismatch_mm<<",\"held_far_eyes\":"<<spacewarp_held_far_eyes
          <<",\"weapon_eyes\":"<<spacewarp_weapon_eyes<<",\"late_wait\":"<<spacewarp_late_wait<<",\"late_slot\":"<<spacewarp_late_slot
-         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"thread_frames\":"<<spacewarp_thread_frames
+         <<",\"thread\":"<<(spacewarp_thread && sw_thread_ok_?"true":"false")<<",\"thread_why\":\""<<spacewarp_thread_why<<"\",\"thread_frames\":"<<spacewarp_thread_frames<<",\"own_device\":"<<own_device_json_()
          <<",\"thread_lead_us\":"<<spacewarp_thread_lead_us<<",\"stuck\":"<<spacewarp_stuck<<",\"late_slot_inline\":"<<spacewarp_inline_late<<",\"grid_handoffs\":"<<spacewarp_grid_handoffs<<",\"cuts\":"<<spacewarp_cuts<<",\"cut_m\":"<<spacewarp_cut_m<<",\"cut_deg\":"<<spacewarp_cut_deg
          <<",\"safe_frames\":"<<spacewarp_safe_frames<<",\"fallback_frames\":"<<spacewarp_fallback_frames<<",\"due_us_last\":"<<spacewarp_due_us_last<<",\"due_us_max\":"<<spacewarp_due_us_max<<'}';
         return o.str();
@@ -2379,6 +2411,7 @@ public:
     // the game side's job waits, its end and the render side's entry. Never inside a render graph.
     bool spacewarp_inline{true},spacewarp_force_inline{},sw_inline_mode_{};std::uint64_t spacewarp_inline_frames{},spacewarp_inline_late{};
     std::uint64_t spacewarp_grid_handoffs{};  // v1451: late inline frames whose handed slot set the next due time from SteamVR's slot grid
+    std::atomic<std::uint64_t> spacewarp_thread_ended{};  // v1453: generated frames the waiting thread began and ended itself (own device)
     inline static std::atomic<bool> spacewarp_inline_pending{false};  // a generated frame waits for its due time (dxgi_probe spacewarp_wait_point)
     inline static std::atomic<std::int64_t> spacewarp_inline_due{0};  // v1444: that time (cpu_time_ns), read by the main thread's waits
     // v1444: at the wait points, how long the runtime's xrWaitFrame took and how long after the due time it was called (us)
@@ -2437,6 +2470,19 @@ public:
     // v1420: set by the probe before it constructs a GameXr: spacewarp with its submit thread is wanted. The constructor then switches D3D11
     // multithread protection on (VDXR or the simulator only), before the probe installs its context hooks (spacewarp_thread_ready_).
     inline static bool d3d_protection_wanted{};
+    // v1453 (build/xr-own-device; src/xr_own_device.hpp): the session on the mod's own D3D11 device. 0 off (default), 1 every runtime
+    // except Virtual Desktop (whose own runtime never touches the game's device), 2 every runtime (the simulator, tests). Read once, at
+    // construction, before the session is created.
+    inline static int own_device_wanted{0};
+    // v1453, the fallback: an image the own device cannot mirror, or two own-device sessions in a row that close before
+    // own_device_proving_frames real frames ended (a runtime or driver that fails with it), turn the own device off for the rest of the
+    // game's run; the next sessions bind the game's device, as before (the status says why). A session that ends that many frames on the
+    // own device proves it and clears the strikes. Present thread only (sessions are made and closed there).
+    inline static int own_device_strikes{0};
+    inline static std::string own_device_blocked{};
+    static constexpr std::uint64_t own_device_proving_frames=900;  // 10 s at 90 Hz
+    XrOwnDevice own_;bool own_device_active_{};std::string own_device_why_{"off"};std::uint64_t own_frames_ended_{};
+    std::uintptr_t chain_key_(XrSwapchain chain) const noexcept {return reinterpret_cast<std::uintptr_t>(chain);}
     std::uint64_t spacewarp_thread_frames{},spacewarp_thread_lead_us{};  // v1420: frames the thread submitted; their last lead on the next Present (us)
     std::array<SpacewarpWeaponLocal,2> spacewarp_weapon{};  // v1419: each hand's weapon body (dxgi_probe, every Present)
     // v1418 diagnostics (dxgi_probe, build knobs): a palm reach other than hand_own_radius (spacewarp-palm-reach, metres; 0 = default: the
@@ -2760,9 +2806,24 @@ public:
             if(FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi))) || FAILED(dxgi->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc)) ||
                desc.AdapterLuid.HighPart!=requirements.adapterLuid.HighPart || desc.AdapterLuid.LowPart!=requirements.adapterLuid.LowPart ||
                device->GetFeatureLevel()<requirements.minFeatureLevel) throw std::runtime_error("Game device differs from XR device requirements");
-            XrGraphicsBindingD3D11KHR binding{};binding.type=XR_TYPE_GRAPHICS_BINDING_D3D11_KHR;binding.device=device;
+            // v1453: with build/xr-own-device, the session on the mod's own device (same adapter): the runtime never touches the game's
+            // device, so spacewarp's waiting thread can send generated frames in their slots on SteamVR too. Any failure binds the game's device.
+            ID3D11Device* session_device=device;
+            if(own_device_wanted>0) {
+                const bool vdxr=xr_runtime_name.find("VirtualDesktop")!=std::string::npos;
+                if(vdxr && own_device_wanted<2) own_device_why_="not needed (Virtual Desktop)";
+                else if(!own_device_blocked.empty()) own_device_why_="off after failures: "+own_device_blocked;
+                else if(own_.create(device)) {session_device=own_.device();own_device_active_=true;own_device_why_="on";}
+                else own_device_why_="failed: "+own_.why();
+            }
+            XrGraphicsBindingD3D11KHR binding{};binding.type=XR_TYPE_GRAPHICS_BINDING_D3D11_KHR;binding.device=session_device;
             XrSessionCreateInfo session{};session.type=XR_TYPE_SESSION_CREATE_INFO;session.next=&binding;session.systemId=system;
-            checked(api<PFN_xrCreateSession>("xrCreateSession",instance_)(instance_,&session,&session_),"Create game XR session");
+            XrResult created=api<PFN_xrCreateSession>("xrCreateSession",instance_)(instance_,&session,&session_);
+            if(XR_FAILED(created) && own_device_active_) {  // v1453: a runtime that refuses the own device gets the game's, as before
+                own_device_why_="runtime refused it ("+std::to_string(created)+")";own_device_active_=false;own_.reset();
+                binding.device=device;created=api<PFN_xrCreateSession>("xrCreateSession",instance_)(instance_,&session,&session_);
+            }
+            checked(created,"Create game XR session");
             try {setup_refresh_rate_();} catch(...) {} // plan 1.6, opt-in; a failure leaves the policy inactive, never the session
             XrReferenceSpaceCreateInfo space{};space.type=XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
             space.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;space.poseInReferenceSpace.orientation.w=1;
@@ -2810,7 +2871,7 @@ public:
             throw std::runtime_error("Game output exceeds an XR eye's limits");
         ContextState::Scope graphics_scope(graphics_state_);
         auto create_chain=api<PFN_xrCreateSwapchain>("xrCreateSwapchain",instance_);
-        auto enumerate_images=api<PFN_xrEnumerateSwapchainImages>("xrEnumerateSwapchainImages",instance_);
+        auto enumerate_images=enumerate_images_();
         std::array<XrSwapchain,2> next{};
         std::array<std::vector<XrSwapchainImageD3D11KHR>,2> images;
         try {
@@ -2837,7 +2898,7 @@ public:
             drain_gpu_for_surface();
             for(auto& chain:chains_) if(chain) {
                 log_chain_event_(false,"Destroy replaced eye swapchain",width_,height_,chain);
-                chain_sizes_.erase(chain);forget_lease_(chain);checked(xrDestroySwapchain(chain),"Destroy replaced eye swapchain");chain=XR_NULL_HANDLE;
+                chain_sizes_.erase(chain);forget_lease_(chain);if(own_device_active_) own_.forget(chain_key_(chain));checked(xrDestroySwapchain(chain),"Destroy replaced eye swapchain");chain=XR_NULL_HANDLE;
             }
         } catch(...) {for(auto chain:next) if(chain) xrDestroySwapchain(chain);throw;}
         chains_=next;images_=std::move(images);width_=width;height_=height;format_=format;rendered_mask_=0;menu_band_width_=0; // prepare_overlays rebuilds the band chain
@@ -3255,8 +3316,11 @@ public:
     bool spacewarp_thread_ready_() {
         if(sw_thread_checked_) return sw_thread_ok_;
         sw_thread_checked_=true;sw_thread_ok_=false;
-        if(!xr_runtime_name.empty() && xr_runtime_name.find("VirtualDesktop")==std::string::npos) {spacewarp_thread_why="runtime";return false;}
         if(spacewarp_force_inline) {spacewarp_thread_why="forced inline";return false;}  // v1440 sim: the SteamVR path in the simulator
+        // v1453: on the own device the runtime never touches the game's device, so the thread waits for, begins and ends the generated
+        // frame on any runtime (SteamVR included), as on Virtual Desktop
+        if(own_device_active_) {spacewarp_thread_why="";return sw_thread_ok_=true;}
+        if(!xr_runtime_name.empty() && xr_runtime_name.find("VirtualDesktop")==std::string::npos) {spacewarp_thread_why="runtime";return false;}
         spacewarp_thread_why="";return sw_thread_ok_=true;
     }
     // v1420: hand the generated frame (sw_views_, sw_layers_, sw_target_time_; its images already released) to the submit thread
@@ -3287,6 +3351,10 @@ public:
             sw_job_.result=result;sw_job_.waited_ns=waited;
             if(XR_FAILED(result)) {sw_job_.fault=xr_result_session_fatal(result);sw_job_.rejected=!sw_job_.fault;sw_job_.what="wait failed";sw_job_.state=SwJob::done;}
             else if(slot.predictedDisplayTime>target+period/2) {sw_job_.late_slot=true;sw_job_.handed=slot;sw_job_.state=SwJob::done;}  // the real frame's slot: its wait
+            else if(own_device_active_) {  // v1453: the runtime uses only the own device: this thread ends the frame in its slot, now
+                sw_job_.slot=slot;sw_job_.state=SwJob::due;
+                l.unlock();submit_due_spacewarp_(false);++spacewarp_thread_ended;l.lock();
+            }
             else {sw_job_.slot=slot;sw_job_.state=SwJob::due;spacewarp_due.store(true,std::memory_order_release);}  // the render thread ends it
             sw_job_cv_.notify_all();
         }
@@ -3555,6 +3623,9 @@ public:
         if(floor_space_ && xrDestroySpace) {xrDestroySpace(floor_space_);floor_space_=XR_NULL_HANDLE;}calibration_floor_y_.reset();grip_pose_tick_=0;grip_velocity_hands=0;
         if(local_ && xrDestroySpace) {xrDestroySpace(local_);local_=XR_NULL_HANDLE;}
         if(session_ && xrDestroySession) {xrDestroySession(session_);session_=XR_NULL_HANDLE;}
+        if(own_device_active_ && own_frames_ended_<own_device_proving_frames && ++own_device_strikes>=2 && own_device_blocked.empty())
+            try {own_device_blocked="2 sessions in a row closed before "+std::to_string(own_device_proving_frames)+" frames";} catch(...) {}  // v1453
+        own_.reset();own_device_active_=false;  // v1453: the own device and the mirrors go with the session, never before it
         if(action_set_ && xrDestroyActionSet) {xrDestroyActionSet(action_set_);action_set_=XR_NULL_HANDLE;}
         if(instance_ && xrDestroyInstance) {xrDestroyInstance(instance_);instance_=XR_NULL_HANDLE;}
         if(loader_) {FreeLibrary(loader_);loader_=nullptr;}
@@ -4458,7 +4529,10 @@ public:
             }
         }
         bool real_frame_ended=false;
-        if(const auto ended=xrEndFrame(session_,&end);XR_SUCCEEDED(ended)) real_frame_ended=true;
+        if(const auto ended=xrEndFrame(session_,&end);XR_SUCCEEDED(ended)) {
+            real_frame_ended=true;
+            if(own_device_active_ && ++own_frames_ended_==own_device_proving_frames) own_device_strikes=0;  // v1453: the own device works here
+        }
         else {
             // SteamVR fails single frames with layer errors ("compositor failed EndFrame()"): drop that frame instead of recreating the
             // session (the user sees SteamVR home). The layer dump goes to xr-recoveries.log either way.
