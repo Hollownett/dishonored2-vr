@@ -1017,7 +1017,14 @@ built again: `full_body_driver.hpp` lacked `<sstream>` since v1423).
   where the torso's own last step puts it (the pelvis's and the neck's world steps since the previous image, by height), as for the legs.
 - Lab: `spacewarp_pass_check` test 22 (a wall beside a standing, leaning player stays, the torso still follows the head; v1432's test moves
   the wall), `spacewarp_image_legs_check` (the foot capsule holds the drawn toe tip: 40 mm from its line; v1439's 112 mm), all earlier
-  checks pass. Not run in the game yet.
+  checks pass.
+- Sim (as v1455, the SteamVR session's build with v1461 merged, 2026-11-21 13:32, `sw1455-tint`, class tint, its own-device route on;
+  captures `D:\d2vr-artifacts\sw-v1455-tint`): 2,939 generated, 2,938 submitted, 0 late, 0 failures, `leg_phase` [3014, 0, 0]. Against
+  v1445's classes on the same frames: both boots, toe caps included, are the leg's (v1445: capped movers); the chest, the coat and the
+  upper sleeves inside the cylinder are the torso's (8.2 M pixels over 8 triples that moved with the play space only); nothing of the body
+  fell to still world (the "lost" pixels are the post v1445 dragged along). A band right under the chin (within 15 cm of the eye's height:
+  the collar) stays the near rig. The motion itself (head-following, the leg swing) is for the headset: the sim's head never moves between
+  the two times and its walk barely swings the legs.
 
 Known limits: a leg's step is still extrapolated from the last real frame, so a foot that plants overshoots by up to ~1 cm at a run for
 one generated frame; the torso's own turn outside the dead zone and its sideways tilt when standing (the solver's ~8 % of a sideways
