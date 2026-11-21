@@ -14,11 +14,13 @@ Work down this list, one change at a time, until the motion looks smooth to you.
 1. **Spacewarp: Auto** (the default) and the **headset at 90 Hz**. When the game falls short of 90 fps, it runs at 45 and the
    mod draws every frame in between, so the headset still gets 90 images a second.
 2. **Resolution: 1.00x.** This is the biggest lever on the graphics card.
-3. **Anti-aliasing: DLSS Quality** (NVIDIA RTX) **or FSR 3 Quality**. These render fewer pixels and upscale them.
+3. **Anti-aliasing: DLSS Quality** (NVIDIA RTX), **FSR 4 Quality** (where your GPU can run FSR 4) **or FSR 3 Quality**. These
+   render fewer pixels and upscale them.
 4. **Game, Shadow Quality: Low.** Shadows were about half of the game's GPU work in one heavy scene.
 5. **Monitor view: Off.**
-6. **Still short with Spacewarp on?** Your processor is the limit: try **Spacewarp: Always**. Without Spacewarp, try
-   **Performance mode** instead; the two cannot run together.
+6. **Still not smooth with Spacewarp on?** If it keeps switching between full and half rate, set **Spacewarp: Always**. If the
+   game cannot hold even 45 fps, lower the settings above further. Without Spacewarp, try **Performance mode** instead; the
+   two cannot run together.
 
 ## What each setting does
 
