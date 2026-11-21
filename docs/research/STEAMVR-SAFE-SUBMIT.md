@@ -579,3 +579,64 @@ the boots' toe caps, the upper chest, and scenery beside a leaning player. All 1
 - SteamVR with a session device that never presents a window is normal for VR applications, but untested here, over Steam Link included.
 - Older drivers: shared fences and typeless sharing. Both fail at creation or at the first mirror, and the fallback binds D1.
 - Memory: the mirrors double the swapchain memory (about 130 MB for the eye chains at the user's size).
+
+## 15. v1455 in the headset, and v1456 (2026-11-21 14:10)
+
+**User** (SteamVR over Steam Link, Quest 2, Spacewarp Auto): "Steam VR fix is not working at all": gameplay did not show in the headset.
+
+**Session** (pid 41948) [data]. Sources: the mod's status and frame-timing CSV, SteamVR's `xrclient_Dishonored2.txt`, and
+`vrcompositor.txt`.
+- **The own device itself worked.** The session was on D2, with 19,346 copies and 0 failures. The menus showed in the headset:
+  about 4,600 presents not timed out, about the menu phase at 90 Hz.
+- **Gameplay broke**, 3.4 s after its first projection layer:
+  1. 14:09:21.9: a new swapchain (the HUD window). The waiting thread's frame calls then took about 300 ms: present 2074 waited
+     318 ms for the thread.
+  2. Present 2074's xrWaitFrame returned at once, with a display time already in the past.
+  3. A 1.2 s gap in the engine followed (present 2076), probably the level-start autosave.
+  4. During it, at 14:09:23.228, SteamVR logged "Application submitted two left scene textures for a single frame!", then
+     `ComposeLayerProjection: failed to submit view N: VRCompositorError_AlreadySubmitted`, 5,186 times.
+  5. From present 2077 on, every xrWaitFrame returned the last display time plus 2 ns: 1,295 real frames until the game closed.
+     xrWaitFrame did not block at first and later blocked 2-10 ms.
+- **SteamVR's verdict:** of the app's 9,129 presents, 4,525 were in "Timed out" (1,764 time-outs). That is SteamVR's own scene instead
+  of the game, as in the user's report.
+- **Earlier sessions:** v1445, v1450 and v1451 had no "two scene textures" warning and real frames always 2 vsyncs apart. Their
+  time-out share was 11-17 %.
+- **The difference: v1453's waiting thread began and ended the generated frame itself.** SteamVR got frame calls from two threads;
+  after a stall its frame bookkeeping never recovered.
+- **Side finding: SteamVR Motion Smoothing was on.** SteamVR was started at 14:07:52 and Spacewarp switched on in the launcher at
+  14:08:10. The launcher changes the per-app override only while SteamVR is closed: `steam.app.403640` had no
+  `motionSmoothingOverride`. SteamVR reported 22.2 ms periods in the menus.
+
+**v1456 (commit `37dbb2b`):**
+- **One thread for SteamVR.** The waiting thread never ends frames again; Virtual Desktop keeps v1420's design. SteamVR uses the
+  inline path, so all frame calls are on the render thread, as in v1445-v1452.
+- **Sends from any wait, on the own device.** `safe_mid::own_device` is set with the session. Then the mid points need neither the
+  engine lock nor the exclusive window. Every main-thread wait outside the Present hook sends at the due time; render graphs are
+  included (new points `render_wait` and `render_wait_timer`).
+  - So a send never touches the game's device: the generated images are released in `present()`, and the send skips the context-state
+    swap, which used `SwapDeviceContextState` on the game's immediate context.
+  - `build/xr-own-device` switches the mid points on.
+- **Watchdog**, on any runtime:
+  - a real frame whose display time is under half a period after the last one stops generated frames;
+  - 30 such frames over 1.5 s recreate the session, at most 3 times per game run;
+  - status `own_device.timing_stalls`, `timing_stall_frames` and `timing_recoveries`.
+- **Lab:** all 10 pass; `spacewarp_safe_mid_check` covers the own-device gates.
+- **Simulator** (`v1456-inline-own`: `spacewarp-force-inline`, `spacewarp always` from 1 s into gameplay, `xr-own-device`) [data]:
+  - own device on, 19,918 copies, 0 failures;
+  - 1,833 of 1,855 generated frames sent, 0 late slots, 0 failures. The 22 drops came too near the real frame's slot (the v1440
+    margin), all at `render_wait`;
+  - 76 sends from render-side waits (52 `render_wait`, 24 `render_wait_timer`), most within 0.25 ms of the due time; 0 watchdog stalls;
+  - StartProbe returned 1 at shutdown ("Native interaction ray/door hooks did not restore or drain"). That is the same intermittent
+    teardown failure as the v1423 sim (`sw-v1423-run`), unrelated to spacewarp; the earlier runs returned 0 or 4.
+- **Installed** in the main checkout at the user's go-ahead (14:40): launcher `67ed89ed...`; v1455's is kept as
+  `DishonoredVRLauncher.before-v1456.exe`.
+
+**For the next headset session:**
+- Close SteamVR before Launch VR, so the launcher switches Motion Smoothing off for the game; or set it Off in SteamVR's per-application
+  video settings.
+- Read:
+  - `spacewarp_safe_mid.points` (`render_wait_timer` and `game_wait_timer` share, `late_slot` per point), and the late share against
+    section 13's 26 %;
+  - `own_device.timing_stalls` (should be 0);
+  - SteamVR's `xrclient_Dishonored2.txt`: no "two scene textures" warning;
+  - `vrcompositor.txt`: the time-out share.
