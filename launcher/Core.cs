@@ -16,6 +16,8 @@ public sealed class Env
     /// <summary>Standalone: Root is the per-user mod home (ModHome) and the mod is the one embedded in the exe (Pinned).</summary>
     public bool Standalone;
     public Candidate? Pinned; public string InstallError = "not installed yet";
+    /// <summary>The game this environment (mod home) is for; Dishonored 2 unless set.</summary>
+    public GameProfile Profile = GameProfile.D2;
     public Env(string root) { Root = root; }
     public string P(params string[] s) => Path.Combine(new[] { Root }.Concat(s).ToArray());
     public string Art => P("artifacts");
@@ -58,8 +60,9 @@ public sealed class Env
         return null;
     }
 
-    public static string? FindGameDir()
+    public static string? FindGameDir(GameProfile? profile = null)
     {
+        var prof = profile ?? GameProfile.D2;
         var steams = new List<string>();
         if (Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam")?.GetValue("SteamPath") is string s1) steams.Add(s1.Replace('/', '\\'));
         if (Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Valve\Steam")?.GetValue("InstallPath") is string s2) steams.Add(s2);
@@ -72,8 +75,8 @@ public sealed class Env
                 foreach (Match m in Regex.Matches(File.ReadAllText(vdf), "\"path\"\\s+\"([^\"]+)\"")) libs.Add(m.Groups[1].Value.Replace(@"\\", @"\"));
             foreach (var l in libs)
             {
-                var d = Path.Combine(l, "steamapps", "common", "Dishonored2");
-                if (File.Exists(Path.Combine(d, "Dishonored2.exe"))) return d;
+                var d = Path.Combine(l, "steamapps", "common", prof.SteamFolder);
+                if (File.Exists(Path.Combine(d, prof.ExeName))) return d;
             }
         }
         return null;
@@ -103,29 +106,45 @@ public sealed class Env
     }
 
     static readonly object buildLock = new();
-    static (string exe, long len, DateTime written, bool ok)? buildCache;
+    static readonly Dictionary<string, (long len, DateTime written, bool ok)> buildCache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>True when Dishonored2.exe in gameDir is the build this mod supports (SHA-256 equals Probe.GameHash). The ~100 MB hash is
     /// computed once per exe path + length + last-write time; RunChecks runs on a worker thread (RefreshChecks), but the art-import
     /// progress callback also calls it on the UI thread, where only a cache hit is expected. An unreadable exe counts as not supported.</summary>
-    public static bool GameBuildSupported(string? gameDir)
+    public static bool GameBuildSupported(string? gameDir, GameProfile? profile = null)
     {
         if (gameDir == null) return false;
+        var prof = profile ?? GameProfile.D2;
         try
         {
-            var exe = Path.Combine(gameDir, "Dishonored2.exe");
+            var exe = Path.Combine(gameDir, prof.ExeName);
             var fi = new FileInfo(exe);
             if (!fi.Exists) return false;
             lock (buildLock)
             {
-                if (buildCache is { } c && c.exe == fi.FullName && c.len == fi.Length && c.written == fi.LastWriteTimeUtc) return c.ok;
-                var ok = string.Equals(ModHome.Sha256(exe), Probe.GameHash, StringComparison.OrdinalIgnoreCase);
-                buildCache = (fi.FullName, fi.Length, fi.LastWriteTimeUtc, ok);
+                if (buildCache.TryGetValue(fi.FullName, out var c) && c.len == fi.Length && c.written == fi.LastWriteTimeUtc) return c.ok;
+                var ok = string.Equals(ModHome.Sha256(exe), prof.ExeSha256, StringComparison.OrdinalIgnoreCase);
+                buildCache[fi.FullName] = (fi.Length, fi.LastWriteTimeUtc, ok);
                 return ok;
             }
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>The OpenXR runtime and loader rows (shared by every game's Setup checks); returns the active runtime's manifest path.</summary>
+    string? AddRuntimeChecks(List<Check> l)
+    {
+        var rt = OpenXrRuntime();
+        var vd = rt != null && (rt.Contains("vdxr", StringComparison.OrdinalIgnoreCase) || rt.Contains("VirtualDesktop", StringComparison.OrdinalIgnoreCase));
+        l.Add(new("OpenXR runtime", rt != null, rt == null ? "no active runtime" : (vd ? "Virtual Desktop (VDXR)" : rt),
+            rt == null ? "Set an active OpenXR runtime (Virtual Desktop Streamer > Settings > OpenXR, or the Oculus / SteamVR app)."
+                       : (vd ? "" : "Usable, but Virtual Desktop's VDXR is the recommended runtime for this mod.")));
+        var bundledLoader = File.Exists(BundledLoader); var steamLoader = File.Exists(SteamVrLoader);
+        l.Add(new("OpenXR loader", bundledLoader || steamLoader, bundledLoader ? "bundled Khronos loader" : steamLoader ? "SteamVR's loader" : "missing",
+            Standalone ? "The launcher installs the Khronos OpenXR loader into " + Root + "; check that the folder is writable, then Re-check."
+                       : "Copy the verified loader to third_party\\openxr\\bin (see third_party\\openxr\\bin\\source.json), or install SteamVR."));
+        return rt;
     }
 
     /// <summary>artState: null when the art is present, otherwise what to show (importing progress or why it is missing).</summary>
@@ -139,15 +158,7 @@ public sealed class Env
         l.Add(new("Dishonored 2 (supported build)", supported,
             gd == null ? "game not found" : supported ? "matches the pinned build" : "Game was updated by Steam; this mod build supports only the pinned version.",
             "Use a mod build made for the installed game version, or verify the game files in Steam (Properties > Installed Files) to restore the supported build."));
-        var rt = OpenXrRuntime();
-        var vd = rt != null && (rt.Contains("vdxr", StringComparison.OrdinalIgnoreCase) || rt.Contains("VirtualDesktop", StringComparison.OrdinalIgnoreCase));
-        l.Add(new("OpenXR runtime", rt != null, rt == null ? "no active runtime" : (vd ? "Virtual Desktop (VDXR)" : rt),
-            rt == null ? "Set an active OpenXR runtime (Virtual Desktop Streamer > Settings > OpenXR, or the Oculus / SteamVR app)."
-                       : (vd ? "" : "Usable, but Virtual Desktop's VDXR is the recommended runtime for this mod.")));
-        var bundledLoader = File.Exists(BundledLoader); var steamLoader = File.Exists(SteamVrLoader);
-        l.Add(new("OpenXR loader", bundledLoader || steamLoader, bundledLoader ? "bundled Khronos loader" : steamLoader ? "SteamVR's loader" : "missing",
-            Standalone ? "The launcher installs the Khronos OpenXR loader into " + Root + "; check that the folder is writable, then Re-check."
-                       : "Copy the verified loader to third_party\\openxr\\bin (see third_party\\openxr\\bin\\source.json), or install SteamVR."));
+        var rt = AddRuntimeChecks(l);
         var c = LatestCandidate(out var why);
         l.Add(new("Mod", c != null, c != null ? (Standalone ? $"{c.Dll} (verified)" : c.Dll) : why, Standalone
             ? "The launcher could not write the mod to " + Root + ". Check that the folder is writable and not locked, then Re-check."
@@ -172,9 +183,38 @@ public sealed class Env
         return l;
     }
 
-    public bool Ready(Candidate? c) => c != null && GameBuildSupported(FindGameDir()) && (File.Exists(BundledLoader) || File.Exists(SteamVrLoader)) && VcRuntime();
+    public bool Ready(Candidate? c) => c != null && GameBuildSupported(FindGameDir(Profile), Profile) && (File.Exists(BundledLoader) || File.Exists(SteamVrLoader)) && VcRuntime()
+        && (Profile.InjectFallback || !ForeignProxy(FindGameDir(Profile)));
 
-    public static Process? Game() => Process.GetProcessesByName("Dishonored2").FirstOrDefault();
+    public static Process? Game(GameProfile? profile = null) => Process.GetProcessesByName((profile ?? GameProfile.D2).ProcessName).FirstOrDefault();
+
+    /// <summary>True when the game folder holds another mod's dinput8.dll: a proxy-only game cannot start VR then.</summary>
+    public static bool ForeignProxy(string? gameDir) => gameDir != null && File.Exists(Path.Combine(gameDir, ProxyInstall.DllName)) && !ProxyInstall.Installed(gameDir);
+
+    /// <summary>Setup checks of a game other than Dishonored 2 (same style as <see cref="RunChecks"/>): game, supported build, mod payload, proxy,
+    /// OpenXR runtime and loader, VC++ runtime.</summary>
+    public List<Check> RunProfileChecks()
+    {
+        var p = Profile; var l = new List<Check>();
+        var gd = FindGameDir(p);
+        l.Add(new("Game found", gd != null, gd ?? "not found in any Steam library",
+            $"Install Dishonored: {p.DisplayName} through Steam (app {p.SteamAppId}). If it is installed, start Steam once so libraryfolders.vdf is written."));
+        var supported = GameBuildSupported(gd, p);
+        l.Add(new("Supported build", supported,
+            gd == null ? "game not found" : supported ? $"{p.ExeName} matches the pinned build" : "Game was updated by Steam; this mod build supports only the pinned version.",
+            "Use a mod build made for the installed game version, or verify the game files in Steam (Properties > Installed Files) to restore the supported build."));
+        var c = LatestCandidate(out var why);
+        l.Add(new("Mod build", c != null, c != null ? $"{c.Dll} (verified)" : why,
+            Pinned == null && InstallError == p.NotIncludedMessage ? "Use a launcher release that includes the " + p.DisplayName + " build."
+                : "The launcher could not write the mod to " + Root + ". Check that the folder is writable and not locked, then Re-check."));
+        bool ours = gd != null && ProxyInstall.Installed(gd), foreign = ForeignProxy(gd);
+        l.Add(new("Proxy", !foreign, gd == null ? "game not found" : foreign ? "another mod's dinput8.dll is in the game folder" : ours ? "installed in the game folder" : "installed when you press Launch VR",
+            foreign ? "Move the other dinput8.dll away: this game starts VR only through the launcher's proxy." : ""));
+        AddRuntimeChecks(l);
+        var vc = VcRuntime();
+        l.Add(new("VC++ runtime", vc, vc ? "Visual C++ 2015-2022 x64" : "missing", "Install the Microsoft Visual C++ 2015-2022 Redistributable (x64) from Microsoft."));
+        return l;
+    }
 
     /// <summary>Live status from artifacts/xr-live-status.json (written about once a second by the injected DLL).</summary>
     public (bool fresh, bool gameplay, long logic) LiveStatus()

@@ -58,8 +58,9 @@ public static class Probe
     /// inside the game about <see cref="ProxyInstall.DefaultStartSeconds"/> s after its window appears; returns false (no session ran here). Fallback
     /// (proxy not installable, logged why) and an already running game: waits 45 s and runs the session until StopProbe, game exit or failure; returns true.
     /// When this call started the game it posts Enter three times (title, Campaign, Continue) to the game window once the mod is in.</summary>
-    public static async Task<bool> Launch(Candidate c, string root, Action<string> log, Func<bool> inGameplay)
+    public static async Task<bool> Launch(Candidate c, string root, Action<string> log, Func<bool> inGameplay, GameProfile? profile = null)
     {
+        var prof = profile ?? GameProfile.D2;
         using (var doc = JsonDocument.Parse(File.ReadAllText(c.Manifest)))
         {
             var m = doc.RootElement;
@@ -68,40 +69,42 @@ public static class Probe
             if (!Regex.IsMatch(m.GetProperty("dll_name").GetString() ?? "", @"^d2vr_render_probe_arm_v[0-9]+\.dll$")) throw new InvalidOperationException("Invalid candidate filename.");
             if (ModHome.Sha256(c.DllPath) != m.GetProperty("sha256").GetString())
                 throw new InvalidOperationException("Candidate DLL changed since validation. Build and validate a fresh version before updating the candidate.");
-            if (m.GetProperty("game_sha256").GetString() != GameHash) throw new InvalidOperationException("The candidate was validated for a different game build.");
+            if (m.GetProperty("game_sha256").GetString() != prof.ExeSha256) throw new InvalidOperationException("The candidate was validated for a different game build.");
         }
-        var games = Process.GetProcessesByName("Dishonored2");
+        var games = Process.GetProcessesByName(prof.ProcessName);
         bool startedGame = false;
         if (games.Length == 0)
         {
-            bool viaProxy = TryInstallProxy(root, log);
+            bool viaProxy = TryInstallProxy(root, log, prof);
+            if (!viaProxy && !prof.InjectFallback)  // proxy-only game: no injection path exists, so do not start it without the proxy
+                throw new InvalidOperationException($"The proxy could not be installed and {prof.DisplayName} has no injection fallback (see the log line above); the game was not started.");
             if (viaProxy) SetAsidePreviousProxyLog(root);  // only lines written by this game start may count
-            GameKeys.PrepareConfig(log);
+            GameKeys.PrepareConfig(log, prof);
             // Steam still owns app 403640 while the game is starting or closing. Sending rungameid then starts it twice (or relaunches over the
             // closing one) and breaks the Steam Link audio. Wait: the process appears (it is starting; do not launch again) or Steam lets go.
             var settle = DateTime.UtcNow.AddSeconds(60);
-            if (SteamRunningApp() == 403640) log("Steam still has Dishonored 2 running or closing; waiting for it before starting.");
-            while (games.Length == 0 && SteamRunningApp() == 403640 && DateTime.UtcNow < settle) { await Task.Delay(500); games = Process.GetProcessesByName("Dishonored2"); }
+            if (SteamRunningApp() == prof.SteamAppId) log($"Steam still has {prof.DisplayName} running or closing; waiting for it before starting.");
+            while (games.Length == 0 && SteamRunningApp() == prof.SteamAppId && DateTime.UtcNow < settle) { await Task.Delay(500); games = Process.GetProcessesByName(prof.ProcessName); }
             if (games.Length == 0)
             {
-                Process.Start(new ProcessStartInfo("steam://rungameid/403640") { UseShellExecute = true });  // Steam app 403640 is Dishonored 2
-                log("Starting Dishonored 2 through Steam...");
+                Process.Start(new ProcessStartInfo(prof.SteamUri) { UseShellExecute = true });  // D2: steam://rungameid/403640
+                log($"Starting {prof.DisplayName} through Steam...");
             }
             var deadline = DateTime.UtcNow.AddMinutes(3);
-            while (games.Length == 0 && DateTime.UtcNow < deadline) { await Task.Delay(2000); games = Process.GetProcessesByName("Dishonored2"); }
+            while (games.Length == 0 && DateTime.UtcNow < deadline) { await Task.Delay(2000); games = Process.GetProcessesByName(prof.ProcessName); }
             if (viaProxy)
             {
-                if (games.Length == 0) throw new InvalidOperationException("Steam did not start Dishonored 2 within 3 minutes.");
+                if (games.Length == 0) throw new InvalidOperationException($"Steam did not start {prof.DisplayName} within 3 minutes.");
                 log($"Game started; the proxy starts VR as soon as the game draws its first frame (artifacts\\linux-proxy.log). Use Stop VR to stop.");
                 SessionPath = ProxyInstall.StartPath.Proxy;
-                await ContinueAfterProxyStart(root, games[0].Id, log, inGameplay);
+                await ContinueAfterProxyStart(root, games[0].Id, log, inGameplay, prof);
                 return false;
             }
             if (games.Length > 0)
             {
                 log($"Game started; waiting {ProxyInstall.FallbackDelaySeconds} s for the title screen.");
                 await Task.Delay(ProxyInstall.FallbackDelaySeconds * 1000);
-                games = Process.GetProcessesByName("Dishonored2"); startedGame = true;
+                games = Process.GetProcessesByName(prof.ProcessName); startedGame = true;
             }
         }
         if (games.Length == 1 && ProxyLoadedIn(games[0]))
@@ -114,6 +117,8 @@ public static class Probe
                           : "VR is already running through the proxy. Stop VR, wait for restoration, then Launch VR to apply saved settings.");
             return false;
         }
+        if (!prof.InjectFallback)
+            throw new InvalidOperationException($"{prof.DisplayName} is running without the VR proxy. Close it and press Launch VR so the launcher can install the proxy first.");
         if (games.Length != 1) throw new InvalidOperationException("Start Dishonored 2 and enter gameplay or its pause menu; exactly one process is required.");
         int pid = games[0].Id;
         SessionPath = ProxyInstall.StartPath.Injected;
@@ -148,21 +153,21 @@ public static class Probe
 
     /// <summary>The embedded proxy (home\build\dinput8.dll) beside Dishonored2.exe plus d2vr-linux.ini. Any problem is logged with the reason and the
     /// old 45 s injection path is used instead.</summary>
-    static bool TryInstallProxy(string root, Action<string> log)
+    static bool TryInstallProxy(string root, Action<string> log, GameProfile prof)
     {
         try
         {
-            var gameDir = Env.FindGameDir() ?? throw new InvalidOperationException("the Dishonored 2 folder was not found");
+            var gameDir = Env.FindGameDir(prof) ?? throw new InvalidOperationException($"the {prof.DisplayName} folder was not found");
             var proxy = Path.Combine(root, "build", ProxyInstall.DllName);
             if (!File.Exists(proxy)) throw new InvalidOperationException("this launcher build carries no proxy (build\\dinput8.dll)");
             var changed = ProxyInstall.Install(gameDir, root, File.ReadAllBytes(proxy));
             log(changed.Count == 0 ? $"Proxy already installed in {gameDir}." : $"Proxy installed in {gameDir} ({string.Join(", ", changed)}).");
-            log($"Note: with the proxy installed, every start of Dishonored 2 starts VR at its first frame. To play flat, use Tools > Uninstall proxy.");
+            log($"Note: with the proxy installed, every start of {prof.DisplayName} starts VR at its first frame. To play flat, use " + (prof.IsD2 ? "Tools > Uninstall proxy." : "Uninstall proxy on the Outsider page."));
             return true;
         }
         catch (Exception ex)  // not installable (foreign dinput8.dll, no permission, missing payload): today's behaviour
         {
-            log($"Proxy not installed: {ex.Message}; using the old {ProxyInstall.FallbackDelaySeconds} s wait.");
+            log(prof.InjectFallback ? $"Proxy not installed: {ex.Message}; using the old {ProxyInstall.FallbackDelaySeconds} s wait." : $"Proxy not installed: {ex.Message}.");
             return false;
         }
     }
@@ -215,13 +220,13 @@ public static class Probe
     /// <summary>With the proxy the launcher still continues the last save like the injection path did: waits for "StartProbe begin" in the proxy log
     /// (the previous log was set aside before the launch), checks that StartProbe did not return a failure code, then posts Enter up to three times.
     /// "StartProbe returned" only appears when a start fails or the session has ended.</summary>
-    static async Task ContinueAfterProxyStart(string root, int pid, Action<string> log, Func<bool> inGameplay)
+    static async Task ContinueAfterProxyStart(string root, int pid, Action<string> log, Func<bool> inGameplay, GameProfile prof)
     {
         var logFile = Path.Combine(root, "artifacts", "linux-proxy.log");
         var deadline = DateTime.UtcNow.AddSeconds(180);
         while (DateTime.UtcNow < deadline)
         {
-            if (Process.GetProcessesByName("Dishonored2").Length == 0) return;
+            if (Process.GetProcessesByName(prof.ProcessName).Length == 0) return;
             var state = ProxyInstall.ReadStart(ReadProxyLog(logFile), out var code, out var why);
             if (state == ProxyInstall.StartState.Failed) { log($"VR did not start: StartProbe returned {code}: {why}. No keys sent."); return; }
             if (state == ProxyInstall.StartState.Started)
@@ -237,7 +242,7 @@ public static class Probe
                 var menuBy = DateTime.UtcNow.AddSeconds(120);
                 while (DateTime.UtcNow < menuBy && !inGameplay() && !Regex.IsMatch(ReadProxyLog(logFile), @"logic_mask \d+ -> 64\b"))
                 {
-                    if (Process.GetProcessesByName("Dishonored2").Length == 0) return;
+                    if (Process.GetProcessesByName(prof.ProcessName).Length == 0) return;
                     if (skip) GameKeys.Post(pid, 0x20);
                     await Task.Delay(skip ? 500 : 1000);
                 }
@@ -689,13 +694,19 @@ public static class Probe
 /// <summary>Port of tools/game_keys.py: background-input game config and keys posted to the game window only (never global input, no focus change).</summary>
 public static class GameKeys
 {
-    static readonly string Config = Environment.ExpandEnvironmentVariables(@"%USERPROFILE%\Saved Games\Arkane Studios\Dishonored2\base\dishonored2Config.cfg");
-
     /// <summary>--prepare-config (game closed): append win_pauseOnFocusLoss "0" and in_controlInactiveWindow "1" when absent.
-    /// The game drops non-archived lines on exit, so this runs before every launch.</summary>
-    public static void PrepareConfig(Action<string> log)
+    /// The game drops non-archived lines on exit, so this runs before every launch. Dishonored 2: dishonored2Config.cfg; another game: the first
+    /// *Config.cfg in its Saved Games folder, skipped (and logged) when the game has not been started yet.</summary>
+    public static void PrepareConfig(Action<string> log, GameProfile? profile = null)
     {
-        if (!File.Exists(Config)) { log("dishonored2Config.cfg not found yet (first start): the game may pause when it loses focus."); return; }
+        var prof = profile ?? GameProfile.D2;
+        var Config = prof.FindConfig();
+        if (Config == null)
+        {
+            log(prof.IsD2 ? "dishonored2Config.cfg not found yet (first start): the game may pause when it loses focus."
+                          : $"{prof.DisplayName} config (*Config.cfg in {prof.SavedGamesDir}) not found yet (the game has not been started on this PC): skipping the focus settings; the game may pause when it loses focus.");
+            return;
+        }
         var text = File.ReadAllText(Config);
         var present = text.Split('\n').Select(l => l.Trim()).Where(l => l != "").Select(l => l.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)[0]).ToHashSet();
         var add = new StringBuilder();
@@ -704,7 +715,7 @@ public static class GameKeys
         if (add.Length == 0) return;
         if (text.Length > 0 && !text.EndsWith('\n')) add.Insert(0, "\r\n");
         File.AppendAllText(Config, add.ToString());
-        log("Prepared dishonored2Config.cfg so the game keeps running without focus.");
+        log($"Prepared {Path.GetFileName(Config)} so the game keeps running without focus.");
     }
 
     /// <summary>Posts one key (WM_KEYDOWN, 80 ms, WM_KEYUP) to the visible "Dishonored" window owned by the game process.</summary>

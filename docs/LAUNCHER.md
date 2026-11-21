@@ -90,11 +90,30 @@ The launcher is styled after the game's own menus and draws the game's real art:
 
 **Tools page**: writes `artifacts\vr-command.txt` (`unlock`, `cvar ark_god_player 1|0`, `uidump on|off`, or any custom line) and shows the tail of `artifacts\vr-command-result.txt`. It opens the artifacts, runs and mod folders. **Run self-test** (developer mode only) runs `python tools\vr_selftest.py --dll <dll> --scenario all` and counts PASS/FAIL lines.
 
+## Death of the Outsider
+
+Dishonored: Death of the Outsider (DOTO) has its own tab, **OUTSIDER** (after PLAY; `--page outsider`). Everything game-specific lives in `GameProfile.cs` (`GameProfile.D2` keeps every value the launcher always used; `GameProfile.Doto` is the second game); `Env.FindGameDir`, `Env.GameBuildSupported`, `Env.Game`, `Probe.Launch`, `GameKeys.PrepareConfig` and `FrameGen.Prepare` take the profile.
+
+| | Dishonored 2 | Death of the Outsider |
+|---|---|---|
+| Steam folder / exe / process | `Dishonored2` / `Dishonored2.exe` / `Dishonored2` | `Dishonored_DeathOfTheOutsider` / `Dishonored_DO.exe` / `Dishonored_DO` |
+| Steam app id | 403640 | 614570 |
+| Supported exe SHA-256 | `b671f824...6180` | `be73d979fdb5a6eacbcd385944c6060b97c997d06ab9d72fb39f275a866b955d` (SizeOfImage `0x431f000`) |
+| Saved Games config | `Arkane Studios\Dishonored2\base\dishonored2Config.cfg` | first `*Config.cfg` in `Arkane Studios\Dishonored_DO\base` (name unconfirmed); if the folder or file does not exist yet the config step is skipped and the log says so |
+| Mod home | `%LOCALAPPDATA%\DishonoredVR` | `%LOCALAPPDATA%\DishonoredVR-DOTO` (`--doto-home <dir>` overrides), so settings, knobs and logs never collide |
+| Start path | proxy, inject fallback | proxy only (no injection fallback; a foreign `dinput8.dll` or a game running without the proxy is refused with the reason) |
+
+**Payload.** At build time the csproj also embeds, when present, the newest `artifacts\doto\repair-vNNNN-test-candidate.json` (same schema as the D2 manifests; `game_sha256` must be the DOTO hash, `dll_name` `d2vr_render_probe_arm_vNNNN.dll`, not `launch_blocked`) and its DLL `build\doto\<dll_name>` (sha256 checked against the manifest), plus `build\doto\<dll>.source.json` when it exists. They are resources named `dotohome/<path>`; the shared files (proxy `dinput8.dll`, FSR 4 and OpenXR loaders, licenses, `features.json`) stay under `home/` and are installed into both homes, the D2 candidate only into the D2 home. The DOTO home has the D2 layout: `.git\` marker, `build\<dll>`, `artifacts\<manifest>`, `third_party\...`, and its `build\` knobs are seeded from the same `features.json`. Without a DOTO candidate the launcher still builds and the page shows "Death of the Outsider build not included in this launcher." The DOTO home is written only once the game is found.
+
+**Page.** Title DEATH OF THE OUTSIDER VR, a status line, **Launch VR**, **Stop VR**, **Re-check**, the option **Use my Dishonored 2 VR settings** (default on; kept in the DOTO home as `build\launcher-share-d2-settings`, `on`/`off`), the Setup checks (game found with path, supported exe build by hash, mod build, proxy, OpenXR runtime and loader, VC++ runtime) and the Launch log, and **Uninstall proxy (DOTO)**. Launch VR installs/refreshes the proxy into the DOTO game folder with the DOTO mod home in `d2vr-linux.ini`, opens `steam://rungameid/614570` and runs the same proxy start/continue/stop flow as Play (`Probe.Launch` with the DOTO profile). With the option on, each launch first copies the Dishonored 2 home's `build\vr-settings.cfg` over the DOTO home's, and its `artifacts\game-art\` files that are missing or older in the DOTO home.
+
+**Command line.** `--game d2|doto` selects the profile for the headless paths and the start page (`doto` opens the Outsider page); `--check-package <empty dir> --game doto` installs the DOTO payload into that folder (exit 0, `package-check.json`); `--launch` presses Launch VR on the selected game's page once the window is up. Launch DOTO VR: `DishonoredVRLauncher.exe --game doto --launch`.
+
 ## Review screenshots and checks
 
     DishonoredVRLauncher.exe --page settings --screenshot shots\settings.png --exit
 
-- `--page play|settings|tools` opens that page; `--screenshot <png>` shows the window **without activating it**, waits for the install, checks, settings and a first-start art import, captures the client area with `PrintWindow` and saves a PNG; `--exit` closes afterwards; `--no-art` previews the plain style; `--home <dir>` uses another mod home.
+- `--page play|outsider|settings|tools|controls|updates` opens that page; `--screenshot <png>` shows the window **without activating it**, waits for the install, checks, settings and a first-start art import, captures the client area with `PrintWindow` and saves a PNG; `--exit` closes afterwards; `--no-art` previews the plain style; `--home <dir>` uses another mod home.
 - `--check-art <reference game-art folder> [--out <dir>]`: headless; extracts into a temporary folder and compares every `.rgba` with a `tools/extract_game_art.py` output (exit 0 when all match within 1 LSB).
 - `--render-poses <dir> [--exit]`: headless; renders the four calibration poses into `<dir>` and writes `poses_sheet.png` (the four side by side, as `build\tmpcheck\poses_sheet.png`) for a visual comparison.
 - `--check-probe <probe-launch-config.json> [--dll <dll>]`: headless, no game access; compares the probe configuration and launch record with one `inject_probe.py` wrote on the headset path and prints the DLL's export RVAs.

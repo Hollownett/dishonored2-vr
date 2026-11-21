@@ -29,20 +29,20 @@ public static class FrameGen
     static readonly JsonSerializerOptions WriteOptions = new() { WriteIndented = true };
 
     /// <summary>The app's Motion Smoothing override in a steamvr.vrsettings text: its raw JSON value, or <see cref="Absent"/>.</summary>
-    public static string ReadOverride(string json)
+    public static string ReadOverride(string json, string appSection = SteamVrAppSection)
     {
         var root = JsonNode.Parse(json, null, ReadOptions) as JsonObject ?? throw new InvalidDataException("steamvr.vrsettings is not a JSON object");
-        return root[SteamVrAppSection] is JsonObject app && app[SmoothingKey] is JsonNode v ? v.ToJsonString() : Absent;
+        return root[appSection] is JsonObject app && app[SmoothingKey] is JsonNode v ? v.ToJsonString() : Absent;
     }
 
     /// <summary>The text with the app's override set to a raw JSON value, or removed for <see cref="Absent"/>. Every other key is kept.</summary>
-    public static string WriteOverride(string json, string raw)
+    public static string WriteOverride(string json, string raw, string appSection = SteamVrAppSection)
     {
         var root = JsonNode.Parse(json, null, ReadOptions) as JsonObject ?? throw new InvalidDataException("steamvr.vrsettings is not a JSON object");
-        if (raw == Absent) { if (root[SteamVrAppSection] is JsonObject old) old.Remove(SmoothingKey); }
+        if (raw == Absent) { if (root[appSection] is JsonObject old) old.Remove(SmoothingKey); }
         else
         {
-            if (root[SteamVrAppSection] is not JsonObject app) root[SteamVrAppSection] = app = new JsonObject();
+            if (root[appSection] is not JsonObject app) root[appSection] = app = new JsonObject();
             app[SmoothingKey] = JsonNode.Parse(raw);
         }
         return root.ToJsonString(WriteOptions);
@@ -65,28 +65,28 @@ public static class FrameGen
 
     /// <summary>Spacewarp on: the override is Off for this game (the value before is kept in <paramref name="stateFile"/>, once). Spacewarp off:
     /// the value before is put back, unless the user changed the override since. Returns a line for the log, or null when nothing changed.</summary>
-    public static string? SyncSteamVr(bool spacewarpOn, string? settingsPath, string stateFile, bool steamVrRunning)
+    public static string? SyncSteamVr(bool spacewarpOn, string? settingsPath, string stateFile, bool steamVrRunning, string appSection = SteamVrAppSection, string gameName = "Dishonored 2")
     {
         if (settingsPath == null || !File.Exists(settingsPath)) return null;  // SteamVR never ran here: nothing can smooth
         var recorded = File.Exists(stateFile);
         if (!spacewarpOn && !recorded) return null;
         var json = File.ReadAllText(settingsPath);
-        var current = ReadOverride(json);
+        var current = ReadOverride(json, appSection);
         var off = SmoothingForceOff.ToString();
         if (spacewarpOn)
         {
             if (current == off) return null;  // already off (ours, or the user's own choice)
-            if (steamVrRunning) return "SteamVR is running, so its Motion Smoothing for Dishonored 2 is switched off at the next launch with SteamVR closed. " +
-                "Or set it Off now: SteamVR > Settings > Video > Per-application video settings > Dishonored 2.";
-            Replace(settingsPath, WriteOverride(json, off));
+            if (steamVrRunning) return "SteamVR is running, so its Motion Smoothing for " + gameName + " is switched off at the next launch with SteamVR closed. " +
+                "Or set it Off now: SteamVR > Settings > Video > Per-application video settings > " + gameName + ".";
+            Replace(settingsPath, WriteOverride(json, off, appSection));
             if (!recorded) File.WriteAllText(stateFile, current);
-            return "SteamVR Motion Smoothing switched off for Dishonored 2: spacewarp generates the in-between frames (put back when Spacewarp is Off).";
+            return "SteamVR Motion Smoothing switched off for " + gameName + ": spacewarp generates the in-between frames (put back when Spacewarp is Off).";
         }
         if (current != off) { File.Delete(stateFile); return null; }  // the user changed it since: theirs now
-        if (steamVrRunning) return "SteamVR is running, so its Motion Smoothing for Dishonored 2 is put back at the next launch with SteamVR closed.";
-        Replace(settingsPath, WriteOverride(json, File.ReadAllText(stateFile).Trim()));
+        if (steamVrRunning) return "SteamVR is running, so its Motion Smoothing for " + gameName + " is put back at the next launch with SteamVR closed.";
+        Replace(settingsPath, WriteOverride(json, File.ReadAllText(stateFile).Trim(), appSection));
         File.Delete(stateFile);
-        return "SteamVR Motion Smoothing for Dishonored 2 put back as it was (Spacewarp is Off).";
+        return "SteamVR Motion Smoothing for " + gameName + " put back as it was (Spacewarp is Off).";
     }
 
     static void Replace(string path, string text)
@@ -192,14 +192,14 @@ public static class FrameGen
 
     /// <summary>Everything above for one launch or Save: what the launcher changed (the SteamVR override), and what the user must switch off
     /// by hand (only while Spacewarp is on). Never throws.</summary>
-    public static (List<string> changed, List<string> manual) Prepare(bool spacewarpOn, string stateFile, string? runtime, string? gameDir)
+    public static (List<string> changed, List<string> manual) Prepare(bool spacewarpOn, string stateFile, string? runtime, string? gameDir, string appSection = SteamVrAppSection, string exeName = "Dishonored2.exe", string gameName = "Dishonored 2")
     {
         var changed = new List<string>(); var manual = new List<string>();
-        try { if (SyncSteamVr(spacewarpOn, SteamVrSettingsPath(), stateFile, SteamVrRunning()) is string s) changed.Add(s); }
+        try { if (SyncSteamVr(spacewarpOn, SteamVrSettingsPath(), stateFile, SteamVrRunning(), appSection, gameName) is string s) changed.Add(s); }
         catch (Exception ex) { changed.Add("SteamVR Motion Smoothing not changed: " + ex.Message); }
         if (!spacewarpOn) return (changed, manual);
         bool? smooth = null;
-        try { smooth = NvidiaSmoothMotion(gameDir != null ? Path.Combine(gameDir, "Dishonored2.exe") : "Dishonored2.exe").on; } catch (Exception) { }
+        try { smooth = NvidiaSmoothMotion(gameDir != null ? Path.Combine(gameDir, exeName) : exeName).on; } catch (Exception) { }
         try { manual.AddRange(ManualConflicts(runtime, RunningProcesses(), smooth)); } catch (Exception) { }
         return (changed, manual);
     }

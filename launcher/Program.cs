@@ -18,6 +18,10 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         // Review flags: --page play|settings|tools|controls, --screenshot <png> (PrintWindow of the client area, window shown without activation), --exit, --no-art.
         string? Flag(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
+        // --game d2|doto: the game the headless/CLI paths act on (default Dishonored 2). --game doto starts on the Outsider page; --launch presses
+        // Launch VR on that game's page once the window is up (automation).
+        var profile = GameProfile.ById(Flag("--game")) ?? GameProfile.D2;
+        if (Flag("--game") != null && GameProfile.ById(Flag("--game")) == null) { Console.Error.WriteLine("Unknown --game " + Flag("--game") + " (use d2 or doto)."); return 2; }
         // Release payload verification uses the actual single-file executable in
         // an empty home, without opening a window or starting the game.
         if (Flag("--check-package") is string packageHome)
@@ -25,6 +29,14 @@ static class Program
             packageHome = Path.GetFullPath(packageHome);
             if (Directory.Exists(packageHome) && Directory.EnumerateFileSystemEntries(packageHome).Any())
                 throw new InvalidOperationException("Package check requires a new or empty directory.");
+            if (!profile.IsD2)
+            {   // another game's payload: install it and report; the D2-only art/hand checks below do not apply
+                var other = ModHome.Install(packageHome, Console.Error.WriteLine, profile);
+                File.WriteAllText(Path.Combine(packageHome, "package-check.json"), System.Text.Json.JsonSerializer.Serialize(new {
+                    game = profile.Id, dll = other.Dll, sha256 = ModHome.Sha256(other.DllPath), game_launched = false
+                }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                return 0;
+            }
             var packaged = ModHome.Install(packageHome, Console.Error.WriteLine);
             ControlsDocument.CheckParser();
             using var controller = typeof(GuideFigures).Assembly.GetManifestResourceStream("guide/touch-plus-left.png")
@@ -62,7 +74,8 @@ static class Program
         // (or --home <dir>).
         var root = Env.FindRoot(args);
         var env = root != null ? new Env(root) : new Env(Path.GetFullPath(Flag("--home") ?? ModHome.Dir)) { Standalone = true };
-        int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "settings", "tools", "controls", "updates" }, (Flag("--page") ?? "play").ToLowerInvariant()));
+        var dotoEnv = new Env(Path.GetFullPath(Flag("--doto-home") ?? ModHome.DotoDir)) { Standalone = true, Profile = GameProfile.Doto };
+        int startPage = Math.Max(0, Array.IndexOf(new[] { "play", "outsider", "settings", "tools", "controls", "updates" }, (Flag("--page") ?? (profile.IsD2 ? "play" : "outsider")).ToLowerInvariant()));
         // Two launcher windows would each press Launch VR and start the game twice. Review runs (--screenshot/--exit) may coexist.
         using var single = new Mutex(true, @"Local\DishonoredVR-Launcher", out var firstLauncher);
         // A launcher restarted by its own update waits for the old one to exit.
@@ -75,7 +88,8 @@ static class Program
             MessageBox.Show("The Dishonored VR launcher is already open.", "Dishonored VR");
             return 0;
         }
-        Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art"), Flag("--guide-page"), Flag("--guide-character")));
+        Application.Run(new MainForm(env, startPage, Flag("--screenshot"), args.Contains("--exit"), args.Contains("--no-art"), Flag("--guide-page"), Flag("--guide-character"))
+        { DotoEnv = dotoEnv, DotoHomeGiven = Flag("--doto-home") != null, AutoLaunch = args.Contains("--launch") ? profile : null });
         return 0;
     }
 }
@@ -84,8 +98,23 @@ sealed class MainForm : Form
 {
     readonly Env env;
     readonly string? shotFile; readonly bool exitAfterShot, noArt;
-    readonly ArtPanel[] pages = { new(), new(), new(), new(), new() };
-    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav), new("Updates", Look.Nav) };
+    // Page indexes (--page names: play, outsider, settings, tools, controls, updates).
+    const int PPlay = 0, POutsider = 1, PSettings = 2, PTools = 3, PControls = 4, PUpdates = 5;
+    readonly ArtPanel[] pages = { new(), new(), new(), new(), new(), new() };
+    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Outsider", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav), new("Updates", Look.Nav) };
+
+    // Death of the Outsider page (GameProfile.Doto; its own mod home, DotoEnv)
+    public Env DotoEnv { get; init; } = null!;
+    public bool DotoHomeGiven { get; init; }       // --doto-home: review runs may then write into that folder
+    public GameProfile? AutoLaunch { get; init; }  // --launch with --game: press that game's Launch VR once the window is up
+    readonly ArtButton dLaunch = new("Launch VR", Look.Primary), dStop = new("Stop VR", Look.Secondary), dRecheck = new("Re-check", Look.Secondary),
+        dUninstall = new("Uninstall proxy (DOTO)", Look.Tab), dTabSetup = new("Setup checks", Look.Tab), dTabLog = new("Launch log", Look.Tab);
+    readonly ArtCheck dShare = new("Use my Dishonored 2 VR settings", "Copies your Dishonored 2 VR settings and menu art before each launch.");
+    readonly RichTextBox dLog = new();
+    Candidate? dCandidate; List<Check> dChecks = new(); bool dReady, dLaunching, dChecking, dStopping, dShowLog;
+    string dStatusText = "", dStatusDetail = ""; Color dStatusColor = Ui.Dim;
+    bool AnyLaunching => launching || dLaunching;
+    int dTop = 254;  // y of the Outsider page content below the tab row (set by LayoutOutsider)
     readonly ControlsGuide guide;
     readonly ArtButton importArt = new("Import game art", Look.Secondary);
     int page;
@@ -158,6 +187,19 @@ sealed class MainForm : Form
         pp.Painter = PaintPlay;
         tabSetup.Selected = true;
 
+        // ---- Outsider page (Dishonored: Death of the Outsider; proxy-only launch, own mod home)
+        var op = pages[POutsider];
+        dLaunch.Click += async (_, _) => await LaunchDoto();
+        dStop.Click += async (_, _) => await StopDoto(); dStop.Enabled = false;
+        dRecheck.Click += async (_, _) => await RefreshDotoChecks();
+        dUninstall.Click += (_, _) => UninstallDotoProxy();
+        dTabSetup.Click += (_, _) => ShowDotoLog(false); dTabLog.Click += (_, _) => ShowDotoLog(true);
+        dShare.Toggled += (_, _) => SetShareSettings(dShare.Checked);
+        StyleText(dLog); dLog.Visible = false;
+        op.Controls.AddRange(new Control[] { dLaunch, dStop, dRecheck, dShare, dTabSetup, dTabLog, dUninstall, dLog });
+        op.Painter = PaintOutsider;
+        dTabSetup.Selected = true;
+
         // ---- Settings page
         res = new Option("Resolution", "Render scale per eye, 0.50 to 2.00. Higher is sharper but heavier on the GPU.")
         { IsSlider = true, Min = 50, Max = 200, Step = 5, Page = 25, Format = v => (v / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "x" };
@@ -177,7 +219,7 @@ sealed class MainForm : Form
         smooth = new Option("Smooth speed", "Turn speed for Smooth turn.", ("45 deg/s (slow)", 45.0), ("90 deg/s", 90.0), ("120 deg/s (fast)", 120.0)) { Active = () => Equals(Val<int>(turn), 2) };
         options.Rows.AddRange(new object[] { "DISPLAY", res, aa, perf, spacewarp, sharp, hud, mirror, hint, crosshair, "TURNING", turn, snap, smooth, "CUTSCENES", recenter, cutscenes });
         options.Selected = 1;
-        options.SelectionChanged += () => pages[1].Invalidate(new Rectangle(0, options.Bottom, pages[1].Width, pages[1].Height - options.Bottom));
+        options.SelectionChanged += () => pages[PSettings].Invalidate(new Rectangle(0, options.Bottom, pages[PSettings].Width, pages[PSettings].Height - options.Bottom));
         options.ValueChanged += OnOptionValueChanged;  // v1440: Spacewarp vs performance mode, Spacewarp's anti-aliasing
         save.Click += (_, _) => SaveSettings(); reload.Click += (_, _) => LoadSettings();
         try
@@ -196,8 +238,8 @@ sealed class MainForm : Form
         featToggle.Click += (_, _) => ShowFeatures(!showFeatures);
         restore.Click += (_, _) => RestoreFeatureDefaults();
         dlssButton.Click += (_, _) => PickDlssProvider();
-        pages[1].Controls.AddRange(new Control[] { options, featList, save, reload, restore, featToggle, dlssButton });
-        pages[1].Painter = PaintSettings;
+        pages[PSettings].Controls.AddRange(new Control[] { options, featList, save, reload, restore, featToggle, dlssButton });
+        pages[PSettings].Painter = PaintSettings;
 
         // ---- Tools page
         ArtButton Cmd(string label, string text) { var b = new ArtButton(label, Look.Secondary); b.Click += (_, _) => SendCommand(text); return b; }
@@ -216,21 +258,21 @@ sealed class MainForm : Form
         uninstallProxy.Click += (_, _) => UninstallProxy();
         diagButtons = env.Standalone ? new[] { uninstallProxy, zipLogs, openArt, openRuns, deleteLogs, openRoot } : new[] { uninstallProxy, selftest, zipLogs, openArt, openRuns, deleteLogs, openRoot };
         StyleText(toolOut);
-        pages[2].Controls.AddRange(cmdButtons); pages[2].Controls.AddRange(new Control[] { custom, send, result }); pages[2].Controls.AddRange(diagButtons); pages[2].Controls.Add(toolOut);
-        pages[2].Painter = PaintTools;
+        pages[PTools].Controls.AddRange(cmdButtons); pages[PTools].Controls.AddRange(new Control[] { custom, send, result }); pages[PTools].Controls.AddRange(diagButtons); pages[PTools].Controls.Add(toolOut);
+        pages[PTools].Painter = PaintTools;
         using (var s = typeof(MainForm).Assembly.GetManifestResourceStream("home/VR-CONTROLS.md"))
             guide = new ControlsGuide(s == null ? "# VR controls and gestures\n\nThe guide is missing from this build." : new StreamReader(s).ReadToEnd(), env.P("artifacts", "game-art"), noArt);
         if (guidePage != null) guide.SelectPage(guidePage);
         if (guideCharacter != null) guide.SelectCharacter(guideCharacter);
-        pages[3].Controls.Add(guide);
+        pages[PControls].Controls.Add(guide);
 
         // ---- Updates page
         StyleText(notes); notes.Text = "Release notes appear here after the check.";
         updateNow.Click += async (_, _) => await UpdateNow();
         openRelease.Click += (_, _) => Process.Start(new ProcessStartInfo(latest?.Url ?? Updates.LatestPage) { UseShellExecute = true });
         checkUpdates.Click += async (_, _) => await CheckForUpdates();
-        pages[4].Controls.AddRange(new Control[] { updateNow, openRelease, checkUpdates, notes });
-        pages[4].Painter = PaintUpdates;
+        pages[PUpdates].Controls.AddRange(new Control[] { updateNow, openRelease, checkUpdates, notes });
+        pages[PUpdates].Painter = PaintUpdates;
         RefreshUpdButtons();
 
         poll.Tick += (_, _) => Tick(); poll.Start();
@@ -254,6 +296,10 @@ sealed class MainForm : Form
                 _ = Task.Run(() => { try { if (PropShapes.EnsureCurrent(propGame, PropShapes.DefaultPath) is string line) BeginInvoke(() => Append(log, line, Ui.Text)); } catch (Exception ex) { BeginInvoke(() => Append(log, "Prop shapes not built: " + ex.Message, Ui.Gold)); } });
             artState = Ui.Art.Present || noArt ? null : Env.FindGameDir() == null ? "needs Dishonored 2 installed" : "not imported yet";
             await RefreshChecks(); LoadSettings();
+            // Review screenshots of the real home must not write a second one (DOTO's) unless --doto-home names a folder for it.
+            await RefreshDotoChecks();
+            dShare.SetSilently(ModHome.ShareSettingsOn(DotoEnv.Root));
+            if (AutoLaunch != null) _ = AutoLaunch.IsD2 ? LaunchVr() : LaunchDoto();
             featList.Prewarm();
             try   // v1439: once per home, when Spacewarp is on (the default since then): what to switch off, and the anti-aliasing it needs
             {
@@ -266,7 +312,7 @@ sealed class MainForm : Form
             }
             catch (Exception ex) { Append(log, "Spacewarp notice: " + ex.Message, Ui.Gold); }
             if (shotFile == null && !exitAfterShot) _ = AutoFindDlss();
-            var updCheck = (shotFile == null && !exitAfterShot) || page == 4 ? CheckForUpdates() : Task.CompletedTask;  // review runs must not write a knob into a real mod home
+            var updCheck = (shotFile == null && !exitAfterShot) || page == PUpdates ? CheckForUpdates() : Task.CompletedTask;  // review runs must not write a knob into a real mod home
             // First start (or art missing): import it from the user's own install; the calibration poses follow, and are
             // rendered alone when only they are missing. Review screenshots wait for it.
             // An install imported before the game crosshair (v671) gets the whole import once more.
@@ -282,7 +328,7 @@ sealed class MainForm : Form
         };
         FormClosing += (_, ev) =>
         {
-            if (launching && MessageBox.Show("VR is running from this launcher. Closing it leaves VR running (reopen the launcher to stop it), " +
+            if (AnyLaunching && MessageBox.Show("VR is running from this launcher. Closing it leaves VR running (reopen the launcher to stop it), " +
                 "but this session's launch record and run archive will not be written.\nClose anyway?", Text, MessageBoxButtons.YesNo) != DialogResult.Yes) ev.Cancel = true;
         };
         FormClosed += (_, _) => { dlssCts?.Cancel(); poll.Dispose(); Ui.Art.Dispose(); Ui.Backdrop?.Dispose(); Ui.Backdrop = null; };
@@ -395,7 +441,7 @@ sealed class MainForm : Form
     Rectangle PageRect(int p)
     {
         float wl = ClientSize.Width * 96f / DeviceDpi;
-        float cw = p switch { 3 => Math.Min(1040, wl - 324), 0 => Math.Clamp(wl * .40f, 470, 520), 1 => Math.Clamp(wl - 300 - 340, 520, 590), _ => Math.Clamp(wl - 300 - 360, 520, 640) };
+        float cw = p switch { PControls => Math.Min(1040, wl - 324), PPlay or POutsider => Math.Clamp(wl * .40f, 470, 520), PSettings => Math.Clamp(wl - 300 - 340, 520, 590), _ => Math.Clamp(wl - 300 - 360, 520, 640) };
         return new Rectangle(S(300), S(176), S(cw), ClientSize.Height - S(176) - S(26));
     }
 
@@ -407,11 +453,11 @@ sealed class MainForm : Form
         importArt.Bounds = new Rectangle(S(44), ClientSize.Height - S(120), Math.Max(S(200), importArt.Natural), S(38)); importArt.TabIndex = 8;
         for (int i = 0; i < pages.Length; i++) { pages[i].Bounds = PageRect(i); pages[i].TabIndex = 3 + i; }
         var mono = Ui.Font(this, 9.5f, FontStyle.Regular, Ui.Mono);
-        foreach (var t in new[] { log, toolOut }) if (!ReferenceEquals(t.Font, mono)) t.Font = mono;
+        foreach (var t in new[] { log, toolOut, dLog }) if (!ReferenceEquals(t.Font, mono)) t.Font = mono;
         var sans = Ui.Font(this, 10.5f, FontStyle.Regular, Ui.Sans);
         if (!ReferenceEquals(custom.Font, sans)) custom.Font = sans;
         if (!ReferenceEquals(notes.Font, sans)) notes.Font = sans;
-        LayoutPlay(); LayoutSettings(); LayoutTools(); LayoutGuide(); LayoutUpdates();
+        LayoutPlay(); LayoutOutsider(); LayoutSettings(); LayoutTools(); LayoutGuide(); LayoutUpdates();
         ResumeLayout(false);
         RebuildBackdrop();
         Invalidate(true);
@@ -446,7 +492,7 @@ sealed class MainForm : Form
 
     void LayoutSettings()
     {
-        var p = pages[1]; int w = p.Width, plateH = S(84), btnH = S(54), gap = S(12);
+        var p = pages[PSettings]; int w = p.Width, plateH = S(84), btnH = S(54), gap = S(12);
         if (showFeatures)
         {
             featList.Bounds = new Rectangle(0, 0, w, Math.Max(S(120), p.Height - btnH - gap * 2));
@@ -524,7 +570,7 @@ sealed class MainForm : Form
 
     void LayoutTools()
     {
-        var p = pages[2]; int w = p.Width, y = 0;
+        var p = pages[PTools]; int w = p.Width, y = 0;
         p.Sections.Clear(); p.Panes.Clear();
         p.Sections.Add(("TEST COMMANDS", new Rectangle(0, y, w, S(28)))); y += S(56);
         y = Flow(0, y, w, S(38), cmdButtons) + S(10);
@@ -594,7 +640,7 @@ sealed class MainForm : Form
 
     void RebuildBackdrop()
     {
-        var key = (Math.Min(page, 2), ClientSize.Width, ClientSize.Height, DeviceDpi, pages[page].Right);
+        var key = (page switch { PPlay => 0, POutsider => 1, PSettings => 2, _ => 3 }, ClientSize.Width, ClientSize.Height, DeviceDpi, pages[page].Right);
         if (!backdrops.TryGetValue(key, out var bmp))
         {
             if (backdrops.Count >= 6) DropBackdrops();  // a resize drag makes a new size per step
@@ -613,10 +659,10 @@ sealed class MainForm : Form
         {
             Ui.Quality(g); g.Clear(Ui.Ink);
             var art = Ui.Art; float k = DeviceDpi / 96f; int cr = pages[page].Right;
-            var hero = art[page switch { 0 => "key_art", 1 => "portrait_emily", _ => "portrait_corvo" }];
+            var hero = art[page switch { PPlay or POutsider => "key_art", PSettings => "portrait_emily", _ => "portrait_corvo" }];
             if (hero != null)
             {
-                if (page == 0)
+                if (page is PPlay or POutsider)
                 {   // split mask/face key art: keep the whole head right of the content, clipped to the window
                     float s = H * 1.08f / hero.Height, w = hero.Width * s, half = 250 * s;
                     float fx = Math.Min(Math.Max(W * .74f, cr + half + 20 * k), W - half - 10 * k);
@@ -680,7 +726,7 @@ sealed class MainForm : Form
     /// <summary>Native, scrollable illustrated lessons from the embedded controls document.</summary>
     void LayoutGuide()
     {
-        var p = pages[3]; p.Panes.Clear();
+        var p = pages[PControls]; p.Panes.Clear();
         p.Panes.Add(new Rectangle(0, 0, p.Width, p.Height));
         guide.Bounds = new Rectangle(0, 0, p.Width, p.Height);
     }
@@ -690,13 +736,13 @@ sealed class MainForm : Form
         page = i;
         for (int k = 0; k < pages.Length; k++) { pages[k].Visible = k == i; nav[k].Selected = k == i; nav[k].Invalidate(); }
         RebuildBackdrop(); Invalidate(true);
-        if (i == 1) LoadSettings();
+        if (i == PSettings) LoadSettings();
     }
 
     // ---------- updates
     void LayoutUpdates()
     {
-        var p = pages[4]; int w = p.Width;
+        var p = pages[PUpdates]; int w = p.Width;
         int top = Flow(0, S(96), w, S(40), updateNow, openRelease, checkUpdates) + S(20);
         p.Panes.Clear(); p.Panes.Add(new Rectangle(0, top, w, p.Height - top));
         notes.Bounds = new Rectangle(S(10), top + S(8), w - S(20), p.Height - top - S(16));
@@ -704,19 +750,19 @@ sealed class MainForm : Form
 
     void PaintUpdates(Graphics g)
     {
-        var p = pages[4];
+        var p = pages[PUpdates];
         const TextFormatFlags np = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
         TextRenderer.DrawText(g, updTitle, Ui.Font(p, 25f), new Point(0, -S(2)), updColor, np);
         TextRenderer.DrawText(g, updDetail, Ui.Font(p, 10f, FontStyle.Regular, Ui.Sans), new Rectangle(S(1), S(44), p.Width - S(4), S(46)), Ui.Dim, np | TextFormatFlags.WordBreak);
     }
 
-    void SetUpd(string title, Color c, string detail) { updTitle = title; updColor = c; updDetail = detail; pages[4].Invalidate(); }
+    void SetUpd(string title, Color c, string detail) { updTitle = title; updColor = c; updDetail = detail; pages[PUpdates].Invalidate(); }
 
     void RefreshUpdButtons()
     {
-        updateNow.Enabled = updateAvailable && !updBusy && env.Standalone && !launching;
+        updateNow.Enabled = updateAvailable && !updBusy && env.Standalone && !AnyLaunching;
         checkUpdates.Enabled = !updBusy;
-        nav[4].Text = updateAvailable ? "New update" : "Updates"; nav[4].Invalidate();
+        nav[PUpdates].Text = updateAvailable ? "New update" : "Updates"; nav[PUpdates].Invalidate();
     }
 
     async Task CheckForUpdates()
@@ -742,7 +788,7 @@ sealed class MainForm : Form
     async Task UpdateNow()
     {
         if (latest == null || updBusy) return;
-        if (launching) { SetUpd("Update waits", Ui.Gold, "VR is running from this launcher. Stop VR first, then update."); return; }
+        if (AnyLaunching) { SetUpd("Update waits", Ui.Gold, "VR is running from this launcher. Stop VR first, then update."); return; }
         updBusy = true; RefreshUpdButtons();
         try
         {
@@ -783,10 +829,17 @@ sealed class MainForm : Form
         TextRenderer.DrawText(g, statusText, Ui.Font(p, 25f), new Point(0, -S(2)), statusColor, np);
         TextRenderer.DrawText(g, statusDetail, Ui.Font(p, 10f, FontStyle.Regular, Ui.Sans), new Rectangle(S(1), S(44), p.Width - S(4), S(42)), Ui.Dim, np | TextFormatFlags.WordBreak);
         if (showLog) return;
+        PaintCheckRows(g, p, checks, S(230));
+    }
+
+    /// <summary>The Setup checks list (diamond, name, detail, fix hint), shared by the Play and Outsider pages.</summary>
+    void PaintCheckRows(Graphics g, ArtPanel p, List<Check> list, int y, float pad = 10)
+    {
+        const TextFormatFlags np = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
         var name = Ui.Font(p, 12.5f); var det = Ui.Font(p, 9.5f, FontStyle.Regular, Ui.Sans); var fix = Ui.Font(p, 9f, FontStyle.Regular, Ui.Sans);
-        int y = S(230), col = S(170), dw = p.Width - col;
-        if (checks.Count == 0) { TextRenderer.DrawText(g, "Checking your setup...", det, new Point(S(26), y), Ui.Dim, np); return; }
-        foreach (var c in checks)
+        int col = S(170), dw = p.Width - col;
+        if (list.Count == 0) { TextRenderer.DrawText(g, "Checking your setup...", det, new Point(S(26), y), Ui.Dim, np); return; }
+        foreach (var c in list)
         {
             bool usable = c.Fix.StartsWith("Usable");
             var mark = c.Ok ? (usable ? Ui.Gold : Ui.Good) : Ui.Bad;
@@ -801,7 +854,7 @@ sealed class MainForm : Form
                 TextRenderer.DrawText(g, "Fix: " + c.Fix, fix, r with { Height = h }, Ui.Mix(mark, Ui.Dim, .45f), np | TextFormatFlags.WordBreak);
                 y += h + S(4);
             }
-            y += S(10);
+            y += S(pad);
         }
     }
 
@@ -820,7 +873,7 @@ sealed class MainForm : Form
     // ---------- launch / stop (Probe: the C# port of run_demo.ps1 -Launch -SkipPreflightWait, inject_probe.py and game_keys.py)
     async Task LaunchVr()
     {
-        if (launching || checking) return;
+        if (AnyLaunching || checking) return;
         checking = true; launch.Enabled = false; // a second click during the re-check must not start a second launch
         try { await RefreshChecks(); } // never trust a cached ready: the game may have been updated while the launcher sat open
         finally { checking = false; }
@@ -847,6 +900,150 @@ sealed class MainForm : Form
         }
         catch (Exception ex) { Append(log, "Launch failed: " + ex.Message, Ui.Bad); }
         launching = false; launch.Enabled = true; Tick();
+    }
+
+    // ---------- Death of the Outsider (GameProfile.Doto): proxy-only launch through its own mod home, same flow as Play
+    static readonly GameProfile Doto = GameProfile.Doto;
+    bool DotoWriteOk => shotFile == null || DotoHomeGiven;  // review screenshots must not write a real home
+
+    void LayoutOutsider()
+    {
+        var p = pages[POutsider]; int w = p.Width;
+        dLaunch.Bounds = new Rectangle(-S(6), S(92), Math.Max(S(212), dLaunch.Natural), S(58));
+        Flow(dLaunch.Right + S(8), S(101), w - dLaunch.Right - S(8), S(40), dStop, dRecheck);
+        dShare.Bounds = new Rectangle(0, S(152), w, dShare.RowHeight);
+        int tabsBottom = Flow(0, S(212), w, S(30), dTabSetup, dTabLog, dUninstall);  // the uninstall button wraps below the tabs in a narrow window
+        p.Sections.Clear(); p.Panes.Clear();
+        int top = dTop = tabsBottom + S(10);
+        if (dShowLog) p.Panes.Add(new Rectangle(0, top, w, p.Height - top));
+        dLog.Bounds = new Rectangle(S(10), top + S(8), w - S(20), p.Height - top - S(16));
+    }
+
+    void PaintOutsider(Graphics g)
+    {
+        var p = pages[POutsider];
+        const TextFormatFlags np = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
+        TextRenderer.DrawText(g, "DEATH OF THE OUTSIDER VR", Ui.Font(p, 20f), new Rectangle(0, -S(2), p.Width, S(38)), Ui.Text, np);
+        TextRenderer.DrawText(g, dStatusText, Ui.Font(p, 12.5f), new Rectangle(S(1), S(36), p.Width - S(4), S(24)), dStatusColor, np);
+        TextRenderer.DrawText(g, dStatusDetail, Ui.Font(p, 9.5f, FontStyle.Regular, Ui.Sans), new Rectangle(S(1), S(60), p.Width - S(4), S(30)), Ui.Dim, np | TextFormatFlags.WordBreak);
+        if (dShowLog) return;
+        PaintCheckRows(g, p, dChecks, dTop, 4);
+    }
+
+    void ShowDotoLog(bool on)
+    {
+        dShowLog = on; dTabSetup.Selected = !on; dTabLog.Selected = on; dLog.Visible = on;
+        LayoutOutsider(); pages[POutsider].Invalidate(true);
+    }
+
+    void SetDotoStatus(string s, Color c, string detail = "")
+    {
+        if (s == dStatusText && c == dStatusColor && detail == dStatusDetail) return;
+        dStatusText = s; dStatusColor = c; dStatusDetail = detail;
+        pages[POutsider].Invalidate(new Rectangle(0, 0, pages[POutsider].Width, S(92)));
+    }
+
+    /// <summary>Writes the Outsider mod into its own home (%LOCALAPPDATA%\DishonoredVR-DOTO) once the game is found; records why not otherwise.</summary>
+    async Task InstallDoto()
+    {
+        if (!ModHome.HasPayload(Doto)) { DotoEnv.InstallError = Doto.NotIncludedMessage; return; }
+        if (!DotoWriteOk) { DotoEnv.InstallError = "not installed yet (review run)"; return; }
+        if (Env.FindGameDir(Doto) == null) { DotoEnv.InstallError = "installed once Dishonored: Death of the Outsider is found"; return; }
+        try { DotoEnv.Pinned = await Task.Run(() => ModHome.Install(DotoEnv.Root, null, Doto)); }
+        catch (Exception ex) { DotoEnv.InstallError = ex.Message; Append(dLog, "Mod install failed: " + ex.Message, Ui.Bad); }
+    }
+
+    async Task RefreshDotoChecks()
+    {
+        if (DotoEnv.Pinned == null) await InstallDoto();
+        dCandidate = DotoEnv.LatestCandidate(out _);
+        dChecks = await Task.Run(() => DotoEnv.RunProfileChecks());
+        dReady = DotoEnv.Ready(dCandidate);
+        pages[POutsider].Invalidate();
+        TickDoto();
+    }
+
+    void SetShareSettings(bool on)
+    {
+        try { ModHome.SetShareSettings(DotoEnv.Root, on); }
+        catch (Exception ex) { Append(dLog, "Could not save the option: " + ex.Message, Ui.Bad); }
+    }
+
+    async Task LaunchDoto()
+    {
+        if (AnyLaunching || dChecking) return;
+        dChecking = true; dLaunch.Enabled = false;
+        try { await RefreshDotoChecks(); }
+        finally { dChecking = false; }
+        if (!dReady) { dLaunch.Enabled = dReady; SetDotoStatus("Cannot launch", Ui.Bad, "Fix the red items under Setup checks first."); return; }
+        dLaunching = true; dStopping = false; dLaunch.Enabled = false; dStop.Enabled = true;
+        dLog.Clear(); ShowDotoLog(true);
+        Append(dLog, $"Launching {dCandidate!.Dll} from {DotoEnv.Root}", Ui.Teal);
+        try
+        {
+            if (ModHome.ShareSettingsOn(DotoEnv.Root))
+                try { await Task.Run(() => ModHome.ShareD2Settings(env.Root, DotoEnv.Root, l => Append(dLog, l))); }
+                catch (Exception ex) { Append(dLog, "Could not copy the Dishonored 2 settings: " + ex.Message, Ui.Gold); }
+            else Append(dLog, "Using the Death of the Outsider settings (the Dishonored 2 settings option is off).", Ui.Text);
+            if (Features.DiagnosticsOn(DotoEnv.P("build"))) Append(dLog, Features.DiagnosticsWarning, Ui.Gold);
+            {   // one frame generation at a time (launcher/FrameGen.cs), keyed by this game's Steam app id
+                var swOn = File.Exists(DotoEnv.P("build", "spacewarp"));
+                var (changed, manual) = await Task.Run(() => FrameGen.Prepare(swOn, DotoEnv.P("build", FrameGen.StateFileName), Env.OpenXrRuntime(), Env.FindGameDir(Doto), Doto.SteamVrSection, Doto.ExeName, Doto.DisplayName));
+                foreach (var line in changed) Append(dLog, line, Ui.Text);
+                if (manual.Count > 0) Append(dLog, "Spacewarp is on, so no other frame generation may run. Switch these off yourself:", Ui.Gold);
+                foreach (var line in manual) Append(dLog, "  " + line, Ui.Gold);
+            }
+            if (await Probe.Launch(dCandidate, DotoEnv.Root, l => Append(dLog, l), () => DotoEnv.LiveStatus().gameplay, Doto))
+                Append(dLog, "VR session ended and the game was restored.", Ui.Good);
+            else Append(dLog, "Launch done; the in-game proxy runs VR. Stop VR ends it.", Ui.Good);
+        }
+        catch (Exception ex) { Append(dLog, "Launch failed: " + ex.Message, Ui.Bad); }
+        dLaunching = false; dLaunch.Enabled = true; Tick();
+    }
+
+    Task StopDoto()
+    {
+        var g = Env.Game(Doto);
+        if (g == null) { Append(dLog, "Nothing to stop (game not running).", Ui.Dim); ShowDotoLog(true); return Task.CompletedTask; }
+        ShowDotoLog(true);
+        if (!ProxyInstall.StopViaProxy(Probe.ProxyLoadedIn(g), Probe.SessionPath))
+        { Append(dLog, $"{Doto.DisplayName} is running without the launcher's proxy, so there is no VR session to stop. Close the game.", Ui.Gold); return Task.CompletedTask; }
+        dStopping = true; dStop.Enabled = false;
+        Append(dLog, $"Stopping VR through the proxy in {Doto.ProcessName} (pid {g.Id})", Ui.Teal);
+        try { Probe.RequestProxyStop(DotoEnv.Root); Append(dLog, "Stop requested. If VR has not started yet the request is held until it has, then stops it at once; otherwise the mod is restoring the game.", Ui.Good); }
+        catch (Exception ex) { Append(dLog, "Stop failed: " + ex.Message, Ui.Bad); }
+        dStopping = false;
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Removes our dinput8 proxy and d2vr-linux.ini from the Death of the Outsider folder (a foreign dinput8.dll is left alone).</summary>
+    void UninstallDotoProxy()
+    {
+        ShowDotoLog(true);
+        var gameDir = Env.FindGameDir(Doto);
+        if (gameDir == null) { Append(dLog, "Death of the Outsider folder not found.", Ui.Bad); return; }
+        try
+        {
+            var removed = ProxyInstall.Uninstall(gameDir);
+            Append(dLog, removed.Count == 0 ? "No d2vr proxy in the Death of the Outsider folder." : "Removed from the game folder: " + string.Join(", ", removed), Ui.Good);
+        }
+        catch (Exception ex) { Append(dLog, "Uninstall failed (close the game first): " + ex.Message, Ui.Bad); }
+        _ = RefreshDotoChecks();
+    }
+
+    void TickDoto()
+    {
+        var g = Env.Game(Doto);
+        var (fresh, gp, logic) = DotoEnv.LiveStatus();
+        dLaunch.Enabled = !AnyLaunching && !dChecking && dReady;
+        dStop.Enabled = g != null && (fresh || dLaunching) && !dStopping;
+        if (dStopping) SetDotoStatus("Stopping VR", Ui.Gold, "Waiting for the mod to restore the game.");
+        else if (g != null && fresh && gp) SetDotoStatus("VR running", Ui.Good, $"Gameplay active (logic mask {logic}). Put on your headset.");
+        else if (g != null && fresh) SetDotoStatus("Load your save", Ui.Teal, $"VR is attached; waiting for gameplay (logic mask {logic}). Load a save or continue from the menu.");
+        else if (g != null && dLaunching) SetDotoStatus("Starting", Ui.Gold, "Game is up; waiting for the proxy to attach the mod (can take a minute).");
+        else if (g != null) SetDotoStatus("Running without VR", Ui.Teal, "Close the game and press Launch VR so the proxy loads with it.");
+        else if (dLaunching) SetDotoStatus("Starting", Ui.Gold, "Starting Death of the Outsider through Steam. The proxy starts VR at the game's first frame.");
+        else SetDotoStatus("Stopped", Ui.Dim, dReady ? "Ready. Press Launch VR." : "Fix the red items under Setup checks, then Re-check.");
     }
 
     /// <summary>v1047 (user: "don't waste any disk space ... to collect VR logs"): deletes the mod's logs in artifacts\ (LogCleanup keeps the launcher's
@@ -914,7 +1111,7 @@ sealed class MainForm : Form
     {
         var g = Env.Game();
         var (fresh, gp, logic) = env.LiveStatus();
-        launch.Enabled = !launching && !checking && Ready;
+        launch.Enabled = !AnyLaunching && !checking && Ready;
         stop.Enabled = g != null && (fresh || launching) && !stopping;
         if (stopping) SetStatus("Stopping VR", Ui.Gold, "Waiting for the mod to restore the game.");
         else if (g != null && fresh && gp) SetStatus("VR running", Ui.Good, $"Gameplay active (logic mask {logic}). Put on your headset.");
@@ -923,6 +1120,7 @@ sealed class MainForm : Form
         else if (g != null) SetStatus("Load your save", Ui.Teal, "Game is running without VR. Press Launch VR to attach the mod.");
         else if (launching) SetStatus("Starting", Ui.Gold, "Starting Dishonored 2 through Steam. At the title screen the launcher attaches VR and continues your last save.");
         else SetStatus("Stopped", Ui.Dim, Ready ? "Ready. Press Launch VR." : "Fix the red items under Setup checks, then Re-check.");
+        if (DotoEnv != null) TickDoto();
     }
 
     // ---------- settings
@@ -936,7 +1134,7 @@ sealed class MainForm : Form
 
     void PaintSettings(Graphics g)
     {
-        var p = pages[1]; var o = showFeatures ? null : options.Current;
+        var p = pages[PSettings]; var o = showFeatures ? null : options.Current;
         if (!showFeatures) aa.Help = AaHelpNow();  // follows the Performance mode and Spacewarp choices at once
         if (showFeatures) { PaintSettingsMsg(g); return; }
         var plate = new Rectangle(0, options.Bottom + S(12), p.Width, S(84));
@@ -953,7 +1151,7 @@ sealed class MainForm : Form
 
     void PaintSettingsMsg(Graphics g)
     {
-        var p = pages[1]; int x = settingsLast.Right + S(18);
+        var p = pages[PSettings]; int x = settingsLast.Right + S(18);
         int top = showFeatures ? featList.Bottom + S(12) : save.Top, h = showFeatures ? S(54) : save.Height;
         var m = new Rectangle(x, top, Math.Max(S(60), p.Width - x), h);
         TextRenderer.DrawText(g, settingsMsg, Ui.Font(p, 9.5f, FontStyle.Regular, Ui.Sans), m, settingsMsgColor,
@@ -967,7 +1165,7 @@ sealed class MainForm : Form
         options.Visible = !on; save.Visible = !on; reload.Visible = !on; featList.Visible = on; restore.Visible = on; dlssButton.Visible = !on;
         featToggle.Text = on ? "Back to options" : "Features";
         if (on) LoadFeatures(keepPerf: true); else SetSettingsMsg("", Ui.Dim);  // opening the list keeps an unsaved Performance mode choice
-        LayoutSettings(); pages[1].Invalidate(true);
+        LayoutSettings(); pages[PSettings].Invalidate(true);
         if (on && featList.Rows.Count > 0) featList.Rows[0].Focus(); else if (!on) options.Focus();
     }
 
@@ -1065,7 +1263,7 @@ sealed class MainForm : Form
         catch (Exception ex) { LoadFeatures(); SetSettingsMsg("Not restored: " + ex.Message, Ui.Bad); }
     }
 
-    void SetSettingsMsg(string text, Color c) { settingsMsg = text; settingsMsgColor = c; pages[1].Invalidate(); }
+    void SetSettingsMsg(string text, Color c) { settingsMsg = text; settingsMsgColor = c; pages[PSettings].Invalidate(); }
 
     void ApplyToForm(Prefs d, Prefs? onlyIfSameAs)
     {
@@ -1173,7 +1371,7 @@ sealed class MainForm : Form
     // ---------- tools
     void PaintTools(Graphics g)
     {
-        TextRenderer.DrawText(g, "The running mod polls artifacts\\vr-command.txt twice a second.", Ui.Font(pages[2], 9.5f, FontStyle.Regular, Ui.Sans),
+        TextRenderer.DrawText(g, "The running mod polls artifacts\\vr-command.txt twice a second.", Ui.Font(pages[PTools], 9.5f, FontStyle.Regular, Ui.Sans),
             new Point(0, S(32)), Ui.Dim, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
     }
 
