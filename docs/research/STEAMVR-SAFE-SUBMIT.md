@@ -557,6 +557,15 @@ headset test has both. All 10 lab tests of the two branches pass. Simulator (`v1
   `DishonoredVRLauncher.before-v1454.exe`. `build\xr-own-device` is on.
 - Spacewarp itself must be on in the launcher (Auto or Always): `build\spacewarp` was absent, which is Off.
 
+**v1455** (merge `e1427b8`) = v1454 + v1461 (`0d71f18`). v1461 is the body/legs session's fix of three gaps its v1460 tint sim found:
+the boots' toe caps, the upper chest, and scenery beside a leaning player. All 10 lab tests pass. That session's class-tint sim
+(`sw1455-tint`) [data]:
+- own device on, 20,783 copies, 0 failures;
+- 2,938 of 2,939 generated frames sent by the waiting thread, 0 late, 0 recoveries;
+- the boots, chest and upper sleeves in their classes.
+- Installed in the main checkout (2026-11-21 13:45) in place of v1454, as the user had asked for a last body/legs fix to be included:
+  launcher `bae8bdc8...`; v1454's is kept as `DishonoredVRLauncher.before-v1455.exe`.
+
 **What to read after a SteamVR session with the knob on:**
 - `own_device.on` true, `why` "on", `blocked` empty, `failures` 0.
 - `copies`: two per real frame (the eyes), one per overlay redraw, and two per generated frame.
