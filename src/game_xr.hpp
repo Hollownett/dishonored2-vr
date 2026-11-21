@@ -3224,7 +3224,10 @@ public:
                     if(count) {const std::array<double,3> local_up{V.r[3],V.r[4],V.r[5]};
                         spacewarp_body_up_dot=up[0]*local_up[0]+up[1]*local_up[1]+up[2]*local_up[2];spacewarp_body_eye_height=eye_height;}
                     if(!(eye_height>.4 && eye_height<2.6)) return;
-                    q.body_on=true;q.body_up=up;q.body_axis=axis;q.body_top=eye_height-.3;if(count) ++spacewarp_body_eyes;
+                    // v1460: the image rule's cylinder reaches up to the shoulders (15 cm under the eye; the neck is 11 cm under it): the upper
+                    // chest and the shoulders, the nearest and largest part of the torso when looking down, follow the head too (sim class tint
+                    // 2026-11-21: above v1432's 30 cm they were the near rig, moved with the play space only)
+                    q.body_on=true;q.body_up=up;q.body_axis=axis;q.body_top=eye_height-(image_rule?.15:.3);if(count) ++spacewarp_body_eyes;
                     static constexpr double radius[4]={.12,.09,.08,0};  // the capsule from each point to the next: thigh, shin, foot
                     const auto o=Si.apply({0,0,0});
                     const auto dir=[&](const Vec3& v) {const auto a=Si.apply({v.x,v.y,v.z});return std::array<double,3>{a[0]-o[0],a[1]-o[1],a[2]-o[2]};};
@@ -3271,6 +3274,9 @@ public:
                                 if(nn>.003*.003) q.torso_rho=std::clamp((dp[0]*dn[0]+dp[1]*dn[1]+dp[2]*dn[2])/nn,0.,1.);
                             }
                             if(count) spacewarp_torso_rho=q.torso_rho;
+                            if(history) {  // the torso's own scenery test: its pelvis's and neck's world steps since the previous image
+                                q.torso_past_on=true;q.torso_past_pelvis=dir(ib.pelvis-ib.prev_pelvis);q.torso_past_neck=dir(ib.neck-ib.prev_neck);
+                            }
                         }
                         if(count) ++spacewarp_torso_eyes;
                     }
@@ -3287,7 +3293,10 @@ public:
                         const auto a=Si.apply({x.x,x.y,x.z}),c=Si.apply(carry.apply({xp.x,xp.y,xp.z})),db=dir(x-xp);
                         const double speed=span>0?moved/span:0;if(speed<.2) ++planted;
                         const auto r=spacewarp_leg_own(a,c,db,mover_share,speed,motion.rest);
-                        q.leg_point[4*side+j]={a[0],a[1],a[2],radius[j]};q.leg_step[4*side+j]=r;q.leg_past[4*side+j]=db;
+                        // the points: hip, knee, under the heel, toe tip (FullBodyDriver foot_line); the shin capsule ends under the heel, a
+                        // little behind the ankle, so it is 1 cm wider than v1439's
+                        static constexpr double image_radius[4]={.12,.10,.08,0};
+                        q.leg_point[4*side+j]={a[0],a[1],a[2],image_radius[j]};q.leg_step[4*side+j]=r;q.leg_past[4*side+j]=db;
                     }
                     if(count) {const Vec3 h=ib.leg[0][0];spacewarp_leg_hip={h.x,h.y,h.z};spacewarp_leg_step_m=length(ib.leg[0][0]-ib.prev_leg[0][0]);
                         spacewarp_leg_root={root->x,root->y,root->z};spacewarp_leg_planted=planted;}
@@ -3301,6 +3310,7 @@ public:
                     q.body_on=d.body_on;q.body_up=d.body_up;q.body_axis=d.body_axis;q.body_radius=d.body_radius;q.body_floor=d.body_floor;q.body_top=d.body_top;q.body_cap=d.body_cap;
                     q.legs_on=d.legs_on;q.leg_point=d.leg_point;q.leg_step=d.leg_step;q.leg_past=d.leg_past;q.leg_cap=d.leg_cap;q.legs_local=d.legs_local;q.legs_floor=d.legs_floor;
                     q.torso_on=d.torso_on;q.torso_step=d.torso_step;q.torso_rho=d.torso_rho;q.torso_pelvis_h=d.torso_pelvis_h;q.torso_neck_h=d.torso_neck_h;
+                    q.torso_past_on=d.torso_past_on;q.torso_past_pelvis=d.torso_past_pelvis;q.torso_past_neck=d.torso_past_neck;
                 };
                 fill_body(p,spacewarp_body2,true);
                 if(spacewarp_held_far && prev.valid && prev.frame+1==alternate_frame && sw_prev_srv_[eye]) {
