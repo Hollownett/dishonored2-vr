@@ -4326,6 +4326,7 @@ static void install_compile_census() noexcept {
     compile_census_hook_export(compiler,"D3DDisassemble",reinterpret_cast<void*>(&d3d_disassemble_census_hook),original_d3d_disassemble);
     compile_census_hook_export(compiler,"D3DPreprocess",reinterpret_cast<void*>(&d3d_preprocess_census_hook),original_d3d_preprocess);
 }
+// Diagnostic (knob build/region-cache-stats): read_self's region-cache hits and why lookups missed (native_readable_range.hpp).
 static std::string region_cache_json() {
     auto& st=d2vr::region_cache_stats();if(!st.on.load()) return "null";
     std::ostringstream o;o<<"{\"lookups\":"<<st.lookups.load()<<",\"hit_readable\":"<<st.hit_readable.load()<<",\"hit_unreadable\":"<<st.hit_unreadable.load()
