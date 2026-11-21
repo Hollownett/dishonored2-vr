@@ -2358,7 +2358,8 @@ public:
     std::string own_device_json_() const {
         std::ostringstream o;
         o<<"{\"on\":"<<(own_device_active_?"true":"false")<<",\"why\":\""<<own_device_why_<<"\",\"copies\":"<<own_.copies()
-         <<",\"failures\":"<<own_.failures()<<",\"chains\":"<<own_.chains()<<",\"thread_ended\":"<<spacewarp_thread_ended.load()
+         <<",\"failures\":"<<own_.failures()<<",\"chains\":"<<own_.chains()<<",\"timing_stalls\":"<<runtime_timing_stalls
+         <<",\"timing_stall_frames\":"<<runtime_timing_stall_frames<<",\"timing_recoveries\":"<<runtime_timing_recoveries
          <<",\"frames\":"<<own_frames_ended_<<",\"strikes\":"<<own_device_strikes<<",\"blocked\":\""<<own_device_blocked<<"\"}";
         return o.str();
     }
@@ -2415,7 +2416,6 @@ public:
     // the game side's job waits, its end and the render side's entry. Never inside a render graph.
     bool spacewarp_inline{true},spacewarp_force_inline{},sw_inline_mode_{};std::uint64_t spacewarp_inline_frames{},spacewarp_inline_late{};
     std::uint64_t spacewarp_grid_handoffs{};  // v1451: late inline frames whose handed slot set the next due time from SteamVR's slot grid
-    std::atomic<std::uint64_t> spacewarp_thread_ended{};  // v1453: generated frames the waiting thread began and ended itself (own device)
     inline static std::atomic<bool> spacewarp_inline_pending{false};  // a generated frame waits for its due time (dxgi_probe spacewarp_wait_point)
     inline static std::atomic<std::int64_t> spacewarp_inline_due{0};  // v1444: that time (cpu_time_ns), read by the main thread's waits
     // v1444: at the wait points, how long the runtime's xrWaitFrame took and how long after the due time it was called (us)
@@ -2445,8 +2445,10 @@ public:
         spacewarp_inline_pending.store(false,std::memory_order_relaxed);
         sw_point_=point;
         try {
-            ContextState::Scope graphics_scope(graphics_state_);  // the runtime's calls never change the game's pipeline state mid-frame
-            submit_spacewarp_(true);
+            // v1456: on the own device the runtime's calls never touch the game's context, and the send may run inside a render graph,
+            // where the engine's workers use that context: no state swap on it then
+            if(own_device_active_) submit_spacewarp_(true);
+            else {ContextState::Scope graphics_scope(graphics_state_);submit_spacewarp_(true);}  // the runtime's calls never change the game's pipeline state mid-frame
         } catch(const std::exception& e) {sw_inline_fault_=e.what();if(sw_inline_fault_.empty()) sw_inline_fault_="error";
         } catch(...) {sw_inline_fault_="error";}
         sw_point_=safe_mid::present_start;
@@ -2486,6 +2488,26 @@ public:
     inline static std::string own_device_blocked{};
     static constexpr std::uint64_t own_device_proving_frames=900;  // 10 s at 90 Hz
     XrOwnDevice own_;bool own_device_active_{};std::string own_device_why_{"off"};std::uint64_t own_frames_ended_{};
+    // v1456: the runtime's frame timing watchdog (any runtime). SteamVR can stop advancing its predicted display time for good: in the
+    // v1455 session, after a 1.3 s stall, every xrWaitFrame returned the last display time plus 2 ns until the game closed (1,295 frames)
+    // and SteamVR showed its own timed-out scene. While a real frame's display time is under half a period after the last one, no frame
+    // is generated; after 30 such frames and 1.5 s the session is recreated (a recovery: about a second of black instead of no picture),
+    // at most 3 times per game run. Present thread only.
+    XrTime last_real_display_{};std::uint64_t timing_stall_run_{};std::int64_t timing_stall_since_{};bool runtime_timing_stalled_{};
+    std::uint64_t runtime_timing_stalls{},runtime_timing_stall_frames{};
+    inline static std::uint64_t runtime_timing_recoveries{};
+    void watch_runtime_timing_(XrTime display) {
+        const std::int64_t period=pacer_.base>0?pacer_.base:(frame_.predictedDisplayPeriod>0?frame_.predictedDisplayPeriod:11'111'111);
+        const XrTime last=last_real_display_;last_real_display_=display;
+        if(!last || !frame_.shouldRender || display-last>=period/2) {timing_stall_run_=0;runtime_timing_stalled_=false;return;}
+        const auto now=cpu_time_ns();
+        if(!timing_stall_run_++) {timing_stall_since_=now;++runtime_timing_stalls;}
+        ++runtime_timing_stall_frames;runtime_timing_stalled_=true;
+        if(timing_stall_run_>=30 && now-timing_stall_since_>=1'500'000'000 && runtime_timing_recoveries<3) {
+            ++runtime_timing_recoveries;timing_stall_run_=0;
+            throw XrSessionFault("XR runtime frame timing stopped advancing ("+std::to_string(display-last)+" ns per frame); recreating the session");
+        }
+    }
     std::uintptr_t chain_key_(XrSwapchain chain) const noexcept {return reinterpret_cast<std::uintptr_t>(chain);}
     std::uint64_t spacewarp_thread_frames{},spacewarp_thread_lead_us{};  // v1420: frames the thread submitted; their last lead on the next Present (us)
     std::array<SpacewarpWeaponLocal,2> spacewarp_weapon{};  // v1419: each hand's weapon body (dxgi_probe, every Present)
@@ -2843,6 +2865,7 @@ public:
                 binding.device=device;created=api<PFN_xrCreateSession>("xrCreateSession",instance_)(instance_,&session,&session_);
             }
             checked(created,"Create game XR session");
+            safe_mid::own_device.store(own_device_active_,std::memory_order_release);  // v1456: the mid points need neither the engine lock nor the window
             try {setup_refresh_rate_();} catch(...) {} // plan 1.6, opt-in; a failure leaves the policy inactive, never the session
             XrReferenceSpaceCreateInfo space{};space.type=XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
             space.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;space.poseInReferenceSpace.orientation.w=1;
@@ -3409,6 +3432,10 @@ public:
             sw_target_time_=slot_time;++spacewarp_generated;spacewarp_skip="";
             if(spacewarp_thread && spacewarp_thread_ready_()) {release_spacewarp_images_();post_spacewarp_job_();}  // v1420: its own thread submits it in its slot
             else if(spacewarp_thread && spacewarp_inline && sw_real_wait_ns_ && pacer_.base>0) {  // v1440: once the slot opens (v1444: from a main-thread wait)
+                // v1456: on the own device the send may come from inside a render graph, where nothing may touch the game's device; the
+                // release (the mirror copy's fence signal and flush on the game's immediate context) happens here, in present(), as on the
+                // waiting thread's path (v1420). The real frame was ended first, so the runtime already has its images.
+                if(own_device_active_) release_spacewarp_images_();
                 sw_pending_=true;sw_inline_mode_=true;sw_inline_due_ns_=sw_real_wait_ns_+pacer_.base;
                 sw_mid_armed_=true;safe_mid::arm(sw_inline_due_ns_);  // v1450: where the due time falls, and where the frame goes out
                 spacewarp_inline_due.store(sw_inline_due_ns_,std::memory_order_relaxed);spacewarp_inline_pending.store(true,std::memory_order_release);}
@@ -3423,9 +3450,10 @@ public:
         if(sw_thread_checked_) return sw_thread_ok_;
         sw_thread_checked_=true;sw_thread_ok_=false;
         if(spacewarp_force_inline) {spacewarp_thread_why="forced inline";return false;}  // v1440 sim: the SteamVR path in the simulator
-        // v1453: on the own device the runtime never touches the game's device, so the thread waits for, begins and ends the generated
-        // frame on any runtime (SteamVR included), as on Virtual Desktop
-        if(own_device_active_) {spacewarp_thread_why="";return sw_thread_ok_=true;}
+        // v1456: v1453 let this thread also begin and end the generated frame on the own device. On SteamVR that broke the session's frame
+        // timing for good after a stall (headset 2026-11-21: two submits for one frame, 5,186 refused views, every later xrWaitFrame the last
+        // display time plus 2 ns): SteamVR gets every frame call from the render thread again (the inline path), and the own device lets
+        // that thread send from any of its waits (spacewarp_safe_mid.hpp own_device).
         if(!xr_runtime_name.empty() && xr_runtime_name.find("VirtualDesktop")==std::string::npos) {spacewarp_thread_why="runtime";return false;}
         spacewarp_thread_why="";return sw_thread_ok_=true;
     }
@@ -3457,10 +3485,6 @@ public:
             sw_job_.result=result;sw_job_.waited_ns=waited;
             if(XR_FAILED(result)) {sw_job_.fault=xr_result_session_fatal(result);sw_job_.rejected=!sw_job_.fault;sw_job_.what="wait failed";sw_job_.state=SwJob::done;}
             else if(slot.predictedDisplayTime>target+period/2) {sw_job_.late_slot=true;sw_job_.handed=slot;sw_job_.state=SwJob::done;}  // the real frame's slot: its wait
-            else if(own_device_active_) {  // v1453: the runtime uses only the own device: this thread ends the frame in its slot, now
-                sw_job_.slot=slot;sw_job_.state=SwJob::due;
-                l.unlock();submit_due_spacewarp_(false);++spacewarp_thread_ended;l.lock();
-            }
             else {sw_job_.slot=slot;sw_job_.state=SwJob::due;spacewarp_due.store(true,std::memory_order_release);}  // the render thread ends it
             sw_job_cv_.notify_all();
         }
@@ -3678,6 +3702,7 @@ public:
     void close() noexcept {
         stop_spacewarp_thread_();  // v1420: before the session and its swapchains go
         spacewarp_inline_pending.store(false,std::memory_order_relaxed);if(sw_mid_armed_) {sw_mid_armed_=false;safe_mid::abandon();}  // v1450: no mid point sends into a closing session
+        safe_mid::own_device.store(false,std::memory_order_release);  // v1456: the game's device rules again until a new session says otherwise
         PalmSaver::process().flush_for(200); // a fit confirmed just before stop reaches the disk (bounded wait)
         ContextState::Scope graphics_scope(graphics_state_);
         // Production polls ready_to_close on the owner Present thread first.
@@ -3871,6 +3896,7 @@ public:
         pacer_.update(waited_ns,timing.wait_ns,frame_.predictedDisplayTime,frame_.predictedDisplayPeriod,steady_pacing && !alternate_enabled);
         update_refresh_rate_(waited_ns,timing.wait_ns); // plan 1.6: no-op unless build/auto-refresh-rate and the runtime offers rates
         timing.display_time=frame_.predictedDisplayTime;timing.display_period=frame_.predictedDisplayPeriod;
+        watch_runtime_timing_(frame_.predictedDisplayTime);  // v1456
         XrFrameBeginInfo begin{};begin.type=XR_TYPE_FRAME_BEGIN_INFO;
         stage_start=cpu_time_ns();
         // v1393: a failed xrBeginFrame after a successful xrWaitFrame leaves a waited frame that was never begun (the next xrWaitFrame may
@@ -4665,7 +4691,10 @@ public:
         if(real_frame_ended) end_frame_rejected_run_=0;
         frame_open_=false;
         // Spacewarp: the next slot's frame from this one, while the GPU is free and this frame's depth is still in place
-        if(sw_keep_) {if(real_frame_ended && real_layers) generate_spacewarp_(end);else {sw_pending_=false;spacewarp_skip="real frame not shown";++spacewarp_unusable;if(sw_mid_armed_) {sw_mid_armed_=false;safe_mid::abandon();}}}
+        if(sw_keep_) {
+            if(real_frame_ended && real_layers && !runtime_timing_stalled_) generate_spacewarp_(end);
+            else {sw_pending_=false;spacewarp_skip=runtime_timing_stalled_?"runtime timing stalled":"real frame not shown";++spacewarp_unusable;if(sw_mid_armed_) {sw_mid_armed_=false;safe_mid::abandon();}}
+        }
         if(gpu_queue_limit && context_) {
             if(!frame_fence_) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT,0};device->CreateQuery(&desc,&frame_fence_);}
             if(frame_fence_) {context_->End(frame_fence_.Get());frame_fence_pending_=true;}

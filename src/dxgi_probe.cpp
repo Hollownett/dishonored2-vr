@@ -3444,23 +3444,33 @@ static void spacewarp_mid_point(d2vr::safe_mid::Point point) noexcept {
     if(d2vr::GameXr::cpu_time_ns()<d2vr::GameXr::spacewarp_inline_due.load(std::memory_order_acquire)) return;
     if(d2vr::AsyncPresent::instance().in_flight()) return;  // build/async-present: its worker holds the immediate context
     static thread_local bool busy=false;if(busy) return;
-    if(!engine_context_enabled()) {sm::refused_lock_off.fetch_add(1,std::memory_order_relaxed);return;}
-    if(!engine_context_try_lock(2'000'000)) {sm::lock_skips.fetch_add(1,std::memory_order_relaxed);return;}
+    // v1456: on the mod's own device the runtime never touches the game's device: no engine lock, no exclusive window (a worker's
+    // immediate-context call cannot meet the runtime's)
+    const bool own=sm::own_device.load(std::memory_order_acquire);
+    if(!own) {
+        if(!engine_context_enabled()) {sm::refused_lock_off.fetch_add(1,std::memory_order_relaxed);return;}
+        if(!engine_context_try_lock(2'000'000)) {sm::lock_skips.fetch_add(1,std::memory_order_relaxed);return;}
+    }
     busy=true;
     {d2vr::CrashOperation operation(sm::point_names[point]);  // a crash in the runtime's calls is attributed to the mid point
-     XrGraphicsScope graphics_scope;sm::Window window(gpu_game_context.load(std::memory_order_relaxed));game_xr->spacewarp_wait_point(point);}
+     XrGraphicsScope graphics_scope;
+     if(own) game_xr->spacewarp_wait_point(point);
+     else {sm::Window window(gpu_game_context.load(std::memory_order_relaxed));game_xr->spacewarp_wait_point(point);}}
     busy=false;
-    engine_context_unlock();
+    if(!own) engine_context_unlock();
 }
 // v1450: job_wake's idle callbacks (main thread, inside its own WaitForSingleObject): only inside the game side (safe_mid's phase), only
-// with a frame pending; a render-side wait never sends (v1444's freeze)
+// with a frame pending; a render-side wait never sends (v1444's freeze). v1456: on the mod's own device (safe_mid::own_device) a
+// render-side wait outside the Present hook sends too (render_wait): the runtime's calls cannot meet the workers' immediate-context calls.
 static std::int64_t safe_mid_wait_left() noexcept {
     if(!d2vr::GameXr::spacewarp_inline_pending.load(std::memory_order_acquire)) return d2vr::job_wake::idle_none;
     return d2vr::safe_mid::game_wait_left(d2vr::GameXr::cpu_time_ns(),d2vr::job_wake::idle_none);
 }
 static void safe_mid_wait_work() noexcept {
-    if(!d2vr::safe_mid::in_game()) return;
-    spacewarp_mid_point(d2vr::job_wake::idle_timer_work?d2vr::safe_mid::game_wait_timer:d2vr::safe_mid::game_wait);
+    namespace sm=d2vr::safe_mid;
+    if(!sm::wait_phase_ok()) return;
+    const bool game=sm::in_game(),timer=d2vr::job_wake::idle_timer_work;
+    spacewarp_mid_point(game?(timer?sm::game_wait_timer:sm::game_wait):(timer?sm::render_wait_timer:sm::render_wait));
 }
 template<unsigned Binding> void WINAPI viewports_hook(ID3D11DeviceContext* context,UINT count,const D3D11_VIEWPORT* viewports) {
     d2vr::ctx_probe::note(context,d2vr::ctx_probe::Kind::viewports,_ReturnAddress());
@@ -18486,7 +18496,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                 {std::ifstream own_knob(root/L"build"/L"xr-own-device");std::string own_mode;  // v1453: OFF by default
                  if(own_knob) {own_knob>>own_mode;xr_own_device_knob=own_mode=="all"?2:own_mode=="off"?0:1;} else xr_own_device_knob=0;}
                 {std::ifstream mid_knob(root/L"build"/L"spacewarp-safe-mid");std::string mid_mode;safe_mid_knob=static_cast<bool>(mid_knob);  // v1450: SteamVR mid-frame points, OFF by default
-                 if(mid_knob) mid_knob>>mid_mode;d2vr::safe_mid::mask.store(safe_mid_knob?d2vr::safe_mid::mask_of(mid_mode):d2vr::safe_mid::mask_off);}
+                 if(mid_knob) mid_knob>>mid_mode;d2vr::safe_mid::mask.store(safe_mid_knob?d2vr::safe_mid::mask_of(mid_mode):d2vr::safe_mid::mask_off);
+                 // v1456: the own device's SteamVR path sends its generated frames at these points: build/xr-own-device switches them on
+                 if(!safe_mid_knob && xr_own_device_knob>0) {safe_mid_knob=true;d2vr::safe_mid::mask.store(d2vr::safe_mid::mask_all);}}
                 {std::ifstream lagk(root/L"build"/L"spacewarp-legs-lag");int lag=-1;if(lagk>>lag && (lag==0 || lag==1)) spacewarp_legs_lag=lag;else spacewarp_legs_lag=spacewarp_legs_lag_default;}  // v1439
                 spacewarp_crack2_knob=fs::exists(root/L"build"/L"spacewarp-crack2");   // v1438: the v1437 crack reach
                 spacewarp_hand_bubble_knob=fs::exists(root/L"build"/L"spacewarp-hand-bubble");   // v1438: the v1437 hand volumes

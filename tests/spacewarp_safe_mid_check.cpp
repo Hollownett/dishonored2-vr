@@ -99,6 +99,31 @@ int main() {
         sm::violated=false;
         check(sm::mask_of("")==sm::mask_all && sm::mask_of("all")==sm::mask_all && sm::mask_of("graph")==sm::mask_graph && sm::mask_of("game")==sm::mask_game && sm::mask_of("off")==sm::mask_off,"knob text");
     }
+    {   // v1456: the session on the mod's own device: render-side waits send too (not inside the Present hook), violations do not count
+        reset_counts();const std::int64_t t0=3000*ms;
+        check(!sm::allowed(sm::render_wait) && !sm::allowed(sm::render_wait_timer),"render_wait: never on the game's device");
+        sm::own_device=true;
+        check(sm::allowed(sm::render_wait) && sm::allowed(sm::render_wait_timer) && sm::allowed(sm::game_wait),"on the own device: render waits and game waits");
+        sm::render_enter(t0);sm::hook_enter(t0+ms/2);sm::arm(t0+12*ms);
+        check(sm::game_wait_left(t0+ms,jw::idle_none)==jw::idle_none && !sm::wait_phase_ok(),"... but not inside the Present hook (present()'s points send there)");
+        sm::hook_exit(t0+2*ms);sm::graph_submit(t0+2*ms);
+        check(sm::wait_phase_ok() && sm::game_wait_left(t0+3*ms,jw::idle_none)==9*ms,"inside a render graph: the time until the due time");
+        check(sm::game_wait_left(t0+12*ms+ms/4,jw::idle_none)==-ms/4,"... and due once it has passed");
+        sm::violated=true;
+        check(sm::allowed(sm::graph_end) && sm::allowed(sm::render_wait),"a violation does not switch the own device's points off");
+        sm::violated=false;sm::mask=sm::mask_graph;
+        check(!sm::allowed(sm::render_wait) && sm::game_wait_left(t0+3*ms,jw::idle_none)==jw::idle_none,"the graph-only mask keeps the waits off");
+        sm::mask=sm::mask_all;sm::waits_ok=false;
+        check(!sm::allowed(sm::render_wait_timer),"no render waits without job_wake's patch");
+        sm::waits_ok=true;
+        sm::record(sm::render_wait_timer,sm::sent_ok,t0+12*ms+ms/20,ms/20,ms/10,ms/3);
+        check(sm::stats[sm::render_wait_timer].sent==1 && sm::stats[sm::render_wait_timer].after_hist[0]==1,"render_wait_timer counted, within 0.25 ms of the due time");
+        sm::graph_return(t0+13*ms);sm::render_exit(t0+13*ms+ms/5);
+        sm::own_device=false;
+        sm::game_enter(t0+14*ms);sm::arm(t0+20*ms);sm::game_exit(t0+15*ms);sm::render_enter(t0+15*ms+ms/10);sm::graph_submit(t0+16*ms);
+        check(!sm::wait_phase_ok() && sm::game_wait_left(t0+17*ms,jw::idle_none)==jw::idle_none,"back on the game's device: no render-side wait (v1444's freeze)");
+        sm::graph_return(t0+21*ms);sm::render_exit(t0+21*ms);sm::abandon();
+    }
     {   // the exclusive window: another thread's call on the immediate context inside a send
         reset_counts();int immediate=0,deferred=0;
         sm::note_call(&immediate,nullptr);

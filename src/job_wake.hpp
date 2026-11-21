@@ -40,6 +40,8 @@ inline std::int64_t ticks_per_second=1;
 // v1450 (opt-in build/spacewarp-safe-mid, src/spacewarp_safe_mid.hpp): used again, ONLY for waits inside the game side (exe 459a0), where
 // no worker uses the immediate context, and with the engine's immediate-context lock held for the send. idle_left returns idle_none in
 // every other wait, so a render-side wait never sends (docs/research/STEAMVR-SAFE-SUBMIT.md).
+// v1456: except while the XR session is on the mod's own D3D11 device (build/xr-own-device, safe_mid::own_device): the runtime's calls then
+// never touch the game's device, so a render-side wait (outside the Present hook) sends at the due time too.
 using LeftFn=std::int64_t(*)() noexcept;  // ns until the pending work is due (<= 0: due now), idle_none: nothing pending
 using WorkFn=void(*)() noexcept;
 inline constexpr std::int64_t idle_none=INT64_MAX;

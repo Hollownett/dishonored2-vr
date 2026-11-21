@@ -47,8 +47,11 @@ enum Phase : unsigned {hook,after_hook,graph0,after_graph0,graph1,after_graph1,g
 inline constexpr const char* phase_names[phases]={"hook","after_hook","graph0","after_graph0","graph1","after_graph1","graph_more","after_graph_more",
     "render_to_game","game","game_to_render","before_hook"};
 // v1451: hook_end = the Present hook's exit, for a frame that came due inside the hook (the earliest point after the frame exists).
-enum Point : unsigned {graph_end,game_wait,game_wait_timer,game_end,render_start,hook_end,present_start,present_fence,present_late,points};
-inline constexpr const char* point_names[points]={"graph_end","game_wait","game_wait_timer","game_end","render_start","hook_end","present_start","present_fence","present"};
+// v1456: render_wait / render_wait_timer = a main-thread wait outside the game side and outside the Present hook (render graphs included),
+// only while the XR session is on the mod's own device (own_device below).
+enum Point : unsigned {graph_end,game_wait,game_wait_timer,render_wait,render_wait_timer,game_end,render_start,hook_end,present_start,present_fence,present_late,points};
+inline constexpr const char* point_names[points]={"graph_end","game_wait","game_wait_timer","render_wait","render_wait_timer","game_end","render_start","hook_end",
+    "present_start","present_fence","present"};
 // Knob text (build/spacewarp-safe-mid): empty or "all" = every mid point, "graph" = graph_end only, "game" = the game-side points only
 // (game_wait, game_end, render_start). Dev command `safemid off|graph|game|all`.
 enum Mask : unsigned {mask_off=0u,mask_graph=1u,mask_game=2u,mask_all=3u};
@@ -66,15 +69,24 @@ inline std::atomic<unsigned> mask{mask_off};          // the knob (or the dev co
 inline std::atomic<bool> hooks_ok{false};             // the game side, render side, graph submit and graph wait detours are all in
 inline std::atomic<bool> waits_ok{false};             // job_wake's import patch is in (game_wait)
 inline std::atomic<bool> violated{false};             // an immediate-context call from another thread inside a send: off for the session
+// v1456: the XR session is on the mod's own D3D11 device (src/xr_own_device.hpp; set by GameXr with its session, cleared at its close).
+// The runtime's calls then never touch the game's device, so a send needs neither the engine's immediate-context lock nor the exclusive
+// window (a worker's immediate-context call cannot meet the runtime's), and every main-thread wait outside the Present hook is a point,
+// render graphs included (render_wait): the generated frame goes out at its due time from wherever the main thread waits. All of the
+// runtime's frame calls stay on the main thread (v1453's waiting thread ending frames broke SteamVR's frame timing).
+inline std::atomic<bool> own_device{false};
 inline std::atomic<DWORD> main_tid{0};                // the Present thread (the engine's main thread)
 
 // May a frame go out at point p? (Present-time points always may: they are v1445's.)
 inline bool allowed(Point p) noexcept {
     if(!mid_point(p)) return true;
-    if(violated.load(std::memory_order_relaxed)) return false;
+    const bool own=own_device.load(std::memory_order_relaxed);
+    if(violated.load(std::memory_order_relaxed) && !own) return false;
+    if((p==render_wait || p==render_wait_timer) && !own) return false;  // v1456: only on the own device
     const unsigned m=mask.load(std::memory_order_relaxed);
     if(!(m&mask_bit(p))) return false;
-    return p==game_wait || p==game_wait_timer?hooks_ok.load(std::memory_order_relaxed) && waits_ok.load(std::memory_order_relaxed):hooks_ok.load(std::memory_order_relaxed);
+    const bool wait=p==game_wait || p==game_wait_timer || p==render_wait || p==render_wait_timer;
+    return wait?hooks_ok.load(std::memory_order_relaxed) && waits_ok.load(std::memory_order_relaxed):hooks_ok.load(std::memory_order_relaxed);
 }
 
 // ---- main thread only (the hooks run on it; the job_wake idle callbacks too) ----
@@ -136,6 +148,9 @@ inline void graph_return(std::int64_t now) noexcept {
     enter(p==graph0?after_graph0:p==graph1?after_graph1:after_graph_more,now);
 }
 inline bool in_game() noexcept {return state().phase==game;}
+// May a main-thread wait send now? The game side always (v1450); on the own device also the render side, except inside the Present hook
+// (present()'s own points send there).
+inline bool wait_phase_ok() noexcept {const Phase p=state().phase;return p==game || (own_device.load(std::memory_order_relaxed) && p!=hook);}
 
 // The frame went out (or was dropped) at point p. after_ns: from the due time to the start of the runtime's xrWaitFrame (or to the drop);
 // wait_ns: the xrWaitFrame; call_ns: the whole send on this thread. outcome: 0 sent, 1 late slot (the wait was the real frame's), 2 dropped
@@ -165,10 +180,11 @@ inline std::int64_t grid_handoff(std::int64_t due_ns,std::int64_t step_ns,std::i
     if(due_ns<=0 || base_ns<=0 || step_ns<base_ns/2 || step_ns>4*base_ns) return clock_ns;
     return due_ns+step_ns;
 }
-// job_wake idle callbacks: only inside the game side, only with a frame armed and the game points allowed
+// job_wake idle callbacks: inside the game side (v1450), or on the own device in any phase but the Present hook (v1456); only with a frame
+// armed and the wait points allowed
 inline std::int64_t game_wait_left(std::int64_t now,std::int64_t none) noexcept {
     const MainState& s=state();
-    if(!s.armed || s.phase!=game || !allowed(game_wait)) return none;
+    if(!s.armed || !wait_phase_ok() || !allowed(s.phase==game?game_wait:render_wait)) return none;
     return s.due-now;
 }
 
