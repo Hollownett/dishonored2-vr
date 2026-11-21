@@ -103,6 +103,10 @@ int main() {
         check(runs.load()>0 && runtime_pixel(2)!=0xdeadbeefu,"200 frames of copies beside another thread on the own device");
     }
     own.reset();check(!own && own.chains()==0,"reset drops everything");
+    // v1457: status texts in JSON strings
+    check(d2vr::json_text("plain text (ok)")=="plain text (ok)","json_text: plain text unchanged");
+    check(d2vr::json_text("a \"quoted\" word")=="a \\\"quoted\\\" word" && d2vr::json_text("C:\\path")=="C:\\\\path","json_text: quotes and backslashes escaped");
+    check(d2vr::json_text(std::string("line\nbreak"))=="line\\u000abreak","json_text: control characters as \\u escapes");
     std::printf(failures?"FAILED %d\n":"ALL PASSED\n",failures);
     return failures?1:0;
 }

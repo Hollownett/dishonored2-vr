@@ -2357,10 +2357,10 @@ public:
     // v1453: the session's own device (build/xr-own-device)
     std::string own_device_json_() const {
         std::ostringstream o;
-        o<<"{\"on\":"<<(own_device_active_?"true":"false")<<",\"why\":\""<<own_device_why_<<"\",\"copies\":"<<own_.copies()
+        o<<"{\"on\":"<<(own_device_active_?"true":"false")<<",\"why\":\""<<json_text(own_device_why_)<<"\",\"copies\":"<<own_.copies()
          <<",\"failures\":"<<own_.failures()<<",\"chains\":"<<own_.chains()<<",\"timing_stalls\":"<<runtime_timing_stalls
          <<",\"timing_stall_frames\":"<<runtime_timing_stall_frames<<",\"timing_recoveries\":"<<runtime_timing_recoveries
-         <<",\"frames\":"<<own_frames_ended_<<",\"strikes\":"<<own_device_strikes<<",\"blocked\":\""<<own_device_blocked<<"\"}";
+         <<",\"frames\":"<<own_frames_ended_<<",\"strikes\":"<<own_device_strikes<<",\"blocked\":\""<<json_text(own_device_blocked)<<"\"}";
         return o.str();
     }
     // The spacewarp counters for xr-live-status.json without diagnostics (the headset test's evidence)
@@ -2854,7 +2854,7 @@ public:
             if(own_device_wanted>0) {
                 const bool vdxr=xr_runtime_name.find("VirtualDesktop")!=std::string::npos;
                 if(vdxr && own_device_wanted!=2) own_device_why_="not needed (Virtual Desktop)";
-                else if(own_device_wanted==3 && xr_runtime_name.find("SteamVR")==std::string::npos) own_device_why_="off: by default on SteamVR only (build/xr-own-device \"on\" for this runtime)";
+                else if(own_device_wanted==3 && xr_runtime_name.find("SteamVR")==std::string::npos) own_device_why_="off: by default on SteamVR only (an xr-own-device file turns it on here)";
                 else if(!own_device_blocked.empty()) own_device_why_="off after failures: "+own_device_blocked;
                 else if(own_.create(device)) {session_device=own_.device();own_device_active_=true;own_device_why_="on";}
                 else own_device_why_="failed: "+own_.why();

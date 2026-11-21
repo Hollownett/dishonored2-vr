@@ -28,6 +28,17 @@
 #include <vector>
 
 namespace d2vr {
+// v1457: a status text as the contents of a JSON string (quotes, backslashes and control characters escaped). The own device's why and
+// blocked texts quote file names and driver messages; unescaped, one quote made xr-live-status.json unreadable (sim 2026-11-21).
+inline std::string json_text(const std::string& text) {
+    std::string out;out.reserve(text.size()+8);
+    for(const char c:text) {
+        if(c=='"' || c=='\\') {out+='\\';out+=c;}
+        else if(static_cast<unsigned char>(c)<0x20) {char code[8];std::snprintf(code,sizeof code,"\\u%04x",static_cast<unsigned>(static_cast<unsigned char>(c)));out+=code;}
+        else out+=c;
+    }
+    return out;
+}
 class XrOwnDevice {
     template<class T> using Com=Microsoft::WRL::ComPtr<T>;
 public:
