@@ -66,7 +66,25 @@ def line_rule(rules, file, line_text, value):
     return None
 
 
-def site_override(rules, file, line_text, value):
+def entity_rule(rules, file, line_text, col, value):
+    """offsets.json "entity": an idEntity field read off a base identifier that holds an engine entity
+    (player, entity, npc, ...): the proven idEntity shift for the listed field values."""
+    e = rules.get('entity')
+    if not e:
+        return None
+    m = {int(k, 0): int(v, 0) for k, v in e['map'].items()}
+    if value not in m:
+        return None
+    b = re.search(r'([A-Za-z_]\w*)\s*\)?\s*\+\s*$', line_text[:col])
+    if not b:
+        return None
+    base = b.group(1)
+    if base in e['bases'] or base in e.get('file_bases', {}).get(file, []):
+        return m[value], e['why']
+    return None
+
+
+def site_override(rules, file, line_text, value, col=None):
     lr = line_rule(rules, file, line_text, value)
     if lr:
         return lr
@@ -76,6 +94,8 @@ def site_override(rules, file, line_text, value):
     g = rules['global'].get(f'{value:#x}')
     if g:
         return int(g['to'], 0), g.get('why', 'offsets.json global')
+    if col is not None:
+        return entity_rule(rules, file, line_text, col, value)
     return None
 
 
@@ -239,7 +259,7 @@ def main():
         if r['cls'] in ('comment', 'bytes'):
             continue
         line = src_lines[r['file']][r['line'] - 1]
-        o = site_override(rules, r['file'], line, r['value'])
+        o = site_override(rules, r['file'], line, r['value'], r['col'])
         if o and r['cls'] != 'offset':   # a reviewed offset rule wins over an address classification
             new = f'{o[0]:#x}'
             if new.lower() != r['text'].lower():
@@ -291,7 +311,7 @@ def main():
         v = r['value']
         line = src_lines[r['file']][r['line'] - 1]
         fv = file_votes(r['file'], r['line'], v) if v >= 0x10 else None
-        if fv and not site_override(rules, r['file'], line, v):
+        if fv and not site_override(rules, r['file'], line, v, r['col']):
             y, n = max(fv.items(), key=lambda kv: kv[1])
             tot = sum(fv.values())
             if n / tot >= 0.9 and (n >= 2 or v >= 0x400 or y == v):
@@ -305,7 +325,7 @@ def main():
             edits[r['file']].append((r['line'], r['col'], r['text'], f'{SIZE_OF_IMAGE[v]:#x}'))
             report['offset_moved'].append({**r, 'to': f'{SIZE_OF_IMAGE[v]:#x}', 'why': 'SizeOfImage'})
             continue
-        o = site_override(rules, r['file'], line, v)
+        o = site_override(rules, r['file'], line, v, r['col'])
         if o:
             if o[0] != v:
                 edits[r['file']].append((r['line'], r['col'], r['text'], f'{o[0]:#x}'))

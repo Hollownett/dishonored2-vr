@@ -148,7 +148,10 @@ def main():
                 value = int(m.group(0), 16)
                 before = line[max(0, s - 160):s]
                 # a {0x..,0x..,...} list of bytes
-                around = line[max(0, s - 60):min(len(line), e + 60)]
+                # neighbouring lines count too: a byte array may break across lines (3 bytes here, 4 on the next)
+                prev_line = lines[n - 2] if n >= 2 else ''
+                next_line = lines[n] if n < len(lines) else ''
+                around = prev_line[-60:] + ' ' + line[max(0, s - 60):min(len(line), e + 60)] + ' ' + next_line[:60]
                 in_bytes = bool(re.search(r'(?:std::byte\{|\{|,)\s*$', line[max(0, s - 12):s]) or not line[:s].strip()) and \
                     len(re.findall(r'0x[0-9a-fA-F]{1,2}\b', around)) >= 4 and value <= 0xff
                 cls = 'comment' if not code else classify(exe, value, before, in_bytes)

@@ -3621,5 +3621,45 @@
    "why": "same wheel prologue (controller flag +0x171 -> +0x179)",
    "source": "review/weapons-merged"
   }
- ]
+ ],
+ "entity": {
+  "why": "idEntity layout (weapons review, constructors 0x874c50->0x8e2390, registry lookup 0x7b5e00->0x81c320; arkPlayer +0x268/+0xf0/+0x360 confirmed live): fields 0x20..0x2b0 +8, fields from 0x2b8 +0x10",
+  "bases": [
+   "player",
+   "entity",
+   "ent",
+   "npc",
+   "victim",
+   "owner",
+   "e"
+  ],
+  "file_bases": {
+   "src/native_weapon_visibility.hpp": [
+    "address"
+   ],
+   "src/native_left_weapon_socket.hpp": [
+    "address"
+   ]
+  },
+  "map": {
+   "0xa8": "0xb0",
+   "0xac": "0xb4",
+   "0xc8": "0xd0",
+   "0xd0": "0xd8",
+   "0xd1": "0xd9",
+   "0xd4": "0xdc",
+   "0xf0": "0xf8",
+   "0x268": "0x270",
+   "0x288": "0x290",
+   "0x2e8": "0x2f8",
+   "0x300": "0x310",
+   "0x304": "0x314",
+   "0x308": "0x318",
+   "0x30c": "0x31c",
+   "0x310": "0x320",
+   "0x314": "0x324",
+   "0x358": "0x368",
+   "0x360": "0x370"
+  }
+ }
 }
