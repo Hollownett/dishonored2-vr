@@ -5961,11 +5961,13 @@ static bool voltaic_pinned() noexcept {return d2vr::game_traits::ranged_player_w
 static std::atomic<bool> voltaic_copy_on{false};   // control thread: the copy is wanted (pinned, gameplay); the render thread then feeds its forearm
 // [copy shots asked, queued, refused, native chord frames, ArmSet pins, forearm feeds, model frame writes, copy aims]
 static std::array<std::atomic<std::uint64_t>,8> voltaic_stats{};
+static std::array<std::atomic<std::uint64_t>,2> voltaic_feed_why{};   // v145738: copy feed skipped: [no forearm joint index, no image of that joint]
 static std::mutex voltaic_aim_mutex;static d2vr::WorldTrackedPose voltaic_copy_aim{};static UINT64 voltaic_copy_aim_tick{};   // the copy hand's hand-aimed ray (render thread)
 static std::string voltaic_json() {
     std::string equip;   // v145735: the live left equip pose name (what decides the forearm gun), letters/digits only
     {std::lock_guard<std::mutex> l(hand_state_mutex);for(const char c:left_equip_name) {if(!c) break;if(std::isalnum(static_cast<unsigned char>(c))) equip+=c;}}
-    std::string s="{\"pinned\":"+std::to_string(voltaic_pinned()?1:0)+",\"forearm\":"+std::to_string(left_forearm_gun.load()?1:0)+",\"equip\":\""+equip+
+    std::string s="{\"pinned\":"+std::to_string(voltaic_pinned()?1:0)+",\"forearm\":"+std::to_string(left_forearm_gun.load()?1:0)+
+        ",\"feed_why\":["+std::to_string(voltaic_feed_why[0].load())+','+std::to_string(voltaic_feed_why[1].load())+"],\"equip\":\""+equip+
         "\",\"copy\":"+std::to_string(voltaic_copy_on.load()?1:0)+",\"stats\":[";
     for(unsigned i=0;i<voltaic_stats.size();++i) s+=(i?",":"")+std::to_string(voltaic_stats[i].load(std::memory_order_relaxed));
     s+="],\"copy_entity\":[";
@@ -6077,8 +6079,8 @@ static void publish_voltaic_copy() noexcept {
     if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) {
         if(!voltaic_copy_on.load(std::memory_order_relaxed) || game_logic_mask()!=2) return;   // gameplay only: with no feed the copy hides within 0.25 s
         try {
-            const unsigned side=voltaic_copy_hand;const int joint=forearm_helper_index(side);if(joint<0) return;
-            const auto now=frames.load();const auto x=full_body.image_world(side,static_cast<unsigned>(joint),now);if(!x) return;
+            const unsigned side=voltaic_copy_hand;const int joint=forearm_helper_index(side);if(joint<0) {voltaic_feed_why[0].fetch_add(1,std::memory_order_relaxed);return;}
+            const auto now=frames.load();const auto x=full_body.image_world(side,static_cast<unsigned>(joint),now);if(!x) {voltaic_feed_why[1].fetch_add(1,std::memory_order_relaxed);return;}
             d2vr::WorldTrackedPose forearm{};forearm.position=x->p;forearm.basis={rotated(x->q,{1,0,0}),rotated(x->q,{0,1,0}),rotated(x->q,{0,0,1})};
             d2vr::NativeWeaponHands::forearm_pose(side,forearm,render_player_root());voltaic_stats[5].fetch_add(1,std::memory_order_relaxed);
             if(!d2vr::HeldEnginePose::on) return;
@@ -15221,6 +15223,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // of 0, NativeGadgetDrop::left_spent) is an empty hand: the player's fingers, a free hip draw. Mirrored, slot 0 is the native left slot all the same.
                                         const bool slot0_spent=state->slots[0] && d2vr::NativeGadgetDrop::left_spent.load(std::memory_order_relaxed);
                                         if(slot0_spent && (!body_carry || left_kept)) {hand_empty_bits|=1u;hand_item_bits&=~1u;}
+                                        // v145738 (user, DOTO headset: "the arm was also not free"): the Voltaic Gun rides the forearm, so its slot leaves the hand
+                                        // empty as a spent gadget does: the player's fingers (no game gun pose / fist), a free grip, no hand weapon for collision.
+                                        bool slot0_forearm=false;
+                                        if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(state->slots[0] && state->equip_name_texts[0]) {
+                                            char nm[32]{};if(read_self(state->equip_name_texts[0],nm,sizeof(nm)-1) && d2vr::is_voltaic_equip_name(nm)) slot0_forearm=true;}
+                                        if(slot0_forearm && (!body_carry || left_kept)) {hand_empty_bits|=1u;hand_item_bits&=~1u;}
                                         controls_carry_snapshot=state->carry;
                                         const auto hold_spawn=state->carry.hold_object()?d2vr::rig::value<std::uint32_t>(reader,state->carry.hold_state()+0x68).value_or(0):0;
                                         if(state->carry.hold_object() && (!hand_holding_object || hand_hold_state!=state->carry.hold_state() || hand_hold_spawn!=hold_spawn)) ++hand_hold_generation;
@@ -15228,7 +15236,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         hand_holding_object=state->carry.hold_object();hand_hold_state=state->carry.hold_state();hand_carry_snapshot=state->carry;
                                         native_grab.hand_contact().set_carrying_body(carry_hands!=0 && !state->carry.hold_object()); // the same frame: no one-update lag at carry start
                                         // Weapons in hand for collision: left slot item; right = the sword unless holstered (empty) or carrying.
-                                        hand_weapon_bits=body_carry?(left_kept && state->slots[0] && !slot0_spent?1u:0u):((state->slots[0] && !slot0_spent?1u:0u)|((state->slots[1] && !(state->empty_candidates&2u))?2u:0u));
+                                        hand_weapon_bits=body_carry?(left_kept && state->slots[0] && !slot0_spent && !slot0_forearm?1u:0u):((state->slots[0] && !slot0_spent && !slot0_forearm?1u:0u)|((state->slots[1] && !(state->empty_candidates&2u))?2u:0u));
                                         {char name[32]{};std::memset(left_equip_name,0,sizeof(left_equip_name));if(state->equip_name_texts[0] && read_self(state->equip_name_texts[0],name,sizeof(name)-1)) std::memcpy(left_equip_name,name,sizeof(name));}
                                         // Guns only (pistol "Gun", crossbow): the Heart and grenades are not aimed along their model.
                                         {const std::string_view n(left_equip_name);

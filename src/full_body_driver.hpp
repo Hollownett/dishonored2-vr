@@ -445,13 +445,13 @@ public:
     // v145727: an arm skeleton joint's index by name (e.g. "left_lower_armhelper2_jnt"); -1 before calibration or without that joint.
     int arm_joint_index(unsigned side,const std::string& name) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(side>1 || !fit_) return -1;
+        if(side>1) return -1;   // v145738: names only need the skeletons, which exist without a body fit (a missing one throws: -1)
         try {return solver_.skeleton(1+static_cast<int>(side)).find(name);} catch(...) {return -1;}
     }
     // v145735: the same-named joint of another arm ("left_X" <-> "right_X"); -1 before calibration or without that joint.
     int mirrored_arm_joint(unsigned from_side,unsigned joint,unsigned to_side) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(from_side>1 || to_side>1 || !fit_) return -1;
+        if(from_side>1 || to_side>1) return -1;   // v145738: as arm_joint_index, no body fit needed
         try {
             const auto& from=solver_.skeleton(1+static_cast<int>(from_side));
             if(joint>=from.names.size()) return -1;
