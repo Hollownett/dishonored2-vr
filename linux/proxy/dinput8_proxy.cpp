@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
 #include <exception>
 #include <optional>
 #include <string>
@@ -461,13 +462,34 @@ std::wstring expand_env(const wchar_t* text) {
     return out;
 }
 
-// GameKeys.PrepareConfig (launcher/Probe.cs:546-558), best effort.
+// GameKeys.PrepareConfig (launcher/Probe.cs, launcher/GameProfile.cs), best effort. The config folder follows the running
+// executable: Dishonored2.exe -> Dishonored2\base\dishonored2Config.cfg; Dishonored_DO.exe (Death of the Outsider) ->
+// the first *Config.cfg in Dishonored_DO\base (dishonored_DOConfig.cfg), the launcher's rule for a game without a fixed name.
+std::wstring focus_config_path() {
+    const std::wstring exe = module_path(nullptr);
+    std::wstring name = exe.substr(exe.find_last_of(L"\\/") + 1);
+    for (auto& c : name) c = static_cast<wchar_t>(towlower(c));
+    const std::wstring saved = expand_env(L"%USERPROFILE%\\Saved Games\\Arkane Studios\\");
+    if (saved.empty()) return std::wstring();
+    if (name == L"dishonored_do.exe") {
+        const std::wstring dir = saved + L"Dishonored_DO\\base\\";
+        WIN32_FIND_DATAW found{};
+        const HANDLE h = FindFirstFileW((dir + L"*Config.cfg").c_str(), &found);
+        if (h == INVALID_HANDLE_VALUE) return std::wstring();
+        std::wstring best = found.cFileName;
+        while (FindNextFileW(h, &found))
+            if (_wcsicmp(found.cFileName, best.c_str()) < 0) best = found.cFileName;
+        FindClose(h);
+        return dir + best;
+    }
+    return saved + L"Dishonored2\\base\\dishonored2Config.cfg";
+}
+
 void append_focus_cvars() {
-    const std::wstring cfg_path =
-        expand_env(L"%USERPROFILE%\\Saved Games\\Arkane Studios\\Dishonored2\\base\\dishonored2Config.cfg");
+    const std::wstring cfg_path = focus_config_path();
     std::string cfg;
     if (cfg_path.empty() || !exists(cfg_path) || !read_file(cfg_path, cfg)) {
-        log_line(L"dishonored2Config.cfg not found");
+        log_line(L"game config not found (" + (cfg_path.empty() ? std::wstring(L"no path") : cfg_path) + L")");
         return;
     }
     const std::string add = focus_cvars_to_append(cfg);
