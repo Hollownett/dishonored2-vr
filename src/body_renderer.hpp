@@ -119,6 +119,12 @@ inline bool billie_body_material_name(const std::string& name) {
     return false;
 }
 // Read-only: the owned body is Billie's and every draw record is one of her body materials.
+// The owned body model is Billie's (by resource name), whatever its draw records currently use.
+template<class Read> bool billie_body(Read& read,const NativeBodyBind& owner) {
+    const auto source=value<std::uintptr_t>(read,owner.descriptor+8);
+    const auto body=source?body_resource_name(read,*source):std::nullopt;
+    return body && billie_body_name(*body);
+}
 template<class Read> bool billie_native_body(Read& read,const NativeBodyBind& owner,const BodyMaterialRoute& route) {
     const auto source=value<std::uintptr_t>(read,owner.descriptor+8);
     const auto body=source?body_resource_name(read,*source):std::nullopt;
@@ -239,15 +245,29 @@ public:
         if(active_ && !(owner_==owner)) {reason_=Reason::owner_or_override;return false;}
         const auto route=body_material_route(read,base,arm,owner);
 #if defined(D2VR_GAME_DOTO)
-        if(route && (native_ || (!active_ && billie_native_body(read,owner,*route)))) {
-            if(!billie_native_body(read,owner,*route)) {reason_=Reason::route_or_material;return verified_=false;}
+        // Billie (live 2026-11-22): the first-person body keeps her six surfaces but every draw record and override slot is
+        // player_part_hidden.material. SetAll(model, nullptr) clears every override (SetAll rebuilds the override list with
+        // one entry per draw record), so Refresh draws each surface with its own material; restore puts the hidden one back.
+        if(route && (native_ || (!active_ && billie_body(read,owner)))) {
             if(!active_) {
+                const auto hidden=route->override_count?route->override_materials[0]:0;
+                if(!hidden || !all_equal(route->override_materials,hidden) || !route->draw_count || route->draw_count>6) {
+                    reason_=Reason::owner_or_override;return verified_=false;}
                 original_drawable_=(route->model_flags&0x10)!=0;
-                owner_=owner;original_=original_draw_=route->draw_materials[0];replacement_=0;
+                owner_=owner;original_=hidden;original_draw_=route->draw_materials[0];replacement_=0;
                 native_=true;active_=true;restoring_=false;
+                set_all(reinterpret_cast<void*>(owner.model),nullptr);
+                refresh_tick_=tick;++refreshes_;refresh(reinterpret_cast<void*>(owner.model));
+            } else if(!billie_native_body(read,owner,*route)) {
+                // The game hid the body again (state change, mantle): clear the overrides again, bounded like the D2 path.
+                if(tick && refresh_tick_ && tick>=refresh_tick_ && tick-refresh_tick_<250) {++refresh_deferred_;reason_=Reason::retry_deferred;return verified_=false;}
+                set_all(reinterpret_cast<void*>(owner.model),nullptr);
+                refresh_tick_=tick;++refreshes_;refresh(reinterpret_cast<void*>(owner.model));
             }
-            verified_=(route->model_flags&0x10)!=0;
-            if(!verified_) reason_=Reason::visibility;
+            const auto after=body_material_route(read,base,arm,owner);
+            if(!after || !billie_native_body(read,owner,*after)) {reason_=Reason::refresh_failed;return verified_=false;}
+            verified_=(after->model_flags&0x10)!=0;
+            if(!verified_) reason_=Reason::visibility;   // the caller's owned drawable-bit transaction shows it
             return verified_;
         }
 #endif
@@ -309,8 +329,16 @@ public:
         if(!active_) return true;
         if(!owned_render_scope || !abi(read,base)) return false;
 #if defined(D2VR_GAME_DOTO)
-        if(native_) { // nothing was written but the drawable bit, which the caller restores from original_drawable()
-            if(!body_material_route(read,base,arm,owner_)) return false;
+        if(native_) { // Billie: put the hidden material back on every slot (the caller restores the drawable bit)
+            const auto route=body_material_route(read,base,arm,owner_);
+            if(!route) return false;
+            if(!all_equal(route->override_materials,original_)) {
+                if(!all_equal(route->override_materials,0)) {reason_=Reason::foreign_restore;return false;}
+                restoring_=true;set_all(reinterpret_cast<void*>(owner_.model),reinterpret_cast<void*>(original_));
+                refresh(reinterpret_cast<void*>(owner_.model));
+            }
+            const auto after=body_material_route(read,base,arm,owner_);
+            if(!after || !all_equal(after->override_materials,original_) || !all_equal(after->draw_materials,original_)) return false;
             active_=verified_=restoring_=native_=false;return true;
         }
 #endif
