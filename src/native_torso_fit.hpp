@@ -5,6 +5,33 @@
 #include "avatar_fit_reuse.hpp"
 
 namespace d2vr {
+#if defined(D2VR_GAME_DOTO)
+// Death of the Outsider, Billie Lurk. Her body wrapper inherits Emily's body.md6, so the skeleton is the shared 20-joint
+// player_body_emily.md6skl (byte-identical to Dishonored 2's); only the mesh differs, and it is NOT a one-surface hidden
+// proxy: six real skinned surfaces (glove, upper, lower, holster, footwear, pouch; LOD0 only). The chest band
+// (Z=1.35 +/- .0125 m, fully weighted to spine01/02/03, extent along Y, same method as Emily/Corvo) holds 41 vertices, all in
+// the upper surface. Billie player_body_billie.md6mesh SHA256 5648f0933803962d52deb4efa0cba775410208bf553b2aca2a520f3bf79ebd12
+inline constexpr unsigned billie_body_vertices=11218;
+inline constexpr std::array<std::array<unsigned,2>,6> billie_body_surfaces{{{173u,244u},{4087u,7028u},{1671u,2940u},{2106u,2944u},{2506u,3896u},{675u,942u}}}; // {vertices,triangles}, file order
+inline bool billie_body_resource(const std::string& resource) {
+    return resource=="models/characters/dlc01/player/billie/player_body_billie.md6" ||
+        resource=="models/characters/dlc01/player/billie/player_body_billie.md6mesh" ||
+        resource=="generated/basemodel/models/characters/dlc01/player/billie/player_body_billie.bmd6model";
+}
+// The engine's surface list order is not verified live, so compare as a multiset.
+inline bool billie_body_surfaces_match(const std::vector<rig::AvatarMeshSurfaceToken>& live) {
+    if(live.size()!=billie_body_surfaces.size()) return false;
+    std::array<bool,6> used{};
+    for(const auto& s:live) {
+        if(s.kind!=0) return false;
+        bool found{};
+        for(unsigned i=0;i<billie_body_surfaces.size() && !found;++i)
+            if(!used[i] && billie_body_surfaces[i][0]==s.vertices && billie_body_surfaces[i][1]==s.triangles) found=used[i]=true;
+        if(!found) return false;
+    }
+    return true;
+}
+#endif
 // Pinned native meshes, decoded eight-weight vertices in the bind chest band
 // Z=1.35 +/- .0125m, fully weighted to spine01/02/03. These are clothed
 // cross-sections, not shoulder spans or a measurement of the player's body.
@@ -17,6 +44,9 @@ inline std::optional<double> native_torso_width(const std::string& resource,unsi
     if(vertices==10391 && (resource=="models/characters/player/corvo/body.md6" ||
         resource=="models/characters/player/corvo/player_body_corvo.md6mesh" ||
         resource=="generated/basemodel/models/characters/player/corvo/player_body_corvo.bmd6model")) return .353106752038002;
+#if defined(D2VR_GAME_DOTO)
+    if(vertices==billie_body_vertices && billie_body_resource(resource)) return .2559487223625183;
+#endif
     return {};
 }
 struct NativeTorsoFitToken {
@@ -63,13 +93,33 @@ template<class Read> std::optional<NativeTorsoFitToken> native_torso_fit_token(R
     const auto body=rig::native_body_bind(read,base,owned_arm);if(!body) return {};
     const auto source=rig::value<std::uintptr_t>(read,body->descriptor+8);
     const auto resource=source?rig::body_resource_name(read,*source):std::nullopt;if(!resource) return {};
+#if defined(D2VR_GAME_DOTO)
+    const bool billie=billie_body_resource(*resource);
+    if(*resource!="models/characters/player/emily/body.md6" && *resource!="models/characters/player/corvo/body.md6" && !billie) return {};
+#else
     if(*resource!="models/characters/player/emily/body.md6" && *resource!="models/characters/player/corvo/body.md6") return {};
+#endif
     auto model=owned_arm;model.model=body->model;model.skeleton=body->skeleton;
     const auto mesh=rig::avatar_mesh_token(read,base,model);
+#if defined(D2VR_GAME_DOTO)
+    std::optional<double> native_width;
+    if(billie) {
+        // Six real surfaces: pin every (vertices,triangles) pair and the total, then the chest-band width of the whole body.
+        if(!mesh || mesh->source!=*source || !billie_body_surfaces_match(mesh->surfaces)) return {};
+        native_width=native_torso_width(*resource,billie_body_vertices);
+    } else {
+        if(!mesh || mesh->source!=*source || mesh->surfaces.size()!=1 || mesh->surfaces[0].kind!=0) return {};
+        const auto& surface=mesh->surfaces[0];
+        native_width=native_torso_width(*resource,surface.vertices);
+        if(!native_width || surface.triangles!=(*resource=="models/characters/player/emily/body.md6"?13504u:18259u)) return {};
+    }
+    if(!native_width) return {};
+#else
     if(!mesh || mesh->source!=*source || mesh->surfaces.size()!=1 || mesh->surfaces[0].kind!=0) return {};
     const auto& surface=mesh->surfaces[0];
     const auto native_width=native_torso_width(*resource,surface.vertices);
     if(!native_width || surface.triangles!=(*resource=="models/characters/player/emily/body.md6"?13504u:18259u)) return {};
+#endif
     const auto scale=rig::value<std::array<float,3>>(read,body->model+0x1890);
     if(!scale || !std::isfinite((*scale)[0]) || (*scale)[0]<1e-4 || (*scale)[0]>16 ||
        (*scale)[1]!=(*scale)[0] || (*scale)[2]!=(*scale)[0]) return {};

@@ -269,6 +269,8 @@ def main():
     ap.add_argument("--keep-saves", action="store_true", help="keep the saves the run made (new game progress)")
     ap.add_argument("--no-session", action="store_true", help="plain game start: no probe override knobs (the proxy waits for a trigger)")
     ap.add_argument("--window", default="1596x993")
+    ap.add_argument("--during", action="append", default=[],
+                    help="'DELAY CMD...': a read-only tool run DELAY s after the session first reports gameplay; output in the run folder")
     ap.add_argument("--out", default=str(ROOT / "artifacts" / "doto-runs"))
     a = ap.parse_args()
     run = Path(a.out) / a.name
@@ -343,8 +345,24 @@ def main():
         next_shot = time.time() + 15
         deadline = time.time() + 240 + a.seconds + 60
         began = False
+        gameplay_at = None
+        pending = [d.split(" ", 1) for d in a.during]
         while time.time() < deadline and game_pid():
             text = plog()
+            try:
+                st = json.loads((ART / "xr-live-status.json").read_text(encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
+                st = None
+            if st and st.get("gameplay") and gameplay_at is None:
+                gameplay_at = time.time()
+                out("gameplay reached")
+            for item in list(pending):
+                if gameplay_at and time.time() - gameplay_at >= float(item[0]):
+                    pending.remove(item)
+                    res = subprocess.run([sys.executable, *item[1].split()], capture_output=True, text=True, cwd=ROOT)
+                    name = f"during-{len(a.during) - len(pending)}.txt"
+                    (run / name).write_text(item[1] + "\n" + res.stdout + "\n" + res.stderr, encoding="utf-8")
+                    out(f"during: {item[1]} -> {name}")
             if not began and "StartProbe begin" in text:
                 began = True
                 out("session started")

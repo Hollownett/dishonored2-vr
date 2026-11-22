@@ -180,6 +180,11 @@ def byte_groups(rows, src_lines=None):
         if cur:
             gap = between(cur[-1], r) if cur[-1]['file'] == r['file'] else None
             joined = gap is not None and all(sep.match(part) for part in gap.replace('std::byte{', ' ').split('\n'))
+            if joined:
+                # inside one array every '}' closes a std::byte{ ; any other brace is an array boundary
+                plain = gap.replace('std::byte{', '')
+                if '{' in plain or plain.count('}') > gap.count('std::byte{'):
+                    joined = False
             if not joined:
                 groups.append(cur)
                 cur = []

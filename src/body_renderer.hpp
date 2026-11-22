@@ -99,6 +99,39 @@ template<class Read> std::optional<std::string> body_resource_name(Read& read,st
     return {};
 }
 
+#if defined(D2VR_GAME_DOTO)
+// Death of the Outsider, Billie Lurk. Unlike Emily/Corvo (one hidden proxy surface, one draw record), her body.md6 mesh
+// carries six real textured surfaces, so there is no hidden material to replace and a single replacement material would
+// paint her whole body with one texture. Her body is recognised by resource name, and every draw record must name one of her
+// own body materials; the route then only needs the reflected m_mayBeDrawn bit (model+0x1c30 bit 0x10), no SetAll.
+inline bool billie_body_name(const std::string& name) {
+    return name=="models/characters/dlc01/player/billie/player_body_billie.md6";
+}
+inline bool billie_body_material_name(const std::string& name) {
+    static constexpr const char* known[]={
+        "models/characters/dlc01/player/billie/asset/body01/texture/ply_billie_glove.material",
+        "models/characters/dlc01/female/billie/body01/textures/f_billie_body01_upper_no_dvision.material",
+        "models/characters/dlc01/female/billie/body01/textures/f_billie_body01_lower_no_dvision.material",
+        "models/characters/dlc01/female/billie/body01/textures/f_billie_body01_holster_no_dvision.material",
+        "models/characters/dlc01/female/billie/body01/textures/f_billie_body01_footwear_no_dvision.material",
+        "models/characters/dlc01/female/billie/body01/textures/f_billie_body01_pouch_no_dvision.material"};
+    for(const auto* k:known) if(name==k) return true;
+    return false;
+}
+// Read-only: the owned body is Billie's and every draw record is one of her body materials.
+template<class Read> bool billie_native_body(Read& read,const NativeBodyBind& owner,const BodyMaterialRoute& route) {
+    const auto source=value<std::uintptr_t>(read,owner.descriptor+8);
+    const auto body=source?body_resource_name(read,*source):std::nullopt;
+    if(!body || !billie_body_name(*body) || !route.draw_count || route.draw_count>6) return false;
+    for(const auto material:route.draw_materials) {
+        const auto text=pointer(material)?value<std::uintptr_t>(read,material+8):std::nullopt;
+        const auto name=text?body_resource_name(read,*text):std::nullopt;
+        if(!name || !billie_body_material_name(*name)) return false;
+    }
+    return true;
+}
+#endif
+
 // The source is an already loaded material in this player's owned arm draw
 // records, not a global material search or a newly constructed game object.
 template<class Read> std::optional<std::uintptr_t> body_material_candidate(Read& read,
@@ -150,6 +183,9 @@ class BodyMaterialOverride {
     std::uintptr_t remembered_{};
     bool active_{},verified_{},restoring_{};
     bool original_drawable_{};
+#if defined(D2VR_GAME_DOTO)
+    bool native_{}; // Billie: native textured body, only the drawable bit is owned (no material override)
+#endif
     std::uint64_t refresh_tick_{},refreshes_{},refresh_deferred_{};
 public:
     enum class Reason {ready,scope_or_abi,route_or_material,owner_or_override,visibility,refresh_failed,retry_deferred,foreign_restore};
@@ -190,7 +226,11 @@ public:
     // Forget only after the integrator proves the old model owner has retired.
     // This performs no write through a recycled model address.
     void retire(const NativeBodyBind& owner) noexcept {
-        if(owner_==owner) {active_=verified_=restoring_=false;owner_={};original_=replacement_=original_draw_=0;refresh_tick_=0;}
+        if(owner_==owner) {active_=verified_=restoring_=false;owner_={};original_=replacement_=original_draw_=0;refresh_tick_=0;
+#if defined(D2VR_GAME_DOTO)
+            native_=false;
+#endif
+        }
     }
     template<class Read,class SetAll,class Refresh> bool apply(Read& read,std::uintptr_t base,
         const Arm& arm,const NativeBodyBind& owner,bool owned_render_scope,SetAll set_all,Refresh refresh,std::uint64_t tick=0) {
@@ -198,6 +238,19 @@ public:
         if(!owned_render_scope || !abi(read,base)) {reason_=Reason::scope_or_abi;return false;}
         if(active_ && !(owner_==owner)) {reason_=Reason::owner_or_override;return false;}
         const auto route=body_material_route(read,base,arm,owner);
+#if defined(D2VR_GAME_DOTO)
+        if(route && (native_ || (!active_ && billie_native_body(read,owner,*route)))) {
+            if(!billie_native_body(read,owner,*route)) {reason_=Reason::route_or_material;return verified_=false;}
+            if(!active_) {
+                original_drawable_=(route->model_flags&0x10)!=0;
+                owner_=owner;original_=original_draw_=route->draw_materials[0];replacement_=0;
+                native_=true;active_=true;restoring_=false;
+            }
+            verified_=(route->model_flags&0x10)!=0;
+            if(!verified_) reason_=Reason::visibility;
+            return verified_;
+        }
+#endif
         auto material=active_?(still_body_material(read,replacement_,owner)?std::optional<std::uintptr_t>(replacement_):std::nullopt):
             body_material_candidate(read,base,arm,owner);
         if(material) remembered_=*material;
@@ -255,6 +308,12 @@ public:
         const Arm& arm,bool owned_render_scope,SetAll set_all,Refresh refresh) {
         if(!active_) return true;
         if(!owned_render_scope || !abi(read,base)) return false;
+#if defined(D2VR_GAME_DOTO)
+        if(native_) { // nothing was written but the drawable bit, which the caller restores from original_drawable()
+            if(!body_material_route(read,base,arm,owner_)) return false;
+            active_=verified_=restoring_=native_=false;return true;
+        }
+#endif
         const auto route=body_material_route(read,base,arm,owner_);
         if(!route || route->draw_count!=1 || route->override_count<1) return false;
         const bool replacement=all_equal(route->override_materials,replacement_);
@@ -273,6 +332,14 @@ public:
         const Arm& arm,const NativeBodyBind& current,bool owned_render_scope,Enable enable) {
         if(!owned_render_scope || !active_ || !(owner_==current) || !abi(read,base))return false;
         const auto route=body_material_route(read,base,arm,current);
+#if defined(D2VR_GAME_DOTO)
+        if(native_) {
+            if(!route || !billie_native_body(read,current,*route)) return false;
+            enable(current.model);
+            const auto after=body_material_route(read,base,arm,current);
+            return verified_=after && billie_native_body(read,current,*after) && (after->model_flags&0x10)!=0;
+        }
+#endif
         if(!route || route->draw_count!=1 || route->override_count<1 ||
            !all_equal(route->override_materials,replacement_) || route->draw_materials[0]!=replacement_)return false;
         // Original bit was captured before SetAll. Mutate only this one bit
