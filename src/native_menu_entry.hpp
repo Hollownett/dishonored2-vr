@@ -7,7 +7,11 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#if defined(D2VR_GAME_DOTO)
+#include "menu_patches_doto.hpp"   // Death of the Outsider's movies (tools/doto/menu_patches.py); same types, its own data
+#else
 #include "menu_patches.hpp"
+#endif
 #include "game_art.hpp"
 #include "native_options_page.hpp"
 #include <cstdlib>
