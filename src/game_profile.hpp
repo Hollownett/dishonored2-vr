@@ -6,7 +6,7 @@
 // Per-game DATA (an avatar's mesh pins, resource names) stays next to the code that uses it, under the game's define.
 #include <cstdint>
 
-namespace d2vr::game {
+namespace d2vr::game_traits {
 #if defined(D2VR_GAME_DOTO)
 inline constexpr const char* name = "Dishonored: Death of the Outsider";
 inline constexpr const char* exe = "Dishonored_DO.exe";
@@ -25,4 +25,4 @@ inline constexpr std::uint64_t render_pipeline_depth = 1;   // Setup N is consum
 inline constexpr bool optional_native_consumers = false;    // every verified consumer is required
 inline constexpr bool billie_avatar = false;
 #endif
-} // namespace d2vr::game
+} // namespace d2vr::game_traits

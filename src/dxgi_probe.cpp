@@ -7759,10 +7759,10 @@ void observe_eye_begin(void* view) noexcept {
             // Actual native trace: Setup N is consumed by Begin N+1.
             // Qualify that exact pipeline stage, not an arbitrary older view.
             else if(const auto frame=frames.load();frame>0) {
-                // The Setup this Begin consumes was published d2vr::game::render_pipeline_depth Presents earlier: one in
+                // The Setup this Begin consumes was published d2vr::game_traits::render_pipeline_depth Presents earlier: one in
                 // Dishonored 2; the same Present in Death of the Outsider (live trace: setup 70 / begin 70, one thread),
                 // where the D2 stage is still accepted as a fallback.
-                if constexpr(d2vr::game::render_pipeline_depth==0) {
+                if constexpr(d2vr::game_traits::render_pipeline_depth==0) {
                     eye=eye_sources.match(address,frame,GetCurrentThreadId(),gpu_render_thread.load());
                     if(eye<0) eye=eye_sources.match(address,frame-1,GetCurrentThreadId(),gpu_render_thread.load());
                 } else eye=eye_sources.match(address,frame-1,GetCurrentThreadId(),gpu_render_thread.load());

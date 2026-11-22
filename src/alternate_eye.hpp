@@ -34,7 +34,7 @@ inline std::atomic<bool> alternate_parity_flip{false};
 inline constexpr std::uint64_t alternate_max_age = 2; // an eye image older than this many displayed frames is never submitted
 // Presents between a view Setup's interval and the one that shows its image: 1 in Dishonored 2, 0 in Death of the Outsider
 // (game_profile.hpp).
-inline constexpr std::uint64_t alternate_pipeline_depth = game::render_pipeline_depth;
+inline constexpr std::uint64_t alternate_pipeline_depth = game_traits::render_pipeline_depth;
 
 // The displayed frame (Present number) that shows the image of a view Setup made while the Present counter read `presented`.
 inline std::uint64_t alternate_display_frame(std::uint64_t presented) noexcept {return presented + 1 + alternate_pipeline_depth;}

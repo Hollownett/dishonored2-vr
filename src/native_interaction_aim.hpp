@@ -2764,7 +2764,7 @@ public:
         door_installed_=true;
         if(!NativeDoorInteraction::process_owner().install(base_,read_,logic_,physical_grab_)) {
             // A game whose door code changed (game_profile.hpp) keeps the game's own door interaction.
-            if constexpr(game::optional_native_consumers) {door_installed_=false;return;}
+            if constexpr(game_traits::optional_native_consumers) {door_installed_=false;return;}
             else throw std::runtime_error("Cannot install native door interaction owner");
         }
     }
@@ -2793,7 +2793,7 @@ public:
         }
         if(physical_grab_ && !ranking_profile(2))throw std::runtime_error("Native physical-grab obstruction wrapper differs");
         bool block_ok=true,slash_ok=true,choke_ok=true,offer_ok=true;
-        if constexpr(game::optional_native_consumers) {
+        if constexpr(game_traits::optional_native_consumers) {
             // A consumer whose engine code changed in this game is skipped (the game keeps its own behaviour for it) instead of
             // refusing the whole interaction system; consumers_ok_ reports which ones run.
             block_ok=NativeBlockEligibility::verify(base,read);slash_ok=NativeSlashSceneRate::verify(base,read);
