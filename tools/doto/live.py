@@ -36,6 +36,8 @@ class Proc:
             if pid is None:
                 raise SystemExit('no game process')
             self.name = name
+        else:
+            self.name = find_pid()[1] or 'Dishonored_DO.exe'
         self.pid = pid
         self.h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
         if not self.h:
@@ -117,6 +119,32 @@ def cmd_game(p, c):
     return g
 
 
+def logic_mask(p, c=None):
+    """The mod's game_logic_mask(): bit id for each active logic entry of the manager (2 = in game, 1<<15 loading,
+    64 main menu). None while the game object is not in state 3."""
+    c = c or (DOTO if p.name == 'Dishonored_DO.exe' else D2)
+    doto = c is DOTO
+    g = p.u64(p.base + c['game'])
+    if not g or p.u32(g + (0x355718 if doto else 0x341058)) != 3:
+        return None
+    manager = g + (0x1f75f8 if doto else 0x1f6ec8)
+    raw = p.read(manager, 0x8b8)
+    if not raw:
+        return None
+    mask = 0
+    for (e,) in struct.iter_unpack('<Q', raw):
+        if not e or e % 8 or not (0x10000 <= e < 0x7fff00000000):
+            continue
+        head = p.read(e, 0x48)
+        if not head:
+            continue
+        back, = struct.unpack_from('<Q', head, 8)
+        ident, = struct.unpack_from('<i', head, 0x18)
+        if back == manager and 0 < ident < 17 and head[0x40] == 1:
+            mask |= 1 << ident
+    return mask
+
+
 def cmd_player(p, c):
     """arkPlayer chain at the DOTO offsets (D2 in brackets): player game+0x327770 (0x3130b0), model +0xf8 (0xf0),
     components +0x270 (0x268), origin +0x310 (0x300), axis +0x31c (0x30c), spawn id +0xb0 (0xa8)."""
@@ -155,6 +183,8 @@ def main():
         cmd_game(p, c)
     elif cmd == 'player':
         cmd_player(p, c)
+    elif cmd == 'mask':
+        print('logic mask', logic_mask(p, c))
     elif cmd == 'rtti':
         a = int(sys.argv[2], 0)
         print(p.rtti(a))

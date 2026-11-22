@@ -272,6 +272,8 @@ def main():
     ap.add_argument("--keep-saves", action="store_true", help="keep the saves the run made (new game progress)")
     ap.add_argument("--no-session", action="store_true", help="plain game start: no probe override knobs (the proxy waits for a trigger)")
     ap.add_argument("--window", default="1596x993")
+    ap.add_argument("--gameplay-session", action="store_true", help="with --max-run: after the first (menu) session, wait for the "
+                    "in-game logic mask and run a second session with --scenario (DOTO's first load outlasts one 120 s session)")
     ap.add_argument("--max-run", type=int, default=0, help="keep the run (and the game) up this many seconds; with --seconds 0 the "
                     "VR session is continuous and has no gameplay script (drive menus with tools/doto/keys.py)")
     ap.add_argument("--during", action="append", default=[],
@@ -389,9 +391,32 @@ def main():
             if began and "StartProbe returned" in text:
                 if not a.max_run:
                     break
-                if text.count("StartProbe returned") != getattr(main, "_seen_returns", 0):
-                    main._seen_returns = text.count("StartProbe returned")
-                    out("session ended; the game stays up (--max-run): tools/doto/keys.py start begins another")
+                returns = text.count("StartProbe returned")
+                if returns != getattr(main, "_seen_returns", 0):
+                    main._seen_returns = returns
+                    out(f"session {returns} ended; the game stays up (--max-run)")
+                    if a.gameplay_session and returns >= 2:
+                        break   # the gameplay session is done
+                if a.gameplay_session and returns == 1 and not getattr(main, "_triggered", False):
+                    # read-only: wait for the in-game logic mask (2) to hold, then start the scripted gameplay session
+                    import live as L
+                    try:
+                        m = L.logic_mask(L.Proc(pid))
+                    except SystemExit:
+                        m = None
+                    main._mask_hits = getattr(main, "_mask_hits", 0) + 1 if m == 2 else 0
+                    if main._mask_hits >= 4:
+                        segs = W2.segments_for(a.scenario, 3000, 114000)
+                        sgs = W2.load("d2vr_simulated_gameplay_script", ROOT / "tools" / "simulated_gameplay_script.py")
+                        tmp = ROOT / "artifacts" / "doto-runs" / "_gameplay_script.json"
+                        tmp.write_text(json.dumps({"segments": segs}, indent=1) + "\n", encoding="utf-8")
+                        sj, sc = sgs.compile_script(tmp, tmp.parent, 120)
+                        (BUILD / W2.SCRIPT_CFG).write_text(sc, encoding="utf-8")
+                        (ART / W2.SCRIPT_JSON).write_text(sj, encoding="utf-8")
+                        (BUILD / "linux-start").write_text("", encoding="utf-8")
+                        main._triggered = True
+                        gameplay_at = None
+                        out(f"in gameplay: started the '{a.scenario}' session")
                 if time.time() - started >= a.max_run:
                     break
             if time.time() >= next_shot:

@@ -267,6 +267,7 @@ class NativeInteractionAim {
     NativeLeanQueryTrace lean_trace_;
     NativeLeanLifecycle lean_lifetime_;
     std::atomic<bool> active_{false};
+    unsigned consumers_ok_{15}; // install-time consumers that run: block 1, slash 2, choke 4, offer 8 (DOTO may skip one whose code changed)
     std::atomic<bool> takedown_ranges_enabled_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<UINT> depth_{};std::atomic<DWORD> stage0_thread_id_{}; // thread of the last stage<0> hook (frame split telemetry)
@@ -2787,10 +2788,19 @@ public:
             if(!read(base+rvas[i],bytes.data(),bytes.size()) || bytes!=expected[i]) throw std::runtime_error("Native interaction query code differs");
         }
         if(physical_grab_ && !ranking_profile(2))throw std::runtime_error("Native physical-grab obstruction wrapper differs");
+#if defined(D2VR_GAME_DOTO)
+        // Death of the Outsider: a consumer whose engine code changed is skipped (the game keeps its own behaviour for it)
+        // instead of refusing the whole interaction system; consumers_ok_ reports which ones run.
+        const bool block_ok=NativeBlockEligibility::verify(base,read),slash_ok=NativeSlashSceneRate::verify(base,read),
+                   choke_ok=NativeChokeDistanceScope::verify(base,read),offer_ok=NativeOfferedChoke::verify(base,read);
+        consumers_ok_=(block_ok?1u:0u)|(slash_ok?2u:0u)|(choke_ok?4u:0u)|(offer_ok?8u:0u);
+#else
         if(!NativeBlockEligibility::verify(base,read))throw std::runtime_error("Native Block eligibility consumer differs");
         if(!NativeSlashSceneRate::verify(base,read))throw std::runtime_error("Native Slash scene-rate consumer differs");
         if(!NativeChokeDistanceScope::verify(base,read))throw std::runtime_error("Native Choke scope consumer differs");
         if(!NativeOfferedChoke::verify(base,read))throw std::runtime_error("Native Choke offer observer differs");
+        constexpr bool block_ok=true,slash_ok=true,choke_ok=true,offer_ok=true;
+#endif
         if(route_) {
             std::array<unsigned char,8> getter{};
             constexpr std::array<unsigned char,32> eligibility_code{0x48,0x8b,0xc4,0x48,0x89,0x78,0x20,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0xa0,0,0,0,0x4d,0x8b,0xe1,0x4d,0x8b,0xf0,0x48,0x8b,0xfa,0x4c,0x8b,0xf9};
@@ -2866,14 +2876,14 @@ public:
         if(physical_grab_) {
             physical_occlusion_=occlusion_?occlusion_:reinterpret_cast<Occlusion>(base_+ranking_rvas[2]);
         }
-        if(!NativeBlockEligibility::process_owner().install(base,read))throw std::runtime_error("Cannot install native Block eligibility consumer");
-        if(!NativeSlashSceneRate::process_owner().install(base,read,logic))throw std::runtime_error("Cannot install native Slash scene-rate consumer");
-        if(!NativeChokeDistanceScope::process_owner().install(base,read,logic))throw std::runtime_error("Cannot install native Choke scope consumer");
-        if(!NativeOfferedChoke::process_owner().install(base,read,logic))throw std::runtime_error("Cannot install native Choke offer observer");
+        if(block_ok && !NativeBlockEligibility::process_owner().install(base,read))throw std::runtime_error("Cannot install native Block eligibility consumer");
+        if(slash_ok && !NativeSlashSceneRate::process_owner().install(base,read,logic))throw std::runtime_error("Cannot install native Slash scene-rate consumer");
+        if(choke_ok && !NativeChokeDistanceScope::process_owner().install(base,read,logic))throw std::runtime_error("Cannot install native Choke scope consumer");
+        if(offer_ok && !NativeOfferedChoke::process_owner().install(base,read,logic))throw std::runtime_error("Cannot install native Choke offer observer");
         active_=true;
-        NativeBlockEligibility::process_owner().enabled(true);
-        NativeSlashSceneRate::process_owner().enabled(true);
-        NativeChokeDistanceScope::process_owner().enabled(takedown_ranges_enabled_.load(std::memory_order_acquire));
+        if(block_ok) NativeBlockEligibility::process_owner().enabled(true);
+        if(slash_ok) NativeSlashSceneRate::process_owner().enabled(true);
+        if(choke_ok) NativeChokeDistanceScope::process_owner().enabled(takedown_ranges_enabled_.load(std::memory_order_acquire));
         } catch(...) {
             disable();
             throw;

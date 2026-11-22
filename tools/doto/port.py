@@ -243,7 +243,7 @@ def main():
             _starts[f] = {i.address for i in _md.disasm(t.a.bytes(f, t.a.fns[f][1] - f), f)}
         return x in _starts[f]
     code_lines = {(r['file'], r['line']) for r in inv if r['cls'].startswith('rva-code')}
-    pin_after = re.compile(r'\s*,\s*\d+\s*,\s*(?:\{|0x[0-9a-fA-F]+u?ll\})')
+    pin_after = re.compile(r'\s*,\s*(?:\d+\s*,\s*)?(?:\{|0x[0-9a-fA-F]+u?ll\})')
     promoted = 0
     for r in inv:
         if r['cls'] != 'offset' or not (0x1000 <= r['value'] < t.a.sections['.text'][1]):
