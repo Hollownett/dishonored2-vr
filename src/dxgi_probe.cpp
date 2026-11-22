@@ -6072,7 +6072,7 @@ static d2vr::SwordHitGate sword_hit_gate;static std::array<std::atomic<UINT64>,8
 static std::atomic<UINT64> npc_blade_contacts{};using GunShape=std::array<double,4>;static GunShape gun_shape_override{};static bool contact_damage_enabled=true,impact_fx_enabled=true;static std::array<std::atomic<float>,2> tip_speed_now{};static std::atomic<float> combat_tip_peak{};static std::atomic<bool> sword_reversed{};
 // The sword's blade numbers: the segment the sweep takes (its tip .65 m out, thin) and the body the contact model solves it with (a blade
 // is not a line to a prop: 2 cm beads along it). Shared by the sweep, the tip and the body so they cannot drift.
-static constexpr double sword_blade_length=.65,sword_blade_body_radius=.02;
+static constexpr double sword_blade_length=d2vr::game_traits::player_blade_length,sword_blade_body_radius=.02;   // D2 .65, DOTO's knife .62
 // A weapon body's beads must reach PAST where the sweep holds the weapon, or nothing is ever touched. The sweep stops the weapon's *segment*
 // by its own radius (a pistol's .035, a crossbow's .06), so beads of exactly that radius come to rest on the prop's surface with no overlap,
 // and the contact model (which pushes only on an overlap) never fires. That is what v1026 shipped: the sword's blade is swept as a line

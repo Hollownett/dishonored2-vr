@@ -29,6 +29,10 @@ inline constexpr bool grenade_spawn_follows_velocity = false;
 // The slash perform entry's stolen prologue (native_slash_scene_rate.hpp): DOTO 0x8d7ed0 = mov rax,rsp (3); push rsi (1);
 // sub rsp,0x90 (7) = 11 bytes, so MinHook copies 11. Its unwind info: prolog 11, 3 slots: UWOP_ALLOC_LARGE 0x90/8 at 11,
 // UWOP_PUSH_NONVOL rsi at 4.
+// The player blade, grip to tip along its length axis: ply_billie_knife01.md6 bounds x -0.209..0.62 (resource decl, 2026-11-22).
+inline constexpr double player_blade_length = 0.62;
+// The blade copy (sword_copy_def) is declared hidden (flags { hide = true }): a spawned copy must be shown explicitly.
+inline constexpr bool sword_copy_spawns_hidden = true;
 inline constexpr std::size_t slash_perform_steal = 11;
 inline constexpr std::array<unsigned char,10> slash_perform_unwind{1,11,3,0, 11,0x01, 0x12,0x00, 4,0x60};
 #else
@@ -40,6 +44,8 @@ inline constexpr bool billie_avatar = false;
 inline constexpr const char* sword_copy_def = "models/campaign/dunwall/midnightassets/sword_player_midnight.def";
 inline constexpr bool grenade_spawn_follows_velocity = true;
 // D2 0x86cbf0: mov rax,rsp (3); push rsi (1); sub rsp,0x60 (4) = 8 bytes; UWOP_ALLOC_SMALL 0x60 at 8, UWOP_PUSH_NONVOL rsi at 4.
+inline constexpr double player_blade_length = 0.65;   // Corvo/Emily's sword (its bbox)
+inline constexpr bool sword_copy_spawns_hidden = false;
 inline constexpr std::size_t slash_perform_steal = 8;
 inline constexpr std::array<unsigned char,8> slash_perform_unwind{1,8,2,0,8,0xb2,4,0x60};
 #endif

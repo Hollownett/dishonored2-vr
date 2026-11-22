@@ -733,6 +733,8 @@ private:
             base+0x8ae9b0)(*game,decl,r.pos.data(),r.axis.data(),owner,false,nullptr,r.vel.data(),r.spin.data());
         if(!entity) return false;
         copy_=entity;copy_id_=rig::value<std::uint32_t>(read,entity+0xa8).value_or(0);copy_since_=GetTickCount64();++spawned;shown_=true;
+        // v145733 (user, DOTO headset: "I cannot drop or throw the sword"): DOTO's blade copy def is declared hidden; show it as it lands.
+        if constexpr(game_traits::sword_copy_spawns_hidden) visible(base,read,entity,true);
         return true;
     }
     template<class Read> static bool alive(std::uintptr_t base,Read& read) {
