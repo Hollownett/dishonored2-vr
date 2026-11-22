@@ -60,6 +60,14 @@ inline unsigned dlss_preset_from_text(const std::string& t) noexcept {
 #pragma clang diagnostic ignored "-Wsign-compare"
 #endif
 inline bool ngx_failed(NVSDK_NGX_Result result) noexcept { return NVSDK_NGX_FAILED(result); }
+// Diagnostics: NGX's own log (the reason behind a FAIL_InvalidParameter), verbose, to ngx_log_path() when it is set (diagnostics on).
+inline std::wstring& ngx_log_path() { static std::wstring path; return path; }
+inline std::mutex& ngx_log_mutex() { static std::mutex m; return m; }
+inline void NVSDK_CONV ngx_log_callback(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature) {
+    if (!message || ngx_log_path().empty()) return;
+    std::lock_guard<std::mutex> lock(ngx_log_mutex());
+    if (FILE* f = _wfopen(ngx_log_path().c_str(), L"a")) { std::fputs(message, f); const auto n = std::strlen(message); if (!n || message[n - 1] != '\n') std::fputc('\n', f); std::fclose(f); }
+}
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
@@ -370,6 +378,7 @@ private:
         if (!c->device_lease || !c->context_lease) return Reason::wrong_device;
         c->search[0] = c->paths.provider_directory.c_str();
         c->common.PathListInfo.Path = c->search; c->common.PathListInfo.Length = 1;
+        if (!ngx_log_path().empty()) { c->common.LoggingInfo.LoggingCallback = &ngx_log_callback; c->common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE; }
         result = calls_.init("d1c5ea6c-f92c-48f9-898d-df8cc7d5f3b4", NVSDK_NGX_ENGINE_TYPE_CUSTOM,
             "dishonored2-vr-dlss-1", c->paths.cache_directory.c_str(), device, &c->common, NVSDK_NGX_Version_API);
         if (ngx_failed(result) || result != NVSDK_NGX_Result_Success) return Reason::init_failed;

@@ -19242,6 +19242,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             dlss_provider_found=provider.has_value();dlss_provider_source=provider?(provider->source==d2vr::DlssProvider::Source::mod_home?1:2):0;
             fsr_taa.dlss_provider_directory=provider?provider->directory.wstring():std::wstring{};
             fsr_taa.dlss_cache_directory=(output.always()/L"ngx").wstring(); // functional (NGX needs a writable folder), logging off unless diagnostics
+            d2vr::ngx_log_path()=d2vr::diag::on()?(output.always()/L"ngx"/L"ngx-log.txt").wstring():std::wstring{}; // NGX's own verbose log (diagnostics only)
             dlss_provider_utf8.clear();
             if(provider) {
                 const auto wide=(provider->directory/L"nvngx_dlss.dll").wstring();
