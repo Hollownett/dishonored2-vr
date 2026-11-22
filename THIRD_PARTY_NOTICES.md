@@ -194,3 +194,12 @@ notice does not itself grant shipping approval.
 `third_party/psvr2` holds the out-of-process trigger bridge (`Bridge.cpp`, built as `DVR_psvr2\dvr_psvr2_bridge.exe`) and
 trigger-effect definitions (`pad_trigger_effect.h`) from [PSVR2Toolkit](https://github.com/BnuuySolutions/PSVR2Toolkit) by
 Bnuuy Solutions, MIT (`third_party/psvr2/PSVR2Toolkit-LICENSE`). Used by `src/psvr2_triggers.hpp`.
+
+## AFW (alternate frame warping): VR Stereo Hub's held-eye rebuild
+
+`third_party/vsh_afw` holds `core/gfx/afw_warp.cpp`, `afw_warp.h` and `clarity_math.h` from
+[VR-Stereo-Hub/Dishonored-VR](https://github.com/VR-Stereo-Hub/Dishonored-VR) (branch VR-Main, commit b15e4d32a720), under the
+zlib license (`third_party/vsh_afw/LICENSE`, copyright the DXVK authors and Jeffrey Ellison). These are **modified** versions: the
+Dishonored 1 depth probe, log and clarity units are replaced by adapters (`third_party/vsh_afw/core/gfx/depth_probe.h`, `clarity.h`,
+`core/util/log.h`), and each changed file says so at its top. `src/afw_vsh.hpp` feeds the rebuild Dishonored 2's linear depth and game
+cameras. With thanks to VR Stereo Hub (Pizza Parker, VOID, BioVRDev) for the AFW design and code.
