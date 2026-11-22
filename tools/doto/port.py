@@ -236,7 +236,9 @@ def main():
     def insn_start(x):
         f = t.a.function_of(x)
         if f is None:
-            return False
+            # a leaf without unwind info: accept when its start maps (call votes / pattern)
+            y, how, _ = t.code_rva(x)
+            return y is not None and how in ('voted', 'pattern', 'aligned', 'exact')
         if f not in _starts:
             _starts[f] = {i.address for i in _md.disasm(t.a.bytes(f, t.a.fns[f][1] - f), f)}
         return x in _starts[f]

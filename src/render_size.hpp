@@ -218,7 +218,10 @@ public:
         return RefreshStatus::deferred;
     }
     void apply(volatile LONG64* target,EyeSize size) {
-        if(target_ || !target || reinterpret_cast<std::uintptr_t>(target)%8 || !size.width || !size.height ||
+        // The pair is written with one 64-bit interlocked exchange: it must not straddle a cache line. Dishonored 2 keeps it
+        // 8-aligned; Death of the Outsider's (0x33c6bac) is 4-aligned inside one line, where lock cmpxchg is still atomic.
+        const auto at=reinterpret_cast<std::uintptr_t>(target);
+        if(target_ || !target || at%4 || (at&63)>56 || !size.width || !size.height ||
            size.width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || size.height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
             throw std::runtime_error("Invalid cached output-size request");
         const auto previous=InterlockedCompareExchange64(target,0,0);

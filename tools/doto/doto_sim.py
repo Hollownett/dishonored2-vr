@@ -40,6 +40,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 import win_perf_sim as W2  # noqa: E402  (probe_config, segments_for, load, tasklist, steam_root)
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+try:  # physical pixels for GetWindowRect / CopyFromScreen on a scaled desktop
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except (OSError, AttributeError):
+    pass
 
 
 class LII(ctypes.Structure):
@@ -268,6 +272,8 @@ def main():
     ap.add_argument("--keep-saves", action="store_true", help="keep the saves the run made (new game progress)")
     ap.add_argument("--no-session", action="store_true", help="plain game start: no probe override knobs (the proxy waits for a trigger)")
     ap.add_argument("--window", default="1596x993")
+    ap.add_argument("--max-run", type=int, default=0, help="keep the run (and the game) up this many seconds; with --seconds 0 the "
+                    "VR session is continuous and has no gameplay script (drive menus with tools/doto/keys.py)")
     ap.add_argument("--during", action="append", default=[],
                     help="'DELAY CMD...': a read-only tool run DELAY s after the session first reports gameplay; output in the run folder")
     ap.add_argument("--out", default=str(ROOT / "artifacts" / "doto-runs"))
@@ -295,7 +301,22 @@ def main():
     pid = None
     started = time.time()
     try:
-        if not a.no_session:
+        if not a.no_session and a.seconds == 0:
+            cfg = W2.probe_config(120, a.resolution).split()
+            cfg[W2.PROBE_FIELDS.index("seconds")] = "0"
+            cfg[W2.PROBE_FIELDS.index("gameplay_script")] = "0"
+            for kv in a.probe:
+                k, _, v = kv.partition("=")
+                cfg[W2.PROBE_FIELDS.index(k)] = v
+            planned = {BUILD / W2.OVERRIDE: " ".join(cfg) + "\n", BUILD / W2.EYE_SIZE: a.eye_size + "\n"}
+            for k in a.knob:
+                name, _, value = k.partition("=")
+                planned[BUILD / name] = (value + "\n") if value else ""
+            for path, text in planned.items():
+                path.write_text(text, encoding="utf-8")
+                written.append(path)
+            out("knobs (continuous session): " + ", ".join(p.name for p in written))
+        elif not a.no_session:
             end_ms = (a.seconds - 6) * 1000
             segs = W2.segments_for(a.scenario, a.lead * 1000, end_ms)
             sgs = W2.load("d2vr_simulated_gameplay_script", ROOT / "tools" / "simulated_gameplay_script.py")
@@ -342,7 +363,7 @@ def main():
             return ""
         shot = 0
         next_shot = time.time() + 15
-        deadline = time.time() + 240 + a.seconds + 60
+        deadline = time.time() + 240 + max(a.seconds, a.max_run) + 60
         began = False
         gameplay_at = None
         pending = [d.split(" ", 1) for d in a.during]
