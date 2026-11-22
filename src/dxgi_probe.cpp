@@ -5964,7 +5964,7 @@ static std::array<std::atomic<std::uint64_t>,8> voltaic_stats{};
 static std::array<std::atomic<std::uint64_t>,2> voltaic_feed_why{};
 // v145739 (user, DOTO headset v145738: the game crashed right after a save load, twice, Dishonored_DO.exe+0x8e506c = GetComponent 0x8e5050
 // reading [entity+0x290] of an invalid entity): the right-forearm copy is the gun's full entity def (cpntweapongaussgun and friends) spawned
-// with no owner, the first build in which it actually spawned. Off unless build/voltaic-copy exists, until it is spawned safely.
+// with no owner, the first build in which it actually spawned. v145740 spawns it with the player as owner; v145743: on unless build/no-voltaic-copy.
 static bool voltaic_copy_knob=false;   // v145738: copy feed skipped: [no forearm joint index, no image of that joint]
 static std::mutex voltaic_aim_mutex;static d2vr::WorldTrackedPose voltaic_copy_aim{};static UINT64 voltaic_copy_aim_tick{};   // the copy hand's hand-aimed ray (render thread)
 static std::string voltaic_json() {
@@ -16623,7 +16623,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // It rides that forearm's helper joint with the engine's left bind tag mirrored (an identity tag: the y180 of the crossed
                                         // weapon tag, power_hand::mirror_correction; the gun mesh's bounds are symmetric across its local XZ plane, Y -0.058..0.057).
                                         if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) {
-                                            const bool copy_now=voltaic_copy_knob && voltaic_pinned() && logic==2;voltaic_copy_on.store(copy_now,std::memory_order_relaxed);   // v145739: opt-in (build/voltaic-copy)
+                                            const bool copy_now=voltaic_copy_knob && voltaic_pinned() && logic==2;voltaic_copy_on.store(copy_now,std::memory_order_relaxed);   // v145743: on unless build/no-voltaic-copy
                                             static const d2vr::held_copy::Pose forearm_offset=[]{const auto c=d2vr::power_hand::mirror_correction(d2vr::power_hand::weapon_tag_rot);
                                                 d2vr::held_copy::Pose p{};for(unsigned i=0;i<3;++i) p.basis[i]={c[i],c[3+i],c[6+i]};return p;}();   // item axis i = column i of C
                                             d2vr::NativeWeaponHands::forearm_copy(voltaic_copy_hand,copy_now?&forearm_offset:nullptr);
@@ -19522,7 +19522,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             throw std::runtime_error("Passive native assassination receipt could not initialize safely");
         weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");hand_feel_enabled=!fs::exists(root/L"build"/L"no-hand-feel");hand_weapon_contact_enabled=!fs::exists(root/L"build"/L"no-hand-weapon-contact");native_grab.set_two_hand(!fs::exists(root/L"build"/L"no-two-hand"));d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");
         {std::ifstream knob(root/L"build"/L"stealth-speed");std::string text;if(knob) std::getline(knob,text);d2vr::NativeInteractionAim::stealth_speed_=d2vr::stealth_speed_from_knob(text);}impact_fx_enabled=!fs::exists(root/L"build"/L"no-impact-fx");hand_contact_enabled=!fs::exists(root/L"build"/L"no-hand-contact");weapon_body_enabled=!fs::exists(root/L"build"/L"no-weapon-body");weapon_body_rigid=!fs::exists(root/L"build"/L"weapon-body-ride");
-        slash_speed_factor=fs::exists(root/L"build"/L"no-slash-speed")?1.f:1.7f;voltaic_copy_knob=fs::exists(root/L"build"/L"voltaic-copy");takedown_range_enabled=!fs::exists(root/L"build"/L"no-takedown-range");
+        slash_speed_factor=fs::exists(root/L"build"/L"no-slash-speed")?1.f:1.7f;voltaic_copy_knob=!fs::exists(root/L"build"/L"no-voltaic-copy");   // v145743: on by default (labs 8-11: spawned with the player as owner, transient, save loads clean; lab11 3 shots)takedown_range_enabled=!fs::exists(root/L"build"/L"no-takedown-range");
         {std::ifstream knob(root/L"build"/L"takedown-range-scale");std::string text;if(knob) std::getline(knob,text);
          takedown_range_scale=takedown_range_enabled?d2vr::takedown_range_scale_from_knob(text):1.f;}
         native_interaction_aim.takedown_range_scale(takedown_range_scale.load());
