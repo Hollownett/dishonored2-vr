@@ -157,6 +157,25 @@ def main():
                 cls = 'comment' if not code else classify(exe, value, before, in_bytes)
                 out.append({'file': 'src/' + name, 'line': n, 'col': s, 'text': m.group(0), 'value': value, 'cls': cls,
                             'before': line[max(0, s - 50):s].strip()})
+            # decimal elements of a byte array ({0x48,0x8b,0,0} / std::byte{0}): bytes too, so the array stays one group
+            def emit(s, text):
+                value = int(text)
+                if value <= 0xff and all(mask[s:s + len(text)]):
+                    out.append({'file': 'src/' + name, 'line': n, 'col': s, 'text': text, 'value': value, 'cls': 'bytes',
+                                'before': line[max(0, s - 50):s].strip()})
+            if len(re.findall(r'0x[0-9a-fA-F]{1,2}\b', line)) >= 3:
+                for m in re.finditer(r'std::byte\{(\d{1,3})\}', line):          # std::byte{0} is a byte by type
+                    emit(m.start(1), m.group(1))
+                for g in re.finditer(r'\{([^{}]*)\}', line):                     # an innermost list made only of byte values
+                    body, base0 = g.group(1), g.start(1)
+                    items = [(mm.start() + base0, mm.group(0).strip()) for mm in re.finditer(r'[^,]+', body)]
+                    tokens = [t for _, t in items]
+                    if len(tokens) >= 4 and all(re.fullmatch(r'0x[0-9a-fA-F]{1,2}|\d{1,3}', t) for t in tokens) and \
+                            sum(1 for t in tokens if t.startswith('0x')) >= 3:
+                        for pos, tok in items:
+                            if tok.isdigit():
+                                emit(line.index(tok, pos), tok)   # the item may start with spaces
+    out.sort(key=lambda r: (r['file'], r['line'], r['col']))
     json.dump(out, sys.stdout, indent=0)
 
 
