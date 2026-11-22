@@ -106,7 +106,21 @@ class Translator:
             return self.pattern(x)
         g = self.fn.get(f)
         if g is None:
-            return None, 'none', f'function {f:#x} unmatched'
+            # unmatched by the matcher: aligned call targets, then a unique masked byte pattern of the function start
+            y, how, why = self.voted(f)
+            if y is None:
+                y, how, why = self.pattern(f, 32)
+            if y is None:
+                return None, 'none', f'function {f:#x} unmatched ({why})'
+            if x == f:
+                return y, how, f'unmatched fn begin: {why}'
+            gb = b.function_of(y)
+            if gb == y and a.fns[f][1] - f == b.fns[gb][1] - gb:
+                ma, ka = self.masked(a, f, a.fns[f][1] - f)
+                mb, kb = self.masked(b, gb, b.fns[gb][1] - gb)
+                if ma == mb:
+                    return y + (x - f), 'pattern', f'unmatched fn {f:#x}->{gb:#x} byte-identical ({why})'
+            return None, 'none', f'unmatched fn {f:#x}->{y:#x} differs inside'
         q = self.quality.get(f)
         la, lb = a.fns[f][1] - f, b.fns[g][1] - g
         if q and q[3] and la == lb:
@@ -316,6 +330,128 @@ class Translator:
             i -= 1
         return None, 'none', 'no anchor'
 
+    # ---------- data through a scan of every rip-relative reference ----------
+    def scan_refs(self, x, limit=16):
+        """D2 instructions whose rip-relative operand resolves to x, followed into DOTO through the code map."""
+        import numpy as np
+        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+        from capstone import x86_const as X
+        if not hasattr(self, '_np_text'):
+            lo, hi = self.a.sections['.text']
+            raw = np.frombuffer(bytes(self.a.mem[lo:hi]), dtype=np.uint8)
+            self._np_text = (lo, raw)
+        lo, raw = self._np_text
+        n = len(raw) - 4
+        disp = (raw[0:n].astype(np.int64) | (raw[1:n + 1].astype(np.int64) << 8) | (raw[2:n + 2].astype(np.int64) << 16)
+                | (raw[3:n + 3].astype(np.int64) << 24))
+        disp = np.where(disp >= 1 << 31, disp - (1 << 32), disp)
+        pos = np.arange(n, dtype=np.int64) + lo
+        md = Cs(CS_ARCH_X86, CS_MODE_64)
+        md.detail = True
+        votes = collections.Counter()
+        for tail in (0, 1, 2, 4):
+            hits = np.nonzero(pos + 4 + tail + disp == x)[0]
+            for h in hits[:limit]:
+                field = int(pos[h])
+                for back in range(1, 8):
+                    start = field - back
+                    insn = next(md.disasm(self.a.bytes(start, 16), start), None)
+                    if not insn or insn.address + insn.size - 4 - tail != field or insn.disp_offset != back:
+                        continue
+                    if not any(op.type == X.X86_OP_MEM and op.mem.base == X.X86_REG_RIP for op in insn.operands):
+                        continue
+                    y, how, why = self.code_rva(start) if self.a.function_of(start) is not None else self.pattern(start, 24)
+                    if y is None:
+                        break
+                    other = next(md.disasm(self.b.bytes(y, 16), y), None)
+                    if other and other.mnemonic == insn.mnemonic and other.disp_size:
+                        votes[other.address + other.size + other.disp] += 1
+                    break
+        if votes:
+            y, k = votes.most_common(1)[0]
+            tot = sum(votes.values())
+            if k / tot >= 0.75 or (k >= 2 and k / tot >= 0.6):
+                return y, 'voted', f'scan {k}/{tot} rip refs'
+            return None, 'none', f'scan conflicts {dict(votes)}'
+        return None, 'none', 'no rip refs found'
+
+    def rip_refs(self, img, target, tails=(0, 1, 2, 4)):
+        """Instruction starts in img .text whose rip-relative operand resolves to target."""
+        import numpy as np
+        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+        from capstone import x86_const as X
+        key = '_np_' + ('a' if img is self.a else 'b')
+        if not hasattr(self, key):
+            lo, hi = img.sections['.text']
+            raw = np.frombuffer(bytes(img.mem[lo:hi]), dtype=np.uint8)
+            n = len(raw) - 4
+            disp = (raw[0:n].astype(np.int64) | (raw[1:n + 1].astype(np.int64) << 8) | (raw[2:n + 2].astype(np.int64) << 16)
+                    | (raw[3:n + 3].astype(np.int64) << 24))
+            disp = np.where(disp >= 1 << 31, disp - (1 << 32), disp)
+            setattr(self, key, (lo, disp + np.arange(n, dtype=np.int64) + lo + 4))
+        lo, resolved = getattr(self, key)
+        md = Cs(CS_ARCH_X86, CS_MODE_64)
+        md.detail = True
+        out = []
+        for tail in tails:
+            for h in np.nonzero(resolved + tail == target)[0][:64]:
+                field = int(h) + lo
+                for back in range(1, 8):
+                    start = field - back
+                    insn = next(md.disasm(img.bytes(start, 16), start), None)
+                    if insn and insn.disp_offset == back and insn.address + insn.size - 4 - tail == field and \
+                            any(op.type == X.X86_OP_MEM and op.mem.base == X.X86_REG_RIP for op in insn.operands):
+                        out.append(insn)
+                        break
+        return out
+
+    def cvar_object(self, img, name):
+        """The cvar object a static initializer registers under this name: the .data/.bss rip target loaded
+        into rcx closest to the instruction that loads the name string."""
+        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+        lo, hi = img.sections['.rdata']
+        blob = bytes(img.mem[lo:hi])
+        needle = name.encode() + b'\0'
+        i = blob.find(needle)
+        cands = set()
+        while i >= 0:
+            if blob[i - 1] == 0:
+                for insn in self.rip_refs(img, lo + i):
+                    md = Cs(CS_ARCH_X86, CS_MODE_64)
+                    md.detail = True
+                    dlo, dhi = img.sections['.data']
+                    window = list(md.disasm(img.bytes(insn.address - 48, 96 + 48), insn.address - 48))
+                    best = None
+                    for w in window:
+                        if w.mnemonic == 'lea' and w.op_str.startswith('rcx, [rip'):
+                            tgt = w.address + w.size + w.disp
+                            if dlo <= tgt < dhi and (best is None or abs(w.address - insn.address) < abs(best[0] - insn.address)):
+                                best = (w.address, tgt)
+                    if best:
+                        cands.add(best[1])
+            i = blob.find(needle, i + 1)
+        return sorted(cands)
+
+    def cvar_by_d2_object(self, x):
+        """A D2 cvar object -> its name (the string its initializer loads next to it) -> the DOTO object."""
+        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+        md = Cs(CS_ARCH_X86, CS_MODE_64)
+        md.detail = True
+        rlo, rhi = self.a.sections['.rdata']
+        for insn in self.rip_refs(self.a, x, tails=(0,)):
+            if insn.mnemonic != 'lea':
+                continue
+            for w in md.disasm(self.a.bytes(insn.address - 48, 112), insn.address - 48):
+                if w.mnemonic == 'lea' and w.op_str.startswith('rdx, [rip'):
+                    tgt = w.address + w.size + w.disp
+                    if rlo <= tgt < rhi:
+                        name = self.a.cstr(tgt, 96)
+                        if 3 <= len(name) < 90 and all(33 <= c < 127 for c in name):
+                            objs = self.cvar_object(self.b, name.decode())
+                            if len(objs) == 1:
+                                return objs[0], 'exact', f'cvar {name.decode()!r} by name'
+        return None, 'none', 'not a named cvar'
+
     # ---------- cvars by name ----------
     def cvar_by_name(self, name):
         """DOTO cvar object rva for a cvar name: an object in .data whose +8 is a pointer to the name string."""
@@ -346,13 +482,13 @@ class Translator:
         if sec == '.text':
             return self.code_rva(x)
         if sec == '.rdata':
-            for f in (self.import_rva, self.vtable_rva, self.voted, self.string_rva, self.near):
+            for f in (self.import_rva, self.vtable_rva, self.voted, self.string_rva, self.scan_refs, self.near):
                 y, how, why = f(x)
                 if y is not None:
                     return y, how, why
             return None, 'none', 'rdata unmapped'
         if sec in ('.data', '_RDATA', '.tls'):
-            for f in (self.voted, self.near):
+            for f in (self.voted, self.scan_refs, self.cvar_by_d2_object, self.near):
                 y, how, why = f(x)
                 if y is not None:
                     return y, how, why

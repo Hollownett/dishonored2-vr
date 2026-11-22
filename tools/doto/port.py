@@ -49,10 +49,27 @@ def load_offsets():
         data = json.load(f)
     data.setdefault('global', {})
     data.setdefault('sites', [])
+    data.setdefault('lines', [])
+    data['_used'] = set()
     return data
 
 
+def line_rule(rules, file, line_text, value):
+    """offsets.json "lines": [{"file", "contains", "map": {"0x9c": "0x8c", ...}, "why"}]: every offset literal
+    with a mapped value on a line containing the text. Used for uniformly shifted structs (renderView_t)."""
+    for i, r in enumerate(rules.get('lines', [])):
+        if r['file'] == file and r['contains'] in line_text:
+            m = {int(k, 0): int(v, 0) for k, v in r['map'].items()}
+            if value in m:
+                rules['_used'].add(i)
+                return m[value], r.get('why', 'offsets.json line rule')
+    return None
+
+
 def site_override(rules, file, line_text, value):
+    lr = line_rule(rules, file, line_text, value)
+    if lr:
+        return lr
     for r in rules['sites']:
         if r['file'] == file and int(r['from'], 0) == value and (not r.get('contains') or r['contains'] in line_text):
             return int(r['to'], 0), r.get('why', 'offsets.json')
@@ -112,19 +129,36 @@ def file_context_votes(t, inv, src_lines):
     return votes
 
 
-def byte_groups(rows):
-    """Group 'bytes' literals into arrays: same file, same line, adjacent columns."""
+def byte_groups(rows, src_lines=None):
+    """Group 'bytes' literals into arrays: adjacent literals separated only by commas, spaces, std::byte{ } and line
+    breaks (a multi-line initializer is one array)."""
+    import re as _re
+    sep = _re.compile(r'^[\s,{}]*(?:std::byte\s*\{)?[\s,{}]*$')
     groups = []
     cur = []
+
+    def between(a, b):
+        if src_lines is None:
+            return None
+        lines = src_lines[a['file']]
+        if a['line'] == b['line']:
+            return lines[a['line'] - 1][a['col'] + len(a['text']):b['col']]
+        if b['line'] != a['line'] + 1:
+            return None
+        return lines[a['line'] - 1][a['col'] + len(a['text']):] + '\n' + lines[b['line'] - 1][:b['col']]
+
     for r in rows:
         if r['cls'] != 'bytes':
             if cur:
                 groups.append(cur)
                 cur = []
             continue
-        if cur and (cur[-1]['file'] != r['file'] or cur[-1]['line'] != r['line'] or r['col'] - cur[-1]['col'] > 24):
-            groups.append(cur)
-            cur = []
+        if cur:
+            gap = between(cur[-1], r) if cur[-1]['file'] == r['file'] else None
+            joined = gap is not None and all(sep.match(part) for part in gap.replace('std::byte{', ' ').split('\n'))
+            if not joined:
+                groups.append(cur)
+                cur = []
         cur.append(r)
     if cur:
         groups.append(cur)
@@ -163,14 +197,46 @@ def main():
             cache[v] = t.rva(v)
         return cache[v]
 
+    # ---- reviewed per-site address overrides (any literal class but comments and bytes) ----
+    handled = set()
+    for r in inv:
+        if r['cls'] in ('comment', 'bytes'):
+            continue
+        line = src_lines[r['file']][r['line'] - 1]
+        o = site_override(rules, r['file'], line, r['value'])
+        if o and r['cls'] != 'offset':   # a reviewed offset rule wins over an address classification
+            new = f'{o[0]:#x}'
+            if new.lower() != r['text'].lower():
+                edits[r['file']].append((r['line'], r['col'], r['text'], new))
+            report['offset_moved'].append({**r, 'to': new, 'why': o[1]})
+            handled.add((r['file'], r['line'], r['col']))
+            continue
+        for o in rules.get('rvas', []):
+            if not o.get('file') or o['file'] != r['file']:
+                continue
+            if o.get('contains') and o['contains'] not in line:
+                continue
+            if int(o['from'], 0) == r['value']:
+                new = o['to']
+                if new.lower() != r['text'].lower():
+                    edits[r['file']].append((r['line'], r['col'], r['text'], new))
+                report['rva'].append({**r, 'to': new, 'how': 'manual', 'why': o.get('why', '')})
+                handled.add((r['file'], r['line'], r['col']))
+                o['_used'] = True
+                break
+
     # ---- addresses ----
     for r in inv:
         cls = r['cls']
-        if not cls.startswith('rva'):
+        if not cls.startswith('rva') or (r['file'], r['line'], r['col']) in handled:
             continue
         v = r['value']
-        y, how, why = tr(v)
-        if y is not None and how in CONFIDENT | {'near'}:
+        manual = {int(o['from'], 0): (int(o['to'], 0), o['why']) for o in rules.get('rvas', []) if not o.get('file')}
+        if v in manual:
+            y, how, why = manual[v][0], 'manual', manual[v][1]
+        else:
+            y, how, why = tr(v)
+        if y is not None and how in CONFIDENT | {'near', 'manual'}:
             new = f'{y:#x}'
             report['rva'].append({**r, 'to': new, 'how': how, 'why': why})
         else:
@@ -184,7 +250,7 @@ def main():
     # ---- offsets ----
     file_votes = file_context_votes(t, inv, src_lines)
     for r in inv:
-        if r['cls'] != 'offset':
+        if r['cls'] != 'offset' or (r['file'], r['line'], r['col']) in handled:
             continue
         v = r['value']
         line = src_lines[r['file']][r['line'] - 1]
@@ -226,7 +292,7 @@ def main():
         by_file_rva[r['file']].append(r)
     text_lo, text_hi = t.a.sections['.text']
     d2_text = t.a.mem[text_lo:text_hi]
-    for g in byte_groups(inv):
+    for g in byte_groups(inv, src_lines):
         bs = bytes(r['value'] for r in g)
         file, line = g[0]['file'], g[0]['line']
         loc = None
@@ -279,6 +345,7 @@ def main():
     if os.path.exists(out_src):
         shutil.rmtree(out_src)
     shutil.copytree(os.path.join(ROOT, 'src'), out_src)
+    original = {f: lines[:] for f, lines in src_lines.items()}
     for file, es in edits.items():
         lines = src_lines[file][:]
         for ln, col, old, new in sorted(es, key=lambda e: (e[0], -e[1])):
@@ -287,6 +354,55 @@ def main():
                 raise SystemExit(f'{file}:{ln}:{col} expected {old!r}, found {s[col:col + len(old)]!r}')
             lines[ln - 1] = s[:col] + new + s[col + len(old):]
         src_lines[file] = lines
+    # FNV-1a code pins {rva,size,0xHASHull}: re-hash DOTO's bytes when they differ only by relocations / voted layout moves
+    pin = re.compile(r'\{(0x[0-9a-fA-F]+),(\d+),(0x[0-9a-fA-F]+)ull\}')
+
+    def fnv(data):
+        h = 14695981039346656037
+        for c in data:
+            h = ((h ^ c) * 1099511628211) & 0xffffffffffffffff
+        return h
+    report['hash_pins'] = []
+    for file in list(original):
+        for i, ln in enumerate(original[file]):
+            for m in pin.finditer(ln):
+                rva, size, h = int(m.group(1), 16), int(m.group(2)), int(m.group(3), 16)
+                if fnv(t.a.bytes(rva, size)) != h:
+                    continue   # not a D2 code-hash pin
+                y, how, why = t.rva(rva)
+                entry = {'file': file, 'line': i + 1, 'd2': f'{rva:#x}', 'size': size}
+                if y is None:
+                    entry['status'] = 'unmapped'
+                else:
+                    status, notes = t.compare_bytes(rva, y, size)
+                    entry.update({'doto': f'{y:#x}', 'status': status, 'notes': notes})
+                    if status in ('same', 'relocated', 'layout'):
+                        new = f'{fnv(t.b.bytes(y, size)):#018x}'
+                        if m.group(3) in src_lines[file][i] and new != m.group(3):
+                            src_lines[file][i] = src_lines[file][i].replace(m.group(3) + 'ull', new + 'ull')
+                            entry['rehashed'] = True
+                report['hash_pins'].append(entry)
+    # reviewed raw text rules (hex strings, decimal sizes, byte runs): the line is found in the D2 source by 'contains',
+    # then 'old' -> 'new' on the generated line (after the literal edits above)
+    for t_rule in rules.get('text', []):
+        file = t_rule['file']
+        if file not in src_lines:
+            with open(os.path.join(ROOT, file), encoding='utf-8', errors='surrogateescape', newline='') as f:
+                src_lines[file] = f.read().split('\n')
+            original[file] = src_lines[file][:]
+            files[file] = []
+        hits = [i for i, ln in enumerate(original[file]) if t_rule['contains'] in ln]
+        done = 0
+        for i in hits:
+            if t_rule['old'] in src_lines[file][i]:
+                src_lines[file][i] = src_lines[file][i].replace(t_rule['old'], t_rule['new'])
+                done += 1
+        if not done:
+            print(f"WARNING text rule matched nothing: {file} {t_rule['contains'][:60]!r}")
+        report.setdefault('text', []).append({'file': file, 'lines': [i + 1 for i in hits], 'applied': done, 'why': t_rule.get('why', '')})
+    for o in rules.get('rvas', []):
+        if o.get('file') and not o.get('_used'):
+            print(f"WARNING unused rva rule: {o['file']} {o.get('contains', '')[:60]!r} {o['from']}")
     for file in files:
         with open(os.path.join(args.out, file), 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
             f.write('\n'.join(src_lines[file]))
@@ -310,6 +426,9 @@ def main():
     os.makedirs(os.path.dirname(args.report), exist_ok=True)
     with open(args.report, 'w') as f:
         json.dump(report, f, indent=1)
+    unused = [r for i, r in enumerate(rules['lines']) if i not in rules['_used']]
+    for r in unused:
+        print(f"WARNING unused line rule: {r['file']} {r['contains']!r}")
     bc = collections.Counter(e['status'] for e in report['bytes'])
     hw = collections.Counter(e['how'] for e in report['rva'])
     print(f"addresses: {len(report['rva'])} translated {dict(hw)}, {len(report['poison'])} poisoned "

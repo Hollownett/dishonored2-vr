@@ -29,7 +29,8 @@ public:
     inline static std::atomic<OwnedMoviePatch> owned_movie_patch{nullptr};
 private:
     using Load=void (__fastcall*)(void*,void*,void*);
-    using Hub=unsigned long long (__fastcall*)(void*,void*,void*);
+    // The 4th register argument is forwarded unchanged: Death of the Outsider's hub (0x35630) reads r9d; D2's ignores it.
+    using Hub=unsigned long long (__fastcall*)(void*,void*,void*,std::uintptr_t);
     static constexpr std::uintptr_t load_rva=0x2E4D0,hub_rva=0x34800;
     static constexpr std::array<unsigned char,12> load_code{0x48,0x8b,0xc4,0x57,0x48,0x81,0xec,0x70,0x01,0x00,0x00,0x48};
     static constexpr std::array<unsigned char,12> hub_code{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89};
@@ -115,7 +116,7 @@ private:
             ++queued;return true;
         } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
-    static unsigned long long __fastcall hub_hook(void* self,void* player,void* call) {
+    static unsigned long long __fastcall hub_hook(void* self,void* player,void* call,std::uintptr_t extra) {
         char name[64];
         if(enabled.load() && call && player && call_name(call,name)) {
             if(!std::strcmp(name,"VR_SETTINGS_EVT") || !std::strcmp(name,"VR_SETTINGS_OPEN_REQUEST")) {
@@ -133,7 +134,7 @@ private:
                 if(index && *index==NativeOptionsPage::instance_index) {enqueue(player,call,back?back_page:restore_page);return 1;}
             }
         }
-        return hub_original_(self,player,call);
+        return hub_original_(self,player,call,extra);
     }
     template<class Fn,std::size_t N> static bool hook(std::uintptr_t base,std::uintptr_t rva,const std::array<unsigned char,N>& code,void* detour,Fn& original,void*& slot) noexcept {
         if(slot) {

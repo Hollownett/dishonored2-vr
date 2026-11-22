@@ -115,8 +115,8 @@ def classify(exe, value, before, in_bytes_list):
     field = bool(re.search(r'[\w\]\)]\s*\+\s*$', before)) and not rva_ctx
     if sec == '.text':
         fn = exe.function_of(value)
-        if rva_ctx and fn is not None:
-            return 'rva-code'
+        if rva_ctx and (fn is not None or value >= 0x1000):
+            return 'rva-code'   # a leaf without unwind info has no .pdata entry
         if fn == value and value >= 0x10000 and not field:
             return 'rva-code?'   # a function begin, no context: likely but review
         return 'offset'
@@ -149,7 +149,7 @@ def main():
                 before = line[max(0, s - 160):s]
                 # a {0x..,0x..,...} list of bytes
                 around = line[max(0, s - 60):min(len(line), e + 60)]
-                in_bytes = bool(re.search(r'(?:std::byte\{|\{|,)\s*$', line[max(0, s - 12):s])) and \
+                in_bytes = bool(re.search(r'(?:std::byte\{|\{|,)\s*$', line[max(0, s - 12):s]) or not line[:s].strip()) and \
                     len(re.findall(r'0x[0-9a-fA-F]{1,2}\b', around)) >= 4 and value <= 0xff
                 cls = 'comment' if not code else classify(exe, value, before, in_bytes)
                 out.append({'file': 'src/' + name, 'line': n, 'col': s, 'text': m.group(0), 'value': value, 'cls': cls,
