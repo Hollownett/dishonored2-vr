@@ -39,6 +39,9 @@ inline constexpr std::array<unsigned char,10> slash_perform_unwind{1,11,3,0, 11,
 // "crossbow" of NativeRangedFire / NativeWeaponHands is that gun, and the "pistol" kind has no player weapon (tools/doto/reviews/combat-port.md
 // sections 0-2). Its RTTI vtables (component, declaration) are this build's own values: offsets.json keeps them unchanged.
 inline constexpr bool ranged_player_weapon_is_voltaic = true;
+// A native weapon is drawn from whichever arm joint the game binds it to (the Voltaic Gun's tags move it between arm joints;
+// user, DOTO headset v145734: the gun moved with the hand and the hand stuck in a fist whenever its tag was not the helper2 one).
+inline constexpr bool bind_any_arm_joint = true;
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0x1c45768, voltaic_decl_vtable = 0x1c45618;
 // The second gun the other forearm shows in dual wield: the gun's own entity def, spawned by name (no owner: its components never start).
 inline constexpr const char* voltaic_copy_def = "models/weapons/dlc01/player/billie/gaussgun01/ply_billie_gaussgun01.def";
@@ -61,6 +64,7 @@ inline constexpr bool sword_copy_spawns_hidden = false;
 inline constexpr std::size_t slash_perform_steal = 8;
 inline constexpr std::array<unsigned char,8> slash_perform_unwind{1,8,2,0,8,0xb2,4,0x60};
 inline constexpr bool ranged_player_weapon_is_voltaic = false;   // the pistol and the crossbow (arkCpntWeaponGun / arkCpntWeaponCrossbow)
+inline constexpr bool bind_any_arm_joint = false;   // D2: hand attachment 59 (and a forearm helper) only, as since v1319
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0, voltaic_decl_vtable = 0;
 inline constexpr const char* voltaic_copy_def = nullptr;
 inline constexpr std::uintptr_t voltaic_configure = 0, voltaic_configure_from = 0, voltaic_mark_attribute = 0,

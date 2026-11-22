@@ -448,6 +448,21 @@ public:
         if(side>1 || !fit_) return -1;
         try {return solver_.skeleton(1+static_cast<int>(side)).find(name);} catch(...) {return -1;}
     }
+    // v145735: the same-named joint of another arm ("left_X" <-> "right_X"); -1 before calibration or without that joint.
+    int mirrored_arm_joint(unsigned from_side,unsigned joint,unsigned to_side) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(from_side>1 || to_side>1 || !fit_) return -1;
+        try {
+            const auto& from=solver_.skeleton(1+static_cast<int>(from_side));
+            if(joint>=from.names.size()) return -1;
+            if(from_side==to_side) return static_cast<int>(joint);
+            std::string name=from.names[joint];
+            const std::string a=from_side?"right_":"left_",b=to_side?"right_":"left_";
+            if(name.rfind(a,0)!=0) return -1;
+            name=b+name.substr(a.size());
+            return solver_.skeleton(1+static_cast<int>(to_side)).find(name);
+        } catch(...) {return -1;}
+    }
     // v1104: the image's version of the controller grip (tracking frame, world) of one hand. A copy is placed from that grip (not from
     // joint 59: the authored socket rotates the hand attachment away from the controller), so the draw-time publisher must compare and
     // correct the copy's read in the same grip frame. Returns nothing without an image of this frame.
