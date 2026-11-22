@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include "game_profile.hpp"
 
 namespace d2vr {
 
@@ -31,13 +32,9 @@ namespace d2vr {
 inline std::atomic<bool> alternate_parity_flip{false};
 
 inline constexpr std::uint64_t alternate_max_age = 2; // an eye image older than this many displayed frames is never submitted
-#if defined(D2VR_GAME_DOTO)
-// Death of the Outsider: a view's Setup and its Begin share one Present interval (live trace 2026-11-22: setup N / begin N on
-// one thread), so its image is on screen at the very next Present.
-inline constexpr std::uint64_t alternate_pipeline_depth = 0;
-#else
-inline constexpr std::uint64_t alternate_pipeline_depth = 1; // Presents between a view Setup's interval and the one that shows its image
-#endif
+// Presents between a view Setup's interval and the one that shows its image: 1 in Dishonored 2, 0 in Death of the Outsider
+// (game_profile.hpp).
+inline constexpr std::uint64_t alternate_pipeline_depth = game::render_pipeline_depth;
 
 // The displayed frame (Present number) that shows the image of a view Setup made while the Present counter read `presented`.
 inline std::uint64_t alternate_display_frame(std::uint64_t presented) noexcept {return presented + 1 + alternate_pipeline_depth;}

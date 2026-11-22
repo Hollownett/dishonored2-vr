@@ -1,0 +1,15 @@
+{
+  "_doc": "Dishonored: Death of the Outsider (Steam build 17712087). Profile traits: src/game_profile.hpp (D2VR_GAME_DOTO).",
+  "display": "Dishonored: Death of the Outsider",
+  "exe": "Dishonored_DO.exe",
+  "steam_folder": "Dishonored_DeathOfTheOutsider",
+  "steam_app": 614570,
+  "sha256": "be73d979fdb5a6eacbcd385944c6060b97c997d06ab9d72fb39f275a866b955d",
+  "size_of_image": "0x431f000",
+  "define": "D2VR_GAME_DOTO",
+  "rules": "tools/doto/offsets.json",
+  "lab": "artifacts/doto-lab",
+  "src_out": "build/doto-src",
+  "dll_out": "build/doto",
+  "index": "doto.idx"
+}

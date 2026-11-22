@@ -19,9 +19,10 @@ import sys
 
 import pefile
 
-LAB = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'artifacts', 'doto-lab')
-D2_EXE = r'D:\Steam\steamapps\common\Dishonored2\Dishonored2.exe'
-DOTO_EXE = r'D:\Steam\steamapps\common\Dishonored_DeathOfTheOutsider\Dishonored_DO.exe'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import target as _target  # noqa: E402  (tools/doto/targets/*.json: executables found in the Steam libraries)
+
+TARGET = os.environ.get('D2VR_PORT_TARGET', 'doto')
 
 
 class Image:
@@ -72,12 +73,16 @@ class Image:
 
 
 class Translator:
-    def __init__(self, lab=LAB):
+    def __init__(self, target=None):
+        tgt = _target.load(target or TARGET)
+        base = _target.base()
+        lab = str(tgt.lab)
         def load(name):
             with open(os.path.join(lab, name), 'rb') as f:
                 return pickle.load(f)
-        self.a = Image(D2_EXE, load('d2.idx'))
-        self.b = Image(DOTO_EXE, load('doto.idx'))
+        self.target = tgt
+        self.a = Image(str(base.exe), load('d2.idx'))
+        self.b = Image(str(tgt.exe), load(tgt.data.get('index', tgt.name + '.idx')))
         m = load('map.pickle')
         al = load('align.pickle')
         self.fn = m['fn']

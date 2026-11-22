@@ -48,6 +48,7 @@ extern "C" MH_STATUS WINAPI MH_DisableHook(LPVOID);
 #include "npc_weapon_pickup.hpp"
 #include "native_door_interaction.hpp"
 #include "native_slash_scene_rate.hpp"
+#include "game_profile.hpp"
 #include "native_takedown.hpp"
 #include "native_contact_assassination.hpp"
 #include "native_choke_distance_scope.hpp"
@@ -2762,11 +2763,9 @@ public:
             throw std::runtime_error("Native door interaction requires installed interaction and physical grab hooks");
         door_installed_=true;
         if(!NativeDoorInteraction::process_owner().install(base_,read_,logic_,physical_grab_)) {
-#if defined(D2VR_GAME_DOTO)
-            door_installed_=false;return;   // Death of the Outsider: doors whose engine code changed keep the game's own interaction
-#else
-            throw std::runtime_error("Cannot install native door interaction owner");
-#endif
+            // A game whose door code changed (game_profile.hpp) keeps the game's own door interaction.
+            if constexpr(game::optional_native_consumers) {door_installed_=false;return;}
+            else throw std::runtime_error("Cannot install native door interaction owner");
         }
     }
     void install(std::uintptr_t base,Read read,Logic logic,bool route,const std::filesystem::path& file,bool observe_lean=false,bool observe_lean_lifetime=false) {
@@ -2793,19 +2792,19 @@ public:
             if(!read(base+rvas[i],bytes.data(),bytes.size()) || bytes!=expected[i]) throw std::runtime_error("Native interaction query code differs");
         }
         if(physical_grab_ && !ranking_profile(2))throw std::runtime_error("Native physical-grab obstruction wrapper differs");
-#if defined(D2VR_GAME_DOTO)
-        // Death of the Outsider: a consumer whose engine code changed is skipped (the game keeps its own behaviour for it)
-        // instead of refusing the whole interaction system; consumers_ok_ reports which ones run.
-        const bool block_ok=NativeBlockEligibility::verify(base,read),slash_ok=NativeSlashSceneRate::verify(base,read),
-                   choke_ok=NativeChokeDistanceScope::verify(base,read),offer_ok=NativeOfferedChoke::verify(base,read);
-        consumers_ok_=(block_ok?1u:0u)|(slash_ok?2u:0u)|(choke_ok?4u:0u)|(offer_ok?8u:0u);
-#else
-        if(!NativeBlockEligibility::verify(base,read))throw std::runtime_error("Native Block eligibility consumer differs");
-        if(!NativeSlashSceneRate::verify(base,read))throw std::runtime_error("Native Slash scene-rate consumer differs");
-        if(!NativeChokeDistanceScope::verify(base,read))throw std::runtime_error("Native Choke scope consumer differs");
-        if(!NativeOfferedChoke::verify(base,read))throw std::runtime_error("Native Choke offer observer differs");
-        constexpr bool block_ok=true,slash_ok=true,choke_ok=true,offer_ok=true;
-#endif
+        bool block_ok=true,slash_ok=true,choke_ok=true,offer_ok=true;
+        if constexpr(game::optional_native_consumers) {
+            // A consumer whose engine code changed in this game is skipped (the game keeps its own behaviour for it) instead of
+            // refusing the whole interaction system; consumers_ok_ reports which ones run.
+            block_ok=NativeBlockEligibility::verify(base,read);slash_ok=NativeSlashSceneRate::verify(base,read);
+            choke_ok=NativeChokeDistanceScope::verify(base,read);offer_ok=NativeOfferedChoke::verify(base,read);
+            consumers_ok_=(block_ok?1u:0u)|(slash_ok?2u:0u)|(choke_ok?4u:0u)|(offer_ok?8u:0u);
+        } else {
+            if(!NativeBlockEligibility::verify(base,read))throw std::runtime_error("Native Block eligibility consumer differs");
+            if(!NativeSlashSceneRate::verify(base,read))throw std::runtime_error("Native Slash scene-rate consumer differs");
+            if(!NativeChokeDistanceScope::verify(base,read))throw std::runtime_error("Native Choke scope consumer differs");
+            if(!NativeOfferedChoke::verify(base,read))throw std::runtime_error("Native Choke offer observer differs");
+        }
         if(route_) {
             std::array<unsigned char,8> getter{};
             constexpr std::array<unsigned char,32> eligibility_code{0x48,0x8b,0xc4,0x48,0x89,0x78,0x20,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0xa0,0,0,0,0x4d,0x8b,0xe1,0x4d,0x8b,0xf0,0x48,0x8b,0xfa,0x4c,0x8b,0xf9};
