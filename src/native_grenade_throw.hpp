@@ -6,6 +6,7 @@
 // local at [rsp+0x50] (= rdx) and the launch point is the local 0x20 bytes after it ([rsp+0x70], passed to the launch exe+0x639970).
 // Both are rewritten in place from ThrowGesture. Any mismatch (bytes, hook, no gesture) leaves the native throw alone.
 #include <windows.h>
+#include "game_profile.hpp"
 #if __has_include(<MinHook.h>)
 #include <MinHook.h>
 #else
@@ -49,6 +50,11 @@ public:
     static bool installed() noexcept {return target_!=nullptr;}
     static bool install(std::uintptr_t base) noexcept {
         if(!base) return false;
+        // v145728: write() puts the spawn point 0x20 bytes past the velocity the setter receives (D2's Throw frame: velocity [rsp+0x50],
+        // launch point [rsp+0x70]). Death of the Outsider's Throw keeps the launch point 0x10 bytes BEFORE the velocity (velocity
+        // [rsp+0x78], launch r8=&[rsp+0x68]; tools/doto/reviews/combat-port.md section 6), so velocity[8+i] would overwrite another local
+        // of the game's stack. Until that frame is confirmed the hand throw stays off there and the game throws its own way.
+        if constexpr(!game_traits::grenade_spawn_follows_velocity) return false;
         if(!target_) {
             static const unsigned char want[8]{0x8b,0x02,0x89,0x81,0x3c,0x03,0x00,0x00};   // mov eax,[rdx]; mov [rcx+0x33c],eax
             unsigned char got[8]{};

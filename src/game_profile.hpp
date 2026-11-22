@@ -21,6 +21,9 @@ inline constexpr bool billie_avatar = true;
 // The standalone world model the mod spawns for a dropped/thrown/second-hand blade (no physics, no audio): DOTO has no
 // dunwall/midnightassets; its bank mission's cinematic knife is Billie's blade as a plain entity (resource index 2026-11-22).
 inline constexpr const char* sword_copy_def = "models/campaign/dlc01/bank/midnight_props/knife_midnight.def";
+// The grenade Throw frame keeps the launch point 0x20 bytes past the velocity the mod's setter hook receives (D2). DOTO's Throw keeps
+// it 0x10 bytes before (native_grenade_throw.hpp): the hand-throw rewrite stays off until that frame is confirmed.
+inline constexpr bool grenade_spawn_follows_velocity = false;
 #else
 inline constexpr const char* name = "Dishonored 2";
 inline constexpr const char* exe = "Dishonored2.exe";
@@ -28,5 +31,6 @@ inline constexpr std::uint64_t render_pipeline_depth = 1;   // Setup N is consum
 inline constexpr bool optional_native_consumers = false;    // every verified consumer is required
 inline constexpr bool billie_avatar = false;
 inline constexpr const char* sword_copy_def = "models/campaign/dunwall/midnightassets/sword_player_midnight.def";
+inline constexpr bool grenade_spawn_follows_velocity = true;
 #endif
 } // namespace d2vr::game_traits
