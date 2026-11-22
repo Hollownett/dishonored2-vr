@@ -387,7 +387,13 @@ def main():
                 began = True
                 out("session started")
             if began and "StartProbe returned" in text:
-                break
+                if not a.max_run:
+                    break
+                if text.count("StartProbe returned") != getattr(main, "_seen_returns", 0):
+                    main._seen_returns = text.count("StartProbe returned")
+                    out("session ended; the game stays up (--max-run): tools/doto/keys.py start begins another")
+                if time.time() - started >= a.max_run:
+                    break
             if time.time() >= next_shot:
                 shot += 1
                 if capture(str(run / f"shot-{shot:03d}.png")):

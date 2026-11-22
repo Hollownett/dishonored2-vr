@@ -31,11 +31,15 @@ def post(h, name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=("press", "shot"))
+    ap.add_argument("cmd", choices=("press", "shot", "start"))
     ap.add_argument("args", nargs="*")
     ap.add_argument("--gap", type=float, default=0.8)
     ap.add_argument("--shot")
     a = ap.parse_args()
+    if a.cmd == "start":   # the proxy begins another session when this file appears (it waits "for start (trigger)")
+        (d.BUILD / "linux-start").write_text("", encoding="utf-8")
+        print("start trigger written")
+        return
     h = d.find_window()
     if not h:
         sys.exit("no Death of the Outsider window")

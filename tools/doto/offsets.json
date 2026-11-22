@@ -2885,6 +2885,14 @@
    "to": "0xbc",
    "why": "render system frame counter getter 0x35eb00->0x3658b0: mov eax,[rcx+0xcc] -> [rcx+0xbc] (whole object -0x10: +0xf8->+0xe8, +0xd5d8->+0xd5c8)",
    "source": "coordinator"
+  },
+  {
+   "file": "src/game_stereo.hpp",
+   "contains": "prepared_view_stride=0x3ab0",
+   "from": "0x3ab0",
+   "to": "0x3ab0",
+   "why": "LIVE (play2, 2026-11-22 04:45): with two prepared views, eye 1 decodes only at +0x3ab0 (viewport 0,0,1599,1727, fov .824/.882, det 1.000); at +0x3aa0 it is garbage. The renderView inside shrank by 0x10 but the entry did not (a file-context vote had moved it).",
+   "source": "coordinator"
   }
  ],
  "global": {},
