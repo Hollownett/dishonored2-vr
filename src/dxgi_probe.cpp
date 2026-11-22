@@ -11889,7 +11889,7 @@ void prepare_head_view(void* view) noexcept {
                     const unsigned pack=arm_pack.load(std::memory_order_relaxed);   // v1370: one plan for the whole routing (each accessor loaded it again)
                     if(!slot1_type) slot1_type=static_cast<int>(live_types[d2vr::arm::slot1_arm_of(pack)]);
                     {d2vr::hand_route::In r{};r.pack=pack;r.fresh=fresh;r.dual_wield=dual_wield_enabled;r.empty_bits=hand_empty_bits;r.weapon_bits=hand_weapon_bits;
-                     r.left_power=left_power;r.left_gun=left_gun_model.load()!=0 && !left_forearm_gun.load();   // v145727: no held-gun hand pose for a forearm gunr.holding_object=hand_holding_object;r.hold_side=hand_hold_side;r.carrying_body=carrying_a_body;
+                     r.left_power=left_power;r.left_gun=left_gun_model.load()!=0 && !left_forearm_gun.load();r.holding_object=hand_holding_object;r.hold_side=hand_hold_side;r.carrying_body=carrying_a_body;   // v145727: no held-gun hand pose for a forearm gun
                      r.slot1_type=slot1_type;r.equip_name=std::string_view(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));
                      d2vr::hand_route::route(r,t);}   // hand_route.hpp: the clip each hand is posed by, its weapon type and its item key
                     const auto holds=[&](unsigned s) {return hand_holding_object && (hand_hold_side&1u)==s;};
