@@ -6004,7 +6004,9 @@ static std::string voltaic_json() {
     s+="],\"copy_entity\":[";
     s+=std::to_string(d2vr::NativeWeaponHands::forearm_spawned.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_placed.load())+','+
         std::to_string(d2vr::NativeWeaponHands::forearm_hidden.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_presented.load())+','+
-        std::to_string(d2vr::NativeWeaponHands::held_failed.load())+"],\"fire\":["+std::to_string(d2vr::NativeRangedFire::fired_.load())+','+
+        std::to_string(d2vr::NativeWeaponHands::held_failed.load())+"],\"anchors\":["+std::to_string(d2vr::NativeWeaponHands::forearm_anchors.load())+','+
+        std::to_string(d2vr::NativeWeaponHands::forearm_rebinds.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_anchor_failed.load())+','+
+        std::to_string(d2vr::NativeWeaponHands::pool_shown_hidden.load())+"],\"fire\":["+std::to_string(d2vr::NativeRangedFire::fired_.load())+','+
         std::to_string(d2vr::NativeRangedFire::refused_count(d2vr::ranged_fire::Why::unverified))+','+std::to_string(d2vr::NativeRangedFire::refused_count(d2vr::ranged_fire::Why::no_weapon))+','+
         std::to_string(d2vr::NativeRangedFire::refused_count(d2vr::ranged_fire::Why::no_ammo)+d2vr::NativeRangedFire::refused_count(d2vr::ranged_fire::Why::empty))+','+
         std::to_string(d2vr::NativeRangedFire::refused_count(d2vr::ranged_fire::Why::fault))+"]}";
@@ -6337,6 +6339,14 @@ static bool arms_publish() {
 // held power) or put away (the power swap with the other arm occupied).
 static void arms_apply(const d2vr::arm::Fx& fx,const char* source) {
     if(fx.sword_left) sword_grip={};
+    // v145747 (user, DOTO headset v145746: "selecting a mine to my right hand, for a second a sword appeared in my left hand, and vice versa"):
+    // a slot-1 item that takes the sword's arm leaves the sword with no arm while the engine still has it drawn, so it was drawn crossed in the
+    // OTHER hand until the grip machine put it away. Put away at once (the engine's instant unequip, as a stowed drop) when no arm took it.
+    if constexpr(d2vr::game_traits::displaced_sword_stows) if(fx.sword_left && arm_set.sword_holder()<0) {
+        bool drawn{};{std::lock_guard<std::mutex> l(hand_state_mutex);drawn=(hand_weapon_bits&2u)!=0;}
+        if(drawn) {d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::stow;const bool queued=d2vr::NativeWeaponHands::request(r);
+            dual_wield_event(std::string("\"ev\":\"sword_stow\",\"src\":\"")+source+"\",\"queued\":"+std::to_string(queued?1:0));}
+    }
     if(fx.restore_slot1) {d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::slot1_restore;const bool queued=d2vr::NativeWeaponHands::request(r);
         dual_wield_event(std::string("\"ev\":\"slot1_restore\",\"src\":\"")+source+"\",\"queued\":"+std::to_string(queued?1:0));}
     if(fx.unequip_slot1) {d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::slot1_unequip;const bool queued=d2vr::NativeWeaponHands::request(r);

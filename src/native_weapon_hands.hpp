@@ -1040,6 +1040,8 @@ public:
     // shows it, and shown again once no longer wanted (only an entity this hid, still alive).
     static void forearm_native_hide(std::uintptr_t entity) noexcept {fn_want_.store(entity,std::memory_order_relaxed);}
     inline static std::atomic<std::uint64_t> forearm_native_hides{},forearm_native_shows{},forearm_native_failed{};
+    inline static std::atomic<std::uint64_t> pool_shown_hidden{},pool_show_failed{};   // v145747: copies spawned hidden, shown / Show refused
+    inline static std::atomic<std::uint64_t> forearm_anchors{},forearm_rebinds{},forearm_anchor_failed{};   // v145747: forearm copy anchors spawned, binds, spawn failures
     static void mirror_hands(bool mirrored) noexcept {mirrored_.store(mirrored,std::memory_order_relaxed);}
     static void held_root_step(bool on) noexcept {held_step_on_.store(on,std::memory_order_relaxed);} // v776 test switch (see service_held)
     static void clear_copies() noexcept {clear_req_.store(true,std::memory_order_relaxed);clear_guns_req_.store(true,std::memory_order_relaxed);}
@@ -1099,6 +1101,48 @@ private:
         std::lock_guard<std::mutex> l(feed_m_);const auto& f=feed_[side&1u];
         if(!f.have || std::chrono::duration<double>(std::chrono::steady_clock::now()-f.at).count()>max_age_s) return false;
         pose=f.pose;speed=f.speed;if(root) *root=f.have_root?std::optional<Vec3>{f.root}:std::nullopt;return true;
+    }
+    // v145747 (user, DOTO headset v145746: "the crossbow on the right forearm fires but is not rendered"; live lab19: the copy's entity sat at the
+    // native gun's origin through 3570 teleports): since v145740 the forearm copy is spawned with the player as owner (its Gauss reference setup
+    // needs one), and an owned weapon is bound to the player by its own components, so the mod's teleports never moved it: it was drawn on the
+    // engine's gun. As Dishonored 2's real copies (v1099 service_anchors): each forearm copy is bound (0x875e80, empty tag, zero offset, identity)
+    // to a hidden anchor of its own, spawned raw from an inert def (game_traits::sword_copy_def, the blade prop), which teleport() moves; bound
+    // again whenever its master is not the anchor. An anchor goes with its copy.
+    template<class Read> static void service_forearm_anchors(std::uintptr_t base,Read& read) {
+        if constexpr(!game_traits::ranged_player_weapon_is_voltaic || game_traits::voltaic_copy_def==nullptr) {(void)base;(void)read;return;}
+        else {
+            for(auto& an:anchors_) if(an.copy && !alive_entity(base,read,an.copy,an.copy_id)) {
+                if(alive_entity(base,read,an.anchor,an.anchor_id)) remove_entity(base,an.anchor);
+                an={};
+            }
+            static const char empty_tag[1]{};const std::uintptr_t tag=reinterpret_cast<std::uintptr_t>(empty_tag);
+            alignas(16) static const std::array<float,3> zero{};alignas(16) static const std::array<float,9> identity{1,0,0,0,1,0,0,0,1};
+            for(unsigned side=0;side<2;++side) {
+                bool on{};{std::lock_guard<std::mutex> l(feed_m_);on=forearm_on_[side];}
+                const auto& h=held_[side];
+                if(!on || h.pe<0 || !h.have_cmd || h.pe>=static_cast<int>(pool_.size())) continue;
+                const auto& pe=pool_[h.pe];
+                if(!pe.ent || !pe.def || std::strcmp(pe.def,game_traits::voltaic_copy_def) || !alive_entity(base,read,pe.ent,pe.id)) continue;
+                Anchor* an=nullptr;for(auto& a:anchors_) if(a.copy==pe.ent && a.copy_id==pe.id) an=&a;
+                if(an && !alive_entity(base,read,an->anchor,an->anchor_id)) {*an={};an=nullptr;}
+                if(!an) {
+                    for(auto& a:anchors_) if(!a.copy) {an=&a;break;}
+                    if(!an) continue;
+                    std::array<float,3> pos{float(h.cmd.position.x),float(h.cmd.position.y),float(h.cmd.position.z)};std::array<float,9> axis{};
+                    for(unsigned i=0;i<3;++i) {axis[i*3]=float(h.cmd.basis[i].x);axis[i*3+1]=float(h.cmd.basis[i].y);axis[i*3+2]=float(h.cmd.basis[i].z);}
+                    const auto anchor=spawn_def(base,read,game_traits::sword_copy_def,pos.data(),axis.data(),false);if(!anchor) {++forearm_anchor_failed;continue;}
+                    visible(base,read,anchor,false);clear_not_presented(anchor);
+                    *an={pe.ent,anchor,pe.id,rig::value<std::uint32_t>(read,anchor+game_traits::entity_id_offset).value_or(0)};++forearm_anchors;
+                }
+                clear_not_presented(an->anchor);   // a Show over the copy inherits the master's bit1 (see service_anchors)
+                const auto bind=rig::value<std::uintptr_t>(read,pe.ent+game_traits::entity_bind_offset).value_or(0);
+                const auto master=bind && rig::pointer(bind)?rig::value<std::uintptr_t>(read,bind+0x3c8).value_or(0):0;
+                if(master!=an->anchor) {
+                    reinterpret_cast<void (__fastcall*)(std::uintptr_t,std::uintptr_t,const std::uintptr_t*,const float*,const float*,bool)>(base+0x875e80)(an->anchor,pe.ent,&tag,zero.data(),identity.data(),true);
+                    ++forearm_rebinds;
+                }
+            }
+        }
     }
     inline static std::atomic<std::uintptr_t> fn_want_{};inline static std::uintptr_t fn_hidden_{};inline static std::uint32_t fn_hidden_id_{};
     inline static std::uint64_t fn_failed_until_{};
@@ -1498,6 +1542,9 @@ private:
         const auto ent=spawn_def(base,read,def,pos.data(),axis.data());
         const std::uint32_t id=ent?rig::value<std::uint32_t>(read,ent+0xa8).value_or(0):0u;
         if(!ent || !alive_entity(base,read,ent,id)) return -1;
+        // v145747 (user, DOTO headset v145746: "the crossbow on the right forearm fires but is not rendered"): DOTO's Voltaic Gun def spawns
+        // hidden (flags bit 0, as its blade copy def): shown here, or the copy is placed and fires while never drawn. D2's defs spawn shown.
+        if(rig::value<std::uint8_t>(read,ent+game_traits::entity_flags_offset).value_or(0)&1u) {if(!visible(base,read,ent,true)) ++pool_show_failed;else ++pool_shown_hidden;}
         pool_[slot]=PoolEnt{def,ent,id,true,true};++gun_spawned;return slot;
     }
     template<class Read> static void pool_release(std::uintptr_t base,Read& read,int pe) {
@@ -2719,6 +2766,7 @@ private:
             if(item) {const std::uintptr_t d=decl?*decl:0;if(d!=slot1_cur_) {if(slot1_cur_) slot1_prev_=slot1_cur_;slot1_cur_=d;}}}
         service_measure(base,read,now);
         service_held(base,read);
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) service_forearm_anchors(base,read);   // v145747
         service_bash(base,read,now);
         bool live=false;for(const auto& g:lying_) live=live || g.present;for(const auto& e:pool_) live=live || e.ent!=0;for(const auto& m:meas_) live=live || m.native!=0;
         guns_live_=live;
