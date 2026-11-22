@@ -6,18 +6,32 @@ namespace DishonoredVR;
 
 public static partial class PoseRender
 {
-    public static bool NoteHandMeshesMissing(string directory)
+    /// <summary>A note-hand character: the file's character id (src/note_hand_mesh.hpp identities), its arm folder in the game's resources and
+    /// the logical arm resources (the md6 decls its arm entity defs name; the mod compares them with the live arm's descriptor+8).</summary>
+    public sealed record NoteHandCharacter(string Name, uint Id, string Folder, string LeftArm, string RightArm);
+
+    // Dishonored 2: Corvo and Emily. Death of the Outsider: Billie, whose arm md6s inherit Emily's (same 69-joint skeleton) with her own meshes.
+    // Her void right arm (player_rightarm_void_billie) has no file: the mod refuses it and the note keeps its controller attachment.
+    static readonly NoteHandCharacter[] D2Hands = {
+        new("corvo", 0, "models/characters/player/corvo/", "left_arm.md6", "right_arm.md6"),
+        new("emily", 1, "models/characters/player/emily/", "left_arm.md6", "right_arm.md6") };
+    static readonly NoteHandCharacter[] DotoHands = {
+        new("billie", 2, "models/characters/dlc01/player/billie/", "player_leftarm_billie.md6", "player_rightarm_billie.md6") };
+    public static IReadOnlyList<NoteHandCharacter> NoteHandCharacters(GameProfile? profile = null) => profile == null || profile.IsD2 ? D2Hands : DotoHands;
+
+    /// <summary>True when a note-hand file of the profile's game (default Dishonored 2) is missing or not the current format in directory.</summary>
+    public static bool NoteHandMeshesMissing(string directory, GameProfile? profile = null)
     {
-        foreach (string character in new[] { "corvo", "emily" })
+        foreach (var character in NoteHandCharacters(profile))
         foreach (string side in new[] { "left", "right" })
         {
-            string path = Path.Combine(directory, $"note_hand_{character}_{side}.bin");
+            string path = Path.Combine(directory, $"note_hand_{character.Name}_{side}.bin");
             try
             {
                 using var reader = new BinaryReader(File.OpenRead(path));
                 if (reader.BaseStream.Length < 3400 || reader.BaseStream.Length > 144 * 1024 * 1024 ||
                     !reader.ReadBytes(8).AsSpan().SequenceEqual("D2VRNH01"u8) || reader.ReadUInt32() != 2 ||
-                    reader.ReadUInt32() != (character == "corvo" ? 0u : 1u) || reader.ReadUInt32() != (side == "left" ? 0u : 1u)) return true;
+                    reader.ReadUInt32() != character.Id || reader.ReadUInt32() != (side == "left" ? 0u : 1u)) return true;
             }
             catch (IOException) { return true; }
         }
@@ -25,23 +39,24 @@ public static partial class PoseRender
     }
 
     // Private install-derived data. Export before Avatar's guide-only ring reweighting.
-    public static void ExportNoteHandMeshes(string game, string directory)
+    // game is the profile's install (default Dishonored 2), directory that game's mod home's artifacts\game-art.
+    public static void ExportNoteHandMeshes(string game, string directory, GameProfile? profile = null)
     {
         Directory.CreateDirectory(directory);
-        var containers = new ArtImport.Containers(Path.GetFullPath(game), n => n.StartsWith("generated/") && n.Contains("models/characters/"));
-        foreach (string character in new[] { "corvo", "emily" })
+        var containers = new ArtImport.Containers(Path.GetFullPath(game), n => n.StartsWith("generated/") && n.Contains("models/characters/"), (profile ?? GameProfile.D2).ResourceContainers);
+        foreach (var hand in NoteHandCharacters(profile))
         for (uint side = 0; side < 2; ++side)
         {
-            string limb = side == 0 ? "leftarm" : "rightarm";
-            string resource = $"models/characters/player/{character}/{(side == 0 ? "left_arm" : "right_arm")}.md6";
-            byte[] bytes = containers.Read($"generated/basemodel/models/characters/player/{character}/player_{limb}_{character}.bmd6model");
+            string character = hand.Name, limb = side == 0 ? "leftarm" : "rightarm";
+            string resource = hand.Folder + (side == 0 ? hand.LeftArm : hand.RightArm);
+            byte[] bytes = containers.Read($"generated/basemodel/{hand.Folder}player_{limb}_{character}.bmd6model");
             var mesh = ParseMesh(bytes);
             var skeleton = ParseSkeleton(containers.Read($"generated/skeleton/models/characters/player/emily/player_{limb}_emily.edgeskl"));
             if (skeleton.Bind.Length != 69 || !mesh.Skeleton.EndsWith($"/player_{limb}_emily.md6skl")) throw new InvalidDataException("Unverified note hand rig");
             string target = Path.Combine(directory, $"note_hand_{character}_{(side == 0 ? "left" : "right")}.bin"), temporary = target + ".tmp";
             using (var writer = new BinaryWriter(File.Create(temporary)))
             {
-                writer.Write("D2VRNH01"u8); writer.Write(2u); writer.Write(character == "corvo" ? 0u : 1u); writer.Write(side);
+                writer.Write("D2VRNH01"u8); writer.Write(2u); writer.Write(hand.Id); writer.Write(side);
                 writer.Write(SHA256.HashData(bytes));
                 byte[] name = Encoding.UTF8.GetBytes(resource); writer.Write((uint)name.Length); writer.Write(name);
                 foreach (var bind in skeleton.Bind)
@@ -60,7 +75,8 @@ public static partial class PoseRender
                     }
                     for (int i = surface.Start; i < surface.Start + surface.Count; ++i) writer.Write(checked((ushort)(mesh.Idx[i] - surface.VertexStart)));
                     string materialName = surface.Material.ToLowerInvariant();
-                    writer.Write(materialName.Contains("hands") || materialName.Contains("gloves") || materialName.Contains("ring") ? 1u : 0u);
+                    // "glove": D2's player_*_gloves and Billie's ply_billie_glove (no D2 arm material has "glove" without "gloves").
+                    writer.Write(materialName.Contains("hands") || materialName.Contains("glove") || materialName.Contains("ring") ? 1u : 0u);
                     for (int v = surface.VertexStart; v < surface.VertexStart + surface.VertexCount; ++v)
                     { writer.Write(mesh.Uv[v].X); writer.Write(mesh.Uv[v].Y); }
                     // Use the installed material declaration rather than guide-only material guesses.

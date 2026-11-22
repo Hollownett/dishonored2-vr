@@ -30,10 +30,16 @@ static class Program
             if (Directory.Exists(packageHome) && Directory.EnumerateFileSystemEntries(packageHome).Any())
                 throw new InvalidOperationException("Package check requires a new or empty directory.");
             if (!profile.IsD2)
-            {   // another game's payload: install it and report; the D2-only art/hand checks below do not apply
+            {   // another game's payload: install it and report; of the D2 art/hand checks below only its note-hand art applies
                 var other = ModHome.Install(packageHome, Console.Error.WriteLine, profile);
+                bool otherHands = false;
+                if (Env.FindGameDir(profile) is string otherGame) {
+                    var art = Path.Combine(packageHome, "artifacts", "game-art");
+                    PoseRender.ExportNoteHandMeshes(otherGame, art, profile);
+                    otherHands = !PoseRender.NoteHandMeshesMissing(art, profile);
+                }
                 File.WriteAllText(Path.Combine(packageHome, "package-check.json"), System.Text.Json.JsonSerializer.Serialize(new {
-                    game = profile.Id, dll = other.Dll, sha256 = ModHome.Sha256(other.DllPath), game_launched = false
+                    game = profile.Id, dll = other.Dll, sha256 = ModHome.Sha256(other.DllPath), native_hand_meshes_ready = otherHands, game_launched = false
                 }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
                 return 0;
             }
@@ -1016,6 +1022,10 @@ sealed class MainForm : Form
         if (DotoEnv.Pinned == null) await InstallDoto();
         if (DotoEnv.Pinned != null && DotoWriteOk)  // DLSS must be offered in DOTO whenever D2 offers it (its build\dlss-dll-path was never created)
             await Task.Run(() => { if (DlssFinder.EnsureSameAsOtherHome(env.Root, DotoEnv.Root, DlssFinder.SteamRoot(), new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token) is string l) Append(dLog, l, Ui.Good); });
+        // Billie's note-hand art (the note held in her hands, as Corvo/Emily's in D2): made from the DOTO install into the DOTO home when missing.
+        if (DotoEnv.Pinned != null && DotoWriteOk && PoseRender.NoteHandMeshesMissing(DotoEnv.P("artifacts", "game-art"), Doto) && Env.FindGameDir(Doto) is string handGame)
+            try { await Task.Run(() => PoseRender.ExportNoteHandMeshes(handGame, DotoEnv.P("artifacts", "game-art"), Doto)); }
+            catch (Exception ex) { Append(dLog, "Note hand mesh import failed: " + ex.Message, Ui.Gold); }
         dCandidate = DotoEnv.LatestCandidate(out _);
         dChecks = await Task.Run(() => DotoEnv.RunProfileChecks());
         dReady = DotoEnv.Ready(dCandidate);

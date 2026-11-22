@@ -24,7 +24,19 @@ static std::string pack(const nh::Mesh& mesh,unsigned version=1) {
 static bool rejects(const std::string& bytes) {try {std::istringstream in(bytes,std::ios::binary);(void)nh::read(in);return false;}catch(const std::invalid_argument&){return true;}}
 int main(int argc,char** argv) {
     for(int i=1;i<argc;++i) {std::ifstream file(argv[i],std::ios::binary);const auto installed=nh::read(file);std::size_t vertices{},triangles{};for(const auto& s:installed.surfaces){vertices+=s.vertices.size();triangles+=s.indices.size()/3;}std::cout<<"PACK "<<installed.resource<<" vertices "<<vertices<<" triangles "<<triangles<<"\n";}
-    nh::Mesh source;source.resource="models/characters/player/corvo/left_arm.md6";source.source_sha256[0]=1;
+    // The note-hand id table (launcher/NoteHandMesh.cs writes the same names): D2 Corvo/Emily, DOTO Billie, whose md6 inherits Emily's.
+    assert(nh::resource(0,0)=="models/characters/player/corvo/left_arm.md6" && nh::resource(1,1)=="models/characters/player/emily/right_arm.md6");
+    assert(nh::resource(2,0)=="models/characters/dlc01/player/billie/player_leftarm_billie.md6" &&
+           nh::resource(2,1)=="models/characters/dlc01/player/billie/player_rightarm_billie.md6");
+    assert(nh::primary_mesh(0,0)=="models/characters/player/corvo/player_leftarm_corvo.md6mesh" &&
+           nh::primary_mesh(1,1)=="models/characters/player/emily/player_rightarm_emily.md6mesh" &&
+           nh::primary_mesh(2,0)=="models/characters/dlc01/player/billie/player_leftarm_billie.md6mesh" &&
+           nh::primary_mesh(2,1)=="models/characters/dlc01/player/billie/player_rightarm_billie.md6mesh");
+    assert(nh::file_name(0,0)=="note_hand_corvo_left.bin" && nh::file_name(1,1)=="note_hand_emily_right.bin" &&
+           nh::file_name(2,0)=="note_hand_billie_left.bin" && nh::file_name(2,1)=="note_hand_billie_right.bin");
+    // This game's first player id (D2 Corvo 0, DOTO Billie 2) owns the generic cases below; D2 builds them exactly as before.
+    const std::uint32_t own=game_traits::note_hand_first_character;
+    nh::Mesh source;source.character=own;source.resource=nh::resource(own,0);source.source_sha256[0]=1;
     for(auto& b:source.inverse)b={1,0,0,0,0,1,0,0,0,0,1,0};
     nh::Surface surface;surface.kind=1;
     for(unsigned i=0;i<3;++i) {nh::Vertex v;v.position={static_cast<float>(i),0,0};v.weights[0]=128;v.weights[1]=127;v.joints[1]=1;surface.vertices.push_back(v);}
@@ -59,10 +71,44 @@ int main(int argc,char** argv) {
     write(arm.model+0x1bb0,std::uintptr_t{0x30000});write(0x1c000,rig::List{0x20000,1,256});write(0x20000,std::uintptr_t{0x24000});
     write(0x24000,module+0x1b0d118);write(0x24058,rig::List{0x28000,1,256});write(0x28000,std::uintptr_t{0x2c000});
     write(0x2c030,1u);write(0x2c054,3u);write(0x2c058,1u);text(0x30000,mesh.resource);
-    write(0x24008,std::uintptr_t{0x34000});text(0x34000,"models/characters/player/corvo/player_leftarm_corvo.md6mesh");
+    write(0x24008,std::uintptr_t{0x34000});text(0x34000,nh::primary_mesh(own,0));
     const auto bound=nh::bind(reader,module,arm,binding,mesh);assert(bound && bound->primary==0x24000);
-    text(0x34000,"models/characters/player/corvo/player_leftarm_sw.md6mesh");assert(!nh::bind(reader,module,arm,binding,mesh));
-    text(0x34000,"models/characters/player/corvo/player_leftarm_corvo.md6mesh");write(0x2c054,4u);assert(!nh::bind(reader,module,arm,binding,mesh));
+    text(0x34000,std::string(nh::identities[own].folder)+"player_leftarm_sw.md6mesh");assert(!nh::bind(reader,module,arm,binding,mesh));
+    text(0x34000,nh::primary_mesh(own,0));write(0x2c054,4u);assert(!nh::bind(reader,module,arm,binding,mesh));write(0x2c054,3u);
+    assert(nh::bind(reader,module,arm,binding,mesh));
+    // Another logical arm (the other side, the other character) never owns the shape.
+    text(0x30000,nh::resource(own,1));assert(!nh::bind(reader,module,arm,binding,mesh));
+    // Emily's logical left arm: never Corvo's; Billie's md6 inherits it, so it may name hers (her primary mesh still decides).
+    text(0x30000,nh::resource(1,0));assert(bool(nh::bind(reader,module,arm,binding,mesh))==(own==2));
+    text(0x30000,mesh.resource);assert(nh::bind(reader,module,arm,binding,mesh));
+    // Billie (Death of the Outsider, id 2): her own md6 names; the D2 build refuses her file and DOTO refuses Corvo's and Emily's.
+    auto billie=source;billie.character=2;billie.resource="models/characters/dlc01/player/billie/player_leftarm_billie.md6";
+    auto corvo=source;corvo.character=0;corvo.resource="models/characters/player/corvo/left_arm.md6";
+    auto emily=source;emily.character=1;emily.resource="models/characters/player/emily/left_arm.md6";
+    auto billie_right=billie;billie_right.side=1;billie_right.resource="models/characters/dlc01/player/billie/player_rightarm_billie.md6";
+    auto billie_as_emily=billie;billie_as_emily.resource=emily.resource;assert(rejects(pack(billie_as_emily))); // the file names her own md6
+    auto billie_void=billie_right;billie_void.resource="models/characters/dlc01/player/billie/player_rightarm_void_billie.md6";assert(rejects(pack(billie_void)));
+    auto too_high=billie;too_high.character=3;assert(rejects(pack(too_high)));
+    if constexpr(game_traits::note_hand_first_character==2) {
+        assert(!rejects(pack(billie)) && !rejects(pack(billie_right)) && rejects(pack(corvo)) && rejects(pack(emily)));
+        std::istringstream billie_in(pack(billie_right),std::ios::binary);const auto right=nh::read(billie_in);
+        assert(right.character==2 && right.side==1 && right.resource==billie_right.resource);
+        // The live logical resource is her md6 (her arm defs name it) or, inherited, Emily's; either way her primary mesh must own the arm.
+        assert(nh::bind(reader,module,arm,binding,mesh));
+        text(0x30000,"models/characters/player/emily/left_arm.md6");assert(nh::bind(reader,module,arm,binding,mesh));
+        text(0x34000,"models/characters/player/emily/player_leftarm_emily.md6mesh");assert(!nh::bind(reader,module,arm,binding,mesh));
+        text(0x34000,nh::primary_mesh(2,0));text(0x30000,"models/characters/player/emily/right_arm.md6");assert(!nh::bind(reader,module,arm,binding,mesh));
+        text(0x30000,mesh.resource);
+        // Her void right arm is another mesh: a right arm whose primary is the void mesh is refused (the note keeps its controller attachment).
+        rig::Arm right_arm=arm;right_arm.side=1;text(0x30000,right.resource);
+        text(0x34000,"models/characters/dlc01/player/billie/player_rightarm_void_billie.md6mesh");assert(!nh::bind(reader,module,right_arm,binding,right));
+        text(0x34000,nh::primary_mesh(2,1));assert(nh::bind(reader,module,right_arm,binding,right));
+        text(0x30000,"models/characters/dlc01/player/billie/player_rightarm_void_billie.md6");assert(!nh::bind(reader,module,right_arm,binding,right));
+        text(0x30000,mesh.resource);text(0x34000,nh::primary_mesh(2,0));
+    } else {
+        assert(rejects(pack(billie)) && rejects(pack(billie_right)) && !rejects(pack(corvo)) && !rejects(pack(emily)));
+    }
+    assert(nh::bind(reader,module,arm,binding,mesh));
     std::array<rig::Transform,69> palette{};
     for(auto& t:palette)t.f[0]=t.f[5]=t.f[10]=t.f[15]=1;
     palette[1].f[12]=1;
@@ -98,5 +144,5 @@ int main(int argc,char** argv) {
     auto inverse=binding.inverse;inverse[0][3]=2;
     const auto altered=nh::skin(mesh,inverse,palette,model,mapping);
     assert(length(altered.vertices[0]-geometry.vertices[0])>1.);
-    std::cout<<"PASS: installed mesh pack validation, ownership shape/inverse gates, eight-weight affine skinning and XR mapping\n";
+    std::cout<<"PASS ("<<game_traits::name<<"): installed mesh pack validation, ownership shape/inverse gates, Billie's note-hand identity, eight-weight affine skinning and XR mapping\n";
 }

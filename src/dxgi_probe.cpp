@@ -1050,7 +1050,8 @@ static std::array<bool,3> world_ui_captured{};
 static std::array<UINT64,3> world_ui_first_seen{};
 static bool world_ui_installed=false;
 static std::mutex note_panel_mutex;
-static std::array<std::shared_ptr<const d2vr::note_hand::Mesh>,4> note_hand_meshes;
+// Index character*2+side over this game's note-hand ids (game_traits: D2 Corvo 0 / Emily 1, DOTO Billie 2; lower DOTO slots stay empty).
+static std::array<std::shared_ptr<const d2vr::note_hand::Mesh>,2*d2vr::game_traits::note_hand_character_end> note_hand_meshes;
 static bool note_tablet_requested{};
 static d2vr::NativeNoteKind native_note_kind;
 static std::atomic<std::uint64_t> note_kind_epoch{1};
@@ -15419,7 +15420,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     static UINT64 next_note_model_attempt{};
                                     if(rig && !game_xr->note_model_owner() && now>=next_note_model_attempt)try {
                                         next_note_model_attempt=now+1000;
-                                        for(unsigned character=0;character<2;++character) {
+                                        for(unsigned character=d2vr::game_traits::note_hand_first_character;character<d2vr::game_traits::note_hand_character_end;++character) {
                                             const auto left=note_hand_meshes[character*2],right=note_hand_meshes[character*2+1];
                                             if(!left || !right || !d2vr::note_hand::bind(read_self,image_base,rig->arms[0],rig->bindings[0],*left) ||
                                                !d2vr::note_hand::bind(read_self,image_base,rig->arms[1],rig->bindings[1],*right))continue;
@@ -15441,7 +15442,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const auto wheel_rig=arm_binding_cache.load();static UINT64 next_wheel_mesh_attempt{};
                                     if(wheel_rig && (!wheel_hand_meshes || wheel_hand_meshes->rig!=wheel_rig) && now>=next_wheel_mesh_attempt) try {
                                         next_wheel_mesh_attempt=now+1000;
-                                        for(unsigned character=0;character<2;++character) {
+                                        for(unsigned character=d2vr::game_traits::note_hand_first_character;character<d2vr::game_traits::note_hand_character_end;++character) {
                                             const auto left=note_hand_meshes[character*2],right=note_hand_meshes[character*2+1];
                                             if(!left || !right || !d2vr::note_hand::bind(read_self,image_base,wheel_rig->arms[0],wheel_rig->bindings[0],*left) ||
                                                !d2vr::note_hand::bind(read_self,image_base,wheel_rig->arms[1],wheel_rig->bindings[1],*right))continue;
@@ -19134,8 +19135,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         native_note_final_tick=0;native_note_final_pairs=0;native_note_final_pair=false;test_move_until=0;
         for(auto& count:native_note_draw_gates)count=0;
         native_note_diagnostics=fs::exists(root/L"build"/L"note-render-diagnostics");native_note_diagnostic_rows=0;
-        if(note_tablet_requested)for(unsigned character=0;character<2;++character)for(unsigned side=0;side<2;++side)try {
-            const auto name=std::string("note_hand_")+(character?"emily":"corvo")+(side?"_right.bin":"_left.bin");
+        if(note_tablet_requested)for(unsigned character=d2vr::game_traits::note_hand_first_character;character<d2vr::game_traits::note_hand_character_end;++character)for(unsigned side=0;side<2;++side)try {
+            const auto name=d2vr::note_hand::file_name(character,side);
             std::ifstream input(root/L"artifacts"/L"game-art"/name,std::ios::binary);
             auto mesh=d2vr::note_hand::read(input);
             if(mesh.character==character && mesh.side==side)note_hand_meshes[character*2+side]=std::make_shared<const d2vr::note_hand::Mesh>(std::move(mesh));

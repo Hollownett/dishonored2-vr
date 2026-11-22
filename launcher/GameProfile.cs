@@ -22,6 +22,8 @@ public sealed class GameProfile
     /// <summary>The 45 s inject_probe fallback (hard-coded D2 addresses) exists only for Dishonored 2; other games are proxy-only.</summary>
     public required bool InjectFallback { get; init; }
     public required string NotIncludedMessage { get; init; }
+    /// <summary>The resource containers under base\ (each with a final &lt;name&gt;_patch.index): Dishonored 2 has game1..game4, Death of the Outsider game1..game3.</summary>
+    public string[] ResourceContainers { get; init; } = { "game1", "game2", "game3", "game4" };
 
     public bool IsD2 => ReferenceEquals(this, D2);
     public string SteamUri => "steam://rungameid/" + SteamAppId;
@@ -58,6 +60,7 @@ public sealed class GameProfile
         SavedGamesBase = @"Arkane Studios\Dishonored_DO\base", ConfigFileName = null,
         ModHomeFolder = "DishonoredVR-DOTO", PayloadPrefix = "dotohome/", InjectFallback = false,
         NotIncludedMessage = "Death of the Outsider build not included in this launcher.",
+        ResourceContainers = new[] { "game1", "game2", "game3" },
     };
 
     public static GameProfile? ById(string? id) => id?.ToLowerInvariant() switch { "d2" or "dishonored2" => D2, "doto" or "outsider" or "deathoftheoutsider" => Doto, _ => null };

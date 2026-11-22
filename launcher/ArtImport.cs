@@ -180,11 +180,12 @@ public static class ArtImport
         readonly Dictionary<string, HashSet<(string C, int Res, long Off, int Packed, int Size)>> entries = new();
 
         public Containers(string game, HashSet<string> wanted) : this(game, wanted.Contains) { }
-        /// <summary>Indexes every destination name (normalised: lower case, forward slashes) that wanted accepts.</summary>
-        public Containers(string game, Func<string, bool> wanted)
+        /// <summary>Indexes every destination name (normalised: lower case, forward slashes) that wanted accepts, in the containers
+        /// the game has (default: Dishonored 2's game1..game4; <see cref="GameProfile.ResourceContainers"/>).</summary>
+        public Containers(string game, Func<string, bool> wanted, IEnumerable<string>? containers = null)
         {
             baseDir = Path.Combine(game, "base");
-            foreach (var c in new[] { "game1", "game2", "game3", "game4" })
+            foreach (var c in containers ?? GameProfile.D2.ResourceContainers)
             {
                 var index = Path.Combine(baseDir, c + "_patch.index");
                 if (!File.Exists(index)) throw new IOException($"Missing final patch index {index}");

@@ -263,6 +263,11 @@ for %%T in (note_frame_history_check native_note_source_check native_note_geomet
     if errorlevel 1 goto build_failed
     if not errorlevel 0 goto build_failed
 )
+rem Death of the Outsider's note-hand ids (game_traits under D2VR_GAME_DOTO): Billie's files accepted and bound, Corvo's and Emily's refused.
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /DD2VR_GAME_DOTO tests\note_hand_mesh_check.cpp /Fo:build\note_hand_mesh_check_doto.obj /Fe:build\note_hand_mesh_check_doto.exe
+if errorlevel 1 goto build_failed
+build\note_hand_mesh_check_doto.exe
+if errorlevel 1 goto build_failed
 python tests\native_interaction_range_abi_check.py
 if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed

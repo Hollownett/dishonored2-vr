@@ -20,6 +20,9 @@ inline constexpr std::uint64_t render_pipeline_depth = 0;
 inline constexpr bool optional_native_consumers = true;
 // The player avatar: Billie Lurk (six textured body surfaces) instead of Corvo/Emily (one hidden proxy surface).
 inline constexpr bool billie_avatar = true;
+// The note-hand art ids the player's arms can be (note_hand_mesh.hpp identities; launcher/NoteHandMesh.cs writes note_hand_billie_{left,right}.bin
+// into this game's home): Billie (2) only. Her void right arm (player_rightarm_void_billie.md6) has no art: bind() refuses it, the note stays a quad.
+inline constexpr unsigned note_hand_first_character = 2, note_hand_character_end = 3;
 // The standalone world model the mod spawns for a dropped/thrown/second-hand blade (no physics, no audio): DOTO has no
 // dunwall/midnightassets; its bank mission's cinematic knife is Billie's blade as a plain entity (resource index 2026-11-22).
 inline constexpr const char* sword_copy_def = "models/campaign/dlc01/bank/midnight_props/knife_midnight.def";
@@ -56,6 +59,7 @@ inline constexpr const char* exe = "Dishonored2.exe";
 inline constexpr std::uint64_t render_pipeline_depth = 1;   // Setup N is consumed by Begin N+1
 inline constexpr bool optional_native_consumers = false;    // every verified consumer is required
 inline constexpr bool billie_avatar = false;
+inline constexpr unsigned note_hand_first_character = 0, note_hand_character_end = 2;   // Corvo (0), Emily (1)
 inline constexpr const char* sword_copy_def = "models/campaign/dunwall/midnightassets/sword_player_midnight.def";
 inline constexpr bool grenade_spawn_follows_velocity = true;
 // D2 0x86cbf0: mov rax,rsp (3); push rsi (1); sub rsp,0x60 (4) = 8 bytes; UWOP_ALLOC_SMALL 0x60 at 8, UWOP_PUSH_NONVOL rsi at 4.

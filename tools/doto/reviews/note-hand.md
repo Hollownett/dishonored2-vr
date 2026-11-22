@@ -83,3 +83,17 @@ the same instruction stream (pin-audit.md #4), only `[rdx+0xf0]/[rdx+0xe4]` fiel
    `xr-live-status`/the full status: `note_tablet.kind.verified` true, `accepted_shows >= 1`, `note_tracking_reason` = `native_models_ready`,
    `note_ready_frames > 0` (`note_last_fallback` empty), `game_xr.note_eye_draws > 0`. Currently expected: kind verified true but `native_models_unavailable` / `hand_art_unavailable`.
 3. Read-only memory check of the arm resource strings (step 4 above) is the one fact needed before coding.
+
+## Done (cause 1; static only)
+* Launcher: `NoteHandMesh.cs` exports per game profile; DOTO = `billie` (id 2, folder `models/characters/dlc01/player/billie/`, md6
+  `player_{left,right}arm_billie.md6`, Emily's 69-joint skeleton), read from DOTO's game1..game3 containers (`GameProfile.ResourceContainers`; DOTO has
+  no game4) into the DOTO home's `artifacts\game-art` from `RefreshDotoChecks` (start, Re-check, Launch VR) while missing, and in `--check-package --game doto`.
+  Exported from the user's install: left 3255+568 v / 5827+861 t, right 3281+395 v / 5827+610 t, inverse bind rows byte-identical to Emily's files; the D2
+  export is byte-identical to the installed `note_hand_{corvo,emily}_*.bin`.
+* src: `game_traits::note_hand_first_character/note_hand_character_end` (D2 0..2, DOTO 2..3) and the id table `note_hand::identities`; `dxgi_probe.cpp`
+  loads/binds only this game's ids (array 2*end). Decision for step 4 (no live read): her arm defs' `renderModelInfo.model` is her own md6 (D2's pinned
+  string is exactly Emily's def `model`, so her own name is expected at descriptor+8); since her md6 inherits Emily's, `bind()` also accepts Emily's
+  `left_arm.md6`/`right_arm.md6` for id 2 only. The primary mesh must be `.../billie/player_<limb>_billie.md6mesh` (the `lod 0 { clear mesh ... }` line,
+  a full path like D2's) and the surface kinds/counts and inverse rows must match, so either logical name still pins her own mesh. The void right arm
+  (`m_voidRightArmMd6` in her `body.cpntplayerbody`, swapped by the game) has another primary mesh and surfaces: refused, quad fallback.
+* Checks: `note_hand_mesh_check` (D2 and `/DD2VR_GAME_DOTO`, the latter added to `tools/build-msvc.cmd`) reads the exported files and tests the Billie identity.
