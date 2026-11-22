@@ -773,6 +773,10 @@ private:
     // magazine (+0xa0/+0xa4) and spawns its own loaded bolt (crossbow +0x160). It only lacks the upgrades (set below through vslot 0xd8).
     // Every other def (the sword copy, guard weapons, a kind the player has never equipped) is spawned by name as before.
     template<class Read> static std::uintptr_t real_weapon_decl(std::uintptr_t base,Read& read,const char* name) {
+        // v145739 (user, DOTO headset v145738: the game crashed right after every save load: a Voltaic Gun component whose entity has no owner
+        // reached GetComponent(null) in its reference setup 0x68eee0 <- 0x3c2530, dumps Dishonored_DO.exe.27236/11376): in DOTO the only player
+        // gun is the forearm Voltaic Gun, which D2's hand-held gun copies (mirror / hip / dropped) must never instance. No real weapon copies.
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {(void)base;(void)read;(void)name;return 0;}
         if(!name || !real_copies_.load(std::memory_order_relaxed)) return 0;
         bool player_gun=false;for(unsigned d=1;d<mirror_def_names.size();++d) player_gun=player_gun || !std::strcmp(name,mirror_def_names[d]);
         if(!player_gun) return 0;
