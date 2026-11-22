@@ -6,9 +6,10 @@ standing rule for future updates.
 ## The standing rule: our changes always go on top
 
 **Every time the mod is updated to Hollow's newest release, start from his `main` and replay our commits on top, so ours are the
-newest layer.** Never merge his work over ours or drop ours. Where he already has an equivalent fix, keep his and add only what ours
-adds. Where he removed something of ours, restore it on top. Keep his precedence rules (for example Spacewarp's) unless the user says
-otherwise. Author replayed commits as `Indurhra <Indurhra@users.noreply.github.com>`. Do not push without the user's go-ahead.
+newest layer. Where his code and ours disagree, ours wins, no matter what** (user, 2026-11-22: "mine should be on top no matter
+what"; "every change we've made, put over the top. performance changes and afw"). Never merge his work over ours or drop ours. Where
+he removed something of ours, restore it. Where he fixed the same thing differently, use ours (his additions that do not touch our
+behaviour, such as new features and presets, stay). Author replayed commits as `Indurhra <Indurhra@users.noreply.github.com>`. Do not push without the user's go-ahead.
 
 ## Repositories and folders
 
@@ -17,7 +18,7 @@ otherwise. Author replayed commits as `Indurhra <Indurhra@users.noreply.github.c
 | Hollow's mod (upstream) | `https://github.com/Hollownett/dishonored2-vr`, git remote `upstream`. The user is not a collaborator there (checked 2026-11-22). |
 | Our fork | `https://github.com/Indurhra/dishonored2-vr`, git remote `origin` |
 | Working copy | `Q:\Modding Community\dishonored2-vr-main` (a worktree of `Q:\Modding Community\dishonored2-vr`) |
-| Current branch | `update/v1457-ours` = Hollow's v1457 (`4685650`) + our commits |
+| Current branch | `update/v1457-ours` = Hollow's v1457 (`4685650`, his newest release and `main` on 2026-11-22) + our commits; installed as v1459 |
 | Installed mod | `%LOCALAPPDATA%\DishonoredVR\build\` holds exactly one `d2vr_render_probe_arm_v*.dll` (the game folder's `dinput8.dll` proxy loads it) |
 | Backups | `%LOCALAPPDATA%\DishonoredVR\backup\` (every replaced DLL, the original intro videos) |
 | DLSS runtime | `%LOCALAPPDATA%\DishonoredVR\nvngx_dlss.dll` (NVIDIA 310.9.16, signed; copied from the user's own files, never committed) |
@@ -31,7 +32,9 @@ otherwise. Author replayed commits as `Indurhra <Indurhra@users.noreply.github.c
 | `6548811` | `build/compile-census` diagnostic: counts every d3dcompiler compile/reflect call by caller | Ours only |
 | `d15c513` | **AFW renderer restored**: Renderer row 2 = AFW (alternate frame warping), VR Stereo Hub's open-source held-eye rebuild (`third_party/vsh_afw`, zlib), tuned for D2 (rig mask, player-model depth classes x5 arms / x9 held items) | He removed AFW in v1443 believing it was the PureDark bridge; it is not |
 | `87ac9ea`, `89fb98d` | `docs/PERFORMANCE-PORT-2026-11-21.md`: the Cosmic Tangerine performance review, measurements, DLSS results | Ours only |
-| `d76e647` | NGX's own verbose log with diagnostics (`artifacts/ngx/ngx-log.txt`) | He fixed the DLSS output-subrect bug his own way (kept); this adds only the logging that found it |
+| `d76e647` | NGX's own verbose log with diagnostics (`artifacts/ngx/ngx-log.txt`) | Ours only |
+| `b63b9ca` | **AFW wins over Spacewarp**: with Spacewarp on and the saved Renderer = AFW, AFW starts and Spacewarp sits the session out (still one frame generation at a time) | His rule (Spacewarp holds native) still applies to Renderer 1 / the launcher's performance mode |
+| `9f1afe3` | DLSS features always created with output subrects (our fix) | He fixed the same bug for his foveated box only (`desc.output_subrects`); ours replaces it |
 
 Already in Hollow's line (merged by him in v1411, credited in his v1445/v1457 notes): the ImGui VR menu, PSVR2 adaptive triggers on
 both hands, the settings-quad fix. They are not replayed.
@@ -48,7 +51,8 @@ in `backup\intro-videos-original\`).
    - Sampler and region cache: both sides had independent fixes; combined as described above (his recent list + our ways).
    - AFW: v1443's removal was reversed for `src/` and `tools/build-dll-fast.cmd` only (not his launcher), then our VR Stereo Hub
      port applied on top in one commit, so no intermediate state carries PureDark.
-   - DLSS: kept his per-feature `InEnableOutputSubrects`; added only our NGX logging.
+   - DLSS: first kept his per-feature `InEnableOutputSubrects` plus our NGX logging; then, at the user's instruction that ours wins
+     no matter what, our always-on version replaced his (`9f1afe3`), and AFW was given precedence over Spacewarp (`b63b9ca`).
 
 ### Procedure for the next update
 
@@ -75,7 +79,7 @@ back up the installed DLL, install, and leave pushing to the user.
 - Known harness noise (also on older builds): "injection" FAIL lines (cleanup timeout / diagnostic code 4) and swing's HUD edge
   coverage 0.022-0.023.
 
-## v1458 results (simulator; not headset-tested)
+## v1458/v1459 results (simulator; not headset-tested)
 
 - AFW: renderer live 2, 0 refusals and 0 fallbacks in idle, swing, menu pages, pistol and shoulder throw.
 - DLSS Quality with AFW: active, 0 evaluate failures (his subrect fix covers our path).
@@ -88,9 +92,9 @@ back up the installed DLL, install, and leave pushing to the user.
 
 ## Things the user should know
 
-- **AFW and Spacewarp do not run together.** With the launcher's Spacewarp on (Auto is Hollow's default), the session stays in native
-  stereo and the saved AFW renderer does not start (his "one frame generation at a time" rule). To use AFW: Launcher > Settings >
-  Spacewarp > Off.
+- **AFW and Spacewarp do not run together, and AFW wins.** With AFW as the saved renderer, AFW runs and Spacewarp is off for that
+  session even if the launcher has it on (the VR menu's Renderer help says so). To use Spacewarp instead, pick Native stereo in the
+  VR menu (or the launcher's performance mode off) and keep Spacewarp on.
 - AFW saves GPU time (one eye rendered per frame); Spacewarp saves CPU time (the game renders at half rate and the mod generates the
   frames in between).
 - The user's AA setting is FSR 4 Quality, which runs as FSR 3 Quality on their NVIDIA GPU. DLSS Quality / DLAA are available.
