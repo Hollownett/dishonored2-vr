@@ -77,9 +77,10 @@ Death of the Outsider (in development)
 --------------------------------------
 
 The same mod is being ported to **Dishonored: Death of the Outsider** from this repository: a generator translates the
-Dishonored 2 build to the Outsider's executable, and the launcher has an **OUTSIDER** tab. Stereo gameplay with head tracking
-runs in simulation; it is not in a release yet and has not been tried in a headset. Design, plan and status:
-[docs/DOTO-VR.md](docs/DOTO-VR.md).
+Dishonored 2 build to the Outsider's executable, and the launcher has an **OUTSIDER** tab. It is one mod: both games share
+the same sources and features, and another game build can be added as a new port target. Stereo gameplay with head
+tracking, hand aim, Billie's tracked hands and her full body run in simulation; it is not in a release yet and has not
+been tried in a headset. Design, plan and status: [docs/DOTO-VR.md](docs/DOTO-VR.md).
 
 What you need
 -------------

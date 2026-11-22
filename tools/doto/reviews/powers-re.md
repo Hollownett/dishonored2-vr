@@ -153,7 +153,7 @@ Init `0x3bd8e0` resolves: `power+0xb0` Mana, `+0xb8` HealthEvolved, **`+0xc0` Pl
 * Enter (state-3 enter `0x3bb7d0` -> `0x3bf180(power, player)`): saves the **player's own body pose** (`power+0x358..0x360` origin from `entity+0x310..0x318`, `+0x364` yaw, **`+0x368` = `cam+0x25294` (camera pitch; D2 0x25264)**, `+0x36c` physics value, `+0x378..0x380` = camera eye `0x86d8e0(cam)`), then **moves the player entity itself** with `0x8eab40(entity,&power+0x378,entity+0x31c,1)` (insn `3bf2f9`; the same SetOriginAndAxis `0x68e9d1` uses for projectiles). Also `0x85ee00(controller)`, `controller[+0x179]=0`, `0x86cff0(machine,0xd)`, `physics->body+0x20a=0`, `0x1bb240/0x1ba2b0`. `0x3bf060` fills the camera screen-effect record at **`cam+0x888`** (flag dword `+0x40` = 1 or 2, mirrored in `power+0x410`; values from decl +0x28c/+0x2a8/+0x2ac/+0x2b0/+0x2c8/+0x2cc).
 * Exit (`0x3bc680` -> `0x3be0b0`): restores origin/yaw (`0x8eab40`), `0x85a9b0(cam, saved pitch)`, clears the physics flags and **`0x85ab40(cam, 0, 0.0)` = PushCameraMode(0)** (insn `3be254`, `xor edx,edx`). `0x85ab40` is the only camera-mode setter (`cmp edx,0x13` = none; queue `cam+0x25238`/`+0x25240`; consumers `0x85c950` -> `0x85b0f0` set `+0x25234`/`+0x25230`).
 * Interpretation (INFERRED, high confidence): the player entity detaches from the body and flies under the **normal first-person player camera component**; no authored camera, no camera entity. The mode-0 push is cleanup; the only `0x85ab40` call in the TheEye cluster `0x3b9000..0x3c1500` is `0x3be254`.
-  **OPEN live check:** `cam+0x25230/+0x25234` during Foresight. If both are 0, `NativePlayerCamera::authored_view()` is false and hand aim/head tracking apply unchanged. (Contrast: Semblance pushes camera **mode 2**, `0x6e5df0` -> `0x6e5f28`, so Semblance is an authored view in the D2 sense.)
+  **OPEN live check:** `cam+0x25230/+0x25234` during Foresight. If both are 0, `NativePlayerCamera::authored_view()` is false and hand aim/head tracking apply unchanged. (CORRECTION, section 6: `0x6e5df0` -> `0x6e5f28` is `arkPlayerStateNpcFatality` vtable slot 11, not Semblance; the Semblance states push no camera mode.)
 
 ### 3.2 Time (PROVEN mechanism, no global timescale)
 
@@ -203,7 +203,7 @@ Mod-side: type-check `vtable RVA 0x1c451a8`, read `u32 power+0x19c` (spirit out 
 
 1. Reuse hand-choke selection (face proximity of the casting hand); gate on "Semblance equipped" and call StartAim (vslot 35, +0x118) on the Mimic power when the game's own phase test (`[[machine+0x98]+0x340]+0x88==3`, copied read-only) passes.
 2. "Pull away like lifting a mask" = Cast (vslot 36, +0x120) or the game's own UseMimic request; never synthesize states directly.
-3. While mimicking (state 96) the camera mode is 2 (authored): decide after a live check whether hand aim stays suppressed by `authored_view()`.
+3. While mimicking (state 96) no Mimic state pushes a camera mode (section 6; the earlier "mode 2" attribution was wrong). Expect mode 0 during free roam; confirm with the live read in 6.6.
 4. Wrist HUD face: `arkCpntMimic` fields (`mimicFace`, `m_mimicName`, ...); not traced.
 
 ---------------------------------------------------------------------------------------------------
@@ -218,6 +218,67 @@ Mod-side: type-check `vtable RVA 0x1c451a8`, read `u32 power+0x19c` (spirit out 
 | Place vs swap = same Cast virtual | PROVEN structure; `+0x259` meaning OPEN |
 | Gauss fire via `0x68e970` (call `0x3c219d`), event 206, pin byte 30 = `b4` | PROVEN |
 | Gauss target from `cam+0x252ac/b8` via aim sensor 9 (`0x402498`) | PROVEN |
-| Foresight = player entity under normal camera, per-entity time layer | PROVEN (entry/exit); steady-state camera mode OPEN |
+| Foresight = player entity under normal camera, per-entity time layer | PROVEN (entry/exit); no non-zero mode/target-mode push anywhere in the power (6.3); steady-state value 0 INFERRED, live read advised |
 | Foresight states 3/4 = spirit | INFERRED, OPEN live |
 | Semblance gated by choke state, no ray | PROVEN gate code; state 95 identity OPEN |
+| Semblance pushes camera mode 2 (`0x6e5df0`) | REFUTED: `0x6e5df0` is NpcFatality (38) slot 11; UseMimic 102 / Mimicking 96 / CancelMimicking 100 push no camera mode (6.2) |
+| Mimicking (96) = passive overlay, free locomotion continues | PROVEN structure (per-state active flag, no per-frame body); mode 0 during free roam INFERRED (6.2) |
+| Mode 2 = generic animation-driven camera | INFERRED (6.4): Choke, CureChoke, NpcFatality, Versus, Mantle, CharacterChoice |
+
+
+---------------------------------------------------------------------------------------------------
+
+## 6. Camera modes during Semblance and Foresight
+
+Static only (capstone over the exe; nothing launched or attached). Tags: **PROVEN** = read in the disassembly, **INFERRED** = deduced, **OPEN** = needs data not in the exe (decl files) or a live read.
+
+### 6.1 Machinery (PROVEN)
+
+* `0x85ab40(cam, mode, blend)` is not a stack push but a **FIFO of pending transitions**: `cmp edx,0x13` (13 = none) at `85ab40`; it dedupes against the queue tail / `cam+0x25234` and appends `{mode, blend}` to the queue at `cam+0x25238` (count `+0x25240`). The per-frame consumer `0x85c950` pops the head into `0x85b0f0`, which writes **target mode `cam+0x25234`** immediately (insn `85b109`) and lets **mode `cam+0x25230`** follow after the blend (blend `-1` = camera default `+0x10c` of the camera decl, insn `85b13d`). So `authored_view()` stays true for the blend time after a push of mode 0.
+* Callers of `0x85ab40`: 40 `call` sites plus 4 tail `jmp`s (`0x6d6590`, `0x6e5f28`, `0x892103`, `0x8cd616`), found by a byte scan of the whole .text. Nothing else writes `+0x25230/34` except the consumer chain and midnight cutscene track code (`0x880610`).
+* Player state machine (`machine`; `0x869570` request-enter, `0x869c90` request-exit; both enqueue 12-byte requests at `machine+0x260`): **each state has its own active flag**. `IsInState(id)` = `0x86a290` = `[[machine+0x98]+id*8+0x10]` byte `+0x20` (id < 0x67); the flag is set by the base start `0x8bcdc0` (insn `8bcde4`) and cleared by the base stop `0x8bd220` (insn `8bd236`). States are therefore not mutually exclusive: Mimicking (96) can be "on" while locomotion states (0 Running, 1 Sprinting, 6 Sneaking, ...) start and stop under it.
+* State ids (decl ctor `mov [this+0x60], id`, read for every `arkDeclPlayerState*` ctor): NpcFatality 38 (`0x6e5fa0`), Choke 41 (`0x89268f`), Mimicking 96 (`0x6e48fb`), CancelMimicking 100 (`0x6d96cb`), UseMimic 102 (`0x6e514b`). State 95 (requested at `0x6e4ebc`, tested at `0x3b5240`/`0x3b5fd0`) has no decl ctor with a literal id: still unnamed.
+* The `arkPlayerStateNavigation` decl family (ctor `0x8d2480`; base of Running, Sprinting, Sneaking, Falling, Jumping, Swimming, Flying, Stun, Choke, CureChoke, Cinematic, ...) uses start `0x8d26a0`, which pushes **the decl's own `m_cameraMode` (`decl+0xc8`), blend `decl+0xcc`** (call `8d26ee`). Decl ctor defaults (every `arkDeclPlayerState*` ctor scanned for stores to `+0xc8`): Navigation base `0x8d2556` = **0**, blend `0x8d255c` = -1.0; **Choke `0x8926c8` = 2**, **CureChoke `0x6e24da` = 2**, Cinematic 9, BlackMarketGoto 9, BlackMarketInteract 10, EnterPossessedHost 0x13 (none). Decl files in the game archives may override these (OPEN, not readable from the exe).
+
+### 6.2 Semblance (Q1)
+
+* **The earlier claim "Semblance pushes mode 2 at `0x6e5df0` -> `0x6e5f28`" is wrong (PROVEN).** `0x6e5df0` is slot 11 of the `arkPlayerStateNpcFatality` vtable (`0x1cbffc8`, data ref `0x1cc0020`; state id 38). Its tail `jmp 0x85ab40` at `0x6e5f28` pushes mode **2** (`mov edx,2` at `6e5ef5`, blend `[rip+0x14d37c2]`). It is not a Mimic state.
+* Mimic state vtables (PROVEN: slots read, direct call graph followed 4-6 levels; indirect `call [reg+x]` not followed):
+  * `arkPlayerStateMimicking` (96, vtable `0x1cbf7c8`): slot 10 `0x6e47e0` = base start `0x8bcdc0` + anim/timeline setup; slot 12 `0x6e4a90` = base stop `0x8bd220` + cleanup; slots 4/5 save/load; **no per-frame body (slots 13/16 = `0x93eb60` no-op)**. It is not in the Navigation family (decl base `0x8bcd10`), so it never reaches `0x8d26a0`. **No `0x85ab40`/`0x85b0f0` reference on any path.**
+  * `arkPlayerStateUseMimic` (102, `0x1cbfc08`; decl base `0x8bf1c0`): slot 10 `0x6e4dd0` is a 5-case dispatcher on `[this+0x88]`: requests state 95 (`0x6e4ebc`), sets flags with `0x8bd0d0`, finishes through `0x8bd210`; slot 12 `0x6e54c0` cancels. **No camera-mode push.**
+  * `arkPlayerStateCancelMimicking` (100, `0x1cbbc28`): slots `0x8bcdc0`, `0x6d97e0`, `0x8bd220`, `0x6d9cf0`, `0x6d9d90`, `0x6da9b0`, `0x6ec460`: **no camera-mode push.**
+  * The base start/stop do touch the camera, but not the mode: decl flag `[decl+0x69] & 0x40` -> `0x856c40(cam,+1)` at `8bce5d` and `(cam,-1)` at `8bd2b6`, which increments/decrements the dword **`cam+0x251ec`** (an input/rotation-lock counter, not a mode; not part of `authored_view()` as written). Whether the Mimic decls set that flag is OPEN (decl data).
+* Power side: `arkCpntMimic` (`0x3d9d10` request-enter 96 at `3d9d22`; `0x3d9de0` request-exit 96 at `3d9df6`; update `0x3dab20` requests 96 at `3dac72`; `0x3dadd0` requests CancelMimicking at `3dae11`) and `arkCpntPowerMimic` (`0x3b5000..0x3b6500`) contain **no** `0x85ab40` call. PROVEN by the whole-.text caller scan (none in `0x3b5xxx`, `0x3d9xxx..0x3dbxxx`, `0x6e47e0..0x6e5b00`).
+* Release of mode 2: not in the Mimic states. Mode 2 can only be **inherited** from the Choke (41, push `0x8d26ee` from its decl default 2) the cast starts from, and it is replaced the first time a Navigation-family state starts, because each pushes its own decl mode (default 0); **Running (0) is the base state and pushes mode 0 on every start**. INFERRED (not read): that the machine falls back into Running/Sprinting/Sneaking after UseMimic; Idle (22) has no push, so if the fallback were Idle the inherited mode would linger. OPEN: a decl file could set a non-zero `m_cameraMode` on a locomotion decl.
+* **Answer: Semblance never requests mode 2.** It does not hold a camera mode for the whole Mimicking state and does not push one for the UseMimic animation. During the face-taking animation the camera sits in whatever mode the preceding Choke left (INFERRED 2); during free movement while disguised it is the locomotion state's mode (INFERRED 0).
+
+### 6.3 Foresight (Q2)
+
+* PROVEN: in the whole TheEye cluster (`0x3b9000..0x3c1500`, plus a depth-6 call-graph walk of every state enter/exit/update: `0x3bb7d0 0x3bf180 0x3bb690 0x3bfbe0 0x3c0fb0 0x3bc680 0x3be0b0 0x3bb750 0x3bca60 0x3bb790 0x3bca50 0x3bc8f0 0x3befd0 0x3bde40 0x3c10e0 0x3bf060 0x3bd8e0 0x3bc3b0 0x3c0d70 0x3c0ea0 0x3bfbb0`) there is **exactly one** `0x85ab40` call, the mode-0 push at exit `0x3be254` (`xor edx,edx`). Nothing pushes a non-zero camera mode or target mode during states 3/4. The power also requests no player state (`0x869570/0x869760/0x869c90` absent; only `IsInState(2)` / `IsInState(4)` at `0x3bb803` / `0x3bb81b` and the machine-layer call `0x86cff0(machine,0xd)` at `0x3bf371`). The other machine calls (`0x86d140` at `0x3bf360`, `0x3be1c2`) toggle sensor/physics, not the camera.
+* Consequence (INFERRED, high): during the spirit the camera mode is whatever the active locomotion (Navigation-family) state pushed last, decl default 0, as in normal play; the exit push of 0 is cleanup. Foresight needs no `authored_view()` exception. Residual risk: a decl-file override of a locomotion `m_cameraMode` (OPEN).
+
+### 6.4 Ordinary choke / takedown (Q3)
+
+Mode 2 is a generic "animation-driven" first-person camera mode, not choke-specific (PROVEN pushes; meaning INFERRED):
+
+| State (id) | push | where |
+|---|---|---|
+| Choke (41), CureChoke (43) | decl `m_cameraMode`, ctor default **2** | start `0x8d26a0` (slots 10/11 `0x892a80`, `0x892ac0`), push `8d26ee`; defaults `0x8926c8`, `0x6e24da` |
+| NpcFatality (38) | explicit **2** | slot 11 `0x6e5df0`, tail jmp `0x6e5f28` |
+| Choke kill sub-phase / Assassination (13) | explicit **3** (+ vector `decl+0x90` to `cam+0x251f0`) | `0x8b1810` call `8b184c`; called from Choke's update (`0x8938a3`) and Assassination slot 13 (`0x8cd4a1`) |
+| Versus (31) / VersusGrab (32) | 2 / 3, exit pushes 0 | `0x6f1930`, `0x6f2e91` / `0x6f1e96`, `0x6f3422` |
+| Mantle (8), CharacterChoice (37) | 2 | `0x8c8ba9`, `0x6da4e6` |
+| Peeking (24) 3, Pathing 3, ShadowWalk 7, CatFall (4) 0xe, EnterPossessedHost 0xc | fixed | `0x8ab6a3`, `0x8cd616`, `0x8b2087`, `0x8c4ae1`, `0x89c555` |
+| Locomotion (Running 0, Sprinting, Sneaking, Falling, Jumping, Swimming, Slipping, AutoCrouch, WallCrouch, InAir, Flying) | decl default **0** via `0x8d26a0` | every start re-asserts mode 0 |
+
+Mode 2 is released only implicitly: Choke's stop (`0x8d2d40` -> base `0x8bd220`) does not push; the next Navigation-family start pushes 0. Explicit exit pushes of 0 exist in Versus, VersusGrab, CarryCorpse, Grapple (`0x8a0e05`).
+
+### 6.5 Consequence for the VR mod
+
+* **No Semblance-specific or Foresight-specific `authored_view()` exception is justified by the code.** The Mimic states push nothing and Mimicking (96) is a passive overlay (own active flag, no per-frame body), so free-roam disguise runs in the normal locomotion states under camera mode 0 and `authored_view()` is false; Foresight is the same.
+* What remains authored: the face-taking animation (UseMimic 102 plus the Choke it starts from, inherited mode 2) and the `target_mode`/mode blend tail after any push (target mode changes at once, mode only after the blend).
+* Fallback only if a live read shows a persistent mode 2 while Mimicking and walking (decl override, or Idle fallback). Exception condition, mirroring `tracked_shadow_walk()`: `mimicking && !use_mimic && !cancel_mimicking && mode==2 && target_mode==2 && !blend_body_yaw && !code_lock`, with `mimicking = active(96)`, `use_mimic = active(102)`, `cancel_mimicking = active(100)` and `active(id)` = byte `+0x20` of `[[machine+0x98]+id*8+0x10]` (null-checked, id < 0x67).
+
+### 6.6 Remaining OPEN (one read-only live check closes all)
+
+Read `cam+0x25230/+0x25234` and the active bytes of states 96/102 (a) during UseMimic, (b) while Mimicking and walking, (c) during Foresight states 3/4 while moving. Expected: (a) 2 (inherited), (b) 0, (c) 0. Also unnamed: state 95; decl-file values of `m_cameraMode`.
