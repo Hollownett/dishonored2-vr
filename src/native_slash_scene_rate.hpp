@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <MinHook.h>
+#include "game_profile.hpp"
 #include "native_trampoline_unwind.hpp"
 #include <intrin.h>
 #include "native_slash_speed.hpp"
@@ -22,9 +23,12 @@ public:
     using Secondary=std::uint32_t* (__fastcall*)(std::uintptr_t,std::uint32_t*,std::uintptr_t,std::uintptr_t,std::uint64_t,std::uintptr_t,std::uint64_t);
     using Setter=bool (__fastcall*)(std::uintptr_t,std::uint32_t,float);
     inline static constexpr std::uintptr_t slash_vtable_rva=0x1c85d28,attributes_vtable_rva=0x1ca7938,setter_rva=0x7d8fe0;
-    inline static constexpr std::size_t perform_trampoline_size=22;
+    // The perform entry's stolen prologue (MinHook copies whole instructions): D2 8 bytes, DOTO 11 (sub rsp,0x90 is 7 bytes);
+    // the trampoline is those bytes + a 14-byte absolute jump. The unwind info for them is game_traits::slash_perform_unwind.
+    inline static constexpr std::size_t perform_steal=game_traits::slash_perform_steal;
+    inline static constexpr std::size_t perform_trampoline_size=perform_steal+14;
     static std::array<unsigned char,14> expected_perform_tail(std::uintptr_t base) noexcept {
-        std::array<unsigned char,14> bytes{0xff,0x25,0,0,0,0};const auto continuation=base+rvas[0]+8;
+        std::array<unsigned char,14> bytes{0xff,0x25,0,0,0,0};const auto continuation=base+rvas[0]+perform_steal;
         std::memcpy(bytes.data()+6,&continuation,sizeof(continuation));return bytes;
     }
     inline static constexpr char attribute_name[]="ARK_ATTRIBUTE_SLASH_SPEED_FACTOR";
@@ -175,19 +179,19 @@ private:
     }
     static unsigned cpp_logic(Logic logic) noexcept {try {return logic?logic():0;}catch(...) {return 0;}}
     bool gameplay() const noexcept {__try {return cpp_logic(logic_)==2;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
-    struct PerformMetadata {RUNTIME_FUNCTION function;std::array<unsigned char,8> unwind;};
+    struct PerformMetadata {RUNTIME_FUNCTION function;std::remove_const_t<decltype(game_traits::slash_perform_unwind)> unwind;};
     static bool trampoline_read(std::uintptr_t address,void* output,std::size_t size) noexcept {
         __try {std::memcpy(output,reinterpret_cast<const void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static std::array<unsigned char,14> owned_perform_tail(std::uintptr_t base) noexcept {
-        std::array<unsigned char,14> bytes{0x49,0xbb};const auto continuation=base+rvas[0]+8;
+        std::array<unsigned char,14> bytes{0x49,0xbb};const auto continuation=base+rvas[0]+perform_steal;
         std::memcpy(bytes.data()+2,&continuation,sizeof(continuation));bytes[10]=0x41;bytes[11]=0xff;bytes[12]=0xe3;bytes[13]=0x90;return bytes;
     }
     bool restore_perform_protection() noexcept {
         const auto trampoline=originals_[0].load(std::memory_order_acquire);
         if(perform_protection_pending_) {
             DWORD ignored{};
-            if(!VirtualProtect(static_cast<unsigned char*>(trampoline)+8,14,perform_protection_,&ignored))return false;
+            if(!VirtualProtect(static_cast<unsigned char*>(trampoline)+perform_steal,14,perform_protection_,&ignored))return false;
             perform_protection_pending_=false;
         }
         if(perform_cache_flush_pending_) {
@@ -203,13 +207,13 @@ private:
             perform_protection_pending_ || perform_cache_flush_pending_)return false;
         std::array<unsigned char,perform_trampoline_size> code{};PerformMetadata metadata{};
         if(!trampoline_read(trampoline,code.data(),code.size()) || !trampoline_read(metadata_base,&metadata,sizeof(metadata)) ||
-            std::memcmp(code.data(),prologues[0].data(),8))return false;
+            std::memcmp(code.data(),prologues[0].data(),perform_steal))return false;
         const auto tail=owned_perform_tail(base_);
-        if(std::memcmp(code.data()+8,tail.data(),tail.size()) || metadata.function.BeginAddress!=0 ||
+        if(std::memcmp(code.data()+perform_steal,tail.data(),tail.size()) || metadata.function.BeginAddress!=0 ||
             metadata.function.EndAddress!=metadata.function.BeginAddress+perform_trampoline_size ||
-            metadata.function.UnwindData!=metadata_base-trampoline+offsetof(PerformMetadata,unwind) || metadata.unwind!=std::array<unsigned char,8>{1,8,2,0,8,0xb2,4,0x60})return false;
+            metadata.function.UnwindData!=metadata_base-trampoline+offsetof(PerformMetadata,unwind) || metadata.unwind!=game_traits::slash_perform_unwind)return false;
         DWORD64 lookup_base{};
-        return RtlLookupFunctionEntry(trampoline+8,&lookup_base,nullptr)==&perform_metadata_->function && lookup_base==trampoline;
+        return RtlLookupFunctionEntry(trampoline+perform_steal,&lookup_base,nullptr)==&perform_metadata_->function && lookup_base==trampoline;
     }
     bool prepare_perform_unwind() noexcept {
         if(semantic_fixture_)return true;
@@ -219,21 +223,21 @@ private:
         if(!trampoline)return false;
         std::array<unsigned char,perform_trampoline_size> current{};
         if(!trampoline_read(trampoline,current.data(),current.size()) ||
-            std::memcmp(current.data(),prologues[0].data(),8))return false;
+            std::memcmp(current.data(),prologues[0].data(),perform_steal))return false;
         const auto replacement=owned_perform_tail(base_);
         const auto expected=perform_relay_patched_?replacement:expected_perform_tail(base_);
-        if(std::memcmp(current.data()+8,expected.data(),expected.size()))return false;
+        if(std::memcmp(current.data()+perform_steal,expected.data(),expected.size()))return false;
         auto* metadata=static_cast<PerformMetadata*>(alloc_unwind_above(trampoline));if(!metadata)return false;
         const auto metadata_base=reinterpret_cast<std::uintptr_t>(metadata);
         metadata->function.BeginAddress=0;
         metadata->function.EndAddress=static_cast<DWORD>(perform_trampoline_size);
         metadata->function.UnwindData=static_cast<DWORD>(metadata_base-trampoline+offsetof(PerformMetadata,unwind));
-        metadata->unwind={1,8,2,0,8,0xb2,4,0x60};
+        metadata->unwind=game_traits::slash_perform_unwind;
         DWORD previous{};
-        if(!VirtualProtect(reinterpret_cast<void*>(trampoline+8),replacement.size(),PAGE_EXECUTE_READWRITE,&previous)) {VirtualFree(metadata,0,MEM_RELEASE);return false;}
+        if(!VirtualProtect(reinterpret_cast<void*>(trampoline+perform_steal),replacement.size(),PAGE_EXECUTE_READWRITE,&previous)) {VirtualFree(metadata,0,MEM_RELEASE);return false;}
         perform_protection_=previous;
-        std::memcpy(reinterpret_cast<void*>(trampoline+8),replacement.data(),replacement.size());perform_relay_patched_=true;
-        DWORD ignored{};const bool protected_again=VirtualProtect(reinterpret_cast<void*>(trampoline+8),replacement.size(),previous,&ignored)!=FALSE;
+        std::memcpy(reinterpret_cast<void*>(trampoline+perform_steal),replacement.data(),replacement.size());perform_relay_patched_=true;
+        DWORD ignored{};const bool protected_again=VirtualProtect(reinterpret_cast<void*>(trampoline+perform_steal),replacement.size(),previous,&ignored)!=FALSE;
         perform_protection_pending_=!protected_again;
         const bool flushed=FlushInstructionCache(GetCurrentProcess(),reinterpret_cast<void*>(trampoline),perform_trampoline_size)!=FALSE;
         perform_cache_flush_pending_=!flushed;

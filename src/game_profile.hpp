@@ -4,6 +4,8 @@
 // src/game_target.hpp defines D2VR_GAME_<NAME> before anything else. Shared code asks these traits instead of testing
 // for a game, so a new target adds one profile block here (and its reviewed rules in its targets folder).
 // Per-game DATA (an avatar's mesh pins, resource names) stays next to the code that uses it, under the game's define.
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace d2vr::game_traits {
@@ -24,6 +26,11 @@ inline constexpr const char* sword_copy_def = "models/campaign/dlc01/bank/midnig
 // The grenade Throw frame keeps the launch point 0x20 bytes past the velocity the mod's setter hook receives (D2). DOTO's Throw keeps
 // it 0x10 bytes before (native_grenade_throw.hpp): the hand-throw rewrite stays off until that frame is confirmed.
 inline constexpr bool grenade_spawn_follows_velocity = false;
+// The slash perform entry's stolen prologue (native_slash_scene_rate.hpp): DOTO 0x8d7ed0 = mov rax,rsp (3); push rsi (1);
+// sub rsp,0x90 (7) = 11 bytes, so MinHook copies 11. Its unwind info: prolog 11, 3 slots: UWOP_ALLOC_LARGE 0x90/8 at 11,
+// UWOP_PUSH_NONVOL rsi at 4.
+inline constexpr std::size_t slash_perform_steal = 11;
+inline constexpr std::array<unsigned char,10> slash_perform_unwind{1,11,3,0, 11,0x01, 0x12,0x00, 4,0x60};
 #else
 inline constexpr const char* name = "Dishonored 2";
 inline constexpr const char* exe = "Dishonored2.exe";
@@ -32,5 +39,8 @@ inline constexpr bool optional_native_consumers = false;    // every verified co
 inline constexpr bool billie_avatar = false;
 inline constexpr const char* sword_copy_def = "models/campaign/dunwall/midnightassets/sword_player_midnight.def";
 inline constexpr bool grenade_spawn_follows_velocity = true;
+// D2 0x86cbf0: mov rax,rsp (3); push rsi (1); sub rsp,0x60 (4) = 8 bytes; UWOP_ALLOC_SMALL 0x60 at 8, UWOP_PUSH_NONVOL rsi at 4.
+inline constexpr std::size_t slash_perform_steal = 8;
+inline constexpr std::array<unsigned char,8> slash_perform_unwind{1,8,2,0,8,0xb2,4,0x60};
 #endif
 } // namespace d2vr::game_traits

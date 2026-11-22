@@ -5794,6 +5794,12 @@ bool is_tutorial_movie(void* iggy) noexcept {
         read_self(file+0x1658,&path,8) && d2vr::rig::pointer(path) && read_self(path,name,sizeof name) && !std::memcmp(name,"ui/tutorials.iggy",18);
     cache={at,hit,now};return hit;
 }
+// v145731 (user, DOTO headset: "tutorial screens are just blue/black screens"): Death of the Outsider shows its tutorial cards in a game
+// logic state of their own (mask 4096; tools/doto/reviews/tutorial-screens.md). The HUD art capture runs only in gameplay (mask 2), and a
+// tutorial child that was not captured is suppressed (native_hud_child_draw.hpp, v814), so a modal card lost its title, text, image and
+// clip and left only the pause dim. Outside gameplay the tutorial movie is not claimed as a HUD child: the card draws on the flat panel
+// like the pause menu. D2's in-gameplay tutorial hints keep the HUD path.
+bool is_gameplay_tutorial_movie(void* iggy) noexcept {return game_logic_mask()==2 && is_tutorial_movie(iggy);}
 
 // Other gameplay HUD movies drawn onto the HUD window (save/objective notifications).
 bool is_panel_extra_movie(void* iggy) noexcept {
@@ -18897,7 +18903,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         if(head_requested) {
             d2vr::NativeHudChildDraw::begin=&begin_native_hud_art;
             d2vr::NativeHudChildDraw::end=&end_native_hud_art;
-            d2vr::NativeHudChildDraw::hud_movie=&is_gameplay_hud_movie;d2vr::NativeHudChildDraw::tutorial_movie=&is_tutorial_movie;d2vr::NativeHudChildDraw::panel_movie=&is_panel_extra_movie;
+            d2vr::NativeHudChildDraw::hud_movie=&is_gameplay_hud_movie;d2vr::NativeHudChildDraw::tutorial_movie=&is_gameplay_tutorial_movie;d2vr::NativeHudChildDraw::panel_movie=&is_panel_extra_movie;
             hud_window_enabled=!fs::exists(root/L"build"/L"hud-window-off");
             d2vr::NativeHudChildDraw::panel_generic=hud_window_enabled && !fs::exists(root/L"build"/L"hud-window-no-generic");
             d2vr::NativeHudChildDraw::hud_layout_node=+[](void* iggy,void* node) noexcept {
