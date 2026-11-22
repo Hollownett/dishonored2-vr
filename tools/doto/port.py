@@ -68,20 +68,18 @@ def line_rule(rules, file, line_text, value):
 
 
 def entity_rule(rules, file, line_text, col, value):
-    """offsets.json "entity": an idEntity field read off a base identifier that holds an engine entity
-    (player, entity, npc, ...): the proven idEntity shift for the listed field values."""
-    e = rules.get('entity')
-    if not e:
-        return None
-    m = {int(k, 0): int(v, 0) for k, v in e['map'].items()}
-    if value not in m:
-        return None
+    """offsets.json "entity" and "structs": a field of a known engine struct read off a base identifier that holds it
+    ("entity": idEntity off player/entity/npc/...; each "structs" entry: its own bases, e.g. the player state machine
+    off machine/machine_): the proven layout shift for the listed field values. The base is the identifier right before
+    the '+' (so `*machine+0x90`, `owner.machine+0x90` and `machine_+0x90` all have base machine/machine_)."""
     b = re.search(r'([A-Za-z_]\w*)\s*\)?\s*\+\s*$', line_text[:col])
     if not b:
         return None
     base = b.group(1)
-    if base in e['bases'] or base in e.get('file_bases', {}).get(file, []):
-        return m[value], e['why']
+    for e in ([rules['entity']] if rules.get('entity') else []) + rules.get('structs', []):
+        m = {int(k, 0): int(v, 0) for k, v in e['map'].items()}
+        if value in m and (base in e['bases'] or base in e.get('file_bases', {}).get(file, [])):
+            return m[value], e['why']
     return None
 
 

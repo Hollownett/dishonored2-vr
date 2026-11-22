@@ -51,6 +51,7 @@ Numbers at the time of writing: 1,397 address literals translated (967 exact, 26
 | Prepared view stride | 0x3ab0 | 0x3ab0 (unchanged: the view keeps a 0x10 tail after the shrunk renderView) | live: eye 1 at +0x3ab0 (`live.py views`) |
 | Render pipeline | a view's Setup is consumed by the next Present's Begin (depth 1) | Setup and Begin inside one Present interval (depth 0) | live thread trace; trait `render_pipeline_depth` |
 | Player body | Corvo/Emily: one hidden proxy surface, the mod swaps in the arm's body material | Billie: `player_body_billie.md6`, six surfaces, all overridden with `player_part_hidden.material` in first person | live dump (`tools/doto/body_dump.py`); the mod clears the overrides so her own materials draw |
+| Player state machine (`arkCpntPlayerStateMachine`) | state pool +0x90, requests +0x220, controller..sensors +0x2f8..+0x338 | pool +0x98, requests +0x260, +0x58 from the controller on (+0x350..+0x390) | constructor diff, live (`hand_state_probe.py`); one struct rule rewrites every `machine` read (hand state, action camera, assassination receipts, Block, sword contact, takedown, lean, equip, choke, talk, weapon visibility) |
 | `idGameLocal` fields | player +0x3130b0, logic manager +0x1f6ec8, state +0x341058 | +0x327770, +0x1f75f8, +0x355718 | aligned code, confirmed live |
 | `arkPlayer` | components +0x268, model +0xf0, origin +0x300, axis +0x30c | +0x270, +0xf8, +0x310, +0x31c | aligned code, live reads |
 | Player camera component | mode/pitch/yaw/aim at +0x25200.. | +0x30 (+0x25230..) | aligned code |
@@ -144,6 +145,8 @@ Simulated sessions (`tools/doto/doto_sim.py`, the mod's simulated OpenXR runtime
 | play15 | v145717 | the same with the target-driven build and the per-game proxy (focus cvars found in `dishonored_DOConfig.cfg`); a clip of the look-down walk recorded from the mirror window (`tools/doto/burst.py`, below) |
 | play17-play18 | v145719 | DOTO menu tables: 13 then 40 glyph movies patched, 0 refused; pause and main menu movies patched (0 mismatched); the pause list shows **VR Settings**; play18's cursor overshot to the disabled Tutorials entry (stick auto-repeat), so no click |
 | play19 | v145720 | **in-game VR Settings in DOTO**: pause -> VR Settings -> the native VR options page (1 click, 1 page, 0 faults, 0 failed steps) -> B back to the pause list -> B to gameplay (`pause_vr_settings` scenario) |
+| play20 | v145720 | avatar check: body IK and arm IK every frame at D2 parity (body solves, body-pose uploads and per-arm two-bone IK poses, 0 rejected); but Billie's fingers used the game's pose (finger mode 3): the hand-state snapshot never read an empty hand. `tools/doto/hand_state_probe.py` (read-only) found the player state machine's pool at +0x98, not +0x90 |
+| play21 | v145721 | **state machine layout fixed for every reader** (`offsets.json` "structs"): fingers follow grip and trigger (finger mode 1 on 5,485/5,485 frames, both hands empty); live: pool +0x98, controller +0x350, body +0x358, interaction +0x370, inventory +0x380, attributes +0x388, sensor container +0x390; state ids 18/39/44/45/49/50/53/54/64 unchanged (Leaning, Slash, Block, CarryCorpse, HoldObject, EquipChange, Draw) |
 
 ![Clip: walking while looking down in Death of the Outsider VR, Billie's body and hands in both eyes (simulated headset)](images/doto/play15-look-down-walk.webp)
 

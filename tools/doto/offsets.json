@@ -3646,6 +3646,13 @@
    "source": "review/weapons-merged"
   }
  ],
+ "structs": [
+  {
+   "why": "arkCpntPlayerStateMachine layout (constructor 0x801f80->0x869040 fn_diff: +0x90->0x98 state pool, 0x220->0x260 requests, 0x2f8..0x338 +0x58: controller 0x350, body 0x358, interaction 0x370, inventory 0x380, attributes 0x388 (choke sensor prologue disp 0x330->0x388), sensor container 0x390); live 2026-11-22 play20 (tools/doto/hand_state_probe.py): the pool at +0x98 holds CarryCorpse/HoldObject at ids 45/49/50, +0x90 does not. Every machine/machine_ base is the player state machine (a player state +0x10, or the player-state lease)",
+   "bases": ["machine", "machine_", "full_body_machine", "control_machine"],
+   "map": {"0x90": "0x98", "0x220": "0x260", "0x2f8": "0x350", "0x300": "0x358", "0x318": "0x370", "0x328": "0x380", "0x330": "0x388", "0x338": "0x390"}
+  }
+ ],
  "entity": {
   "why": "idEntity layout (weapons review, constructors 0x874c50->0x8e2390, registry lookup 0x7b5e00->0x81c320; arkPlayer +0x268/+0xf0/+0x360 confirmed live): fields 0x20..0x2b0 +8, fields from 0x2b8 +0x10",
   "bases": [
