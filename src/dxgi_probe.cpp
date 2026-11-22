@@ -7759,7 +7759,14 @@ void observe_eye_begin(void* view) noexcept {
             // Actual native trace: Setup N is consumed by Begin N+1.
             // Qualify that exact pipeline stage, not an arbitrary older view.
             else if(const auto frame=frames.load();frame>0)
+#if defined(D2VR_GAME_DOTO)
+                // Death of the Outsider runs a view's Setup and its Begin inside the same Present frame (live trace: setup 70 /
+                // begin 70, one thread); Dishonored 2's Begin comes one Present later. Accept the same frame, then the D2 stage.
+                {eye=eye_sources.match(address,frame,GetCurrentThreadId(),gpu_render_thread.load());
+                 if(eye<0) eye=eye_sources.match(address,frame-1,GetCurrentThreadId(),gpu_render_thread.load());}
+#else
                 eye=eye_sources.match(address,frame-1,GetCurrentThreadId(),gpu_render_thread.load());
+#endif
             if(eye>=0) {
                 std::uintptr_t allocation{};
                 const auto owner=d2vr::find_native_player_camera(read_self,image_base);

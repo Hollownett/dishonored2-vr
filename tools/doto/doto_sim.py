@@ -294,6 +294,11 @@ def main():
         sys.exit("refusing to run: " + "; ".join(bad))
     dll = (ROOT / a.dll).resolve() if not Path(a.dll).is_absolute() else Path(a.dll)
     stage_home(dll)
+    for stale in ("xr-live-status.json", "dxgi-probe-result.json", "dxgi-probe-failure.txt"):
+        try:
+            (ART / stale).unlink()   # a previous run's status must not look like this run's gameplay
+        except OSError:
+            pass
     install_proxy(out)
     backup(run / "save-backup")
     width, height = (int(x) for x in a.window.split("x"))
@@ -375,7 +380,7 @@ def main():
                 st = json.loads((ART / "xr-live-status.json").read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
                 st = None
-            if st and st.get("gameplay") and gameplay_at is None:
+            if st and st.get("gameplay") and gameplay_at is None and (not a.gameplay_session or getattr(main, "_triggered", False)):
                 gameplay_at = time.time()
                 out("gameplay reached")
             for item in list(pending):
