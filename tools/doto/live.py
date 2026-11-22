@@ -111,7 +111,37 @@ def cmd_views(p, c):
 def cmd_game(p, c):
     g = p.u64(p.base + c['game'])
     print(f'game {g:#x} {p.rtti(g)}')
+    if g:
+        state = p.u32(g + (0x355718 if c is DOTO else 0x341058))
+        print(f'  game state {state}')
     return g
+
+
+def cmd_player(p, c):
+    """arkPlayer chain at the DOTO offsets (D2 in brackets): player game+0x327770 (0x3130b0), model +0xf8 (0xf0),
+    components +0x270 (0x268), origin +0x310 (0x300), axis +0x31c (0x30c), spawn id +0xb0 (0xa8)."""
+    doto = c is DOTO
+    g = p.u64(p.base + c['game'])
+    if not g:
+        print('no game object')
+        return
+    pl = p.u64(g + (0x327770 if doto else 0x3130b0))
+    print(f'player {pl:#x} {p.rtti(pl) if pl else None}')
+    if not pl:
+        return
+    off = (lambda d2: d2 + (8 if d2 < 0x2b8 else 0x10)) if doto else (lambda d2: d2)
+    model = p.u64(pl + off(0xf0))
+    print(f'  model +{off(0xf0):#x} {model:#x} {p.rtti(model) if model else None}')
+    comp = p.read(pl + off(0x268), 16)
+    if comp:
+        ptr, packed = struct.unpack_from('<QI', comp)
+        print(f'  components +{off(0x268):#x} list {ptr:#x} count {packed & 0xffffff}')
+        for i in range(min(packed & 0xffffff, 24)):
+            e = p.u64(ptr + 8 * i)
+            print(f'    [{i}] {e:#x} {p.rtti(e) if e else None}')
+    print(f'  origin +{off(0x300):#x}', p.f32(pl + off(0x300), 3))
+    print(f'  axis   +{off(0x30c):#x}', p.f32(pl + off(0x30c), 9))
+    print(f'  spawn  +{off(0xa8):#x} {p.u32(pl + off(0xa8)):#x}')
 
 
 def main():
@@ -123,6 +153,8 @@ def main():
         cmd_views(p, c)
     elif cmd == 'game':
         cmd_game(p, c)
+    elif cmd == 'player':
+        cmd_player(p, c)
     elif cmd == 'rtti':
         a = int(sys.argv[2], 0)
         print(p.rtti(a))

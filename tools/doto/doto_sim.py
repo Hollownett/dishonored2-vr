@@ -219,20 +219,19 @@ def find_window():
 
 
 def capture(path):
-    """PrintWindow of the game window (works while it is not in front)."""
+    """Copy of the game window's screen rectangle (PrintWindow returns white for a flip-model D3D swapchain)."""
     h = find_window()
     if not h:
         return False
-    ps = (
-        "Add-Type -AssemblyName System.Drawing;"
-        "Add-Type @'\nusing System;using System.Runtime.InteropServices;public class PW{"
-        "[DllImport(\"user32.dll\")]public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint f);"
-        "[DllImport(\"user32.dll\")]public static extern bool GetClientRect(IntPtr h,out RECT r);"
-        "public struct RECT{public int L,T,R,B;}}\n'@;"
-        f"$h=[IntPtr]{h};$r=New-Object PW+RECT;[void][PW]::GetClientRect($h,[ref]$r);"
-        "$b=New-Object System.Drawing.Bitmap ($r.R-$r.L),($r.B-$r.T);$g=[System.Drawing.Graphics]::FromImage($b);"
-        "$dc=$g.GetHdc();[void][PW]::PrintWindow($h,$dc,3);$g.ReleaseHdc($dc);"
-        f"$s=New-Object System.Drawing.Bitmap $b,([int]($b.Width/2)),([int]($b.Height/2));$s.Save('{path}')")
+    rect = W.RECT()
+    user32.GetWindowRect(h, ctypes.byref(rect))
+    x, y, w, hgt = rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+    if w <= 0 or hgt <= 0:
+        return False
+    ps = ("Add-Type -AssemblyName System.Drawing;"
+          f"$b=New-Object System.Drawing.Bitmap {w},{hgt};$g=[System.Drawing.Graphics]::FromImage($b);"
+          f"$g.CopyFromScreen({x},{y},0,0,$b.Size);"
+          f"$s=New-Object System.Drawing.Bitmap $b,([int]({w}/2)),([int]({hgt}/2));$s.Save('{path}')")
     r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
     return r.returncode == 0
 

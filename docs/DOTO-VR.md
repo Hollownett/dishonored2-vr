@@ -83,6 +83,15 @@ Rat Whispers talisman.
 | **Rat Whispers** talisman | Hear rats' clues | Hold the hand to the ear (as the Heart is held up in D2); spatialised audio toward the rats. | Heart listen gesture |
 | Bonecharms, Black Market, Contracts | Equip charms; buy gear; optional jobs | The game's own menus on the VR panels; contract text in the left palm like notes. | world UI, note tablet |
 
+### What the engine does (static RE, `tools/doto/reviews/powers-re.md`)
+
+| Item | Engine path in DOTO | Consequence for VR |
+|---|---|---|
+| Displace | `arkCpntPowerSwapper`; its sensor (`arkCpntPlayerSensorSwapper`, id 0x26) solves the marker from the **player camera's aim block** (`cam+0x252ac` origin, `+0x252b8` axis), target at `sensor+0x148`; place and swap are one Cast virtual (`0x3b7040`); swap requests player state 93 | The mod's gameplay aim already writes that block from the hand, so hand-aimed Displace needs only the publish gate to include the Swapper's aim state (`power+0xa4`). Fallback hook: `0x3e21b0`. |
+| Voltaic Gun | `arkCpntWeaponGaussGun`, fire event 206 -> `0x3c1d70` -> launch `0x68e970` (call at `0x3c219d`); target from aim sensor 9, which copies the same camera aim block | Hand aim applies through the existing shot-aim hook; its call table now names `0x3c219d`. Publish the forearm frame (the gun is on the wrist). |
+| Foresight | `arkCpntPowerTheEye`: no separate camera; the player entity itself leaves the body under the normal player camera; time is frozen per entity, not globally | Head tracking applies unchanged; add the vignette for spirit motion and a tether line. Live check pending: camera mode during the spirit state. |
+| Semblance | `arkCpntPowerMimic`: no ray; the target is the NPC held in the choke path; while mimicking the camera is in mode 2 (authored) | The hand-to-face gesture reuses the choke selection; whether hand aim stays suppressed in mode 2 needs a live check. |
+
 ### Situations that need care
 
 - First mission ("One Last Fight"): scripted opening, powers arrive after it.

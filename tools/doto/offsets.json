@@ -3522,6 +3522,14 @@
    "to": "0x263e20",
    "why": "leaf 'lea rax,[rcx+0x98]; ret', 3/3 call votes, bytes identical",
    "source": "coordinator"
+  },
+  {
+   "file": "src/native_shot_aim.hpp",
+   "contains": "shot_aim_calls{{{0x633419",
+   "from": "0x633419",
+   "to": "0x3c219d",
+   "why": "D2 single-target fire 0x632f70 was rewritten in DOTO (unmatched); the Voltaic Gun (arkCpntWeaponGaussGun) fire fn 0x3c1d70 calls the launch 0x68e970 at 0x3c219d (decoded: call 0x68e970); powers-re.md section 2",
+   "source": "coordinator"
   }
  ],
  "text": [
