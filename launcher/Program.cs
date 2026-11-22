@@ -1055,6 +1055,7 @@ sealed class MainForm : Form
                 try { await Task.Run(() => ModHome.ShareD2Settings(env.Root, DotoEnv.Root, l => Append(dLog, l))); }
                 catch (Exception ex) { Append(dLog, "Could not copy the Dishonored 2 settings: " + ex.Message, Ui.Gold); }
             else Append(dLog, "Using the Death of the Outsider settings (the Dishonored 2 settings option is off).", Ui.Text);
+            if (DotoWriteOk) await Task.Run(() => ModHome.SyncFeatures(env.Root, DotoEnv.Root, features, l => Append(dLog, l, Ui.Text)));  // spacewarp etc. as set in the launcher
             if (Features.DiagnosticsOn(DotoEnv.P("build"))) Append(dLog, Features.DiagnosticsWarning, Ui.Gold);
             {   // one frame generation at a time (launcher/FrameGen.cs), keyed by this game's Steam app id
                 var swOn = File.Exists(DotoEnv.P("build", "spacewarp"));
@@ -1308,11 +1309,18 @@ sealed class MainForm : Form
         finally { loadingFeatures = false; }
     }
 
+    /// <summary>The Settings page's switches also go to the Death of the Outsider home (once installed), so both games run what the launcher shows.</summary>
+    void SyncDotoFeatures()
+    {
+        if (DotoEnv != null && DotoWriteOk && Directory.Exists(DotoEnv.P("build"))) ModHome.SyncFeatures(env.Root, DotoEnv.Root, features);
+    }
+
     void SetFeature(Feature f, ArtCheck row)
     {
         try
         {
             Features.Set(FeatureBuild, f, row.Checked);
+            SyncDotoFeatures();
             SetSettingsMsg($"{f.Label}: {(row.Checked ? "on" : "off")}. Applies the next time VR starts.", Ui.Good);
         }
         catch (Exception ex)
@@ -1327,6 +1335,7 @@ sealed class MainForm : Form
         try
         {
             Features.RestoreDefaults(FeatureBuild, features);
+            SyncDotoFeatures();
             LoadFeatures();
             SetSettingsMsg("Defaults restored. Your saved tuning files were kept. Applies the next time VR starts.", Ui.Good);
         }
@@ -1433,6 +1442,7 @@ sealed class MainForm : Form
             loadedPerf = perfChoice; loadedSpacewarp = swChoice;
             if (features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf && Features.State(FeatureBuild, features)[pf.Id].On != (perfChoice >= 1))
                 Features.Set(FeatureBuild, pf, perfChoice >= 1);
+            SyncDotoFeatures();
             SetSettingsMsg("Saved." + note + " " + (Env.Game() != null ? "Restart VR (Stop, then Launch) to apply." : "Applies on next launch."), Ui.Good);
         }
         catch (Exception ex) { SetSettingsMsg("Not saved: " + ex.Message, Ui.Bad); }

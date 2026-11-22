@@ -139,6 +139,32 @@ public static class ModHome
         if (n > 0) log($"Copied {n} menu art files from the Dishonored 2 mod home.");
     }
 
+    /// <summary>The launcher's feature switches (Settings page: spacewarp, performance mode and every other knob file in tools/default_features.json) live in the
+    /// Dishonored 2 home; the Death of the Outsider home was seeded with the defaults once and kept them (so Spacewarp stayed on there while off in the launcher).
+    /// Copies the D2 home's state onto the DOTO home: each feature switched to the D2 value, and the Spacewarp knob's text ("always") copied. Skipped while the
+    /// D2 home has no feature state yet or the DOTO home is not installed. Returns the features changed in the DOTO home; throws nothing.</summary>
+    public static List<string> SyncFeatures(string d2Root, string dotoRoot, IReadOnlyList<Feature> list, Action<string>? log = null)
+    {
+        var changed = new List<string>();
+        try
+        {
+            var d2 = Path.Combine(d2Root, "build"); var doto = Path.Combine(dotoRoot, "build");
+            if (list.Count == 0 || !Directory.Exists(doto) || !File.Exists(Path.Combine(d2, "launcher-features.json"))) return changed;
+            var from = Features.State(d2, list); var to = Features.State(doto, list);
+            foreach (var f in list)
+                if (from[f.Id].On != to[f.Id].On) { Features.Set(doto, f, from[f.Id].On); changed.Add(f.Id); }
+            var sw = Path.Combine(d2, "spacewarp"); var swTo = Path.Combine(doto, "spacewarp");
+            if (File.Exists(sw) && File.Exists(swTo))
+            {
+                var text = File.ReadAllText(sw);
+                if (File.ReadAllText(swTo) != text) { File.WriteAllText(swTo, text); changed.Add("spacewarp mode"); }
+            }
+            if (changed.Count > 0) log?.Invoke("Death of the Outsider features follow the launcher's Settings: " + string.Join(", ", changed) + ".");
+        }
+        catch (Exception ex) { log?.Invoke("Could not sync the launcher's features to Death of the Outsider: " + ex.Message); }
+        return changed;
+    }
+
     public static string Sha256(string file)
     {
         using var s = File.OpenRead(file);
