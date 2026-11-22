@@ -310,6 +310,12 @@ static d2vr::MirrorMode mirror_mode_requested=d2vr::MirrorMode::both_eyes;
 static double sharpness_requested=.5;
 static int taa_preference=2,hud_preference=65,upscale_percent_preference=0; /* upscale_percent_preference: the player's Upscaler scale for taa_preference (0 = preset) */static bool hint_preference=true;
 // v609: the saved AA-chosen marker, whether a settings file existed, and the one-time first-start AA decision (made at Present once the adapter vendor is known)
+// AFW (afw_vsh.hpp): the rebuild's own log lines, to <mod home>artifacts\afw.log (at most 2000 lines a session).
+static std::filesystem::path afw_log_path;
+static void afw_log_line(const char* line) {
+    static std::atomic<unsigned> lines{0};if(afw_log_path.empty() || ++lines>2000) return;
+    try {std::ofstream out(afw_log_path,std::ios::app);out<<GetTickCount64()<<' '<<line<<std::endl;} catch(...) {}
+}
 static int renderer_preference=0,renderer_running=0; // VR menu Renderer row (vr_preferences.hpp v12): saved choice / what this session started
 static bool spacewarp_holds_native=false; // build/spacewarp kept this session in native stereo though performance mode was asked for
 static bool preferences_file_existed=false,aa_chosen_preference=false,crosshair_preference=true,scripted_recenter_preference=true,first_start_pending=false,crosshair_migrated=false;
@@ -7402,10 +7408,17 @@ static std::string run_test_command(const std::string& line) {
         else if(v=="overlays") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_baked_overlays_knob=m=="off";}  // v1432 A/B: spacewarp overlays on|off
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
-    if(verb=="afw") { // v1443: the PureDark AFW renderer is gone; `afw capture N` still saves the built-in warp's rebuilt eyes (tools/afw_compare.py)
-        std::string v;in>>v;
-        if(v=="capture") {int n=6;in>>n;if(game_xr) game_xr->afw_capture_requested=std::clamp(n,1,32);}
-        std::ostringstream o;o<<"afw (built-in warp) running "<<renderer_running<<" captures "<<(game_xr?game_xr->afw_captures_saved:0);
+    if(verb=="afw") { // AFW renderer: afw [on|off|status] | afw tune <threshold|jitter|gap|reset> <value>
+        std::string v;in>>v;auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();
+        if(v=="on") rt.requested=renderer_running!=0;else if(v=="off") rt.requested=false;
+        else if(v=="capture") {int n=6;in>>n;if(game_xr) game_xr->afw_capture_requested=std::clamp(n,1,32);}
+        else if(v=="tune") {std::string k;double x{};in>>k>>x;
+            if(k=="mask") t.mask=x!=0;else if(k=="stale") t.stale=static_cast<float>(std::clamp(x,.002,.2));else if(k=="fg") t.fg_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="body") t.body_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="nearmiss") t.near_miss=static_cast<float>(std::clamp(x,0.,32.));else if(k=="debug") t.debug=x!=0;else if(k=="ownhands") t.own_hands=static_cast<float>(std::clamp(x,0.,1.));else if(k=="edgehands") t.edge_hands=x!=0;else if(k=="heldhands") t.held_hands=x!=0;else if(k=="stillshade") t.still_shade=x!=0;else if(k=="stillmm") t.still_mm=static_cast<float>(std::clamp(x,0.,50.));else if(k=="stilldeg") t.still_deg=static_cast<float>(std::clamp(x,0.,30.));else if(k=="rigdepth") {t.rig_depth=static_cast<float>(std::clamp(x,.1,50.));t.rig_depth_manual=true;}else if(k=="near") t.near_range=static_cast<float>(std::clamp(x,0.,1.));else if(k=="helddepth") t.held_depth=static_cast<float>(std::clamp(x,.1,50.));else
+            if(k=="threshold") t.ignore_motion_threshold=static_cast<float>(std::clamp(x,0.,64.));else if(k=="jitter") t.jitter_scale=static_cast<float>(std::clamp(x,-2.,2.));
+            else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));else if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));else if(k=="reset") t.reset_on_gap=x!=0;else return "afw tune: threshold|jitter|gap|reset|mv <value>";}
+        std::ostringstream o;o<<"afw requested "<<rt.requested.load()<<" running "<<renderer_running<<" rebuilt "<<rt.rebuilt.load()<<" refused "<<rt.refused.load()
+            <<" fallbacks "<<rt.fallbacks.load()<<" busy "<<rt.busy()<<" threshold "<<t.ignore_motion_threshold.load()<<" jitter "<<t.jitter_scale.load()
+            <<" captures "<<(game_xr?game_xr->afw_captures_saved:0)<<" gap "<<t.max_frame_gap.load()<<" mv "<<t.motion_scale.load()<<" reset "<<t.reset_on_gap.load()<<" | "<<rt.problem();
         return o.str();
     }
     if(verb=="eyeburst") {unsigned n=12;in>>n;n=std::clamp(n,2u,24u);alt_band_request=n;return "eyeburst "+std::to_string(n)+" presents (alternate-eye gameplay only)";}
@@ -13073,7 +13086,10 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
                << ",\"paired\":" << alt_paired.load() << ",\"scope_held\":" << alt_scope_held.load() << ",\"fallbacks\":" << alt_fallbacks.load()
                << ",\"parity_flip\":" << (d2vr::alternate_parity_flip.load()?"true":"false") << ",\"band_bursts\":" << alt_band_bursts
-               << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << ",\"renderer_live\":" << (game_xr?game_xr->renderer_live():-1) << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
+               << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << [&]{auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();std::string pr=rt.problem();for(auto& ch:pr) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';
+                   std::ostringstream o;o<<",\"renderer_live\":"<<(game_xr?game_xr->renderer_live():-1)<<",\"afw\":{\"requested\":"<<(rt.requested.load()?"true":"false")<<",\"rebuilt\":"<<rt.rebuilt.load()<<",\"masked\":"<<rt.masked.load()<<",\"captured\":"<<rt.captured.load()<<",\"submitted\":"<<(game_xr?game_xr->afw_rebuilds:0)
+                    <<",\"refused\":"<<rt.refused.load()<<",\"fallbacks\":"<<rt.fallbacks.load()<<",\"busy\":"<<rt.busy()<<",\"mv\":"<<t.motion_scale.load()<<",\"jitter\":"<<t.jitter_scale.load()
+                    <<",\"halo\":"<<t.halo.load()<<",\"threshold\":"<<t.ignore_motion_threshold.load()<<",\"problem\":\""<<pr<<"\"}";return o.str();}() << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
                << ",\"stale_warp_failures\":" << (game_xr?game_xr->stale_eye_warp_failures:0)
                << ",\"stale_parallax\":" << (stale_eye_parallax_knob?"true":"false") << ",\"stale_parallax_warps\":" << (game_xr?game_xr->stale_parallax_passes():0)
                << ",\"stale_parallax_misses\":" << (game_xr?game_xr->stale_eye_parallax_misses:0) << ",\"stale_near_range\":" << stale_near_range << ",\"stale_fresh_warps\":" << (game_xr?game_xr->stale_fresh_passes():0)
@@ -14836,6 +14852,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                             alt_motion_times.note(number,alt_fresh);
                             game_xr->stale_fresh_part=alt_motion_times.fresh_part(number);game_xr->stale_kept_part=alt_motion_times.kept_part(number);
+                            fsr_taa.afw_keep_motion=false; // AFW (afw_vsh.hpp) works from depth and camera poses: no motion-vector copy
+                            if(auto& at=d2vr::afw::tuning();!at.rig_depth_manual.load()) at.rig_depth=d2vr::NativePlayerDepth::process_owner().world_depth_current(read_self_ref)?1.f:5.f;
+                            if(fsr_taa.afw_keep_motion.load()) {float jx{},jy{};if(const auto motion=fsr_taa.afw_eye_motion(alt_fresh,jx,jy)) game_xr->afw_eye_motion(static_cast<UINT>(alt_fresh),motion.Get(),jx,jy,number);}
                         }
                         // G2 VR cutscenes (cutscene_policy.hpp): classify this Present. Immersive = exact 32 with a complete native pair of two distinct
                         // eyes (two textures, two eye poses, both layer views recorded), the player camera read, no fault since the cutscene began. Any
@@ -15461,6 +15480,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;
                             game_xr->stale_eye_warp_enabled=stale_eye_warp_knob;game_xr->stale_eye_parallax_enabled=stale_eye_parallax_knob;game_xr->stale_near_range=stale_near_range;game_xr->locate_periods=legacy_locate_horizon?1:2;game_xr->gpu_queue_limit=!legacy_gpu_queue;game_xr->steady_pacing=!legacy_pacing;game_xr->pacer_miss_lock=pacer_miss_lock;game_xr->median_horizon=!legacy_display_horizon;
                             game_xr->performance_mode(alternate_on() && game_xr->renderer_live()!=0);
+                            game_xr->afw_status(d2vr::afw::runtime().problem());
                             { // PSVR2 adaptive triggers, per hand: gameplay with the panel closed and the session focused
                                 std::string slot1_equip;unsigned weapon_bits{};
                                 {std::lock_guard<std::mutex> l(hand_state_mutex);slot1_equip.assign(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));weapon_bits=hand_weapon_bits;}
@@ -15478,7 +15498,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 }
                                 const bool play=gameplay && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->controller_input.active && !game_xr->settings_open();
                                 wchar_t exe[MAX_PATH]{};static const auto game_dir=(GetModuleFileNameW(nullptr,exe,MAX_PATH),std::filesystem::path(exe).parent_path());
-                                static bool psvr2_log_set=false;if(!psvr2_log_set) {psvr2_log_set=true;d2vr::psvr2::runtime().log_to(output_directory.always()/L"psvr2.log");}
+                                static bool psvr2_log_set=false;if(!psvr2_log_set) {psvr2_log_set=true;d2vr::psvr2::runtime().log_to(output_directory.always()/L"psvr2.log");
+                                    afw_log_path=output_directory.always()/L"afw.log";d2vr::afw::runtime().log_to(&afw_log_line);}
                                 d2vr::psvr2::runtime().update(game_xr->xr_runtime_name,game_xr->xr_system_name,play,items,
                                     {game_xr->controller_input.left_trigger,game_xr->controller_input.right_trigger},game_dir);
                             }
@@ -18616,7 +18637,19 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             {std::ifstream knob(root/L"build"/L"alt-motion-probe");unsigned n{},k{},s{};
              if(knob>>n>>k>>s && n>=1 && n<=50 && k>=2 && k<=64 && s>=1 && s<=600) {alt_motion_bursts=n;alt_motion_size=k;alt_motion_interval_s=s;}}
             layer_pose_sync_state=fs::exists(root/L"build"/L"no-layer-pose-sync")?0:1;layer_pose_synced=0;layer_pose_sync_fallbacks=0; // paired / perf-mono layer-pose sync (2026-10-22); the knob restores the Setup-time record
-            d2vr::psvr2::runtime().enabled=!fs::exists(root/L"build"/L"no-psvr2-triggers"); // PSVR2 left adaptive trigger (SteamVR + PS VR2 only)
+            if(fs::exists(root/L"build"/L"afw")) renderer_preference=2;
+            { // build/afw-tune: "<key> <value>" lines (mv, jitter, threshold, gap, reset), the same keys as the `afw tune` command
+                std::ifstream tune(root/L"build"/L"afw-tune");std::string k;double x{};auto& t=d2vr::afw::tuning();
+                while(tune>>k>>x) {
+                    if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="jitter") t.jitter_scale=static_cast<float>(std::clamp(x,-2.,2.));
+                    else if(k=="threshold") t.ignore_motion_threshold=static_cast<float>(std::clamp(x,0.,64.));else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));
+                    else if(k=="reset") t.reset_on_gap=x!=0;else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));
+                    else if(k=="debug") t.debug=x!=0;else if(k=="mask") t.mask=x!=0;else if(k=="stale") t.stale=static_cast<float>(std::clamp(x,.002,.2));else if(k=="fg") t.fg_depth=static_cast<float>(std::clamp(x,.1,3.));
+                    else if(k=="body") t.body_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="nearmiss") t.near_miss=static_cast<float>(std::clamp(x,0.,32.));
+                    if(k=="ownhands") t.own_hands=static_cast<float>(std::clamp(x,0.,1.));else if(k=="edgehands") t.edge_hands=x!=0;else if(k=="heldhands") t.held_hands=x!=0;else if(k=="stillshade") t.still_shade=x!=0;else if(k=="stillmm") t.still_mm=static_cast<float>(std::clamp(x,0.,50.));else if(k=="stilldeg") t.still_deg=static_cast<float>(std::clamp(x,0.,30.));else if(k=="rigdepth") {t.rig_depth=static_cast<float>(std::clamp(x,.1,50.));t.rig_depth_manual=true;}else if(k=="near") t.near_range=static_cast<float>(std::clamp(x,0.,1.));else if(k=="helddepth") t.held_depth=static_cast<float>(std::clamp(x,.1,50.));
+                }
+            }
+            d2vr::psvr2::runtime().enabled=!fs::exists(root/L"build"/L"no-psvr2-triggers"); // PSVR2 left adaptive trigger (SteamVR + PS VR2 only) // knob: AFW renderer (development runs without saved settings)
             // v1412 (2026-11-19 sim: an alternate-capable session renders Native through the mono-view path, both eyes unshared - no
             // shadow share, no paired skips - 13.4 ms against 9.5 ms paired): Native starts paired again, as before the merge. A session
             // starts alternate-capable (every renderer live) only when it is asked for: build/alternate-eye (the launcher's performance

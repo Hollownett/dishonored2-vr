@@ -70,10 +70,11 @@ class VrSettings {
     bool aa_chosen_{},crosshair_{true}; // v609: persisted AA-chosen marker and the aim crosshair switch
     unsigned upscaler_generation_{3}; // Actual runtime backend; preferences retain the existing quality modes.
     bool performance_mode_{};
-    int renderer_{};          // the Renderer row's selection: 0 native stereo, 1 alternate eye (built-in warp); v1443: a saved 2 (PureDark AFW, gone) reads as 1
+    int renderer_{};          // the Renderer row's selection: 0 native stereo, 1 alternate eye (built-in warp), 2 AFW (vr_preferences.hpp v12)
     int renderer_applied_{};  // what renders now (and is saved); the selection takes effect only on Apply (A on the row)
     bool renderer_capable_{}; // this session started alternate-capable, so every renderer switches live
     bool spacewarp_hold_{};   // spacewarp is on, so performance mode did not start (spacewarp_hold)
+    std::string afw_status_;  // afw_vsh.hpp Runtime::problem(), shown under the Renderer row
     std::optional<int> effective_temporal_aa_;
     bool dlss_available_{}; // NVIDIA GPU and a usable nvngx_dlss.dll: the DLAA/DLSS Quality rows are offered only then
     int hud_percent_{65};
@@ -225,15 +226,17 @@ public:
     void performance_mode(bool value) noexcept {performance_mode_=value;}
     int renderer() const noexcept {return renderer_;}
     int renderer_applied() const noexcept {return renderer_applied_;}
-    void set_renderer(int v) noexcept {renderer_=renderer_applied_=std::clamp(v,0,1);}  // v1443: AFW (2) is gone: the built-in warp           // the saved choice, at load
+    void set_renderer(int v) noexcept {renderer_=renderer_applied_=std::clamp(v,0,2);}           // the saved choice, at load
     void renderer_capable(bool v) noexcept {renderer_capable_=v;}
     bool renderer_capable() const noexcept {return renderer_capable_;}
-    void cycle_renderer(int) noexcept {renderer_=1-std::clamp(renderer_,0,1);}  // v1443: two choices
+    void cycle_renderer(int direction) noexcept {renderer_=(renderer_+(direction<0?2:1))%3;}
     bool renderer_pending() const noexcept {return renderer_!=renderer_applied_;}
     bool renderer_available(int v) const noexcept {return v==0 || renderer_capable_;}
-    static const wchar_t* renderer_name(int v) noexcept {return v>=1?L"Alternate eye (built-in warp)":L"Native stereo";}
+    static const wchar_t* renderer_name(int v) noexcept {return v==1?L"Alternate eye (built-in warp)":v==2?L"AFW (alternate frame warping)":L"Native stereo";}
     // Apply (A, or the pointer on the row's Apply chip): the selection becomes what renders, live. False: nothing to apply or unavailable.
     bool apply_renderer() noexcept {if(!renderer_pending() || !renderer_available(renderer_)) return false;renderer_applied_=renderer_;return true;}
+    void afw_status(std::string s) {afw_status_=std::move(s);}
+    const std::string& afw_status() const noexcept {return afw_status_;}
     // Every switch is live in an alternate-capable session (Native renders both eyes every frame there, as menus already do).
     // build/spacewarp kept this session in native stereo (one frame generation at a time): the saved choice stays, Native renders.
     void spacewarp_hold(bool v) noexcept {spacewarp_hold_=v;}
