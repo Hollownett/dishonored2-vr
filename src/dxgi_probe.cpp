@@ -4484,11 +4484,14 @@ static void held_engine_pose_write(std::uintptr_t model,const d2vr::weapon_draw:
         if(write_self(model+0x1860,want.data(),sizeof want)) ++held_frame_writes;else ++held_frame_bad;
     } catch(...) {}
 }
+static unsigned weapon_bind_joint(std::uintptr_t weapon,unsigned engine_side,unsigned drawn_side) noexcept;   // v145727 (beside engine_bind_of)
 static void place_weapons() noexcept {
     try {
-        const auto models=weapon_models();const auto now=frames.load();
+        std::array<std::uintptr_t,2> ents{};const auto models=weapon_models(&ents);const auto now=frames.load();
         for(unsigned side=0;side<2;++side) {
             if(!models[side]) continue;
+            // v145727: a forearm-mounted weapon is not composed from the hand read (the engine's joint 59); the draw-time placement owns it
+            if(weapon_bind_joint(ents[side],side,side)!=59u) continue;
             const auto image=full_body.image_world(side,59,now);
             std::optional<d2vr::fullbody::Xf> read;
             {std::lock_guard<std::mutex> lock(weapon_place_mutex);if(weapon_hand_read_frame[side]+2>=now) read=weapon_hand_read[side];}
@@ -4560,6 +4563,31 @@ static bool bind_gate=true;static std::array<std::array<std::atomic<std::uint64_
 static std::array<std::atomic<std::uint64_t>,2> engine_bind_used{},engine_bind_compared{};static std::array<std::atomic<std::uint64_t>,4> engine_bind_refused{};
 static std::mutex engine_bind_m;static std::array<double,2> engine_bind_mm_sum{},engine_bind_deg_sum{},engine_bind_mm_max{},engine_bind_deg_max{};
 static std::array<float,8> engine_bind_last{};static std::atomic<int> engine_bind_last_joint{-1};
+// v145727 (user, DOTO headset: "the crossbow on Billie's forearm moves with my hand; it should be static"): the joint the game binds a native
+// weapon to. D2's weapons hang on the hand attachment (59). Death of the Outsider's Voltaic Gun hangs on left_lower_armhelper2_jnt
+// (player_leftarm_billie.md6: prop ply_billie_gaussgun01.md6 tag weapon_attach_tag parent left_lower_armhelper2_jnt; its arkCpntReferenceFrame
+// joint, tools/doto/reviews/combat-port.md section 8). A weapon on the forearm helper is drawn from that helper of the DRAWN arm: it follows
+// the forearm's swing and twist and never the wrist. The helper's index comes from the arm skeleton by name (the 69-joint arm skeletons are
+// byte-identical in both games).
+static int forearm_helper_index(unsigned side) noexcept {
+    static std::array<std::atomic<int>,2> cached{{-2,-2}};   // -2: not resolved yet (the skeleton arrives with the first calibration)
+    if(side>1) return -1;
+    if(const int v=cached[side].load(std::memory_order_relaxed);v!=-2) return v;
+    const int v=full_body.arm_joint_index(side,side?"right_lower_armhelper2_jnt":"left_lower_armhelper2_jnt");
+    if(v>=0) cached[side].store(v,std::memory_order_relaxed);
+    return v;
+}
+// The joint of the DRAWN arm a native weapon is placed from: 59 (hand attachment) unless the game binds it to the engine arm's forearm helper.
+static unsigned weapon_bind_joint(std::uintptr_t weapon,unsigned engine_side,unsigned drawn_side) noexcept {
+    try {
+        std::uintptr_t comp{};std::uint16_t joint{};
+        if(!weapon || !read_self(weapon+0x358,&comp,sizeof comp) || !comp || !read_self(comp+0x3d0,&joint,sizeof joint)) return 59u;
+        const int engine_helper=forearm_helper_index(engine_side),drawn_helper=forearm_helper_index(drawn_side);
+        if(engine_helper>=0 && drawn_helper>=0 && joint==static_cast<std::uint16_t>(engine_helper)) return static_cast<unsigned>(drawn_helper);
+    } catch(...) {}
+    return 59u;
+}
+static std::atomic<bool> left_forearm_gun{false};   // v145727: the slot-1 (gun-hand) weapon hangs on the forearm: its hand keeps the grip
 static std::optional<d2vr::weapon_draw::Mat> engine_bind_of(std::uintptr_t weapon,std::uintptr_t arm_model,bool crossed,unsigned engine_side,const float* raw15) noexcept {
     try {
         std::uintptr_t comp{},master{},master_model{};std::uint16_t joint{};float o[3]{},q[4]{};
@@ -4568,7 +4596,10 @@ static std::optional<d2vr::weapon_draw::Mat> engine_bind_of(std::uintptr_t weapo
         {std::lock_guard<std::mutex> l(engine_bind_m);for(unsigned i=0;i<3;++i) engine_bind_last[i]=o[i];for(unsigned i=0;i<4;++i) engine_bind_last[3+i]=q[i];}
         engine_bind_last_joint.store(joint==0xffff?-1:static_cast<int>(joint),std::memory_order_relaxed);
         if(!arm_model || !read_self(master+0xf0,&master_model,sizeof master_model) || master_model!=arm_model) {engine_bind_refused[1].fetch_add(1,std::memory_order_relaxed);return std::nullopt;}
-        if(joint!=static_cast<std::uint16_t>(d2vr::power_hand::attachment_joint)) {engine_bind_refused[2].fetch_add(1,std::memory_order_relaxed);return std::nullopt;}
+        // v145727: a forearm-mounted weapon (the engine arm's lower_armhelper2) is bound too; its G is relative to that joint, which the
+        // native placement then draws from (weapon_bind_joint).
+        const int forearm=forearm_helper_index(engine_side);
+        if(joint!=static_cast<std::uint16_t>(d2vr::power_hand::attachment_joint) && !(forearm>=0 && joint==static_cast<std::uint16_t>(forearm))) {engine_bind_refused[2].fetch_add(1,std::memory_order_relaxed);return std::nullopt;}
         const float s[3]{raw15[12],raw15[13],raw15[14]};
         d2vr::power_hand::Rot3 c{};if(crossed) c=attachment_pose.cross_attachment(engine_side);
         d2vr::weapon_draw::Mat g{};
@@ -4768,7 +4799,9 @@ static void publish_weapon_draw(std::uintptr_t view) noexcept {
                         copy.kind?copy.kind:d2vr::weapon_draw::write_mirror,d2vr::weapon_draw::space_grip,copy.serial,now);
                 }
             } else {
-                image=full_body.image_world(hand,59,now);   // native/crossed: the attachment joint 59 of the physical hand
+                // native/crossed: the attachment joint 59 of the physical hand, or its forearm helper for a forearm-mounted weapon (v145727)
+                const unsigned bind_joint=engine_side>=0 && engine_side<2?weapon_bind_joint(native_ent[static_cast<unsigned>(engine_side)],static_cast<unsigned>(engine_side),hand):59u;
+                image=full_body.image_world(hand,bind_joint,now);
                 const d2vr::weapon_draw::Mat hand_frame=image?weapon_mat(*image):d2vr::weapon_draw::Mat{};
                 d2vr::weapon_draw::Write writes[d2vr::weapon_draw::WriteLog::ring]{};const unsigned write_count=d2vr::weapon_draw::WriteLog::writes(hand,writes);
                 d2vr::weapon_draw::Write candidates[d2vr::weapon_draw::WriteLog::ring]{};int arm=-1;unsigned selected_kind=required_kind;
@@ -10463,7 +10496,7 @@ void prepare_head_view(void* view) noexcept {
                 // A fist round a grenade or mine still aims it. v776 (headset v775: a crossbow held by its squeezed grip shot from the camera, 6 of 6): so does the grip that
                 // holds a drawn gun in dual wield (GunGrip owns it, it is no Use or grab). Knob off: the grip rule is as before. right_trigger stays unset (its statement sat
                 // inside the comment of this line since v672): shots are allowed while the sword blocks.
-                gate_in.grip_holds_weapon=left_gadget || (dual_wield_enabled && left_gun_model.load()!=0);
+                gate_in.grip_holds_weapon=left_gadget || (dual_wield_enabled && left_gun_model.load()!=0 && !left_forearm_gun.load());   // v145727: a forearm gun leaves the grip free
                 const auto gate=d2vr::ranged_aim_gate(gate_in);
                 if(gate.shots || (gate.reticle && native_crosshair_installed)) {
                     const auto& p=aim.pose;
@@ -10548,7 +10581,7 @@ void prepare_head_view(void* view) noexcept {
             // mirror_native) is the player's fingers: the sword hand a closed fist round the hilt, the gun hand a fist with the index on the trigger.
             {   const unsigned cross=arm_cross_now(); // per arm: the sword on the left arm (bit 1), the slot-1 item on the right arm (bit 0)
                 if((cross&2u) && sword_held_now.load()) {hands.curls[0]=1.f;hands.index_curls[0]=1.f;}
-                if((cross&1u) && left_gun_model.load()) hands.curls[1]=1.f;
+                if((cross&1u) && left_gun_model.load() && !left_forearm_gun.load()) hands.curls[1]=1.f;
             }
             hands.independent_index=true;hands.reference_epoch=game_xr->reference_epoch();hands.has_head_anchor=true;
             hands.head_anchor.position={anchor.position[0],anchor.position[1],anchor.position[2]};
@@ -11856,7 +11889,7 @@ void prepare_head_view(void* view) noexcept {
                     const unsigned pack=arm_pack.load(std::memory_order_relaxed);   // v1370: one plan for the whole routing (each accessor loaded it again)
                     if(!slot1_type) slot1_type=static_cast<int>(live_types[d2vr::arm::slot1_arm_of(pack)]);
                     {d2vr::hand_route::In r{};r.pack=pack;r.fresh=fresh;r.dual_wield=dual_wield_enabled;r.empty_bits=hand_empty_bits;r.weapon_bits=hand_weapon_bits;
-                     r.left_power=left_power;r.left_gun=left_gun_model.load()!=0;r.holding_object=hand_holding_object;r.hold_side=hand_hold_side;r.carrying_body=carrying_a_body;
+                     r.left_power=left_power;r.left_gun=left_gun_model.load()!=0 && !left_forearm_gun.load();   // v145727: no held-gun hand pose for a forearm gunr.holding_object=hand_holding_object;r.hold_side=hand_hold_side;r.carrying_body=carrying_a_body;
                      r.slot1_type=slot1_type;r.equip_name=std::string_view(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));
                      d2vr::hand_route::route(r,t);}   // hand_route.hpp: the clip each hand is posed by, its weapon type and its item key
                     const auto holds=[&](unsigned s) {return hand_holding_object && (hand_hold_side&1u)==s;};
@@ -15111,6 +15144,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           if(by_item) {++gun_item_frames;if(!(n=="Gun" || n.find("rossbow")!=n.npos)) ++gun_name_miss_frames;} // miss = what the v612 exact-name rule would have dropped
                                           left_gun_model=(!body_carry || left_kept) && state->slots[0] && (by_name || by_item)?gun_model_of(state->slots[0]):0;
                                           left_barrel_model=d2vr::is_barrel_equip_name(n)?left_gun_model.load():0;} // isolate barrel routing from holster/draw tracking
+                                         // v145727: the slot-1 weapon hangs on the forearm (DOTO's Voltaic Gun): no gun grip, no hip draw, the hand stays free
+                                         {std::array<std::uintptr_t,2> ents{};weapon_models(&ents);
+                                          left_forearm_gun=(!body_carry || left_kept) && state->slots[0] && ents[0] && weapon_bind_joint(ents[0],0,0)!=59u;}
                                          left_gadget=(!body_carry || left_kept) && state->slots[0] && !d2vr::NativeGadgetDrop::left_spent.load(std::memory_order_relaxed) && (d2vr::is_gadget_equip_name(n) || d2vr::is_gadget_equip_name(item_decl_name(state->slots[0]))); // pose "Grenade"; decls regular/sticky_grenade, stun_mine, springrazor
                                          left_power=!power_native_fingers && (!body_carry || left_kept) && state->slots[0] && !left_gadget && !left_gun_model && d2vr::is_power_equip_name(n);
                                          left_power_item=(!body_carry || left_kept) && state->slots[0] && !left_gadget && !left_gun_model && d2vr::is_power_equip_name(n);
@@ -16290,9 +16326,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 in.takedown_offered=control_takedown.any();
                                                 // I2: the left hand at the hip (the gun draw) or with a gun out is a fast native action: Use at the edge, never the 150 ms wait
                                                 if(h==rh) {std::lock_guard<std::mutex> hip_lock(hand_state_mutex);
-                                                    in.fast_native=left_gun_model.load()!=0 || gun_owns || (logic==2 && hands[rh] && hip_xr_position && hip_pose_epoch==game_xr->pose_epoch() &&
+                                                    in.fast_native=!left_forearm_gun.load() && (left_gun_model.load()!=0 || gun_owns || (logic==2 && hands[rh] && hip_xr_position && hip_pose_epoch==game_xr->pose_epoch() &&
                                                         now_gi>=hip_pose_tick && now_gi-hip_pose_tick<=250 &&
-                                                        d2vr::length(d2vr::Vec3{(*hands[rh])[0],(*hands[rh])[1],(*hands[rh])[2]}-*hip_xr_position)<=.17);}
+                                                        d2vr::length(d2vr::Vec3{(*hands[rh])[0],(*hands[rh])[1],(*hands[rh])[2]}-*hip_xr_position)<=.17));}   // v145727: a forearm gun's hand is an ordinary hand
                                                 in.occupied=(carry_bits&(1u<<h))!=0 || (holding_native && holding_side==h) || native_grab.holding(h);
                                                 // v1087: the grab's own pick IS the game's loot-kind Use target: is that Use only a carry (a severed limb's HoldObject)? Read once, only then.
                                                 in.native_carry=in.native && in.native->kind==d2vr::PalmKind::loot && in.physical && in.physical->entity==in.native->id &&
@@ -16360,7 +16396,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             if(grip_intent[h].kind()==d2vr::GripIntent::Kind::drain && (h?rc.right_grip:rc.left_grip)>.55f) ++use_diag[8+h];}
                                     }
                                     // Gun holster at the left hip (GunGrip; dual wield: the gun's hand, rh), in a yaw-only head frame: looking down does not move the hip.
-                                    {   static bool was_at_hip{};bool at_hip{};const auto hip_now=GetTickCount64();
+                                    // v145727 (user, DOTO headset): a forearm-mounted gun is never drawn, held, holstered or dropped by the grip: its hand keeps
+                                    // the grip for grabs, doors and Use; the gun fires on grip + trigger (below, after the fist rule).
+                                    if(left_forearm_gun.load()) {gun_owns=false;hip_draw_reserved=false;}
+                                    else {   static bool was_at_hip{};bool at_hip{};const auto hip_now=GetTickCount64();
                                         {std::lock_guard<std::mutex> hip_lock(hand_state_mutex);
                                             at_hip=logic==2 && !x_wheel.wheel() && hands[rh] && hip_xr_position && hip_pose_epoch==game_xr->pose_epoch() &&
                                                 hip_now>=hip_pose_tick && hip_now-hip_pose_tick<=250 &&
@@ -16877,6 +16916,15 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     const bool timepiece=timepiece_out();   // v1254: the Timepiece's trigger is the time shift, never a fist's
                                     if(!grip_intent_out[0].pass_trigger && !timepiece) input.left_trigger=0;else if(grip_intent_out[0].tap_trigger) input.left_trigger=1;
                                     if(!grip_intent_out[1].pass_trigger) input.right_trigger=0;else if(grip_intent_out[1].tap_trigger) input.right_trigger=1;
+                                    // v145727 (user, DOTO headset: "fire only when I have a squeezed grip, and then I click trigger"): the forearm gun's hand
+                                    // fires on grip + trigger and on nothing else. The trigger alone never fires it, a hand holding or grabbing never fires,
+                                    // and the grip alone stays the hand's (Use / grab, above).
+                                    if(left_forearm_gun.load()) {
+                                        const auto& gc=game_xr->controller_input;
+                                        const float grip_raw=rh?gc.right_grip:gc.left_grip,trigger_raw=rh?gc.right_trigger:gc.left_trigger;
+                                        const bool hand_busy_now=grip_intent_out[rh].grab || (physical_grab_requested && native_grab.holding(rh));
+                                        (rh?input.right_trigger:input.left_trigger)=!hand_busy_now && grip_raw>=.55f && trigger_raw>=.35f?trigger_raw:0.f;
+                                    }
                                 }
                                 if(rh && logic==2) std::swap(input.left_trigger,input.right_trigger);
                                 if(dual_wield_enabled && logic==2 && d2vr::arm::is_gun(arm_set.copy_at(rh))) input.left_trigger=0; // v773: the slot-1 hand's copy fires, its power (slot 1) does not cast

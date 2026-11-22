@@ -442,6 +442,12 @@ public:
         if(side>1 || !image_valid_ || image_frame_!=frame || image_fit_!=fit_revision_ || joint>=image_out_.arm[side].size()) return {};
         return image_out_.arm[side][joint];
     }
+    // v145727: an arm skeleton joint's index by name (e.g. "left_lower_armhelper2_jnt"); -1 before calibration or without that joint.
+    int arm_joint_index(unsigned side,const std::string& name) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(side>1 || !fit_) return -1;
+        try {return solver_.skeleton(1+static_cast<int>(side)).find(name);} catch(...) {return -1;}
+    }
     // v1104: the image's version of the controller grip (tracking frame, world) of one hand. A copy is placed from that grip (not from
     // joint 59: the authored socket rotates the hand attachment away from the controller), so the draw-time publisher must compare and
     // correct the copy's read in the same grip frame. Returns nothing without an image of this frame.
