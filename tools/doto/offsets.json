@@ -3538,6 +3538,14 @@
    "to": "0x3c219d",
    "why": "D2 single-target fire 0x632f70 was rewritten in DOTO (unmatched); the Voltaic Gun (arkCpntWeaponGaussGun) fire fn 0x3c1d70 calls the launch 0x68e970 at 0x3c219d (decoded: call 0x68e970); powers-re.md section 2",
    "source": "coordinator"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "contains": "{0x9533ee,0x7f6a80},{0x7f7275,0x7f4b30}",
+   "from": "0x7f7275",
+   "to": "0x85d965",
+   "why": "the build call inside the camera finalize: D2 0x7f7275 call 0x7f4b30 -> DOTO 0x85d965 call 0x85b340 (decoded); weapons review",
+   "source": "coordinator"
   }
  ],
  "text": [
