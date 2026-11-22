@@ -6275,7 +6275,10 @@ static std::atomic<std::uintptr_t> slot1_decl_now{};   // the declaration of the
 // What the engine reports for slot 1 and slot 0 right now (the sampled atomics; no new engine reads), with the equip revision that settles a change.
 static d2vr::arm::Native arms_native_now() noexcept {
     using H=d2vr::arm::Held;d2vr::arm::Native n{};
-    if(left_gun_model.load(std::memory_order_relaxed)) n.slot1=hip_kind.load(std::memory_order_relaxed)==1?H::crossbow:H::pistol;
+    // v145740 (DOTO crash on save load in v145738): the forearm Voltaic Gun is no hand-held slot-1 gun: D2's ArmSet must never plan a gun copy,
+   // a restore or a re-equip for it (its copy is NativeWeaponHands' forearm copy). The hand counts as holding nothing.
+   if(d2vr::game_traits::ranged_player_weapon_is_voltaic && left_forearm_gun.load(std::memory_order_relaxed)) {}
+   else if(left_gun_model.load(std::memory_order_relaxed)) n.slot1=hip_kind.load(std::memory_order_relaxed)==1?H::crossbow:H::pistol;
     else if(left_gadget.load(std::memory_order_relaxed)) n.slot1=H::gadget;
     bool timepiece=false;
     {std::lock_guard<std::mutex> l(hand_state_mutex);n.sword=(hand_weapon_bits&2u)!=0;

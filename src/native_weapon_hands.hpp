@@ -805,8 +805,13 @@ private:
         void* decl=reinterpret_cast<void* (__fastcall*)(std::uintptr_t,const char*,bool,bool)>(base+0x1e030)(base+0x2434170,name,false,false);
         if(!decl) return 0;
         static const std::array<float,3> zero{};
+        // v145740: a weapon entity def (DOTO's Voltaic copy, the gun's own def with its Gauss component) gets the player as owner, as the real
+        // copies above always did: its reference setup (0x68eee0) looks the owner up by id and crashes on none (v145738 dumps).
+        std::uintptr_t owner_for=0;
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) if(game_traits::voltaic_copy_def && !std::strcmp(name,game_traits::voltaic_copy_def)) {
+            const auto p=player(base,read);if(!p) return 0;owner_for=p;}
         return transient_or_none(base,reinterpret_cast<std::uintptr_t (__fastcall*)(std::uintptr_t,void*,const float*,const float*,std::uintptr_t,bool,const float*,const float*,const float*)>(
-            base+0x8ae9b0)(*game,decl,pos,axis,0,false,nullptr,zero.data(),zero.data()));
+            base+0x8ae9b0)(*game,decl,pos,axis,owner_for,false,nullptr,zero.data(),zero.data()));
     }
     // A failed mark (only possible on memory that is not a live entity: a fresh spawn is always writable) is counted and the entity kept as
     // before v1122: removing it would turn into a spawn failure and change the copy's lifecycle (the manual-equip fixture's hip draw retries
