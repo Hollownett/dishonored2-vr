@@ -132,6 +132,7 @@ Simulated sessions (`tools/doto/doto_sim.py`, the mod's simulated OpenXR runtime
 | play7 | v145712 | **tracked stereo gameplay: 6,887/6,887 frames paired, 0 flat frames, 13,774 head-pose writes, 2,938 verified turns** (pipeline depth 0) |
 | play8-play10 | v145712-v145714 | the launcher's full feature set refused at start, one check per run: gameplay-aim producer prologue (a decimal `std::byte{0}` split the pin), its caller, the door owner |
 | play11 | v145715 | **the launcher's full feature set (minus saved settings): 7,039/7,039 frames paired, hand aim applied on 7,036 frames, crosshair 7,038, interaction 21,441 calls, grab 7,141 callbacks, FSR eye AA on both eyes, 3,223 verified turns, arm template verified**; only notes: Timepiece lens guard and hand-aimed Blink off (Billie has neither) |
+| play12 | v145715 | **the launcher's default feature knobs too (spacewarp, full body, hand body, dual wield, note tablet): 5,447/5,447 frames paired, hand aim 5,445, 3,525 verified turns, grab 5,576 callbacks, Billie's tracked hands drawn in both eyes** |
 
 Live read-only checks of the running game (`tools/doto/live.py`): prepared views (count 2, eye 1 at +0x3ab0), renderView
 fields at -0x10, `arkPlayer` model +0xf8 / components +0x270 (98) / origin +0x310 / axis +0x31c, the logic mask.
