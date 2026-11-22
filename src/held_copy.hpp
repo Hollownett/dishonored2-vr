@@ -4,6 +4,7 @@
 // axes (WorldTrackedPose). The offset of a weapon in its hand's frame is measured live, mirrored across the hand's left axis, and composed
 // with the other hand.
 #include "tracked_pose.hpp"
+#include "game_profile.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -102,6 +103,8 @@ inline bool name_has(std::string_view name,std::string_view part) noexcept {
 }
 inline Kind kind_of(std::string_view def) noexcept {
     if(name_has(def,"crossbow")) return Kind::crossbow;
+    // Death of the Outsider: Billie's Voltaic Gun (ply_billie_gaussgun01.def) is the crossbow kind (game_traits::ranged_player_weapon_is_voltaic)
+    if constexpr(game_traits::ranged_player_weapon_is_voltaic) {if(name_has(def,"gaussgun")) return Kind::crossbow;}
     // "knife": Death of the Outsider's blades (ply_billie_knife01.def, the copy knife_midnight.def; game_profile.hpp sword_copy_def)
     if(name_has(def,"sword") || name_has(def,"blade") || name_has(def,"cutlass") || name_has(def,"knife")) return Kind::sword;
     if(name_has(def,"gun") || name_has(def,"pistol")) return Kind::pistol;

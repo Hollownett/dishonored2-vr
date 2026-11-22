@@ -195,6 +195,13 @@ struct ArmSet {
     }
     // The hand let go of its copy (or a copy was lost): the arm is empty.
     void release(unsigned h) noexcept {h&=1u;if(a[h].home==Home::copy) a[h]={};}
+    // Death of the Outsider, dual wield (dxgi_probe voltaic_pinned): a native slot-1 GUN the other arm holds moves to arm h when h is empty and
+    // nothing is pending. The forearm-mounted gun the engine hangs on its own arm stays drawn there; the other forearm gets its copy. True: moved.
+    bool pin_slot1(unsigned h) noexcept {
+        h&=1u;const unsigned o=h^1u;
+        if(any_pending() || a[o].home!=Home::slot1 || !native_gun(a[o].what) || !empty(h)) return false;
+        a[h]=a[o];a[o]={};rest_slot1=h;return true;
+    }
     // Test/debug: set an arm's copy directly.
     Fx set_copy(unsigned h,Held kind,std::uint64_t now) noexcept {
         Fx fx;h&=1u;

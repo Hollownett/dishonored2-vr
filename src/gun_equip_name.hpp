@@ -33,6 +33,10 @@ public:
 inline bool is_gun_equip_name(std::string_view name) noexcept {
     return contains_nocase(name,"gun") || contains_nocase(name,"pistol") || contains_nocase(name,"crossbow");
 }
+// Death of the Outsider: Billie's Voltaic Gun, pose "GaussGun" (gaussgun.cpntweapongaussgun m_locoEquipStateName; item 21 of the left arm equip
+// states in her loco.playerlocomotion; the right arm has none). A gun by is_gun_equip_name, not a barrel (it hangs on the forearm helper, which
+// the engine poses from its own arm animation: its model row 0 is not the drawn forearm, so the hand's aim ray stays the shot's).
+inline bool is_voltaic_equip_name(std::string_view name) noexcept {return name=="GaussGun";}
 // A gadget the left hand throws or places (grenades, stun mines, spring razors): the fist holds it, opening the hand lets it go.
 inline bool is_gadget_equip_name(std::string_view name) noexcept {
     return contains_nocase(name,"grenade") || contains_nocase(name,"mine") || contains_nocase(name,"razor");

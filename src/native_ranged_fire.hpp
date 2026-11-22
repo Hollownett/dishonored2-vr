@@ -25,6 +25,7 @@
 #else
 #define D2VR_COPY_FIRE_GATE 0
 #endif
+#include "game_profile.hpp"
 #include "game_rig.hpp"
 #include "gameplay_aim.hpp"
 #include "crash_observer.hpp"
@@ -39,6 +40,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace d2vr {
@@ -306,6 +308,9 @@ public:
     // which 0x7fb350 treats as already equipped (slot-1 record and ammo item unchanged: no EquipChange), so the other hand keeps its bolt.
     // Returns the ammo item the game should equip, 0 = the wheel's own choice stands (another item, no copy, or the native not in slot 1).
     template<class Read> static std::uintptr_t wheel_pick(std::uintptr_t base,Read& read,std::uintptr_t item,std::uintptr_t ammo) {
+        // DOTO (game_traits::ranged_player_weapon_is_voltaic): the forearm Voltaic copy fires through the native gun's component, so both guns
+        // share the native's ammo: every wheel choice is the game's own, whichever hand opened the wheel (no copy-owned ammo, no kept choice)
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {(void)base;(void)read;(void)item;(void)ammo;return 0;}
         if(!item || !ammo) return 0;
         const int w=wheel_hand_.load();if(w<0 || w>1) return 0;
         const unsigned side=static_cast<unsigned>(w);
@@ -444,7 +449,9 @@ public:
         for(std::size_t i=0;i<shots_.size();++i) o<<(i?",":"")<<shots_[i];
         o<<"],\"plans\":[";
         for(std::size_t i=0;i<plans_.size();++i) o<<(i?",":"")<<'"'<<plans_[i]<<'"';
-        o<<"]}";
+        o<<"]";
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) o<<",\"voltaic\":["<<voltaic_marks_.load()<<','<<voltaic_infos_.load()<<']';   // DOTO: Gauss shots marked, special-ammo info set
+        o<<'}';
         return o.str();
     }
     static std::uint64_t refused_count(Why w) {return refused_[static_cast<unsigned>(w)].load();}
@@ -461,7 +468,12 @@ public:
     inline static constexpr std::uintptr_t game_rva=0x39a5290,entities_offset=0x3130b0,player_vtable=0x1c5e428,game_vtable=0x1c940a8,
         inventory_vtable=0x1b9a878,weapon_entity_vtable=0x1ce1e98,projectile_info_rva=0x39d77e0;
     struct KindInfo {std::uintptr_t comp_vtable,decl_vtable;};
-    static constexpr KindInfo kind_info(Shot::Kind k) noexcept {return k==Shot::crossbow?KindInfo{0x1b9cbf8,0x1b9cab8}:KindInfo{0x1b53f58,0x1b53e18};}
+    // Death of the Outsider (game_traits::ranged_player_weapon_is_voltaic): the crossbow kind is Billie's Voltaic Gun, the pistol kind has no
+    // player weapon ({0,0}: locate() answers no_weapon at once).
+    static constexpr KindInfo kind_info(Shot::Kind k) noexcept {
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) return k==Shot::crossbow?KindInfo{game_traits::voltaic_comp_vtable,game_traits::voltaic_decl_vtable}:KindInfo{0,0};
+        else return k==Shot::crossbow?KindInfo{0x1b9cbf8,0x1b9cab8}:KindInfo{0x1b53f58,0x1b53e18};
+    }
     struct Rec {std::uintptr_t decl;std::uint32_t id,pad;std::uintptr_t comp,equipment;std::int32_t count,pad2;};
     static_assert(sizeof(Rec)==0x28);
 
@@ -491,6 +503,7 @@ public:
         // v764 (live, the user's chapter-4 save: 816 records; a 512 cap refused every shot as no_weapon). list() bounds it at 4096.
         const auto items=list(read,l.inventory+0x38,4096);if(!items || !items->packed_count) return {};
         const auto info=kind_info(kind);bool candidate=false;
+        if(!info.comp_vtable) return {};   // a kind with no player weapon in this game (why: no_weapon)
         for(std::uint32_t i=0;i<items->packed_count;++i) {
             const auto rec=value<Rec>(read,items->data+i*0x38ull);
             if(!rec || !rec->comp || !rec->equipment || !typed(read,base,rec->comp,info.comp_vtable) || !typed(read,base,rec->equipment,info.decl_vtable)) continue;
@@ -553,8 +566,12 @@ public:
                 if(!index || *index<0 || !table || !pointer(*table)) return {};
                 return value<float>(read,*table+0x24+static_cast<std::uintptr_t>(*index)*0x28);
             };
+            if constexpr(game_traits::ranged_player_weapon_is_voltaic) {   // the Gauss fire: speed is the constant 1; its ammo attribute marks the projectile
+                const auto flag=attribute(game_traits::voltaic_mark_attribute);l.mark=flag && *flag>0;
+            } else {
             if(const auto speed=attribute(0x158);speed && std::isfinite(*speed) && *speed>0) l.speed=*speed; // native passes 0 with no attribute; 1 is the plain bolt
             const auto flag=attribute(0x15c);l.mark=flag && *flag>0;
+            }
         }
         why=Why::ok;return l;
     }
@@ -750,6 +767,7 @@ private:
                 seen_ammo_[k]=m && entry_valid(read,l->comp,m)?m:l->ammo;set_own(l->comp,seen_ammo_[k]);continue;
             }
             const auto cur=l->ammo,own=seen_ammo_[k];if(cur==own) continue;
+            if constexpr(game_traits::ranged_player_weapon_is_voltaic) {seen_ammo_[k]=cur;set_own(l->comp,cur);++native_follows_;continue;}   // DOTO: the native always follows the game (wheel_pick)
             const auto own_decl=entry_valid(read,l->comp,own)?rig::value<std::uintptr_t>(read,own):std::nullopt;
             const bool own_known=own_decl && *own_decl;
             if(ranged_fire::native_ammo(false,own_known,own_known?pool_count(read,l->inventory,*own_decl):0)==ranged_fire::NativeAmmo::follow) {seen_ammo_[k]=cur;set_own(l->comp,cur);++native_follows_;continue;}   // ran out: the game's switch stands
@@ -903,8 +921,13 @@ private:
         AmmoSwap swap{base,l.comp,l.native_ammo,false};
         if(l.ammo!=l.native_ammo) {if(!set_ammo(base,l.comp,l.ammo)) return fault();swap.on=true;++ammo_swaps_;}
         const auto flags=rig::value<std::uint8_t>(read,l.comp+0xb8).value_or(0);
-        const bool no_bullet=(flags&0x20)!=0;
+        constexpr bool voltaic=game_traits::ranged_player_weapon_is_voltaic;   // DOTO: the Gauss fire always creates its projectile, has no spread and no muzzle flash
+        const bool no_bullet=!voltaic && (flags&0x20)!=0;
         if(s.kind==Shot::pistol && rig::value<std::uint8_t>(read,l.ammo+0x4a).value_or(0)) spread(base,read,l,origin,axis,flags); // 44e0c0's spread-area explosion (the shotgun's damage)
+        // The Gauss fire sets the create/sound configure byte from its own source byte before every create (combat-port.md section 2); held for
+        // this shot's create and sound, then put back.
+        std::conditional_t<voltaic,VoltaicConfigure,NoConfigure> configure{};(void)configure;
+        if constexpr(voltaic) {configure.comp=l.comp;configure.old=voltaic_configure(l.comp,-1);}   // put back when this shot returns
         std::uintptr_t projectile{};bool ok;
         if(!no_bullet) {
             {LaunchScope scope;ok=n.create(base,l.comp,projectile);}
@@ -918,11 +941,14 @@ private:
             finish_shot(s,l,now,hand,flags);return Why::ok;
         }
         Track t{};t.entity=projectile;t.id=rig::value<std::uint32_t>(read,projectile+0xa8).value_or(0);t.born=now;t.side=s.side;t.kind=s.kind;
+        if constexpr(voltaic) voltaic_before_launch(base,read,n,l,projectile,t);   // the Gauss fire's order: its projectile info is set before the launch
         {LaunchScope scope;ok=n.launch(base,l.comp,projectile,origin,axis,l.speed);}
         if(!ok) return fault();
         ++launched_;
+        if constexpr(!voltaic) {
         t.component=n.component(base,projectile,projectile_info_rva);
         if(l.mark && t.component) n.mark(base,t.component);
+        }
         if(const auto p=rig::value<std::array<float,3>>(read,projectile+0x300)) t.start=t.last=*p;
         census(read,projectile,t.comps,t.started0);
         t.flags0=t.component?rig::value<rig::Identity>(read,t.component+0x18).value_or(rig::Identity{}).flags:0;
@@ -936,7 +962,7 @@ private:
         if(s.entity && s.entity!=l.entity && valid_id(s.entity_id) && rig::value<std::uintptr_t>(read,l.game+entities_offset+(s.entity_id>>16)*8ull)==s.entity &&
            rig::value<std::uint32_t>(read,s.entity+0xa8)==s.entity_id) gun=s.entity;
         if(play_sound.load() && !n.sound(base,l.comp,gun,origin,axis)) {fault();clean=false;} // the shot has left: count it, keep going
-        if(muzzle_flash.load() && n.flash && !n.flash(base,l.comp,gun,origin,axis)) {fault();clean=false;}
+        if(!voltaic && muzzle_flash.load() && n.flash && !n.flash(base,l.comp,gun,origin,axis)) {fault();clean=false;}
         const int pool_after=pool_count(read,l.inventory,l.ammo_decl);
         pool_after_=pool_after;mag_after_=rig::value<std::int32_t>(read,l.comp+0xa0).value_or(-1);
         if(spent) {++spent_;if(pool_after!=l.pool-1) ++ammo_mismatch_;}
@@ -1046,5 +1072,32 @@ private:
     static bool real_mark(std::uintptr_t,std::uintptr_t projectile_component) {
         __try {*reinterpret_cast<volatile unsigned char*>(projectile_component+0xa5)|=2;return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
+    // ---- Death of the Outsider: the Voltaic Gun's own steps of its fire (game_traits::ranged_player_weapon_is_voltaic; combat-port.md section 2) ----
+    // restore<0: the configure byte takes its source byte's value and the old value is returned (-1 = fault); else `restore` is written back.
+    static int voltaic_configure(std::uintptr_t comp,int restore) noexcept {
+        __try {
+            auto* b=reinterpret_cast<volatile std::uint8_t*>(comp+game_traits::voltaic_configure);
+            if(restore<0) {const int old=*b;*b=*reinterpret_cast<const volatile std::uint8_t*>(comp+game_traits::voltaic_configure_from);return old;}
+            *b=static_cast<std::uint8_t>(restore);return restore;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+    }
+    struct VoltaicConfigure {std::uintptr_t comp{};int old{-1};~VoltaicConfigure() {if(comp && old>=0) voltaic_configure(comp,old);}};
+    struct NoConfigure {};
+    static bool voltaic_info(std::uintptr_t projectile_component,std::uintptr_t value) noexcept {
+        __try {*reinterpret_cast<volatile std::uintptr_t*>(projectile_component+game_traits::voltaic_info_field)=value;return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
+    // Between the create and the launch, as the Gauss fire: the projectile's info component; its special-ammo value when the shot's projectile
+    // def is the weapon decl's special one; the mark when the ammo attribute is set and the projectile entity is the decl's marked kind.
+    template<class Read> static void voltaic_before_launch(std::uintptr_t base,Read& read,const Natives& n,const Located& l,std::uintptr_t projectile,Track& t) {
+        t.component=n.component(base,projectile,projectile_info_rva);if(!t.component) return;
+        const auto decl=rig::value<std::uintptr_t>(read,l.comp+8);if(!decl || !rig::pointer(*decl)) return;
+        if(const auto special=rig::value<std::uintptr_t>(read,*decl+game_traits::voltaic_info_def);special && *special && *special==l.projectile_def)
+            if(const auto v=rig::value<std::uintptr_t>(read,*decl+game_traits::voltaic_info_value);v && voltaic_info(t.component,*v)) ++voltaic_infos_;
+        const auto marked=rig::value<std::uintptr_t>(read,*decl+game_traits::voltaic_mark_decl);
+        if(l.mark && marked && *marked && rig::value<std::uintptr_t>(read,projectile+game_traits::voltaic_entity_decl)==*marked && n.mark(base,t.component)) ++voltaic_marks_;
+    }
+public:
+    inline static std::atomic<std::uint64_t> voltaic_marks_{},voltaic_infos_{};
+private:
 };
 } // namespace d2vr

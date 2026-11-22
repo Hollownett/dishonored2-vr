@@ -35,6 +35,18 @@ inline constexpr double player_blade_length = 0.62;
 inline constexpr bool sword_copy_spawns_hidden = true;
 inline constexpr std::size_t slash_perform_steal = 11;
 inline constexpr std::array<unsigned char,10> slash_perform_unwind{1,11,3,0, 11,0x01, 0x12,0x00, 4,0x60};
+// The player's ranged weapon is Billie's Voltaic Gun (arkCpntWeaponGaussGun), mounted on her left forearm: the hand-fired copy kind
+// "crossbow" of NativeRangedFire / NativeWeaponHands is that gun, and the "pistol" kind has no player weapon (tools/doto/reviews/combat-port.md
+// sections 0-2). Its RTTI vtables (component, declaration) are this build's own values: offsets.json keeps them unchanged.
+inline constexpr bool ranged_player_weapon_is_voltaic = true;
+inline constexpr std::uintptr_t voltaic_comp_vtable = 0x1c45768, voltaic_decl_vtable = 0x1c45618;
+// The second gun the other forearm shows in dual wield: the gun's own entity def, spawned by name (no owner: its components never start).
+inline constexpr const char* voltaic_copy_def = "models/weapons/dlc01/player/billie/gaussgun01/ply_billie_gaussgun01.def";
+// The Gauss fire (combat-port.md section 2): before its create it copies byte comp+0xe0 into the create/sound configure byte comp+0xb0;
+// the ammo attribute index at comp+0x178 marks the projectile (info +0x18d |= 4) when the projectile entity's decl (+0x2f8) is the weapon
+// decl's +0x310; info +0x1a0 = decl +0x308 when the shot's projectile def is decl +0x300. Speed is the constant 1.
+inline constexpr std::uintptr_t voltaic_configure = 0xb0, voltaic_configure_from = 0xe0, voltaic_mark_attribute = 0x178,
+    voltaic_entity_decl = 0x2f8, voltaic_mark_decl = 0x310, voltaic_info_def = 0x300, voltaic_info_value = 0x308, voltaic_info_field = 0x1a0;
 #else
 inline constexpr const char* name = "Dishonored 2";
 inline constexpr const char* exe = "Dishonored2.exe";
@@ -48,5 +60,10 @@ inline constexpr double player_blade_length = 0.65;   // Corvo/Emily's sword (it
 inline constexpr bool sword_copy_spawns_hidden = false;
 inline constexpr std::size_t slash_perform_steal = 8;
 inline constexpr std::array<unsigned char,8> slash_perform_unwind{1,8,2,0,8,0xb2,4,0x60};
+inline constexpr bool ranged_player_weapon_is_voltaic = false;   // the pistol and the crossbow (arkCpntWeaponGun / arkCpntWeaponCrossbow)
+inline constexpr std::uintptr_t voltaic_comp_vtable = 0, voltaic_decl_vtable = 0;
+inline constexpr const char* voltaic_copy_def = nullptr;
+inline constexpr std::uintptr_t voltaic_configure = 0, voltaic_configure_from = 0, voltaic_mark_attribute = 0,
+    voltaic_entity_decl = 0, voltaic_mark_decl = 0, voltaic_info_def = 0, voltaic_info_value = 0, voltaic_info_field = 0;
 #endif
 } // namespace d2vr::game_traits

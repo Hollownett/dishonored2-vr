@@ -3,6 +3,9 @@
 static int failures=0;
 static void expect(bool ok,const char* what) {if(!ok) {std::printf("FAIL %s\n",what);++failures;}}
 int main() {
+    // v145799: Death of the Outsider's Voltaic Gun pose (Billie's loco.playerlocomotion left arm state 21): a gun, not a barrel route
+    expect(d2vr::is_voltaic_equip_name("GaussGun") && d2vr::is_gun_equip_name("GaussGun") && !d2vr::is_barrel_equip_name("GaussGun"),"Voltaic Gun pose is a gun, not a barrel route");
+    expect(!d2vr::is_voltaic_equip_name("Gun") && !d2vr::is_voltaic_equip_name("Crossbow") && !d2vr::is_voltaic_equip_name("Hookmine"),"only GaussGun is the Voltaic Gun");
     using namespace d2vr;
     expect(is_gun_equip_name("Gun"),"Gun");
     expect(is_gun_equip_name("gun_emily"),"decl name");

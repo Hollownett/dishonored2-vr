@@ -246,6 +246,21 @@ int main() {
         assert(s.a[0].what==Held::crossbow && s.a[0].home==Home::slot1 && s.a[1].what==Held::pistol && s.a[1].home==Home::copy && s.valid());
         assert(s.derive().slot1_arm==0 && s.derive().sword_arm==1);
     }
+    {   // v145799 pin_slot1 (DOTO's forearm Voltaic Gun stays on the engine's arm): a native gun the right wheel gave arm 1 moves to the empty arm 0;
+        // nothing moves while a request is pending, while arm 0 holds something, or when slot 1 is a power; the moved state stays put on later reports
+        ArmSet s;Clock c;engine(s,c,Held::none,true);
+        s.wheel_commit(1,c.t,c.rev);s.wheel_choice(1,false,c.t);
+        assert(!s.pin_slot1(0));   // the request is still pending
+        engine(s,c,Held::crossbow,true);assert(s.a[1].what==Held::crossbow && s.a[1].home==Home::slot1 && s.derive().sword_arm==0);
+        assert(s.pin_slot1(0) && s.a[0].what==Held::crossbow && s.a[0].home==Home::slot1 && s.a[1].what==Held::none && s.valid());
+        assert(s.derive().slot1_arm==0 && s.derive().sword_arm==1 && s.derive().cross==0);
+        idle(s,c,Held::crossbow,true,500);assert(s.a[0].what==Held::crossbow && s.derive().slot1_arm==0 && !s.pin_slot1(0));
+        ArmSet t;Clock d;engine(t,d,Held::none,false);t.set_copy(0,Held::pistol,d.t);   // arm 0 holds something (a copy)
+        t.wheel_commit(1,d.t,d.rev);t.wheel_choice(1,false,d.t);engine(t,d,Held::crossbow,false);
+        assert(t.copy_at(0)==Held::pistol && t.a[1].home==Home::slot1 && !t.pin_slot1(0) && t.derive().slot1_arm==1);
+        ArmSet u;Clock e;engine(u,e,Held::none,false);u.wheel_commit(1,e.t,e.rev);u.wheel_choice(1,false,e.t);engine(u,e,Held::power,false);
+        assert(u.a[1].what==Held::power && !u.pin_slot1(0));   // a power is not a forearm gun
+    }
     {   // WHEEL late landings: the opening arm still gets it at 78 .. 3000 ms; a later landing is engine-initiated (holder / sticky arm)
         const std::uint64_t lands[]={78,235,900,2172,3000};
         for(const auto ms:lands) {

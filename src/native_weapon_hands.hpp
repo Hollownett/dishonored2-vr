@@ -1003,6 +1003,28 @@ public:
         else if(dt>=.25) f.speed={1,10}; // unknown after a gap: calm only after a few frames
         f.pose=drawn;f.at=now;f.have=true;f.have_root=root.has_value();if(root) f.root=*root;
     }
+    // Death of the Outsider (game_traits::ranged_player_weapon_is_voltaic), dual wield: the held copy of `side` rides that arm's FOREARM
+    // instead of its hand. forearm_pose: render thread, every frame, the drawn forearm helper joint (lower_armhelper2) in game world, with the
+    // player's root as hand_pose. forearm_copy(side, offset): the copy is placed at forearm * offset (the engine's left-arm bind tag mirrored),
+    // never from the hand's grip, so the wrist does not move it; nullptr = the ordinary hand copy. The copy is not reported to the draw-time
+    // weapon placement (that hand keeps drawing its own weapon, the sword); its frame is the game-thread teleport and the render thread's
+    // model-frame write (dxgi_probe).
+    static void forearm_pose(unsigned side,const WorldTrackedPose& drawn,const std::optional<Vec3>& root=std::nullopt) noexcept {
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {
+            if(side>1 || !held_copy::valid(drawn)) return;
+            const auto now=std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> l(feed_m_);auto& f=forearm_feed_[side];
+            const double dt=f.have?std::chrono::duration<double>(now-f.at).count():1e9;
+            if(dt>.0005 && dt<.25) {const auto m=held_copy::motion(f.pose,drawn,dt);f.speed={f.speed.linear*.7+m.linear*.3,f.speed.angular*.7+m.angular*.3};}
+            else if(dt>=.25) f.speed={1,10};
+            f.pose=drawn;f.at=now;f.have=true;f.have_root=root.has_value();if(root) f.root=*root;
+        } else {(void)side;(void)drawn;(void)root;}
+    }
+    static void forearm_copy(unsigned side,const held_copy::Pose* offset) noexcept {
+        if(side>1) return;
+        std::lock_guard<std::mutex> l(feed_m_);forearm_on_[side]=offset!=nullptr;if(offset) forearm_offset_[side]=*offset;
+    }
+    inline static std::atomic<std::uint64_t> forearm_spawned{},forearm_placed{},forearm_hidden{},forearm_presented{};
     static void mirror_hands(bool mirrored) noexcept {mirrored_.store(mirrored,std::memory_order_relaxed);}
     static void held_root_step(bool on) noexcept {held_step_on_.store(on,std::memory_order_relaxed);} // v776 test switch (see service_held)
     static void clear_copies() noexcept {clear_req_.store(true,std::memory_order_relaxed);clear_guns_req_.store(true,std::memory_order_relaxed);}
@@ -1062,6 +1084,24 @@ private:
         std::lock_guard<std::mutex> l(feed_m_);const auto& f=feed_[side&1u];
         if(!f.have || std::chrono::duration<double>(std::chrono::steady_clock::now()-f.at).count()>max_age_s) return false;
         pose=f.pose;speed=f.speed;if(root) *root=f.have_root?std::optional<Vec3>{f.root}:std::nullopt;return true;
+    }
+    // DOTO forearm copies (forearm_copy): whether `side`'s held copy rides the forearm, its offset, and that forearm's feed (as feed()).
+    inline static std::array<HeldFeed,2> forearm_feed_{};inline static std::array<bool,2> forearm_on_{};inline static std::array<held_copy::Pose,2> forearm_offset_{};
+    static bool forearm_mode(unsigned side,held_copy::Pose& offset) {
+        if constexpr(!game_traits::ranged_player_weapon_is_voltaic) {(void)side;(void)offset;return false;}
+        else {std::lock_guard<std::mutex> l(feed_m_);if(!forearm_on_[side&1u]) return false;offset=forearm_offset_[side&1u];return true;}
+    }
+    static bool forearm_feed(unsigned side,held_copy::Pose& pose,held_copy::Motion& speed,double max_age_s,std::optional<Vec3>* root=nullptr) {
+        std::lock_guard<std::mutex> l(feed_m_);const auto& f=forearm_feed_[side&1u];
+        if(!f.have || std::chrono::duration<double>(std::chrono::steady_clock::now()-f.at).count()>max_age_s) return false;
+        pose=f.pose;speed=f.speed;if(root) *root=f.have_root?std::optional<Vec3>{f.root}:std::nullopt;return true;
+    }
+    // A copy whose entity is not presented (+0xd0 bit1) is presented alone (the engine's present + the model's own, no bound children). Game thread.
+    static bool present_alone(std::uintptr_t base,std::uintptr_t ent) {
+        __try {
+            if((*reinterpret_cast<const volatile std::uint8_t*>(ent+0xd0)&3u)!=2u) return false;   // presented already, or hidden on purpose
+            present_one(base,ent);return true;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     // The player's body model origin (model+0x1860, as render_player_root reads it on the render thread).
     // yaw (optional): the frame's yaw (+0x186c rows) minus NativeTurning's head-follow total: the heading the camera is placed with (BodyAnchor).
@@ -1701,9 +1741,10 @@ private:
             if(!want) {if(h.pe>=0) {held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};}continue;}
             if(h.pe>=0 && std::strcmp(pool_[h.pe].def,want)) {const auto failed=h.failed;const auto tries=h.tries;held_hide(base,read,side);pool_release(base,read,h.pe);h=HeldSide{};h.failed=failed;h.tries=tries;}
             held_copy::Pose hand{},offset{},out{};held_copy::Motion speed{};bool mirrored{};std::optional<Vec3> drawn_root;
-            const bool measured=grip_offset(want,side,offset,mirrored);
+            const bool forearm=forearm_mode(side,offset);   // DOTO: a forearm copy, its fixed offset on the forearm helper
+            const bool measured=forearm || grip_offset(want,side,offset,mirrored);
             if(measured) held_bits|=4u<<side;else held_bits&=~(4u<<side);
-            if(!feed(side,hand,speed,.25,&drawn_root)) {held_hide(base,read,side);continue;} // no fresh hand: no stand-in
+            if(!(forearm?forearm_feed(side,hand,speed,.25,&drawn_root):feed(side,hand,speed,.25,&drawn_root))) {if(forearm && h.shown) ++forearm_hidden;held_hide(base,read,side);continue;} // no fresh hand: no stand-in
             // v1106: a feed whose recorded root is in another world (a load/teleport between the render publication and this service) still
             // describes the OLD world. It used to be teleported with the stale hand after the load, which is the v1014 16 m gate rejection
             // (the read was 16.3-17.5 m from the image hand while the weapon's own origin gap was 30.8 mm). Drop that frame instead.
@@ -1722,12 +1763,16 @@ private:
                     std::lock_guard<std::mutex> l(feed_m_);std::snprintf(held_last_failed_.data(),held_last_failed_.size(),"%s",want);
                     continue;
                 }
-                ++held_spawned;
+                ++held_spawned;if(forearm) ++forearm_spawned;
             } else {
                 auto& e=pool_[h.pe];teleport<Read>(base,e.ent,pos,axis);++held_teleports;
                 if(!e.shown && visible(base,read,e.ent,true)) e.shown=true;
             }
             h.shown=true;h.cmd=out;h.have_cmd=true;held_bits|=1u<<side;
+            if(forearm) {   // DOTO: not the hand's drawn weapon (the draw-time placement keeps that hand's own); a model never presented is presented once
+                ++forearm_placed;if(present_alone(base,pool_[h.pe].ent)) ++forearm_presented;
+                clear_copy_draw(pool_[h.pe].ent);
+            } else
             note_copy_draw(side,pool_[h.pe].ent,pool_[h.pe].id,hand,mirrored?held_copy::mirror(offset):offset,3);   // v1101/v1106: read + exact applied offset
             std::lock_guard<std::mutex> l(feed_m_);
             held_pub_[side]=HeldPub{true,out,steady_ms(),pool_[h.pe].ent,pool_[h.pe].id};
@@ -1794,6 +1839,9 @@ private:
         const auto entries=inv && *inv?rig::list(read,*inv+0x38,4096):std::nullopt;if(!entries) return 0;
         for(unsigned i=0;i<entries->packed_count;++i) {
             const auto comp=rig::value<std::uintptr_t>(read,entries->data+i*0x38ull+0x10);
+            if constexpr(game_traits::ranged_player_weapon_is_voltaic) {   // DOTO: the crossbow kind is the Voltaic Gun; no player pistol
+                if(kind==held_copy::Kind::crossbow && comp && *comp && rig::typed(read,base,*comp,game_traits::voltaic_comp_vtable)) return *comp;
+            } else
             if(comp && *comp && rig::typed(read,base,*comp,kind==held_copy::Kind::crossbow?0x1b9cbf8:0x1b53f58)) return *comp;
         }
         return 0;
@@ -2422,8 +2470,10 @@ private:
                 if(reload!=u.reload_seen) {u.reload_seen=reload;copy_anim(base,u,4);}
                 copy_anim(base,u,1);
             }
-            const auto comp=ent && kind==held_copy::Kind::crossbow?native_equipment(base,read,held_copy::Kind::crossbow):0;
-            try {service_bolt(base,read,side,kind==held_copy::Kind::crossbow?ent:0,id,comp);} catch(...) {++upgrade_faults;}
+            // DOTO: the crossbow kind is the Voltaic Gun, which has no loaded bolt to show on a copy (its comp+0x160 is no bolt entity)
+            const bool bolt_kind=kind==held_copy::Kind::crossbow && !game_traits::ranged_player_weapon_is_voltaic;
+            const auto comp=ent && bolt_kind?native_equipment(base,read,held_copy::Kind::crossbow):0;
+            try {service_bolt(base,read,side,bolt_kind?ent:0,id,comp);} catch(...) {++upgrade_faults;}
         }
     }
     // The copy's own weapon component (a real weapon copy, v1096): 0 for a model-only copy.
