@@ -377,10 +377,11 @@ public:
         const bool y=in.y&&!previous_y_,a=in.a&&!previous_a_,b=in.b&&!previous_b_,click=trigger&&!previous_trigger_,x=in.x&&!previous_x_;
         const bool left_trigger=in.left_trigger>.55f,left_click=left_trigger&&!previous_left_trigger_;
         previous_y_=in.y;previous_a_=in.a;previous_b_=in.b;previous_x_=in.x;previous_trigger_=trigger;previous_left_trigger_=left_trigger;
-        if(!gameplay && calibration_runtime_==AvatarFitRuntimeStatus::recalibration_required && !calibration_prompted_) {
-            calibration_prompted_=true;open_=calibration_page_=true;selected_=11;
-            out.opened=out.consume=true;return out;
-        }
+        // v1458 / DOTO v145749 (user, both games: "the first menu open in a session opens all menus; it should open only the game menu"): the
+        // first non-gameplay frame of a session used to open this panel's calibration page by itself when a recalibration was due (once per
+        // session: calibration_prompted_), drawn over the game's Pause menu. The game menu opens alone now; calibration stays on the native
+        // VR Settings page's Calibrate row (open_calibration_from_native), which shows the same notice.
+        (void)gameplay;
         if(open_ && calibration_page_ && hand_fit_page_ && y) {out.consume=true;return out;} // Y has no meaning on the hand-fit page
         if(open_ && calibration_page_ && y) {measurements_page_=!measurements_page_;stick_held_=false;out.consume=true;return out;}
         if(y) {open_=!open_;if(!open_) calibration_page_=false;out.opened=open_;out.consume=true;return out;}

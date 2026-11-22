@@ -18060,6 +18060,24 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         focus_window_foreground=GetForegroundWindow()==desc.OutputWindow;
                                     }
                                 }
+                                {   // v1458 / DOTO v145749 (user, both games: "the first trigger in a session does not register a weapon shot"): the first four
+                                    // gameplay trigger presses of a session, at the press and 300 ms later, as the game receives them (dual-wield-events.jsonl
+                                    // "first_trigger"): which hand, raw grip/trigger, the pad's LT/RT after every rule, the slot-1 arm, the gun in hand / at the hip,
+                                    // the forearm gun, the equip name and revision (a draw instead of a shot changes it).
+                                    static unsigned first_triggers{};static std::array<bool,2> trig_was{};static std::array<UINT64,2> follow_at{};
+                                    const auto& rc=game_xr->controller_input;const std::array<float,2> rt{rc.left_trigger,rc.right_trigger},rg{rc.left_grip,rc.right_grip};
+                                    const auto note=[&](unsigned h,const char* phase){std::string eq;{std::lock_guard<std::mutex> l(hand_state_mutex);for(const char c:left_equip_name) {if(!c) break;if(std::isalnum(static_cast<unsigned char>(c))) eq+=c;}}
+                                        char b[400];std::snprintf(b,sizeof b,"\"ev\":\"first_trigger\",\"phase\":\"%s\",\"n\":%u,\"hand\":%u,\"raw\":[%.2f,%.2f,%.2f,%.2f],\"pad\":[%.2f,%.2f],\"slot1_arm\":%u,\"gun_in_hand\":%d,\"hip_loaded\":%d,\"forearm\":%d,\"equip\":\"%s\",\"rev\":%llu,\"logic\":%u",
+                                            phase,first_triggers,h,rg[0],rt[0],rg[1],rt[1],input.left_trigger,input.right_trigger,slot1_arm_now(),left_gun_model.load()?1:0,hip_loaded?1:0,left_forearm_gun.load()?1:0,eq.c_str(),
+                                            static_cast<unsigned long long>(left_aim_equip_revision.load(std::memory_order_relaxed)),logic);dual_wield_event(b);};
+                                    const auto now_ft=GetTickCount64();
+                                    for(unsigned h=0;h<2;++h) {
+                                        const bool down=rt[h]>.55f;
+                                        if(logic==2 && down && !trig_was[h] && first_triggers<4) {++first_triggers;note(h,"press");follow_at[h]=now_ft+300;}
+                                        if(follow_at[h] && now_ft>=follow_at[h]) {follow_at[h]=0;note(h,"after_300ms");}
+                                        trig_was[h]=down;
+                                    }
+                                }
                                 controller_bridge.publish(input,logic==2);
                                 npc_trigger_interact={};npc_trigger_consume={};npc_owns_frame={};
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
