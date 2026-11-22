@@ -311,7 +311,24 @@ public:
     template<class Read> static std::uintptr_t wheel_pick(std::uintptr_t base,Read& read,std::uintptr_t item,std::uintptr_t ammo) {
         // DOTO (game_traits::ranged_player_weapon_is_voltaic): the forearm Voltaic copy fires through the native gun's component, so both guns
         // share the native's ammo: every wheel choice is the game's own, whichever hand opened the wheel (no copy-owned ammo, no kept choice)
-        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {(void)base;(void)read;(void)item;(void)ammo;return 0;}
+        // v145750 (user, DOTO headset v145749: "when I select the electric bolt from my right forearm it goes to my left forearm"; the copy
+        // "rendered with a wrong bolt"): as Dishonored 2 (v1101), a choice made by the wheel of a hand whose forearm carries the mod's copy is that
+        // copy's own (copy_ammo_, swapped in for its shots by handle/execute); the game is handed the native gun's current ammo so the engine's
+        // gun keeps its own. The hand that carries the engine's gun (voltaic_native_hands_) chooses for it, as the game does.
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {
+            if(!item || !ammo) return 0;
+            const int w=wheel_hand_.load();if(w<0 || w>1) return 0;
+            const unsigned side=static_cast<unsigned>(w);
+            if(voltaic_native_hands_.load(std::memory_order_relaxed)&(1u<<side)) return 0;   // the engine's gun: the game's own choice
+            Why wk{};const auto lk=locate(base,read,Shot::crossbow,wk);
+            if(!lk || rig::value<std::uintptr_t>(read,lk->record)!=item) return 0;   // not the Voltaic Gun
+            const auto entry=ammo_entry(read,lk->comp,ammo);if(!entry) return 0;
+            copy_ammo_[side][Shot::crossbow]=entry;hand_choice_[side][Shot::crossbow]=ammo;++wheel_picks_;++copy_ammo_sets_;
+            note_pick(side,Shot::crossbow,0,ammo_index(read,lk->comp,entry));
+            const bool in_slot1=rig::value<std::uintptr_t>(read,lk->inventory+0x70)==lk->record;
+            const auto keep=rig::value<std::uintptr_t>(read,lk->ammo);
+            return in_slot1 && keep && *keep?*keep:0;
+        }
         if(!item || !ammo) return 0;
         const int w=wheel_hand_.load();if(w<0 || w>1) return 0;
         const unsigned side=static_cast<unsigned>(w);
@@ -1140,6 +1157,7 @@ private:
 public:
     inline static std::atomic<std::uint64_t> voltaic_marks_{},voltaic_infos_{},charged_creates_{},overcharged_creates_{};
     static bool voltaic_charge_owned() noexcept {return charge_owned_.load(std::memory_order_relaxed);}
+    inline static std::atomic<unsigned> voltaic_native_hands_{1u};   // v145750: bit h = hand h's forearm carries the engine's gun (dxgi_probe, control thread)
 private:
     inline static std::atomic<bool> charge_owned_{};
 };

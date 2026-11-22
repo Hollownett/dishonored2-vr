@@ -12333,10 +12333,18 @@ void prepare_head_view(void* view) noexcept {
                 static std::array<float,2> ring_distance_m{30.f,30.f};
                 d2vr::EyeReticle ring{0,0,alt_display,game_xr->pose_epoch(),game_xr->reference_epoch(),GetTickCount64(),false};
                 const bool copy_gun=dual_wield_enabled && crosshair_visible_now.load() && d2vr::arm::is_gun(arm_copy_now(h));
-                const auto pose=copy_gun?d2vr::NativeWeaponHands::held_copy_pose(h):std::nullopt;
-                if(copy_gun && !pose && per_frame) ++copy_ring_no_pose[h];
+                // v145750 (user, DOTO headset v145749: "there is no second crosshair for the second weapon"): DOTO's forearm Voltaic copy is no
+                // ArmSet copy; its shots leave along its hand's aim ray (voltaic_copy_aim), so its ring stands on that ray.
+                bool voltaic_ring=false;std::optional<d2vr::WorldTrackedPose> pose;
+                if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic)
+                    if(!copy_gun && dual_wield_enabled && crosshair_visible_now.load() && voltaic_copy_at[h].load(std::memory_order_relaxed)) {
+                        std::lock_guard<std::mutex> l(voltaic_aim_mutex);
+                        if(voltaic_copy_aim_tick[h] && GetTickCount64()-voltaic_copy_aim_tick[h]<=250) {pose=voltaic_copy_aim[h];voltaic_ring=true;}
+                    }
+                if(copy_gun) pose=d2vr::NativeWeaponHands::held_copy_pose(h);
+                if((copy_gun || voltaic_ring) && !pose && per_frame) ++copy_ring_no_pose[h];
                 if(pose) {
-                    const auto muzzle=pose->position+pose->basis[0]*.2;
+                    const auto muzzle=voltaic_ring?pose->position:pose->position+pose->basis[0]*.2;
                     if(per_frame) {
                         std::optional<double> fraction;
                         if(const auto hit=d2vr::NativeInteractionAim::weapon_hit(h,d2vr::NativeInteractionAim::copy_crosshair_slot,GetTickCount64(),d2vr::NativeInteractionAim::producer_crosshair)) fraction=hit->fraction;
@@ -16694,6 +16702,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             if(!dual_wield_enabled) varms=native?1u:0u;
                                             else if(!voltaic_copy_knob) varms=native && varms?1u:0u;   // no copy (build/no-voltaic-copy): the engine's gun on the left, as before
                                             voltaic_arms_now.store(varms,std::memory_order_relaxed);
+                                            d2vr::NativeRangedFire::voltaic_native_hands_.store(native && (varms&1u)?1u:0u,std::memory_order_relaxed);   // v145750: whose wheel picks the engine gun's ammo
                                             for(unsigned h=0;h<2;++h) if(arrived&(1u<<h)) {
                                                 arm_set.wheel_nothing(h);   // the gun is VoltaicArms': ArmSet's ticket for this wheel must not take the next arrival (a restored power)
                                                 if(voltaic_restore_hand==static_cast<int>(h) && voltaic_restore_decl) {   // the other arm's power (or gadget) equipped again
