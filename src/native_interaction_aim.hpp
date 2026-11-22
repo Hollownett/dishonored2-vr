@@ -2761,8 +2761,13 @@ public:
         if(!active_ || stopping_ || !physical_grab_ || !physical_grab_->enabled())
             throw std::runtime_error("Native door interaction requires installed interaction and physical grab hooks");
         door_installed_=true;
-        if(!NativeDoorInteraction::process_owner().install(base_,read_,logic_,physical_grab_))
+        if(!NativeDoorInteraction::process_owner().install(base_,read_,logic_,physical_grab_)) {
+#if defined(D2VR_GAME_DOTO)
+            door_installed_=false;return;   // Death of the Outsider: doors whose engine code changed keep the game's own interaction
+#else
             throw std::runtime_error("Cannot install native door interaction owner");
+#endif
+        }
     }
     void install(std::uintptr_t base,Read read,Logic logic,bool route,const std::filesystem::path& file,bool observe_lean=false,bool observe_lean_lifetime=false) {
         if(active_.load(std::memory_order_acquire) || depth_.load(std::memory_order_acquire) ||
