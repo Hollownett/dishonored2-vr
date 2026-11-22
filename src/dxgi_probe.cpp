@@ -2543,7 +2543,7 @@ static bool xr_requested=false;
 static bool controller_requested=false,controller_import_restored=true;
 static d2vr::XInputBridge controller_bridge;
 static d2vr::NativePadFocus native_pad_focus;
-// v145722 (DOTO headset 2026-11-22: sticks and Menu dead without window focus): live focus cvars, set through the console when wrong.
+// v145722 (DOTO headset 2026-11-22: sticks and Menu dead without window focus): live focus cvars, written when wrong (v145725).
 static d2vr::FocusCvarGuard focus_cvar_guard;
 static std::atomic<int> focus_inactive_value{-1},focus_pause_value{-1};   // -1 = not readable (yet)
 static std::atomic<bool> focus_window_foreground{};
@@ -15820,7 +15820,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           << ",\"start_reads\":" << controller_bridge.pause_reads()
                                           << ",\"pad_gate\":[" << native_pad_focus.calls() << ',' << native_pad_focus.overrides() << ',' << native_pad_focus.window_calls() << ',' << native_pad_focus.window_overrides()
                                           << "],\"in_controlInactiveWindow\":" << focus_inactive_value.load() << ",\"win_pauseOnFocusLoss\":" << focus_pause_value.load()
-                                          << ",\"cvar_sets\":" << focus_cvar_guard.sets() << '}'
+                                          << ",\"cvar_sets\":" << focus_cvar_guard.sets() << ",\"cvar_set_failures\":" << focus_cvar_guard.failures() << '}'
                                           << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json() << ",\"ctx_probe\":" << ctx_probe_json() // v1423
                                           << ",\"paired_prev_probe\":" << paired_prev_probe_json() // v1426
                                           << ",\"job_wake\":" << d2vr::job_wake::json(frames.load()) << ",\"core_isolation\":" << d2vr::core_isolation::json() << ",\"overlap_probe\":" << d2vr::overlap_probe::json() << ",\"spacewarp_safe_mid\":" << (safe_mid_knob?d2vr::safe_mid::json(image_base):std::string("null")) // v1430/v1432
@@ -17741,11 +17741,13 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     static std::uint64_t focus_cvar_tick{};const auto now_f=GetTickCount64();
                                     if(now_f-focus_cvar_tick>=1000) {
                                         focus_cvar_tick=now_f;
+                                        // v145725: the engine refuses these from config and console after startup (v145722: 6 console
+                                        // sets queued, values unchanged), so the int/float fields the focus code reads are written directly.
+                                        focus_cvar_guard.update(&read_self,&write_self,image_base,logic!=0);
                                         const auto inactive=d2vr::FocusCvars::inactive_window(&read_self,image_base);
                                         const auto pause=d2vr::FocusCvars::pause_on_focus_loss(&read_self,image_base);
                                         focus_inactive_value=inactive?*inactive:-1;focus_pause_value=pause?*pause:-1;
                                         focus_window_foreground=GetForegroundWindow()==desc.OutputWindow;
-                                        focus_cvar_guard.update(inactive,pause,logic!=0,now_f,[](const char* line){d2vr::NativeInteractionAim::request_console(line);});
                                     }
                                 }
                                 controller_bridge.publish(input,logic==2);
