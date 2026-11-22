@@ -17797,7 +17797,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         busy=busy || use_hand==static_cast<int>(rh) || !controls_focus || input.menu_modifier || x_wheel.wheel() || input.lean_suspended;
                                         if(timepiece_grip.update(equipped,raw_grip(rh),tp_state,busy,use_now)) input.x=true;
                                     }
-                                    if(grab_guard[rh] && !timepiece_out()) input.left_trigger=0;   // v1254: the trigger that shifts time is the Timepiece's, not a grab's
+                                    // v1459 / DOTO v145751 (user, both games: "the first shot does not register"; DOTO headset journal: grip and trigger
+                                // pressed in the same frame, the pad's LT 0 on that press, the next one with the grip still held fired): the grab guard
+                                // swallows a trigger pulled within 400 ms of its grip's squeeze. A hand whose grip is a gun's own (the forearm gun's fire
+                                // chord IS grip + trigger; a drawn gun held by its grip) and that holds nothing is not grabbing: its first shot goes.
+                                const bool gun_chord_hand=!(physical_grab_requested && native_grab.holding(rh)) && (left_forearm_gun.load() || (left_gun_model.load()!=0 && gun_grip.held()));
+                                if(grab_guard[rh] && !timepiece_out() && !gun_chord_hand) input.left_trigger=0;   // v1254: the trigger that shifts time is the Timepiece's, not a grab's
                                     {   // A grenade or mine in the slot-1 hand. Last word on the left trigger.
                                         // Without dual wield (user, headset v671): the fist holds the game's left trigger (aim / cook), opening the hand lets it go
                                         // (the throw / the placement); the trigger alone still works.

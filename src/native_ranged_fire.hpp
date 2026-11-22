@@ -319,7 +319,11 @@ public:
             if(!item || !ammo) return 0;
             const int w=wheel_hand_.load();if(w<0 || w>1) return 0;
             const unsigned side=static_cast<unsigned>(w);
-            if(voltaic_native_hands_.load(std::memory_order_relaxed)&(1u<<side)) return 0;   // the engine's gun: the game's own choice
+            // v145751 (user: "the left forearm does not always pick up the right bolt"): the left forearm shows the ENGINE's gun whenever it
+            // carries one (or gets it from this very choice), so the left wheel always chooses for the engine's gun; v145750 asked whether it
+            // carried it NOW, and a left choice made while only the right had the gun went to an unused left copy slot.
+            if(side==0) return 0;   // the engine's gun: the game's own choice
+            (void)voltaic_native_hands_;
             Why wk{};const auto lk=locate(base,read,Shot::crossbow,wk);
             if(!lk || rig::value<std::uintptr_t>(read,lk->record)!=item) return 0;   // not the Voltaic Gun
             const auto entry=ammo_entry(read,lk->comp,ammo);if(!entry) return 0;
