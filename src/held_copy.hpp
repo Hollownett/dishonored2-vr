@@ -102,7 +102,8 @@ inline bool name_has(std::string_view name,std::string_view part) noexcept {
 }
 inline Kind kind_of(std::string_view def) noexcept {
     if(name_has(def,"crossbow")) return Kind::crossbow;
-    if(name_has(def,"sword") || name_has(def,"blade") || name_has(def,"cutlass")) return Kind::sword;
+    // "knife": Death of the Outsider's blades (ply_billie_knife01.def, the copy knife_midnight.def; game_profile.hpp sword_copy_def)
+    if(name_has(def,"sword") || name_has(def,"blade") || name_has(def,"cutlass") || name_has(def,"knife")) return Kind::sword;
     if(name_has(def,"gun") || name_has(def,"pistol")) return Kind::pistol;
     return Kind::other;
 }

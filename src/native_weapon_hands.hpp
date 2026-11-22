@@ -12,6 +12,7 @@
 //   the grab motor's velocity (sim v413: three writes, no motion). So the mod flies it: gravity, spin, the native world
 //   sphere-cast for what it meets, and idEntity::Teleport 87d1e0(entity, origin, axis rows, 0) every game frame.
 #include <windows.h>
+#include "game_profile.hpp"
 #include "game_rig.hpp"
 #include "native_rigid_body.hpp"
 #include "native_melee.hpp"
@@ -146,7 +147,7 @@ public:
     // The exact sword the hand holds (the cinematic copy of sword_player.md6: refframe + animation, no physics, no audio). The
     // howler sword prop used before carried an audio component; spawned and removed 47 times in a headset session, the audio
     // update crashed on a freed emitter (2026-10-13, rva 0xc3e00 from 0x709de7). One copy per level, hidden and shown again.
-    static constexpr const char* sword_copy_decl="models/campaign/dunwall/midnightassets/sword_player_midnight.def";
+    static constexpr const char* sword_copy_decl=game_traits::sword_copy_def;   // D2: dunwall/midnightassets/sword_player_midnight.def (src/game_profile.hpp)
     // Any thread: queued for the next game-thread service.
     static bool request(const Request& r) {
         const auto ok=[](const auto& a){return std::all_of(a.begin(),a.end(),[](float v){return std::isfinite(v);});};

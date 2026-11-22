@@ -18,11 +18,15 @@ inline constexpr std::uint64_t render_pipeline_depth = 0;
 inline constexpr bool optional_native_consumers = true;
 // The player avatar: Billie Lurk (six textured body surfaces) instead of Corvo/Emily (one hidden proxy surface).
 inline constexpr bool billie_avatar = true;
+// The standalone world model the mod spawns for a dropped/thrown/second-hand blade (no physics, no audio): DOTO has no
+// dunwall/midnightassets; its bank mission's cinematic knife is Billie's blade as a plain entity (resource index 2026-11-22).
+inline constexpr const char* sword_copy_def = "models/campaign/dlc01/bank/midnight_props/knife_midnight.def";
 #else
 inline constexpr const char* name = "Dishonored 2";
 inline constexpr const char* exe = "Dishonored2.exe";
 inline constexpr std::uint64_t render_pipeline_depth = 1;   // Setup N is consumed by Begin N+1
 inline constexpr bool optional_native_consumers = false;    // every verified consumer is required
 inline constexpr bool billie_avatar = false;
+inline constexpr const char* sword_copy_def = "models/campaign/dunwall/midnightassets/sword_player_midnight.def";
 #endif
 } // namespace d2vr::game_traits

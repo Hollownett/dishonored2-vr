@@ -37,21 +37,28 @@
 
 namespace d2vr {
 namespace gadget_drop {
-enum class Kind : unsigned {any,regular_grenade,sticky_grenade,stun_mine,spring_razor,heart};
+// hook_mine / concussion_grenade: Death of the Outsider's gadgets (Billie). DOTO ships both decls
+// (models/weapons/gadgets/hook_mine_equipment.def, models/weapons/dlc01/gadgets/concussion_grenade_equipment.def, their
+// inventory items and ammo_* pickups, read from the game's resource index 2026-11-22); in D2 no item matches them. DOTO has
+// no ammo_stun_mine pickup and no Heart, so those two rows simply never match there.
+enum class Kind : unsigned {any,regular_grenade,sticky_grenade,stun_mine,spring_razor,heart,hook_mine,concussion_grenade};
 struct KindInfo {Kind kind;const char* label;const char* equipment;const char* pickup_def;bool mine;const char* item;bool keep;}; // item: the inventory item decl (live name);
 // keep: the item never leaves the inventory (the Heart, v773: its pickup is only seen in the world; a take or a re-equip removes it)
-inline constexpr std::array<KindInfo,5> kinds{{
+inline constexpr std::array<KindInfo,7> kinds{{
     {Kind::regular_grenade,"regular_grenade","regular_grenade_equipment","models/interactive/pickups_entities/ammo_grenade_regular.def",false,"regular_grenade.inventoryitem",false},
     {Kind::sticky_grenade,"sticky_grenade","sticky_grenade_equipment","models/interactive/pickups_entities/ammo_grenade_sticky.def",false,"sticky_grenade.inventoryitem",false},
     {Kind::stun_mine,"stun_mine","stun_mine_equipment","models/interactive/pickups_entities/ammo_stun_mine.def",true,"stun_mine.inventoryitem",false},
     {Kind::spring_razor,"spring_razor","springrazor_equipment","models/interactive/pickups_entities/ammo_springrazor.def",true,"springrazor.inventoryitem",false},
-    {Kind::heart,"heart","heart_equipment","models/weapons/heart/heart_pickup.def",false,"heart.inventoryitem",true}}};
+    {Kind::heart,"heart","heart_equipment","models/weapons/heart/heart_pickup.def",false,"heart.inventoryitem",true},
+    {Kind::hook_mine,"hook_mine","hook_mine_equipment","models/interactive/pickups_entities/ammo_hook_mine.def",true,"hook_mine.inventoryitem",false},
+    {Kind::concussion_grenade,"concussion_grenade","concussion_grenade_equipment","models/interactive/pickups_entities/ammo_concussion_grenade.def",false,"concussion_grenade.inventoryitem",false}}};
 inline const KindInfo* info(Kind k) noexcept {for(const auto& i:kinds) if(i.kind==k) return &i;return nullptr;}
 // v781: the name NativeWeaponHands::test_equip finds the kind's inventory item by (the "equip" test command's, live since sim v769).
 inline const char* equip_key(Kind k) noexcept {
     switch(k) {
     case Kind::regular_grenade: return "regular_grenade";case Kind::sticky_grenade: return "sticky_grenade";case Kind::stun_mine: return "stun_mine";
-    case Kind::spring_razor: return "springrazor";case Kind::heart: return "heart";default: return nullptr;
+    case Kind::spring_razor: return "springrazor";case Kind::heart: return "heart";
+    case Kind::hook_mine: return "hook_mine";case Kind::concussion_grenade: return "concussion_grenade";default: return nullptr;
     }
 }
 // The equipped weapon entity's decl name (".../regular_grenade_equipment.def", any case) -> its kind; Kind::any = not a gadget.
@@ -255,7 +262,7 @@ private:
         std::uintptr_t entity{},item_decl{};std::uint32_t id{};Kind kind{};gadget_drop::GadgetFlight flight;
         std::array<float,3> commanded{},rest_pos{};std::array<float,9> rest_axis{};bool have_command{},physics{},rested{},probed{};
         std::array<float,3> live{};bool have_live{};   // v1046: the engine's own position (entity+0x300), read each service: a pickup the engine simulates (physics) no longer follows commanded/rest_pos
-        bool keep{};                                // KindInfo::keep: the item stayed in the inventory
+        bool keep{};                                // KindInfo::keep: the item stayed in the inventory
         int count{1};                               // v790: the stack this pickup carries (0: the game consumed nothing)
         std::optional<NativeCastExclusion> self;   // its own body, once the engine started it (sim v767: else the sweep met only the item and it fell through the deck)
         double last_s{},rest_s{},spawn_s{},probe_s{};
@@ -499,7 +506,7 @@ private:
             auto& t=tracked_[i];
             if(!alive_entity(*game,read,t.entity,t.id)) {tracked_.erase(tracked_.begin()+static_cast<std::ptrdiff_t>(i));continue;}   // taken by the native Use, removed or unloaded
             ++i;
-            const bool mine=t.kind==Kind::stun_mine || t.kind==Kind::spring_razor;
+            const bool mine=t.kind==Kind::stun_mine || t.kind==Kind::spring_razor || t.kind==Kind::hook_mine;
             if((!t.probed && now-t.spawn_s>=probe_after_s) || (mine && t.probed && now-t.probe_s>=1)) { // a lying mine: its state every second (does it arm?)
                 const bool first=!t.probed;t.probed=true;t.probe_s=now;const auto p=read_probe(base,read,t);
                 std::lock_guard<std::mutex> l(m_);if(first) probe_=p;if(mine) mine_probes_[t.kind==Kind::spring_razor?1:0]=p;
