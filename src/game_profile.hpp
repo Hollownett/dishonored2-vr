@@ -46,6 +46,9 @@ inline constexpr bool ranged_player_weapon_is_voltaic = true;
 // user, DOTO headset v145734: the gun moved with the hand and the hand stuck in a fist whenever its tag was not the helper2 one).
 inline constexpr bool bind_any_arm_joint = true;
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0x1c45768, voltaic_decl_vtable = 0x1c45618;
+// v145741 (live, lab9: the inventory's GaussGun record 0x40138 -> its component's +0x10 owner): the Voltaic Gun's entity is a plain
+// idEntity (vtable 0x1d0dd88), not the weapon entity class the crossbow uses; owner +0xb4 is the player, id +0xb0 matches.
+inline constexpr std::uintptr_t voltaic_entity_vtable = 0x1d0dd88;
 // The second gun the other forearm shows in dual wield: the gun's own entity def, spawned by name (no owner: its components never start).
 inline constexpr const char* voltaic_copy_def = "models/weapons/dlc01/player/billie/gaussgun01/ply_billie_gaussgun01.def";
 // The Gauss fire (combat-port.md section 2): before its create it copies byte comp+0xe0 into the create/sound configure byte comp+0xb0;
@@ -70,6 +73,7 @@ inline constexpr std::array<unsigned char,8> slash_perform_unwind{1,8,2,0,8,0xb2
 inline constexpr bool ranged_player_weapon_is_voltaic = false;   // the pistol and the crossbow (arkCpntWeaponGun / arkCpntWeaponCrossbow)
 inline constexpr bool bind_any_arm_joint = false;   // D2: hand attachment 59 (and a forearm helper) only, as since v1319
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0, voltaic_decl_vtable = 0;
+inline constexpr std::uintptr_t voltaic_entity_vtable = 0;
 inline constexpr const char* voltaic_copy_def = nullptr;
 inline constexpr std::uintptr_t voltaic_configure = 0, voltaic_configure_from = 0, voltaic_mark_attribute = 0,
     voltaic_entity_decl = 0, voltaic_mark_decl = 0, voltaic_info_def = 0, voltaic_info_value = 0, voltaic_info_field = 0;

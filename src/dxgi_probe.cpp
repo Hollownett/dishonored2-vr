@@ -17557,7 +17557,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                     // Both hands thrown up above the head = native A (jump), held while they stay up (mantle at a ledge).
                                     {static bool jump_was{};if(gesture.jump && !jump_was) ++gesture_jumps;jump_was=gesture.jump;if(gesture.jump) input.a=true;}
-                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget && !timepiece_out()) input.left_trigger=0; // a fist never fires; a gripped gun or gadget does; the Timepiece's trigger is its time shift (v1254)
+                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget && !timepiece_out() && !left_forearm_gun.load()) input.left_trigger=0; // v145741: not the forearm Voltaic Gun (its fire chord IS grip + trigger; lab8: 280 chord frames, no shot). a fist never fires; a gripped gun or gadget does; the Timepiece's trigger is its time shift (v1254)
                                     if(GetTickCount64()<gesture_cast_until) input.left_trigger=1;
                                     if(gesture_release_until) {if(raw_trigger(rh)<.3f) gesture_release_until=0;else input.left_trigger=0;} // yoink: release the aimed power, held until the trigger is let go
                                 }

@@ -426,7 +426,8 @@ public:
             if(!refused_[i].load()) continue;
             o<<(first?"":",")<<'"'<<ranged_fire::name(static_cast<Why>(i))<<"\":"<<refused_[i].load();first=false;
         }
-        o<<"},\"fired\":"<<fired_.load()<<",\"dry_plans\":"<<dry_plans_.load()<<",\"projectiles_created\":"<<created_.load()
+        o<<"},\"no_comp\":["<<no_comp_why_[0].load()<<','<<no_comp_why_[1].load()<<','<<no_comp_why_[2].load()<<','<<no_comp_why_[3].load()<<','<<no_comp_why_[4].load()<<','<<no_comp_why_[5].load()<<','<<no_comp_vtable_.load()
+         <<"],\"fired\":"<<fired_.load()<<",\"dry_plans\":"<<dry_plans_.load()<<",\"projectiles_created\":"<<created_.load()
          <<",\"launched\":"<<launched_.load()<<",\"reloads\":"<<reloads_.load()
          <<",\"components\":{\"total_at_create\":"<<comps_total_.load()<<",\"started_at_create\":"<<comps_started0_.load()
          <<",\"started_at_100ms\":"<<comps_started100_.load()<<",\"projectile_comp_started_at_100ms\":"<<proj_comp_started100_.load()
@@ -458,6 +459,7 @@ public:
     inline static std::atomic<std::uint64_t> requests_{},serviced_{},services_{},failures_{},fired_{},created_{},launched_{},reloads_{},dry_plans_{},
         comps_total_{},comps_started0_{},comps_started100_{},proj_comp_started100_{},moved_{},stationary_{},ended_early_{},alive_4s_{},spent_{},ammo_mismatch_{},entity_finds_{},unstarted_shots_{}; // entity_finds_: shots whose weapon was found through its entity (v762)
     inline static std::atomic<int> pool_before_{-1},pool_after_{-1},mag_before_{-1},mag_after_{-1};
+    inline static std::array<std::atomic<std::uint32_t>,6> no_comp_why_{};inline static std::atomic<std::uintptr_t> no_comp_vtable_{};
 
     // What the sequence needs, read from the game for one shot.
     struct Located {
@@ -467,6 +469,11 @@ public:
     };
     inline static constexpr std::uintptr_t game_rva=0x39a5290,entities_offset=0x3130b0,player_vtable=0x1c5e428,game_vtable=0x1c940a8,
         inventory_vtable=0x1b9a878,weapon_entity_vtable=0x1ce1e98,projectile_info_rva=0x39d77e0;
+    // DOTO: the Voltaic Gun's entity is a plain idEntity (game_traits::voltaic_entity_vtable); Dishonored 2 never takes this route.
+    template<class Read> static bool voltaic_entity(Read& read,std::uintptr_t base,std::uintptr_t entity) {
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic && game_traits::voltaic_entity_vtable!=0) return rig::typed(read,base,entity,game_traits::voltaic_entity_vtable);
+        else {(void)read;(void)base;(void)entity;return false;}
+    }
     struct KindInfo {std::uintptr_t comp_vtable,decl_vtable;};
     // Death of the Outsider (game_traits::ranged_player_weapon_is_voltaic): the crossbow kind is Billie's Voltaic Gun, the pistol kind has no
     // player weapon ({0,0}: locate() answers no_weapon at once).
@@ -514,7 +521,7 @@ public:
         for(std::uint32_t i=0;i<items->packed_count && !candidate;++i) {
             const auto rec=value<Rec>(read,items->data+i*0x38ull);if(!rec || !valid_id(rec->id)) continue;
             const auto entity=value<std::uintptr_t>(read,l.game+entities_offset+(rec->id>>16)*8ull);
-            if(!entity || !*entity || !typed(read,base,*entity,weapon_entity_vtable)) continue;
+            if(!entity || !*entity || (!typed(read,base,*entity,weapon_entity_vtable) && !voltaic_entity(read,base,*entity))) continue;
             const auto comps=list(read,*entity+0x268,4096);if(!comps) continue;
             for(std::uint32_t c=0;c<comps->packed_count && c<64;++c) {
                 const auto comp=value<std::uintptr_t>(read,comps->data+c*8ull);
@@ -524,10 +531,14 @@ public:
         }
         if(!candidate) return {};
         why=Why::no_component;
-        if(value<std::uintptr_t>(read,l.comp+8)!=l.decl || !valid_id(l.entity_id)) return {};
+        // v145741 (DOTO lab8: no_component 8 of 8): which identity check refused [decl, id, entity, entity type, entity id, owner]
+        if(value<std::uintptr_t>(read,l.comp+8)!=l.decl) {++no_comp_why_[0];return {};}
+        if(!valid_id(l.entity_id)) {++no_comp_why_[1];return {};}
         const auto entity=value<std::uintptr_t>(read,l.game+entities_offset+(l.entity_id>>16)*8ull);
-        if(!entity || !typed(read,base,*entity,weapon_entity_vtable) || value<std::uint32_t>(read,*entity+0xa8)!=l.entity_id ||
-           value<std::uintptr_t>(read,l.comp+0x10)!=entity) return {};
+        if(!entity || !*entity) {++no_comp_why_[2];return {};}
+        if(!typed(read,base,*entity,weapon_entity_vtable) && !voltaic_entity(read,base,*entity)) {++no_comp_why_[3];no_comp_vtable_=value<std::uintptr_t>(read,*entity).value_or(0)-base;return {};}
+        if(value<std::uint32_t>(read,*entity+0xa8)!=l.entity_id) {++no_comp_why_[4];return {};}
+        if(value<std::uintptr_t>(read,l.comp+0x10)!=entity) {++no_comp_why_[5];return {};}
         l.entity=*entity;
         why=Why::bad_owner;
         if(value<std::uint32_t>(read,l.entity+0xac)!=l.player_id) return {}; // 63b5f0 / 639970 dereference the owner: it must be the player
