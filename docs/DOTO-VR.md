@@ -8,8 +8,9 @@ Status (2026-11-22, first night): the port pipeline, the DOTO DLL build, the lau
 exist, and **the VR core runs in Death of the Outsider under the simulated headset**: tracked stereo gameplay with every
 frame paired, per-eye head tracking, native turning, comfort settings, per-eye TAA history and the menus on the VR panel
 (see §5), Billie's tracked hands and **her full body** (her own coat, torso and Voltaic Gun arm when looking down).
-Nothing has been tried in a real headset yet. This document is the design and the plan. The mod is one source tree
-for both games (§8).
+First headset session 2026-11-22 (Virtual Desktop, v145721): controller input did not reach the game, the sword looked
+black, quest markers were flat; v145722 addresses the input and marker causes (see the headset row in §5). This document
+is the design and the plan. The mod is one source tree for both games (§8).
 
 ![Simulated-headset mirror of Death of the Outsider in VR, both eyes side by side](images/doto/play7-stereo-mirror.png)
 
@@ -147,6 +148,7 @@ Simulated sessions (`tools/doto/doto_sim.py`, the mod's simulated OpenXR runtime
 | play19 | v145720 | **in-game VR Settings in DOTO**: pause -> VR Settings -> the native VR options page (1 click, 1 page, 0 faults, 0 failed steps) -> B back to the pause list -> B to gameplay (`pause_vr_settings` scenario) |
 | play20 | v145720 | avatar check: body IK and arm IK every frame at D2 parity (body solves, body-pose uploads and per-arm two-bone IK poses, 0 rejected); but Billie's fingers used the game's pose (finger mode 3): the hand-state snapshot never read an empty hand. `tools/doto/hand_state_probe.py` (read-only) found the player state machine's pool at +0x98, not +0x90 |
 | play21 | v145721 | **state machine layout fixed for every reader** (`offsets.json` "structs"): fingers follow grip and trigger (finger mode 1 on 5,485/5,485 frames, both hands empty); live: pool +0x98, controller +0x350, body +0x358, interaction +0x370, inventory +0x380, attributes +0x388, sensor container +0x390; state ids 18/39/44/45/49/50/53/54/64 unchanged (Leaning, Slash, Block, CarryCorpse, HoldObject, EquipChange, Draw) |
+| headset 1 | v145721 | **first real headset session** (user, Virtual Desktop): sticks and Menu did not reach the game; the sword looked black; quest markers flat on the HUD panel. Causes found: (1) every sim run had the game window in the foreground (`game_window_foreground` true, pad-gate overrides 0), so the no-focus input path was never exercised, and the game paused itself on focus loss (logic 4) although the launcher writes `win_pauseOnFocusLoss "0"` / `in_controlInactiveWindow "1"` into its config; v145722 reads both cvars live (`src/focus_cvars.hpp`, idCVar +0x28 value / +0x30 name; objects in `offsets.json` "rvas") and sets them through the engine console when wrong, and the always-on `xr-live-status.json` gets an `input` block (foreground, XR focus, reads, pad gate, cvars). (2) the Iggy value-ref construct pin (D2 0x28e50, DOTO 0x29490: frame 0x30 -> 0x40, same ABI) never matched, so no native HUD art was ever bound (play21: `native_hud_children.published` 0, `marker_published` 0); fixed by a text rule. The black sword is open (hip vs hand to confirm) |
 
 ![Clip: walking while looking down in Death of the Outsider VR, Billie's body and hands in both eyes (simulated headset)](images/doto/play15-look-down-walk.webp)
 
@@ -161,12 +163,13 @@ fields at -0x10, `arkPlayer` model +0xf8 / components +0x270 (98) / origin +0x31
 
 1. Close the running Dishonored VR launcher (one instance at a time), then start
    `launcher\dist-doto\DishonoredVRLauncher.exe` (developer mode: Dishonored 2 keeps using the repository as before).
-2. Open the **OUTSIDER** tab. It installs the Death of the Outsider mod into `%LOCALAPPDATA%\DishonoredVR-DOTO`, copies your
-   Dishonored 2 VR settings (option "Use my Dishonored 2 VR settings") and shows the checks.
+2. On the **Play** tab pick **Death of the Outsider** in the game switch above the page (Dishonored 2 is the default). It
+   installs the Death of the Outsider mod into `%LOCALAPPDATA%\DishonoredVR-DOTO`, copies your Dishonored 2 VR settings
+   (option "Use my Dishonored 2 VR settings") and your DLSS location (`build\dlss-dll-path`), and shows the checks.
 3. Start Virtual Desktop or SteamVR as for Dishonored 2 and press **LAUNCH VR**. The launcher installs the proxy beside
    `Dishonored_DO.exe` and starts the game through Steam; VR attaches at the title screen.
 4. Campaign > Continue loads the campaign the night's tests started (slot 01, the opening of the first mission); New Game works too.
-5. **Uninstall proxy (DOTO)** on the same tab makes the game flat again.
+5. **Uninstall proxy (DOTO)** on the same page makes the game flat again.
 
 In the game, **Pause > VR Settings** opens the VR options (the same page as in Dishonored 2); B goes back.
 

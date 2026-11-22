@@ -101,7 +101,12 @@ sealed class MainForm : Form
     // Page indexes (--page names: play, outsider, settings, tools, controls, updates).
     const int PPlay = 0, POutsider = 1, PSettings = 2, PTools = 3, PControls = 4, PUpdates = 5;
     readonly ArtPanel[] pages = { new(), new(), new(), new(), new(), new() };
-    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Outsider", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav), new("Updates", Look.Nav) };
+    // The left menu has no Outsider entry: Play shows one game at a time (POutsider is Play's page for Death of the Outsider, picked with the switcher above the content).
+    static readonly int[] NavPages = { PPlay, PSettings, PTools, PControls, PUpdates };
+    const int NavUpdates = 4;
+    readonly ArtButton[] nav = { new("Play", Look.Nav), new("Settings", Look.Nav), new("Tools", Look.Nav), new("Controls", Look.Nav), new("Updates", Look.Nav) };
+    readonly ArtButton gameD2 = new("Dishonored 2", Look.Tab), gameDoto = new("Death of the Outsider", Look.Tab);
+    bool playDoto;  // the game Play currently shows
 
     // Death of the Outsider page (GameProfile.Doto; its own mod home, DotoEnv)
     public Env DotoEnv { get; init; } = null!;
@@ -172,8 +177,12 @@ sealed class MainForm : Form
         try { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch (Exception) { }  // the exe icon (launcher.ico) in the title bar and taskbar
         LoadArt();
 
-        for (int i = 0; i < nav.Length; i++) { int idx = i; nav[i].Click += (_, _) => ShowPage(idx); Controls.Add(nav[i]); }
+        for (int i = 0; i < nav.Length; i++) { int idx = i; nav[i].Click += (_, _) => ShowPage(NavPages[idx] == PPlay && playDoto ? POutsider : NavPages[idx]); Controls.Add(nav[i]); }
         importArt.Click += async (_, _) => await ImportArt(); Controls.Add(importArt);
+        gameD2.Click += (_, _) => { playDoto = false; ShowPage(PPlay); };
+        gameDoto.Click += (_, _) => { playDoto = true; ShowPage(POutsider); };
+        Controls.Add(gameD2); Controls.Add(gameDoto);
+        playDoto = startPage == POutsider;
         foreach (var p in pages) { p.Visible = false; Controls.Add(p); }
 
         // ---- Play page
@@ -331,7 +340,7 @@ sealed class MainForm : Form
             if (AnyLaunching && MessageBox.Show("VR is running from this launcher. Closing it leaves VR running (reopen the launcher to stop it), " +
                 "but this session's launch record and run archive will not be written.\nClose anyway?", Text, MessageBoxButtons.YesNo) != DialogResult.Yes) ev.Cancel = true;
         };
-        FormClosed += (_, _) => { dlssCts?.Cancel(); poll.Dispose(); Ui.Art.Dispose(); Ui.Backdrop?.Dispose(); Ui.Backdrop = null; };
+        FormClosed += (_, _) => { dlssCts?.Cancel(); dotoHero?.Dispose(); dotoLogo?.Dispose(); poll.Dispose(); Ui.Art.Dispose(); Ui.Backdrop?.Dispose(); Ui.Backdrop = null; };
     }
 
     // ---------- window, DPI, art
@@ -450,6 +459,8 @@ sealed class MainForm : Form
         if (!IsHandleCreated || ClientSize.Width < 50 || ClientSize.Height < 50) return;
         SuspendLayout();
         for (int i = 0; i < nav.Length; i++) { nav[i].Bounds = new Rectangle(S(40), S(176) + i * S(50), S(224), S(46)); nav[i].TabIndex = i; }
+        gameD2.Bounds = new Rectangle(S(300), S(134), Math.Max(S(150), gameD2.Natural), S(32));
+        gameDoto.Bounds = new Rectangle(gameD2.Right + S(10), S(134), Math.Max(S(190), gameDoto.Natural), S(32));
         importArt.Bounds = new Rectangle(S(44), ClientSize.Height - S(120), Math.Max(S(200), importArt.Natural), S(38)); importArt.TabIndex = 8;
         for (int i = 0; i < pages.Length; i++) { pages[i].Bounds = PageRect(i); pages[i].TabIndex = 3 + i; }
         var mono = Ui.Font(this, 9.5f, FontStyle.Regular, Ui.Mono);
@@ -651,6 +662,39 @@ sealed class MainForm : Form
         if (old != null && old != bmp && !backdrops.ContainsValue(old)) old.Dispose();
     }
 
+    /// <summary>Death of the Outsider art from Steam's library cache (appcache\librarycache\&lt;appid&gt;\library_hero.jpg, logo.png; the older flat layout
+    /// &lt;appid&gt;_library_hero.jpg too). Null when Steam or the file is missing: the page then falls back to the plain dark background and the D2 logo.</summary>
+    Bitmap? dotoHero, dotoLogo; bool dotoArtLoaded;
+    Bitmap? DotoHero { get { LoadDotoArt(); return dotoHero; } }
+    Bitmap? DotoLogo { get { LoadDotoArt(); return dotoLogo; } }
+    void LoadDotoArt()
+    {
+        if (dotoArtLoaded) return;
+        dotoArtLoaded = true;
+        if (noArt) return;
+        Bitmap? Load(params string[] names)
+        {
+            try
+            {
+                var steam = DlssFinder.SteamRoot(); if (steam == null) return null;
+                var cache = Path.Combine(steam, "appcache", "librarycache"); var id = Doto.SteamAppId.ToString();
+                foreach (var n in names)
+                    foreach (var f in new[] { Path.Combine(cache, id, n), Path.Combine(cache, id + "_" + n) })
+                        if (File.Exists(f))
+                        {
+                            using var src = new Bitmap(f);
+                            var b = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppPArgb);
+                            using var g = Graphics.FromImage(b); g.CompositingMode = CompositingMode.SourceCopy; g.DrawImage(src, 0, 0, src.Width, src.Height);
+                            return b;
+                        }
+            }
+            catch (Exception) { }
+            return null;
+        }
+        dotoHero = Load("library_hero.jpg", "header.jpg");
+        dotoLogo = Load("logo.png");
+    }
+
     Bitmap RenderBackdrop()
     {
         int W = ClientSize.Width, H = ClientSize.Height;
@@ -659,10 +703,16 @@ sealed class MainForm : Form
         {
             Ui.Quality(g); g.Clear(Ui.Ink);
             var art = Ui.Art; float k = DeviceDpi / 96f; int cr = pages[page].Right;
-            var hero = art[page switch { PPlay or POutsider => "key_art", PSettings => "portrait_emily", _ => "portrait_corvo" }];
-            if (hero != null)
+            var hero = page == POutsider ? DotoHero : art[page switch { PPlay => "key_art", PSettings => "portrait_emily", _ => "portrait_corvo" }];
+            if (page == POutsider && hero != null)
+            {   // Steam's wide library hero: cover the window height, centred right of the content, the ink veil below fades it into the menu
+                float s = H * 1.0f / hero.Height, w = hero.Width * s;
+                float fx = Math.Max(W * .7f, cr + 40 * k);
+                g.DrawImage(hero, new RectangleF(fx - w / 2, 0, w, H));
+            }
+            else if (hero != null)
             {
-                if (page is PPlay or POutsider)
+                if (page is PPlay)
                 {   // split mask/face key art: keep the whole head right of the content, clipped to the window
                     float s = H * 1.08f / hero.Height, w = hero.Width * s, half = 250 * s;
                     float fx = Math.Min(Math.Max(W * .74f, cr + half + 20 * k), W - half - 10 * k);
@@ -697,7 +747,12 @@ sealed class MainForm : Form
                 g.FillRectangle(tb, 0, 0, W, H);
             }
             Ui.Image(g, art["menu_vignette"], new RectangleF(0, 0, W, H));
-            Ui.Image(g, art["logo"], LogoRect());
+            if (page == POutsider && DotoLogo is Bitmap dl)
+            {   // Steam's logo, fitted into the logo slot with its own aspect ratio
+                var lr = LogoRect(); float f = Math.Min((float)lr.Width / dl.Width, (float)lr.Height * 1.6f / dl.Height);
+                Ui.Image(g, dl, new RectangleF(lr.X, lr.Y, dl.Width * f, dl.Height * f));
+            }
+            else Ui.Image(g, art["logo"], LogoRect());
         }
         return bmp;
     }
@@ -734,7 +789,11 @@ sealed class MainForm : Form
     void ShowPage(int i)
     {
         page = i;
-        for (int k = 0; k < pages.Length; k++) { pages[k].Visible = k == i; nav[k].Selected = k == i; nav[k].Invalidate(); }
+        bool play = i is PPlay or POutsider; if (play) playDoto = i == POutsider;
+        for (int k = 0; k < pages.Length; k++) pages[k].Visible = k == i;
+        for (int k = 0; k < nav.Length; k++) { nav[k].Selected = NavPages[k] == i || (play && NavPages[k] == PPlay); nav[k].Invalidate(); }
+        gameD2.Visible = gameDoto.Visible = play; gameD2.Selected = play && !playDoto; gameDoto.Selected = play && playDoto;
+        gameD2.Invalidate(); gameDoto.Invalidate();
         RebuildBackdrop(); Invalidate(true);
         if (i == PSettings) LoadSettings();
     }
@@ -762,7 +821,7 @@ sealed class MainForm : Form
     {
         updateNow.Enabled = updateAvailable && !updBusy && env.Standalone && !AnyLaunching;
         checkUpdates.Enabled = !updBusy;
-        nav[PUpdates].Text = updateAvailable ? "New update" : "Updates"; nav[PUpdates].Invalidate();
+        nav[NavUpdates].Text = updateAvailable ? "New update" : "Updates"; nav[NavUpdates].Invalidate();
     }
 
     async Task CheckForUpdates()
@@ -922,10 +981,9 @@ sealed class MainForm : Form
     void PaintOutsider(Graphics g)
     {
         var p = pages[POutsider];
-        const TextFormatFlags np = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
-        TextRenderer.DrawText(g, "DEATH OF THE OUTSIDER VR", Ui.Font(p, 20f), new Rectangle(0, -S(2), p.Width, S(38)), Ui.Text, np);
-        TextRenderer.DrawText(g, dStatusText, Ui.Font(p, 12.5f), new Rectangle(S(1), S(36), p.Width - S(4), S(24)), dStatusColor, np);
-        TextRenderer.DrawText(g, dStatusDetail, Ui.Font(p, 9.5f, FontStyle.Regular, Ui.Sans), new Rectangle(S(1), S(60), p.Width - S(4), S(30)), Ui.Dim, np | TextFormatFlags.WordBreak);
+        const TextFormatFlags np = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+        TextRenderer.DrawText(g, dStatusText, Ui.Font(p, 25f), new Point(0, -S(2)), dStatusColor, np);
+        TextRenderer.DrawText(g, dStatusDetail, Ui.Font(p, 10f, FontStyle.Regular, Ui.Sans), new Rectangle(S(1), S(44), p.Width - S(4), S(42)), Ui.Dim, np | TextFormatFlags.WordBreak);
         if (dShowLog) return;
         PaintCheckRows(g, p, dChecks, dTop, 4);
     }
@@ -956,6 +1014,8 @@ sealed class MainForm : Form
     async Task RefreshDotoChecks()
     {
         if (DotoEnv.Pinned == null) await InstallDoto();
+        if (DotoEnv.Pinned != null && DotoWriteOk)  // DLSS must be offered in DOTO whenever D2 offers it (its build\dlss-dll-path was never created)
+            await Task.Run(() => { if (DlssFinder.EnsureSameAsOtherHome(env.Root, DotoEnv.Root, DlssFinder.SteamRoot(), new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token) is string l) Append(dLog, l, Ui.Good); });
         dCandidate = DotoEnv.LatestCandidate(out _);
         dChecks = await Task.Run(() => DotoEnv.RunProfileChecks());
         dReady = DotoEnv.Ready(dCandidate);

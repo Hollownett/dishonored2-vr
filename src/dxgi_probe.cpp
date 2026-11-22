@@ -59,6 +59,7 @@
 #include "native_turning.hpp"
 #include "native_menu.hpp"
 #include "native_pad_focus.hpp"
+#include "focus_cvars.hpp"
 #include "native_interaction_aim.hpp"
 #include "native_grab.hpp"
 #include "held_render_pose.hpp"   // v1249
@@ -2542,6 +2543,10 @@ static bool xr_requested=false;
 static bool controller_requested=false,controller_import_restored=true;
 static d2vr::XInputBridge controller_bridge;
 static d2vr::NativePadFocus native_pad_focus;
+// v145722 (DOTO headset 2026-11-22: sticks and Menu dead without window focus): live focus cvars, set through the console when wrong.
+static d2vr::FocusCvarGuard focus_cvar_guard;
+static std::atomic<int> focus_inactive_value{-1},focus_pause_value{-1};   // -1 = not readable (yet)
+static std::atomic<bool> focus_window_foreground{};
 static UINT64 xr_controller_samples{};
 static bool temporal_aa_requested=false,temporal_aa_active=false,temporal_aa_written=false,temporal_aa_restored=true;
 static LONG saved_temporal_aa{};
@@ -15807,6 +15812,15 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           << ",\"game_layers_submitted\":" << xr_submitted
                                           << ",\"spacewarp\":" << (game_xr && spacewarp_knob?game_xr->spacewarp_brief_json():std::string("null")) // headset evidence without diagnostics
                                           << ",\"hands\":" << (game_xr?game_xr->hands_brief_json():std::string("null")) // v1421: grip tracking, and who drove the arms
+                                          // v145722: why controller input does or does not reach the game (DOTO headset: sticks and Menu dead without window focus)
+                                          << ",\"input\":{\"foreground\":" << (focus_window_foreground.load()?"true":"false")
+                                          << ",\"xr_focused\":" << (game_xr && game_xr->state==XR_SESSION_STATE_FOCUSED?"true":"false")
+                                          << ",\"active\":" << (game_xr && game_xr->controller_input.active?"true":"false")
+                                          << ",\"reads\":" << controller_bridge.virtual_reads() << ",\"nonzero_reads\":" << controller_bridge.nonzero_reads()
+                                          << ",\"start_reads\":" << controller_bridge.pause_reads()
+                                          << ",\"pad_gate\":[" << native_pad_focus.calls() << ',' << native_pad_focus.overrides() << ',' << native_pad_focus.window_calls() << ',' << native_pad_focus.window_overrides()
+                                          << "],\"in_controlInactiveWindow\":" << focus_inactive_value.load() << ",\"win_pauseOnFocusLoss\":" << focus_pause_value.load()
+                                          << ",\"cvar_sets\":" << focus_cvar_guard.sets() << '}'
                                           << ",\"arm_flicker\":" << arm_flicker_json() << ",\"arm_freeze\":" << arm_freeze_json() << ",\"ctx_probe\":" << ctx_probe_json() // v1423
                                           << ",\"paired_prev_probe\":" << paired_prev_probe_json() // v1426
                                           << ",\"job_wake\":" << d2vr::job_wake::json(frames.load()) << ",\"core_isolation\":" << d2vr::core_isolation::json() << ",\"overlap_probe\":" << d2vr::overlap_probe::json() << ",\"spacewarp_safe_mid\":" << (safe_mid_knob?d2vr::safe_mid::json(image_base):std::string("null")) // v1430/v1432
@@ -17723,6 +17737,17 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(npc_trigger_consume[1]) input.right_trigger=0;  // nor the sword hand's block
                                 // Native hands phase 1 (user 2026-11-06): heavy held things slow the walk (hand_feel.hpp, at most 75%).
                                 if(hand_feel_enabled && logic==2 && physical_grab_requested) {const double kg=native_grab.held_total_kg();const float k=d2vr::held_move_scale(kg);input.move_x*=k;input.move_y*=k;if(kg>held_kg_peak.load())held_kg_peak=static_cast<float>(kg);if(k<move_scale_min.load())move_scale_min=k;}
+                                {   // v145722: the pad paths without window focus need in_controlInactiveWindow 1 and win_pauseOnFocusLoss 0 (focus_cvars.hpp)
+                                    static std::uint64_t focus_cvar_tick{};const auto now_f=GetTickCount64();
+                                    if(now_f-focus_cvar_tick>=1000) {
+                                        focus_cvar_tick=now_f;
+                                        const auto inactive=d2vr::FocusCvars::inactive_window(&read_self,image_base);
+                                        const auto pause=d2vr::FocusCvars::pause_on_focus_loss(&read_self,image_base);
+                                        focus_inactive_value=inactive?*inactive:-1;focus_pause_value=pause?*pause:-1;
+                                        focus_window_foreground=GetForegroundWindow()==desc.OutputWindow;
+                                        focus_cvar_guard.update(inactive,pause,logic!=0,now_f,[](const char* line){d2vr::NativeInteractionAim::request_console(line);});
+                                    }
+                                }
                                 controller_bridge.publish(input,logic==2);
                                 npc_trigger_interact={};npc_trigger_consume={};npc_owns_frame={};
                                 published_logic=logic;published_move_x=input.move_x;published_move_y=input.move_y;
@@ -18408,7 +18433,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         native_eye_pair.reset();native_eye_pairs=0;native_eye_copy_count=0;
         eye_begin_calls=0;eye_begin_matches=0;eye_boundary_rows=0;
         {std::lock_guard<std::mutex> gpu_lock(gpu_mutex);eye_sources.invalidate();eye_view_allocation=0;eye_camera_owner={};}
-        if(controller_requested) {controller_bridge.install(image_base,0x1a7ecf0);controller_import_restored=false;}
+        if(controller_requested) {controller_bridge.install(image_base,0x1a7ecf0);controller_import_restored=false;focus_cvar_guard.reset();focus_inactive_value=-1;focus_pause_value=-1;}
         if(full_scale_requested) {
             constexpr std::array<std::byte,17> expected_reads{std::byte{0xf3},std::byte{0x44},std::byte{0x0f},std::byte{0x10},std::byte{0x05},std::byte{0x53},std::byte{0x4a},std::byte{0x60},std::byte{0x03},
                 std::byte{0xf3},std::byte{0x0f},std::byte{0x10},std::byte{0x3d},std::byte{0xcb},std::byte{0x4a},std::byte{0x60},std::byte{0x03}};
@@ -19147,7 +19172,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         }
         ++note_kind_epoch;native_note_kind.configure(read_self,image_base);
         native_reader_generation=0;
-        native_prompt_probe_calls=0;native_prompt_probe.configure(image_base,&read_self);native_prompt_entry_abi=d2vr::native_prompt_entry::verified_abi(read_self,image_base);d2vr::NativeWristHud::observer=&native_hud_call_observer;
+        native_prompt_probe_calls=0;
+        // v145722: a refused Iggy getter API leaves every native HUD art binding (wrist, prompts, objective markers) empty and
+        // the HUD flat (DOTO headset 2026-11-22: the construct wrapper's pin differed); say so instead of failing silently.
+        if(!native_prompt_probe.configure(image_base,&read_self)) note_recoverable("Native Iggy getter API differs from the pinned build: HUD markers, prompts and wrist art stay on the flat HUD panel");
+        native_prompt_entry_abi=d2vr::native_prompt_entry::verified_abi(read_self,image_base);d2vr::NativeWristHud::observer=&native_hud_call_observer;
         // v985: the FSR eye GPU timer was the fallback whenever neither profiler was on, so turning the profiler knobs off (v984) put
         // two D3D11 timestamp pairs around the FSR4 dispatch of each eye every frame: hook_ms went 0.9 -> 5.4 and mod CPU 1.09 -> 3.42
         // in the 2026-11-04 headset run. It is a measurement, so it is now opt-in (build/fsr-gpu-timing) and the profile knobs still turn it off.

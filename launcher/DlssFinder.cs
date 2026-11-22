@@ -108,4 +108,24 @@ public static class DlssFinder
         }
         catch (Exception) { return null; }
     }
+
+    /// <summary>Gives the DOTO home the same DLSS provider the D2 home has (build\dlss-dll-path is per-machine state, not per-game: the DOTO mod
+    /// offers DLAA/DLSS Quality only while it resolves). Does nothing when the DOTO home already resolves one; otherwise carries over D2's, else
+    /// runs the same Steam-library search the D2 launcher runs. Returns a log line when it changed something. Never throws.</summary>
+    public static string? EnsureSameAsOtherHome(string d2Root, string dotoRoot, string? steamRoot, CancellationToken ct = default)
+    {
+        try
+        {
+            if (DlssProvider.Resolve(dotoRoot) != null) return null;
+            if (DlssProvider.Resolve(d2Root) is { } d2)
+            {
+                var loc = DlssProvider.Configure(dotoRoot, d2.Path);
+                return $"DLSS: using the same nvngx_dlss.dll as Dishonored 2 ({loc.Path}).";
+            }
+            if (!DlssProvider.NvidiaDriverPresent()) return null;
+            var found = FindAndConfigure(dotoRoot, steamRoot, ct);
+            return found == null ? null : $"DLSS found in {found.Source["auto: ".Length..]}: {found.Path}.";
+        }
+        catch (Exception) { return null; }
+    }
 }

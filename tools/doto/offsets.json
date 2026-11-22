@@ -3282,6 +3282,8 @@
   }
  ],
  "rvas": [
+  {"from": "0x25adf50", "to": "0x2678e10", "why": "in_controlInactiveWindow idCVar object (src/focus_cvars.hpp): D2 registration 0x1353220 lea rcx 0x25adf50, DOTO 0x13db3c0 lea rcx 0x2678e10; same name/default/flags (tools/doto/cvar_static.py); read sites 0x3a4b8 -> 0x3b518 both cmp dword [obj+0x28],0"},
+  {"from": "0x31393e0", "to": "0x3204bc0", "why": "win_pauseOnFocusLoss idCVar object (src/focus_cvars.hpp): D2 registration 0x1359610 lea rcx 0x31393e0, DOTO 0x13e1a50 lea rcx 0x3204bc0; same name/default/flags (tools/doto/cvar_static.py)"},
   {
    "from": "0x3995630",
    "to": "0x3a624a0",
@@ -3549,6 +3551,7 @@
   }
  ],
  "text": [
+  {"file": "src/native_interaction_prompt.hpp", "contains": "match(0x28e50,std::array<unsigned char,18>{0x48,0x89,0x4c,0x24,0x08,0x57,0x48,0x83,0xec,0x30", "old": "0x48,0x83,0xec,0x30,0x48,0xc7,0x44,0x24,0x20,0xfe", "new": "0x48,0x83,0xec,0x40,0x48,0xc7,0x44,0x24,0x30,0xfe", "why": "Iggy value-ref construct D2 0x28e50 -> DOTO 0x29490: frame 0x30 -> 0x40 (slots +0x10) and one extra mov byte [rsp+0x20],1 = a 5th stack argument to the inner call 0x29a60 -> 0x2a090; the public (this,file,path) ABI and the object layout (+8 iggy, +0x10, +0x18 table, +0x20 index/flags, +0x24 0x1040, +0x28 inline) are identical (both disassembled 2026-11-22). Without it configure() leaves the Iggy getter API empty and no native HUD art (wrist, prompts, objective markers) is ever bound: markers stayed on the flat HUD panel (DOTO headset 2026-11-22; play21 native_hud_children.published 0, marker_published 0)", "source": "review/marker-depth"},
   {
    "file": "src/native_menu.hpp",
    "contains": "update_code=",

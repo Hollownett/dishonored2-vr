@@ -422,6 +422,16 @@ string StateText(string d) => File.ReadAllText(Path.Combine(d, "launcher-feature
     File.WriteAllBytes(Path.Combine(root, DlssProvider.DllName), new byte[] { 4 });
     Check("dlss_mod_home_wins", DlssProvider.Resolve(root) is { Source: "mod home" } r3 && r3.Path == Path.Combine(root, DlssProvider.DllName));
     Check("dlss_status_names_provider", DlssProvider.Status(root).Contains(DlssProvider.DllName) && DlssProvider.Status(root).Contains("mod home"));
+    {   // a second home (DOTO) with no provider gets the first home's; a home that has one keeps it
+        var other = Path.Combine(Path.GetTempPath(), "d2vrdlss2-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Path.Combine(other, "build"));
+        File.Delete(Path.Combine(root, DlssProvider.DllName));  // root now resolves through the knob only
+        var line = DlssFinder.EnsureSameAsOtherHome(root, other, null);
+        Check("dlss_second_home_carries_over", line != null && DlssProvider.Resolve(other) is { Source: "configured" } o1 && o1.Path == Path.GetFullPath(dll));
+        Check("dlss_second_home_keeps_own", DlssFinder.EnsureSameAsOtherHome(root, other, null) == null);
+        var third = Path.Combine(Path.GetTempPath(), "d2vrdlss3-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Path.Combine(third, "build"));
+        Check("dlss_nothing_to_carry_over", DlssFinder.EnsureSameAsOtherHome(third, other + "-x", null) == null);
+        Directory.Delete(other, true); Directory.Delete(third, true);
+    }
     Check("dlss_attribution_present", DlssProvider.Attribution.Contains("NVIDIA DLSS") && DlssProvider.Prompt.Contains(DlssProvider.DllName));
     Check("dlss_available_needs_driver", DlssProvider.Available(root) == DlssProvider.NvidiaDriverPresent());
 }
