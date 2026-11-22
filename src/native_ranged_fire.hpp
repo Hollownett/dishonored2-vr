@@ -160,6 +160,7 @@ public:
         // The gun in the hand that fires (its held copy's entity + id, 0 = none): 63b3c0 and 44ee80 take their entity from comp+0x10 (the record's own
         // gun, which is the OTHER hand's native pistol: v815 headset 'the flash comes out of the pistol in my left hand'), so they run with this one.
         std::uintptr_t entity{};std::uint32_t entity_id{};
+        bool charged{},overcharged{};   // v145745 (DOTO): the Voltaic copy's charged shot (the charge upgrade's projectile), overcharged (held 4 s)
     };
     struct Request {bool reload{},burst{};Shot shot{};};
     // The native calls, replaceable so the pure flow is testable. Real ones run under SEH and return false on a fault.
@@ -390,6 +391,7 @@ public:
         CrashOperation operation("native ranged fire");
         if(verified && !latched_) {try {track_ammo(base,read);} catch(...) {++failures_;}}
         const auto now=clock();
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {static std::uint64_t probed{};if(verified && !latched_ && now-probed>=1000) {probed=now;try {probe_charge(base,read);} catch(...) {}}}   // v145745
         for(unsigned side=0;side<2;++side) // burst follow-ups (the shot's frame is the first one's)
             if(burst_left_[side] && now>=burst_next_[side]) {Request r{};r.shot=burst_shot_[side];r.burst=true;work.push_back(r);}
         for(unsigned side=0;side<2;++side) if(hands_[side].reloading && !reload_noted_[side] && now>=hands_[side].reload_done-reload_len_[side]) {reload_noted_[side]=true;++reload_serial_[side];}
@@ -451,7 +453,7 @@ public:
         o<<"],\"plans\":[";
         for(std::size_t i=0;i<plans_.size();++i) o<<(i?",":"")<<'"'<<plans_[i]<<'"';
         o<<"]";
-        if constexpr(game_traits::ranged_player_weapon_is_voltaic) o<<",\"voltaic\":["<<voltaic_marks_.load()<<','<<voltaic_infos_.load()<<']';   // DOTO: Gauss shots marked, special-ammo info set
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) o<<",\"voltaic\":["<<voltaic_marks_.load()<<','<<voltaic_infos_.load()<<','<<(charge_owned_.load()?1:0)<<','<<charged_creates_.load()<<','<<overcharged_creates_.load()<<']';   // DOTO: Gauss shots marked, special-ammo info set; v145745 charge upgrade owned, charged / overcharged copy creates
         o<<'}';
         return o.str();
     }
@@ -938,7 +940,10 @@ private:
         // The Gauss fire sets the create/sound configure byte from its own source byte before every create (combat-port.md section 2); held for
         // this shot's create and sound, then put back.
         std::conditional_t<voltaic,VoltaicConfigure,NoConfigure> configure{};(void)configure;
-        if constexpr(voltaic) {configure.comp=l.comp;configure.old=voltaic_configure(l.comp,-1);}   // put back when this shot returns
+        if constexpr(voltaic) {   // put back when this shot returns; v145745: this shot's own charge (VoltaicConfigure)
+            const bool charged=s.charged && ((flags&game_traits::voltaic_charge_bit)!=0);configure.begin(l.comp,charged,charged && s.overcharged);
+            if(charged) {++charged_creates_;if(s.overcharged) ++overcharged_creates_;}
+        }
         std::uintptr_t projectile{};bool ok;
         if(!no_bullet) {
             {LaunchScope scope;ok=n.create(base,l.comp,projectile);}
@@ -1092,7 +1097,22 @@ private:
             *b=static_cast<std::uint8_t>(restore);return restore;
         } __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
     }
-    struct VoltaicConfigure {std::uintptr_t comp{};int old{-1};~VoltaicConfigure() {if(comp && old>=0) voltaic_configure(comp,old);}};
+    // v145745: one byte of the Gauss component, SEH-guarded: v<0 reads it, else writes v; returns the value before (-1: fault).
+    static int voltaic_byte(std::uintptr_t a,int v) noexcept {
+        __try {auto* b=reinterpret_cast<volatile std::uint8_t*>(a);const int old=*b;if(v>=0) *b=static_cast<std::uint8_t>(v);return old;} __except(EXCEPTION_EXECUTE_HANDLER) {return -1;}
+    }
+    // v145745 (static RE of 0x3c1d70 / release 0x8d0bc0, 2026-11-22): the Gauss fire's charge state is comp+0xe0 (charged: held >= 2 s) and
+    // comp+0xe1 (overcharged: >= 4 s), written by the native release and never cleared; the fire copies e0 into the create/sound configure byte
+    // (+0xb0), and create applies the charge upgrade's modifiers (each ammo's *_charged.cpntprojectile, its fx) only when that byte is set. A copy
+    // shot therefore sets e0/e1 to ITS charge (before: it inherited the native's last release, so a copy after a native charged shot was charged
+    // too), the configure byte from it, and puts all three back after.
+    struct VoltaicConfigure {std::uintptr_t comp{};int old{-1},old_e0{-1},old_e1{-1};
+        void begin(std::uintptr_t c,bool charged,bool overcharged) noexcept {
+            comp=c;old_e0=voltaic_byte(c+game_traits::voltaic_configure_from,charged?1:0);old_e1=voltaic_byte(c+game_traits::voltaic_shot_overcharged,overcharged?1:0);
+            old=voltaic_configure(c,-1);
+        }
+        ~VoltaicConfigure() {if(!comp) return;if(old>=0) voltaic_configure(comp,old);if(old_e0>=0) voltaic_byte(comp+game_traits::voltaic_configure_from,old_e0);if(old_e1>=0) voltaic_byte(comp+game_traits::voltaic_shot_overcharged,old_e1);}
+    };
     struct NoConfigure {};
     static bool voltaic_info(std::uintptr_t projectile_component,std::uintptr_t value) noexcept {
         __try {*reinterpret_cast<volatile std::uintptr_t*>(projectile_component+game_traits::voltaic_info_field)=value;return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
@@ -1107,8 +1127,20 @@ private:
         const auto marked=rig::value<std::uintptr_t>(read,*decl+game_traits::voltaic_mark_decl);
         if(l.mark && marked && *marked && rig::value<std::uintptr_t>(read,projectile+game_traits::voltaic_entity_decl)==*marked && n.mark(base,t.component)) ++voltaic_marks_;
     }
+    // v145745: whether the player owns the charge upgrade: the Gauss component's flags byte has the charge upgrade's m_chargedMode (bit 2), ORed
+    // in by the modifier rebuild 0x68cf80 from the upgrade's entry for the ammo in use (the player state tests it at 0x4d5180 before it lets a press
+    // charge). Read once a second on the game thread.
+    template<class Read> static void probe_charge(std::uintptr_t base,Read& read) {
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {
+            Why why{};const auto l=locate(base,read,Shot::crossbow,why);if(!l) {charge_owned_.store(false,std::memory_order_relaxed);return;}
+            const auto f=rig::value<std::uint8_t>(read,l->comp+game_traits::voltaic_charge_flags);
+            charge_owned_.store(f && (*f&game_traits::voltaic_charge_bit)!=0,std::memory_order_relaxed);
+        } else {(void)base;(void)read;}
+    }
 public:
-    inline static std::atomic<std::uint64_t> voltaic_marks_{},voltaic_infos_{};
+    inline static std::atomic<std::uint64_t> voltaic_marks_{},voltaic_infos_{},charged_creates_{},overcharged_creates_{};
+    static bool voltaic_charge_owned() noexcept {return charge_owned_.load(std::memory_order_relaxed);}
 private:
+    inline static std::atomic<bool> charge_owned_{};
 };
 } // namespace d2vr

@@ -51,6 +51,9 @@ inline constexpr std::uintptr_t voltaic_comp_vtable = 0x1c45768, voltaic_decl_vt
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0x1d0dd88;
 // v145744: idEntity spawn id and its flags byte (bit 0 hidden, bit 1 not presented), for new code that must not depend on a port rule
 inline constexpr std::uintptr_t entity_id_offset = 0xb0, entity_flags_offset = 0xd8;
+// v145745: the Gauss charge (static RE, release 0x8d0bc0 / fire 0x3c1d70 / rebuild 0x68cf80): overcharged byte (charged = voltaic_configure_from),
+// the component flags byte and its charged-mode bit (the charge upgrade owned for the ammo in use)
+inline constexpr std::uintptr_t voltaic_shot_overcharged = 0xe1, voltaic_charge_flags = 0xc8; inline constexpr unsigned voltaic_charge_bit = 4;
 // The second gun the other forearm shows in dual wield: the gun's own entity def, spawned by name (no owner: its components never start).
 inline constexpr const char* voltaic_copy_def = "models/weapons/dlc01/player/billie/gaussgun01/ply_billie_gaussgun01.def";
 // The Gauss fire (combat-port.md section 2): before its create it copies byte comp+0xe0 into the create/sound configure byte comp+0xb0;
@@ -77,6 +80,7 @@ inline constexpr bool bind_any_arm_joint = false;   // D2: hand attachment 59 (a
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0, voltaic_decl_vtable = 0;
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0;
 inline constexpr std::uintptr_t entity_id_offset = 0xa8, entity_flags_offset = 0xd0;
+inline constexpr std::uintptr_t voltaic_shot_overcharged = 0, voltaic_charge_flags = 0; inline constexpr unsigned voltaic_charge_bit = 0;
 inline constexpr const char* voltaic_copy_def = nullptr;
 inline constexpr std::uintptr_t voltaic_configure = 0, voltaic_configure_from = 0, voltaic_mark_attribute = 0,
     voltaic_entity_decl = 0, voltaic_mark_decl = 0, voltaic_info_def = 0, voltaic_info_value = 0, voltaic_info_field = 0;
