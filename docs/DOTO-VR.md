@@ -130,12 +130,26 @@ Simulated sessions (`tools/doto/doto_sim.py`, the mod's simulated OpenXR runtime
 | play2 | v145708 | menus driven by the simulated controller into a new campaign; in gameplay: **two prepared views**, renderView decoded at the DOTO offsets, arkPlayer chain confirmed live, per-eye TAA history installed, comfort applied and restored; no eye pairs (stride) |
 | play4-play5 | v145709-v145710 | stride fixed; the whole player-camera chain verified live (`tools/doto/check_camera.py`); still no eye pairs: Setup and Begin share one Present frame in DOTO |
 | play7 | v145712 | **tracked stereo gameplay: 6,887/6,887 frames paired, 0 flat frames, 13,774 head-pose writes, 2,938 verified turns** (pipeline depth 0) |
-| play9 | v145713 | the launcher's full feature set (tracked arms, controller aim, grab, left aim, native menu pointer, eye AA): see the run report |
+| play8-play10 | v145712-v145714 | the launcher's full feature set refused at start, one check per run: gameplay-aim producer prologue (a decimal `std::byte{0}` split the pin), its caller, the door owner |
+| play11 | v145715 | **the launcher's full feature set (minus saved settings): 7,039/7,039 frames paired, hand aim applied on 7,036 frames, crosshair 7,038, interaction 21,441 calls, grab 7,141 callbacks, FSR eye AA on both eyes, 3,223 verified turns, arm template verified**; only notes: Timepiece lens guard and hand-aimed Blink off (Billie has neither) |
 
 Live read-only checks of the running game (`tools/doto/live.py`): prepared views (count 2, eye 1 at +0x3ab0), renderView
 fields at -0x10, `arkPlayer` model +0xf8 / components +0x270 (98) / origin +0x310 / axis +0x31c, the logic mask.
 
-## 6. Developer workflow
+## 6. Trying it (headset)
+
+1. Close the running Dishonored VR launcher (one instance at a time), then start
+   `launcher\dist-doto\DishonoredVRLauncher.exe` (developer mode: Dishonored 2 keeps using the repository as before).
+2. Open the **OUTSIDER** tab. It installs the Death of the Outsider mod into `%LOCALAPPDATA%\DishonoredVR-DOTO`, copies your
+   Dishonored 2 VR settings (option "Use my Dishonored 2 VR settings") and shows the checks.
+3. Start Virtual Desktop or SteamVR as for Dishonored 2 and press **LAUNCH VR**. The launcher installs the proxy beside
+   `Dishonored_DO.exe` and starts the game through Steam; VR attaches at the title screen.
+4. Campaign > Continue loads the campaign the night's tests started (slot 01, the opening of the first mission); New Game works too.
+5. **Uninstall proxy (DOTO)** on the same tab makes the game flat again.
+
+Logs (when "Save diagnostic logs" is on): `%LOCALAPPDATA%\DishonoredVR-DOTO\artifacts\`.
+
+## 7. Developer workflow
 
     python tools/doto/pe_index.py <D2 exe> artifacts/doto-lab/d2.idx          # once per game build
     python tools/doto/pe_index.py <DOTO exe> artifacts/doto-lab/doto.idx
