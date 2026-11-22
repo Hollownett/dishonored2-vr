@@ -4,9 +4,12 @@ Dishonored: Death of the Outsider (DOTO, Steam app 614570, `Dishonored_DO.exe`) 
 family as Dishonored 2. This mod supports it from the **same repository and the same sources**. A generator ports
 the Dishonored 2 build to the DOTO executable, and the launcher has an **OUTSIDER** tab that installs and starts it.
 
-Status (2026-11-22, first night): the port pipeline, the DOTO DLL build, the launcher tab and the simulated test
-runner exist. This document is the design and the plan; the "Verified" column of each table says what has actually
-been checked, and how.
+Status (2026-11-22, first night): the port pipeline, the DOTO DLL build, the launcher tab and the simulated test runner
+exist, and **the VR core runs in Death of the Outsider under the simulated headset**: tracked stereo gameplay with every
+frame paired, per-eye head tracking, native turning, comfort settings, per-eye TAA history and the menus on the VR panel
+(see §5). Nothing has been tried in a real headset yet. This document is the design and the plan.
+
+![Simulated-headset mirror of Death of the Outsider in VR, both eyes side by side](images/doto/play7-stereo-mirror.png)
 
 ## 1. How the port works
 
@@ -106,7 +109,7 @@ Rat Whispers talisman.
 | Phase | Goal | State |
 |---|---|---|
 | 0 | Research, address-mapping lab, generator, DOTO DLL builds | done (this night) |
-| 1 | **VR core boots in DOTO**: stereo, head tracking, controllers, turning, menus on the panels, loading/pause detection | static checks pass (every session-fatal pin translated or reviewed); first simulated boot pending |
+| 1 | **VR core boots in DOTO**: stereo, head tracking, controllers, turning, menus on the panels, loading/pause detection | **done in simulation** (play7: 6,887 of 6,887 gameplay frames paired, 13,774 head writes, 2,938 verified turns, logic mask and loading detected); headset pending |
 | 2 | Hands and body: Billie's arm and body models (body-material route and torso fit only know Corvo/Emily), grab, carry, doors | reviewed rules merged for rig/arm offsets; Billie's mesh tokens needed |
 | 3 | Combat: sword, block/parry, takedowns, choke | weapons review in progress |
 | 4 | Billie's toolkit: Voltaic Gun on the wrist, Displace aim + swap, Foresight camera, Semblance gesture, Hook Mine, grenade | design above; implementation after phase 1-3 are verified |
@@ -116,7 +119,23 @@ Rat Whispers talisman.
 Verification rule (AGENTS.md): automated and simulated checks do not establish headset visual quality, comfort or
 complete gameplay; each phase ends with a headset session.
 
-## 5. Developer workflow
+## 5. What was verified, and how
+
+Simulated sessions (`tools/doto/doto_sim.py`, the mod's simulated OpenXR runtime, Steam build 17712087, a new campaign):
+
+| Run | DLL | Result |
+|---|---|---|
+| boot1-boot2 | v145703-v145705 | refused at start: a byte pin split across two lines (comfort), output-size getter pins merged with a neighbour array |
+| boot3 | v145707 | first complete session: XR focused, menu panel, title and main menu detected (logic mask 64) |
+| play2 | v145708 | menus driven by the simulated controller into a new campaign; in gameplay: **two prepared views**, renderView decoded at the DOTO offsets, arkPlayer chain confirmed live, per-eye TAA history installed, comfort applied and restored; no eye pairs (stride) |
+| play4-play5 | v145709-v145710 | stride fixed; the whole player-camera chain verified live (`tools/doto/check_camera.py`); still no eye pairs: Setup and Begin share one Present frame in DOTO |
+| play7 | v145712 | **tracked stereo gameplay: 6,887/6,887 frames paired, 0 flat frames, 13,774 head-pose writes, 2,938 verified turns** (pipeline depth 0) |
+| play9 | v145713 | the launcher's full feature set (tracked arms, controller aim, grab, left aim, native menu pointer, eye AA): see the run report |
+
+Live read-only checks of the running game (`tools/doto/live.py`): prepared views (count 2, eye 1 at +0x3ab0), renderView
+fields at -0x10, `arkPlayer` model +0xf8 / components +0x270 (98) / origin +0x310 / axis +0x31c, the logic mask.
+
+## 6. Developer workflow
 
     python tools/doto/pe_index.py <D2 exe> artifacts/doto-lab/d2.idx          # once per game build
     python tools/doto/pe_index.py <DOTO exe> artifacts/doto-lab/doto.idx

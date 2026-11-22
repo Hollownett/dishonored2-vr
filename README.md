@@ -73,6 +73,14 @@ Features
   <img src="docs/images/readme/sword-guard-charge.jpg" alt="A guard charges while the sword is held up" width="32%">
 </p>
 
+Death of the Outsider (in development)
+--------------------------------------
+
+The same mod is being ported to **Dishonored: Death of the Outsider** from this repository: a generator translates the
+Dishonored 2 build to the Outsider's executable, and the launcher has an **OUTSIDER** tab. Stereo gameplay with head tracking
+runs in simulation; it is not in a release yet and has not been tried in a headset. Design, plan and status:
+[docs/DOTO-VR.md](docs/DOTO-VR.md).
+
 What you need
 -------------
 
