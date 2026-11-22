@@ -773,6 +773,2118 @@
    "to": "0x1ff8",
    "why": "same",
    "source": "review/body-rig"
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "contains": " auto pool=rig::value<std::uintptr_t>(reader,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 125",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "contains": "_lease) || rig::value<std::uintptr_t>(reader,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 135",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "contains": "o components=rig::list(reader,lease->player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 134 receiver lease->player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": " value<std::uint32_t>(guarded,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 60 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "=value<std::uint32_t>(guarded,expected.arm.player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 62 receiver expected.arm.player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "=value<std::uint32_t>(guarded,expected.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 63 receiver expected.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "=value<std::uint32_t>(guarded,expected.parent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 64 receiver expected.parent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": " value<std::uint32_t>(guarded,expected.entity+0xac",
+   "from": "0xac",
+   "to": "0xb4",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 67 receiver expected.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "layer_components=list(guarded,expected.arm.player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 71 receiver expected.arm.player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": " auto components=list(guarded,expected.entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 87 receiver expected.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "g=value<std::uintptr_t>(read,*child+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 120 receiver child",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "native && *alternative) axis=*alternative+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 201 receiver alternative",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "e<std::array<float,9>>(read_,*alternative+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 204 receiver alternative",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "                row.axis=row.b+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 267 receiver row.b",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "contains": "field(sensor,0x10,p)) {origin=f3(p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 71 receiver f3(p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "contains": "0,p)) {origin=f3(p+0x300);dir=f3(p+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 71 receiver f3(p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": " auto entries=rig::list(read,*player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 373 receiver player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "g::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 380",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "ig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 386 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "g::value<std::uintptr_t>(read,e+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 389 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "ig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 433 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": " auto p=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 456 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "ig::value<std::uint32_t>(read,t.entity+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 471 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "   p.at=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 472 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "onst auto list=rig::list(read,t.entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 473 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "      if(const auto at=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 508 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "         const auto at=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 511 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "onst auto id=rig::value<std::uint32_t>(read_,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 391 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "::value<std::uint32_t>(read_,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 508 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "e<std::array<float,3>>(read_,*entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 509 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "ue<std::array<float,3>>(read_,grasp.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 646 receiver grasp.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "e<std::array<float,3>>(read_,*player+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 834 receiver player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "            if(read_(body.entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 874 receiver if(read_(body.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "g::value<unsigned char>(read_,body.entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 901 receiver body.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "g::value<std::uint32_t>(read_,at+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1222 receiver at",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "ue<std::array<float,3>>(read_,at+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1223 receiver at",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "2_t> {return rig::value<std::uint32_t>(read_,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1333 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "st auto flags=rig::value<std::uint8_t>(read,*e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 163 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "uto id=entity?rig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 172 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": " scale=rig::value<float>(read,entity+0xc8",
+   "from": "0xc8",
+   "to": "0xd0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 180 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 213 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "ig::value<std::uint32_t>(read,e.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 274 receiver e.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "(const auto f=rig::value<std::uint8_t>(read,*e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 353 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "auto entries=entity?list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 382 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "cpy(cp,reinterpret_cast<const void*>(t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 485 receiver void*>(t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "cpy(ca,reinterpret_cast<const void*>(t.entity+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 485 receiver void*>(t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "value<std::uintptr_t>(reader,*entity+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 44 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "ents=entity?rig::list(reader,*entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 45 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "o components=rig::list(reader,proof.entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 127 receiver proof.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "::value<std::uint32_t>(reader,proof.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 132 receiver proof.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": ":value<std::uintptr_t>(reader,proof.entity+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 132 receiver proof.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "to kind=rig::value<int>(read_,entity+0x288",
+   "from": "0x288",
+   "to": "0x290",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 381 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<unsigned char>(read_,entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 381 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<unsigned char>(read_,entity+0x368",
+   "from": "0x368",
+   "to": "0x378",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 385 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "::value<std::uintptr_t>(read_,entity+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 390 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "wn=rig::value<unsigned>(read_,s.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 416 receiver s.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "f(owner) {e.spawn=rig::value<unsigned>(read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 463 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "::value<std::uintptr_t>(read_,e.owner+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 495 receiver e.owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": " const auto spawn=rig::value<unsigned>(read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 562 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "   rig::value<unsigned>(read_,query.owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 572 receiver query.owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<std::uint32_t>(read_,camera->player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 722 receiver camera->player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "ue<std::uint32_t>(self->read_,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1115 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "y || body->handle!=handle || !self->read_(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1118 receiver self->read_(entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "                rig::value<unsigned>(read_,*owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1415 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "::value<std::uintptr_t>(read_,*machine+0x318",
+   "from": "0x318",
+   "to": "0x370",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1452",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "=owner?rig::value<UINT>(read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1468 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "nst auto list=rig::list(read_,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1659 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "ue<std::uint32_t>(self->read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1784 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "   rig::value<unsigned>(read_,contact.owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1835 receiver contact.owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "lue_or(false),rig::value<std::uint8_t>(read_,owner+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1862 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": ">(read_,reinterpret_cast<std::uintptr_t>(entity)+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1890 receiver uintptr_t>(entity)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "os(false,true,rig::value<std::uint8_t>(read_,owner+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1947 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": " auto model=rig::value<std::uintptr_t>(read_,owner+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2168 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "            rig::value<std::uintptr_t>(read_,owner+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2175 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "   rig::value<unsigned>(read_,t.owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2237 receiver t.owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "e<std::array<float,3>>(read_,*owner+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2251 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<std::uint32_t>(read_,entities[i]+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2530 receiver entities[i]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": " auto members=rig::list(read_,door+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2588 receiver door",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "final_members=rig::list(read_,door+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2599 receiver door",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "           rig::value<unsigned>(read_,*owner+0xa8)!=spawn)return {};",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2649 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "ue<std::array<float,3>>(read_,camera.player+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 3027 receiver camera.player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "mponents=list(snapshot,reader,owner->player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 155 receiver owner->player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": " auto pool=rig::value<std::uintptr_t>(reader,*machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 102",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "        if(!entity || !rig::typed(reader,base,*entity,0x1ce1e98) || rig::value<std::uint32_t>(reader,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 112 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": " components=rig::list(reader,*entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 117 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "           rig::value<std::uintptr_t>(reader,*machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 126",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "(*spawn>>16)*8ull)!=entity || !rig::typed(reader,base,*entity,0x1ce1e98) || rig::value<std::uint32_t>(reader,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 132 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "_components=rig::list(reader,*entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 137 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "ol=machine?rig::value<std::uintptr_t>(reader,*machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 177",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "    const auto controller=rig::value<std::uintptr_t>(reader,machine+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 108",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": " inventory=rig::value<std::uintptr_t>(reader,expected.owner.machine+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 155",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": " auto body=rig::value<std::uintptr_t>(reader,expected.owner.machine+0x300",
+   "from": "0x300",
+   "to": "0x358",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 156",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "96),requests=rig::list(reader,expected.owner.machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 164",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "           rig::value<std::uintptr_t>(reader,expected.owner.machine+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 168",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "           rig::value<std::uintptr_t>(reader,expected.owner.machine+0x300",
+   "from": "0x300",
+   "to": "0x358",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 169",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "ent_requests=rig::list(reader,expected.owner.machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 179",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,holster_.owner.machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 255",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "ate+0x30),queue=rig::value<rig::List>(reader,machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 259",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "96),requests=rig::list(reader,machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 260",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "30),queue_after=rig::value<rig::List>(reader,machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 271",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "hine),pool=rig::value<std::uintptr_t>(reader,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 277",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,machine+0x300",
+   "from": "0x300",
+   "to": "0x358",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 335",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,*machine+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 349",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,*machine+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 351",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": " if(const auto controller=rig::value<std::uintptr_t>(reader,machine+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 429",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "e std::uint32_t*>(*draw+0x30)=0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 439",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "pid=value<std::uint32_t>(read,s.player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 75 receiver s.player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "|| value<std::uint32_t>(read,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 84 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "alth=value<std::uint8_t>(read,victim+0xd7",
+   "from": "0xd7",
+   "to": "0xdf",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 95 receiver victim",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "lags=value<std::uint8_t>(read,victim+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 95 receiver victim",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 110 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "rig::value<std::uint8_t>(read,victim+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 123 receiver victim",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "ig::value<std::uint32_t>(read,hit.victim+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 131 receiver hit.victim",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "  const auto l=rig::list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 158 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "ress=value<std::uint8_t>(read,owner+0xd2",
+   "from": "0xd2",
+   "to": "0xda",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 313 receiver owner",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "id=value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 474 receiver player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "|| value<std::uint32_t>(read,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 516 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": " if(value<std::uint32_t>(read,l.entity+0xac",
+   "from": "0xac",
+   "to": "0xb4",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 520 receiver l.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "ig::value<std::uint32_t>(read,projectile+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 920 receiver projectile",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "lue<std::array<float,3>>(read,projectile+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 926 receiver projectile",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "ig::value<std::uint32_t>(read,s.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 937 receiver s.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "ig::value<std::uint32_t>(read,t.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 967 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "lue<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 970 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "(saved,reinterpret_cast<const void*>(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1013 receiver void*>(entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": " std::memcpy(reinterpret_cast<void*>(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1014 receiver void*>(entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": ";std::memcpy(reinterpret_cast<void*>(entity+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1014 receiver void*>(entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": ";std::memcpy(reinterpret_cast<void*>(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1016 receiver void*>(entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "t auto entries=rig::list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 87 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 158 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "       value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 158 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": " if(value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 332 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    if(value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 332 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "ate=value<unsigned char>(read,entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 406 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    if(!read(component+0xc8",
+   "from": "0xc8",
+   "to": "0xd0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 500 receiver read(component",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "ig::value<std::uint32_t>(read,at+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 545 receiver at",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "lue<std::array<float,3>>(read,at+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 547 receiver at",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "    const auto pool=value<std::uintptr_t>(read,owner.machine+0x90);if(!pool || !pointer(*pool))return {};",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 30",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "if(value<std::uintptr_t>(read,owner.machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 41",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "nst auto components=list(read,owner.player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 60 receiver owner.player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "    value<std::uint32_t>(read,sword->entity+0xac",
+   "from": "0xac",
+   "to": "0xb4",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 78 receiver sword->entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "ig::value<std::uint32_t>(read,victim+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 99 receiver victim",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "ig::value<std::uint32_t>(read,hit.victim+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 108 receiver hit.victim",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "    const auto pool=value<std::uintptr_t>(read,owner.machine+0x90);if(!pool || !pointer(*pool))return fal",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 123",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "   auto components=list(read,*player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 39 receiver player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "|| value<std::uint32_t>(read,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 94 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "ue<std::array<float,3>>(read,*entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 95 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "ol=value<std::uintptr_t>(read,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 107",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_takedown_range.hpp",
+   "contains": "wn=value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 147 receiver player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,t.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 353 receiver t.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ictor,0,decl,rig::value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 385 receiver player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,npc+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 417 receiver npc",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        const auto state=rig::value<unsigned char>(read,npc+0xd1);return state && !(",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 432 receiver npc",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,grabbed_[side]+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 462 receiver grabbed_[side]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::array<float,9>>(read,r.target+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 490 receiver r.target",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "       run.id=rig::value<std::uint32_t>(read,npc+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 530 receiver npc",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::array<float,3>>(read,run.npc+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 548 receiver run.npc",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,run.npc+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 549 receiver run.npc",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "            const auto state=rig::value<unsigned char>(read,npc+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 582 receiver npc",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,best+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 597 receiver best",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,best+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 603 receiver best",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,e.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 637 receiver e.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<unsigned char>(read,e.entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 637 receiver e.entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<unsigned char>(read,e+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 668 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 669 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "o pid=player?rig::value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 681 receiver player",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "auto entries=p?rig::list(read,p+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 701 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "0)(params.data(),nullptr,code,0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 711",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "params.bytes.data(),nullptr,0,0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 723",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*weapon_ent+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 778 receiver weapon_ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "pret_cast<const volatile std::uint8_t*>(e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 843 receiver uint8_t*>(e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "einterpret_cast<volatile std::uint8_t*>(e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 859 receiver uint8_t*>(e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "current_spawn=rig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 886 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*p+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 926 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,hip_ent_[k]+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 958 receiver hip_ent_[k]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,p+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1066 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,e+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1075 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nst auto comps=rig::list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1083 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,s.owed+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1155 receiver s.owed",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,s.native+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1192 receiver s.native",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,s.native+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1202 receiver s.native",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,c.ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1225 receiver c.ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,c.ent+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1233 receiver c.ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nt32_t id=ent?rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1418 receiver ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,s.fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1439",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,s.fsm+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1439",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "(params.data(),item,ammo,code,0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 1468",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,entity+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1473 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1474 receiver entity",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,pool_[g.pe].ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1574 receiver pool_[g.pe].ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::array<float,3>>(read,p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1617 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ed.linear,ent,rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1750 receiver ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        std::array<float,12> f{};if(!read(e+0x300,f.data(),sizeof(f))) return std::nullop",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1813 receiver read(e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*weapon+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1820 receiver weapon",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uint32_t>(read,*part+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1831 receiver part",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::uint32_t>(read,out[2+k]+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1880 receiver k]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uint32_t>(read,*native_bolt+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1917 receiver native_bolt",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "t,def,copy_id,rig::value<std::uint32_t>(read,bolt+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1941 receiver bolt",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint8_t>(read,*b+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2107 receiver b",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "inter(*p) && (rig::value<std::uint8_t>(read,*p+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2109 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "y<float,12> at{};if(!copy || !read(copy+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2182 receiver read(copy",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2185 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,a.ent+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2199 receiver a.ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2293 receiver ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "(read,c)) nid=rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2373 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": " auto cid=ent?rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2384 receiver ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "auto bid=bolt?rig::value<std::uint32_t>(read,bolt+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2405 receiver bolt",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": ");const auto f=rig::value<std::uint8_t>(read,bolt+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2407 receiver bolt",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "auto comps=ent?rig::list(read,ent+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2428 receiver ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "onst auto pid=rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2495 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": " const auto fl=rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2496 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,copy+0x288",
+   "from": "0x288",
+   "to": "0x290",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2519 receiver copy",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,anchor+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2550 receiver anchor",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,shown[i].ent+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2581 receiver shown[i].ent",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "    bool need=(rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2588 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "er(*p)) need=(rig::value<std::uint8_t>(read,*p+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2590 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,master+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2594 receiver master",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "            const auto fsm=player_fsm(base,read);const auto inv=fsm?rig::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 2625",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "=\"<<std::hex<<rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2680 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "d0=\"<<unsigned(rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2681 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "<<\" model=\"<<rig::value<std::uintptr_t>(read,e+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2682 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        if(const auto m=rig::value<std::uintptr_t>(read,e+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2684 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,e+0xd4",
+   "from": "0xd4",
+   "to": "0xdc",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2686 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": " c8=\"<<rig::value<float>(read,e+0xc8",
+   "from": "0xc8",
+   "to": "0xd0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2686 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "     std::array<float,3> pp{};read(*p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2689 receiver read(*p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*p+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2689 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "0=\"<<unsigned(rig::value<std::uint8_t>(read,*p+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2690 receiver p",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "std::array<float,3> ep{},mp{};read(e+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2692 receiver read(e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": ",ep.data(),12);const auto m=rig::value<std::uintptr_t>(read,e+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2692 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "         const auto bind=rig::value<std::uintptr_t>(read,e+0x358).value_or(0);o<<\" b",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2694 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nst auto comps=rig::list(read,e+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2697 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,e+0x288",
+   "from": "0x288",
+   "to": "0x290",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2712 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "std::array<float,3> pp{},mp{};read(part+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2721 receiver read(part",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,part+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2721 receiver part",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,part+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2722 receiver part",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,part+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2723 receiver part",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,part+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2723 receiver part",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,part+0xd4",
+   "from": "0xd4",
+   "to": "0xdc",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2723 receiver part",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "     std::array<float,3> pp{};read(bolt+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2729 receiver read(bolt",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,bolt+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2729 receiver bolt",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "d0=\"<<unsigned(rig::value<std::uint8_t>(read,bolt+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2730 receiver bolt",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,native+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2752 receiver native",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "t_=e;rc_id_=e?rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2758 receiver e",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nventory=fsm?rig::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 2770",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "at>=scope->sensor+0x70 && at<=scope->sensor+0x78",
+   "from": "0x78",
+   "to": "0x78",
+   "why": "REVERT the generator (0x78->0x70, \"file context 5/5\"): sensor+0x70..0x78 is the 3-slot volume-ticket array; DOTO sensor job 0x3f6d20 still does lea rsi,[rdi+0x70] (fn_diff 0x3b8430: 0x3b8816 -> 0x3f717c)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "rig::value<std::uintptr_t>(self->read_,slot+0xb8)==shape",
+   "from": "0xb8",
+   "to": "0xb8",
+   "why": "REVERT the generator (0xb8->0xc4): slot is a hknp query-manager slot (manager fns 0x92630->0x94680 byte identical, stride 0x140, +0x88/+0x8e unchanged); the who_shifts 0xb8->0xc4 pair is the SENSOR flag byte, not the manager slot",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "rig::value<std::uintptr_t>(read_,scope->sensor+0x40)!=scope->camera.camera",
+   "from": "0x40",
+   "to": "0x40",
+   "why": "REVERT the generator (0x40->0x50, \"file context 12/13\"): the interaction sensor job 0x3b8430->0x3f6d20 still loads the camera from [rdi+0x40] (fn_diff 0x3b84e6 -> 0x3f6e09 identical)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "*getter>=base_+0x1a70000",
+   "from": "0x1a70000",
+   "to": "0x1b80000",
+   "why": ".text of Dishonored_DO is 0x1000..0x1b8107c, .rdata starts 0x1b81000 (D2: 0x1a70000 just below .rdata 0x1a7e000)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "info<base_+0x3900000",
+   "from": "0x3900000",
+   "to": "0x3a00000",
+   "why": "typeInfo block reached by vtable-0 getters: D2 0x39ad920..0x39f2900 inside [0x3900000,0x3f00000); DOTO 0x3a7ad10..0x3ac3420 (scan of vt_names), DOTO .data 0x2333000..0x3fdc780",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "info>=base_+0x3f00000",
+   "from": "0x3f00000",
+   "to": "0x3fdd000",
+   "why": "end of DOTO .data = start of .pdata 0x3fdd000",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "contains": "start=f3(s40+0xd8)",
+   "from": "0xd8",
+   "to": "0xc8",
+   "why": "placement sensor 0x3c1e40->0x400990: call 0x417820->0x86d8e0 (lea rax,[rcx+0xc8]); sensor +0x40 camera, +0x48 dir(+0x2c), +0x58 length unchanged (fn_diff)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "contains": "caller!=base_+0x7f727a",
+   "from": "0x7f727a",
+   "to": "0x85d96a",
+   "why": "return address of the build call inside the camera finalize: D2 0x7f7275 call 0x7f4b30 -> DOTO 0x85d965 call 0x85b340, return 0x85d96a (disassembly of 0x85d170..0x85dbe1)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "call_return_rva=0x633341",
+   "from": "0x633341",
+   "to": "0x69166d",
+   "why": "Throw call site: the only DOTO caller of 0x8e9c20 shaped like D2 0x63333c (3 mulss, call, cmp byte [..], lea rbx,[r14+0x31c]) is 0x691668 (fn 0x69137b chunk); D2 fn 0x6332d0 is unmatched. Medium confidence, test live",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "call_site_rva=0x63333c",
+   "from": "0x63333c",
+   "to": "0x691668",
+   "why": "see call_return_rva",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "fire_scene_rva=0x633810",
+   "from": "0x633810",
+   "to": "0x690ff0",
+   "why": "arkCpntWeaponThrowable vtable slot 0x120 is DOTO slot 36 = 0x690ff0, but its prologue/body differ (48 89 5c 24 10 48 89 74 24 18 57 48): the throw-scene rate hook will fail its 12-byte pin and stay off (graceful)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "snapshot.base_+outcome_vtable+0x10)!=snapshot.base_+0x695390",
+   "from": "0x695390",
+   "to": "0x6f4f50",
+   "why": "arkRule outcome vtable slot 2: D2 0x695390 = DOTO 0x6f4f50 (DOTO vtable 0x1d14d78 slot 2 read from the image; the generator skipped this literal)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "snapshot.base_+outcome_vtable+0x20)!=snapshot.base_+0x11d080",
+   "from": "0x11d080",
+   "to": "0x120460",
+   "why": "same vtable, slot 4 = DOTO 0x120460",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "(distance?0x9e9df0:0x9e9e30)",
+   "from": "0x9e9df0",
+   "to": "0xa6c220",
+   "why": "accessor distance thunk (push rbx; call getter; movss [rbx],xmm0): getter 0x3b05f0->0x3eef00 exact, thunk at 0xa6c220 (byte pattern scan)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "(distance?0x9e9df0:0x9e9e30)",
+   "from": "0x9e9e30",
+   "to": "0xa6c260",
+   "why": "accessor height thunk: getter 0x3b0730 (entity z [+0x308]-slot) = DOTO 0x3ef060 (entity z [+0x318]), thunk 0xa6c260",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "contains": "reader(base+0x3a6a9d,code.data()",
+   "from": "0x3a6a9d",
+   "to": "0x3e4739",
+   "why": "caller block just before the ret-site 0x3a6ab3->0x3e474f (aligned); D2 fn 0x3a6a05 itself is unmatched; DOTO bytes at 0x3e4739: 48 8b 73 08 48 8b cb 0f 29 74 24 30 0f 29 7c 24 20 e8 .. 8b 4b 50 0f 28 f8 e8 .. f3 0f 10 46 70",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "read(base+npc_vtable_rva+0x140,&slot,8)",
+   "from": "0x140",
+   "to": "0x148",
+   "why": "arkNPC vtable: take (D2 0x879270 at slot 40) = DOTO 0x8e6bb0 at slot 41 (+0x148); slot 40 holds 0x8e6df0. Without this NativeMelee::verify() fails and interaction install aborts",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "rig::value<unsigned char>(reader,controller+0x171)",
+   "from": "0x171",
+   "to": "0x179",
+   "why": "arkCpntPlayerController flag byte (wheel fn cmp [rcx+0x171] -> [rcx+0x179])",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "rig::value<std::array<float,3>>(read_,owner+0xa8)",
+   "from": "0xa8",
+   "to": "0x98",
+   "why": "accessor 0x88e140->0x8fc240: origin float3 [rcx+0xa8]->[rcx+0x98]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "rig::value<std::array<float,9>>(read_,owner+0xcc)",
+   "from": "0xcc",
+   "to": "0xbc",
+   "why": "accessor 0x88e140->0x8fc240: axis [rcx+0xcc]->[rcx+0xbc]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_taa_history.hpp",
+   "contains": "frame_counter_rva=render_system_rva+0xcc",
+   "from": "0xcc",
+   "to": "0xbc",
+   "why": "render system frame counter getter 0x35eb00->0x3658b0: mov eax,[rcx+0xcc] -> [rcx+0xbc] (whole object -0x10: +0xf8->+0xe8, +0xd5d8->+0xd5c8)",
+   "source": "coordinator"
   }
  ],
  "global": {},
@@ -835,6 +2947,330 @@
    "d2_at": "0x18cb90",
    "why": "pin bytes regenerated correctly, but the table KEY must become 0x1903c0 (see sites); same for key 0x8a7820 -> 0x9161e0",
    "source": "review/body-rig"
+  },
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x954d00",
+   "why": "job thunk 0x954d00->0x9cd420 is byte identical (32 B)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "d2_at": "0x8031c1",
+   "why": "only constants moved: state count 0x5a->0x67, per-state flag +0x230->+0x270 (and +0x28a->+0x2d7), config comiss +0x100->+0x108; DOTO fn 0x86a2c0 / call site 0x8c43cd otherwise identical",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "d2_at": "0x8031d1",
+   "why": "only constants moved: state count 0x5a->0x67, per-state flag +0x230->+0x270 (and +0x28a->+0x2d7), config comiss +0x100->+0x108; DOTO fn 0x86a2c0 / call site 0x8c43cd otherwise identical",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "d2_at": "0x85a2ee",
+   "why": "only constants moved: state count 0x5a->0x67, per-state flag +0x230->+0x270 (and +0x28a->+0x2d7), config comiss +0x100->+0x108; DOTO fn 0x86a2c0 / call site 0x8c43cd otherwise identical",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_crosshair.hpp",
+   "d2_at": "0x672f70",
+   "why": "crosshair update fn 0x672f70->0x6ca220 identical by hash",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x639970",
+   "why": "only [rax+0xac]->[rax+0xb4] (reads a field of [rcx+0x10])",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x638570",
+   "why": "DOTO 0x68d5d0 (pattern match), prologue identical",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x88e140",
+   "why": "only the origin/axis offsets moved (+0xa8->+0x98, +0xcc->+0xbc)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "d2_at": "0x3cec30",
+   "why": "throw-hit sensor 0x3cec30->0x40f8d0: prologue re-allocated (push r14; lea rbp,[rax-0x68]; sub rsp,0x158) but the hook only swaps entity pose fields; DOTO still reads origin [entity+0x310..] and axis [entity+0x31c..], sensor +0x10/+0x38/+0x40. Accept the DOTO bytes, test live",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "d2_at": "0x63a2b0",
+   "why": "only displacement 0x98->0xa0 changed in fn 0x68f2c0 (body identical by shape)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a80",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a88",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a92",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a98",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f4b48",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "d2_at": "0x87c2a0",
+   "why": "setter: only mov [rcx+0x33c],eax -> [rcx+0x34c],eax",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80a1",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80b5",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80dd",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80f1",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8119",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b812d",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8141",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b81a5",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b81f5",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8209",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8231",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8245",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "d2_at": "0x87b760",
+   "why": "only entity +0xc8 -> +0xd0 (idEntity field after the +8 shift)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "d2_at": "0x8a7820",
+   "why": "game flag displacement only",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x95280",
+   "why": "query job prologue (DOTO 0x974c0) byte identical (20 insns equal in fn_diff)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x95550",
+   "why": "query job prologue (DOTO 0x97790) byte identical",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x417820",
+   "why": "range getter = 48 8d 81 c8 00 00 00 c3 at 0x86d8e0 (see site 0xd8->0xc8)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x3b80a0",
+   "why": "eligibility prologue at 0x3f6990: push r12 -> push r13 and r9/rcx register moves only",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "d2_at": "0x8363f0",
+   "why": "EquipChange processor 0x8363f0->0x89ea20: 32-byte prologue identical (the tool failed only because the total lengths differ by 6 bytes)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "d2_at": "0x7fb351",
+   "why": "wheel fn 0x7fb350->0x861b20: only cmp byte [rcx+0x171] -> [rcx+0x179]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_hooks.hpp",
+   "d2_at": "0x8363f0",
+   "why": "hook prologue copy: processor identical / wheel byte 12 0x71->0x79",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_hooks.hpp",
+   "d2_at": "0x7fb350",
+   "why": "hook prologue copy: processor identical / wheel byte 12 0x71->0x79",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "d2_at": "0x6b8b70",
+   "why": "bloodfly swarm kill 0x6b8b70->0x718930: register allocation (r14d->ebp) and a jne rel32; same arguments (rcx,rdx,r8d). Accept (low value feature)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "d2_at": "0x75ff0f",
+   "why": "sever pin: params +0x98->+0xa8 and entity +0xd1->+0xd9 only",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "d2_at": "0x60a8b0",
+   "why": "impact-fx play fn 0x60a8b0->0x65f2e0: entity flag +0xd2->+0xda only",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_quick_health.hpp",
+   "d2_at": "0x719890",
+   "why": "health-elixir count fn 0x719890->0x77b9a0: cmp [rcx+0xf0] -> [rcx+0xf8] only",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_shot_aim.hpp",
+   "d2_at": "0x639988",
+   "why": "only [rax+0xac]->[rax+0xb4]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "d2_at": "0x810240",
+   "why": "event-system getter: add rax,0x1e8968 -> 0x1e8970 only (game struct shift)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6980",
+   "why": "choke sensor entry prologue (48 B) at DOTO 0x3e45f0: only the je rel32 (0x30c->0x338) and the machine field disp 0x330->0x388 (+0x58) differ",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a66f0",
+   "why": "choke distance fn 0x3a66f0->0x3e4360: prologue differs by call relocations only",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6a9d",
+   "why": "caller_code 38 B at DOTO 0x3e4739: two call rel32 only",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6abe",
+   "why": "pin movss xmm0,[rsi+0x70] identical at 0x3e475a",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6b18",
+   "why": "pin identical (0x3e47b4)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6c57",
+   "why": "pin identical (0x3e48f3)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6c64",
+   "why": "pin identical (0x3e4900)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6caf",
+   "why": "pin identical (0x3e494b)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6cbc",
+   "why": "pin identical (0x3e4958)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_taa_history.hpp",
+   "d2_at": "0x35eb00",
+   "why": "counter getter: only the -0x10 field move; frame_counter_rva moved by the same rule",
+   "source": "coordinator"
   }
  ],
  "rvas": [
@@ -1078,6 +3514,14 @@
    "to": "0x3a53cc0",
    "why": "apply_test_unlock: static init at RVA 0x1410ec2 (name string 0x1caaeb8) -> object 0x3a53cc0; ark_blackMarket_unlockAll 0x397fee0->0x3a4c3a0 is already right",
    "source": "review/input-ui"
+  },
+  {
+   "file": "src/native_taa_history.hpp",
+   "contains": "{0x2bfa0,8,",
+   "from": "0x2bfa0",
+   "to": "0x263e20",
+   "why": "leaf 'lea rax,[rcx+0x98]; ret', 3/3 call votes, bytes identical",
+   "source": "coordinator"
   }
  ],
  "text": [
@@ -1128,6 +3572,54 @@
    "new": "0x9161e0",
    "why": "0x8a7820->0x9161e0 (voted leaf 64/64; body matches: cmp [rcx+0x34b7e1]...); key left untranslated",
    "source": "review/body-rig"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "range_origin_code{0x48,0x8d,0x81,0xd8,0,0,0,0xc3}",
+   "old": "0xd8",
+   "new": "0xc8",
+   "why": "camera range-origin getter D2 0x417820 (lea rax,[rcx+0xd8];ret) = DOTO 0x86d8e0 (lea rax,[rcx+0xc8];ret) (fn_diff); same +0xd8->+0xc8 in the placement sensor",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "std::array<unsigned char,338> scan{}",
+   "old": "338",
+   "new": "363",
+   "why": "DOTO hand-hover scan block: D2 0x3b8b05..0x3b8c57 (338 B) = DOTO 0x3f746c..0x3f75d7 (363 B): sensor result writer gained 3 movss (+0xb8/+0xbc/+0xc0) and its flags byte moved +0xb8->+0xc4; block ends after \"or byte [rdi+0xc4],sil\"",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "scan_hash!=0xfa858f63011f3e5cull",
+   "old": "0xfa858f63011f3e5cull",
+   "new": "0x901ce20934c4335eull",
+   "why": "FNV-1a-64 over the 363 DOTO image bytes at 0x3f746c (method validated: the D2 image gives 0xfa858f63011f3e5c over its 338 bytes)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "0x8b,0x02,0x89,0x81,0x3c,0x03,0x00,0x00",
+   "old": "0x3c",
+   "new": "0x4c",
+   "why": "setter D2 0x87c2a0->0x8e9c20: mov [rcx+0x33c],eax -> [rcx+0x34c],eax (entity velocity block, +0x10 past 0x2b8); only the disp byte changes in want[8]",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "0x48,0x8b,0xc4,0x56,0x41,0x56,0x48,0x83,0xec,0x68,0x80,0xb9,0x71,0x01,0x00,0x00",
+   "old": "0x71",
+   "new": "0x79",
+   "why": "wheel 0x7fb350->0x861b20: cmp byte [rcx+0x171],0 -> [rcx+0x179] (fn_diff)",
+   "source": "review/weapons-merged"
+  },
+  {
+   "file": "src/native_manual_equip_hooks.hpp",
+   "contains": "0x80,0xb9,0x71,0x01,0,0,0,0x4d",
+   "old": "0x71",
+   "new": "0x79",
+   "why": "same wheel prologue (controller flag +0x171 -> +0x179)",
+   "source": "review/weapons-merged"
   }
  ]
 }

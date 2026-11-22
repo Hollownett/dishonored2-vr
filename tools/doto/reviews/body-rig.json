@@ -1,0 +1,327 @@
+{
+ "sites": [
+  {
+   "file": "src/game_rig.hpp",
+   "contains": "auto model=value<std::uintptr_t>(read,*player+0xf0);",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "LIVE: arkPlayer+0xf8 and +0x370 both hold the same arkSkinnedRenderModel (vt 0x1c146e8); D2 +0xf0/+0x360. Generator kept 0xf0 (vote mixed). Without it player_arms() returns {} and every arm/body feature is off"
+  },
+  {
+   "file": "src/game_rig.hpp",
+   "contains": "value<std::uintptr_t>(read,*player+0x360)!=model",
+   "from": "0x360",
+   "to": "0x370",
+   "why": "LIVE: arkPlayer+0x370 == model pointer (same object as +0xf8)"
+  },
+  {
+   "file": "src/game_rig.hpp",
+   "contains": "auto components=list(read,*player+0x268,4096);",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "LIVE: scanned the whole arkPlayer for {ptr,count|cap} lists: the only one holding arkCpntPlayerBody (owner +0x10==player) is at +0x270 (98 components). Generator kept 0x268"
+  },
+  {
+   "file": "src/game_rig.hpp",
+   "contains": "auto after=list(read,*player+0x268,4096);",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "same (re-read of the components list)"
+  },
+  {
+   "file": "src/game_rig.hpp",
+   "contains": "base+0x1b0bd08+0x88)!=base+0x24f240",
+   "from": "0x88",
+   "to": "0x90",
+   "why": "skeleton vtable 0x1c12d98 gained a slot before idx 11: D2 slot 0x88 (0x24f240) is DOTO slot 0x90 (0x254900); DOTO slot 0x88 is 0x254880 (= D2 0x24f1c0). Compared both vtables slot by slot"
+  },
+  {
+   "file": "src/game_rig.hpp",
+   "contains": "base+0x1b0bd08+0x88)!=base+0x24f240",
+   "from": "0x24f240",
+   "to": "0x254900",
+   "why": "fn 0x24f240->0x254900 identical body (fn_diff: [rcx+0x158], [r9+0x1c], [r9+rcx*4+0x42]); generator left this plain RVA untranslated (offset_review no aligned access), so arm_hierarchy() would always fail"
+  },
+  {
+   "file": "src/arm_tracking.hpp",
+   "contains": "arm.player+0xf0),animation=",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "LIVE model at arkPlayer+0xf8 (see game_rig)"
+  },
+  {
+   "file": "src/arm_tracking.hpp",
+   "contains": "arm.player+0xf0)!=model",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "LIVE model at arkPlayer+0xf8"
+  },
+  {
+   "file": "src/native_torso_fit.hpp",
+   "contains": "arm.player+0xf0)!=b.model",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "LIVE model at arkPlayer+0xf8"
+  },
+  {
+   "file": "src/native_torso_fit.hpp",
+   "contains": "arm.player+0xf0)==b.model",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "LIVE model at arkPlayer+0xf8"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "const auto components=list(read,player+0x268,4096);",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "LIVE components list at arkPlayer+0x270"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "const auto after=list(read,player+0x268,4096);",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "LIVE components list at arkPlayer+0x270"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "auto components=list(read,*player+0x268,4096);",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "LIVE components list at arkPlayer+0x270"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "auto after=list(read,*player+0x268,4096);",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "LIVE components list at arkPlayer+0x270"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "field(s.mode,0x25200)",
+   "from": "0x25200",
+   "to": "0x25230",
+   "why": "GENERATOR BUG: output has field(s.mode,0x25c50), outside the 0x200-byte window read at camera+0x25180 (offset-0x25180=0xad0 -> memcpy out of bounds). Correct value is +0x30 like every neighbour: target_mode 0x25234 and the shadow-walk check 0x25230 (live camera+0x25230/+0x25234 = (0,0), valid mode ints)"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "value<std::uint8_t>(read,controller+0x172)!=0) return false;",
+   "from": "0x172",
+   "to": "0x17a",
+   "why": "fn 0x7f7860->0x85df50 (arkCpntPlayerController ctor): mov byte [rbx+0x172],dil -> [rbx+0x17a]; also who_shifts 0x172->0x17a in 0x8492f0. LIVE controller+0x17a=0, +0x172=0x61 (unchanged value would read nonzero and reject shadow walk forever)"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "value<std::uint8_t>(read,controller+0x172)==0 &&",
+   "from": "0x172",
+   "to": "0x17a",
+   "why": "same, second read"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "*delegate+0x168)!=s.physics",
+   "from": "0x168",
+   "to": "0x178",
+   "why": "delegate = arkPhysicsPlayer object; ctor 0x1b2290->0x1b64a0: sub-object lea [rdi+0x160]->[rdi+0x170] and its vtable store (generator already moved the vtable check 0x160->0x170); the back pointer sits 8 bytes after it. LIVE: +0x168 != physics component, so it cannot stay"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "*delegate+0x120)!=*player+0x300",
+   "from": "0x120",
+   "to": "0x130",
+   "why": "ctor 0x1b2290->0x1b64a0: mov [rdi+0x120],[rbp+0xb0] -> mov [rdi+0x130],[rbp+0xb0] (a 12-byte copy was added at 0x120..0x128)"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "!=*player+0x300 ||",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "arkPlayer origin: fn 0x3aa470->0x3e9c20 movss [rsi+0x300]->[rsi+0x310] on an id-resolved entity; delegate+0x130 is the pointer to player+0x310"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "*delegate+0x1e0)!=delegate",
+   "from": "0x1e0",
+   "to": "0x1f0",
+   "why": "ctor 0x1b2290->0x1b64a0: mov [rdi+0x1e0],rdi -> mov [rdi+0x1f0],rdi (self pointer)"
+  },
+  {
+   "file": "src/native_player_camera.hpp",
+   "contains": "read(*player+0x30c,s.entity_axis.data()",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "LIVE: arkPlayer+0x31c holds the 3x3 axis equal to the camera aim_axis at camera+0x252b8; generator left 0x30c (offset_review moved 431/473 but not applied)"
+  },
+  {
+   "file": "src/hand_body_probe.hpp",
+   "contains": "!within_page(*entity+0xa8,4)",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity id: fn 0x7b5e00->0x81c320 (GetEntity by id): cmp [rax+0xa8],r8d -> [rax+0xb0]"
+  },
+  {
+   "file": "src/hand_body_probe.hpp",
+   "contains": "(read,*entity+0xa8)",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "entity id idEntity+0xa8 -> +0xb0 (0x7b5e00->0x81c320)"
+  },
+  {
+   "file": "src/hand_body_probe.hpp",
+   "contains": "(read,at+0xa8)",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "entity id idEntity+0xa8 -> +0xb0 (0x7b5e00->0x81c320)"
+  },
+  {
+   "file": "src/hand_body_probe.hpp",
+   "contains": "std::array<float,3>>(read,at+0x300)",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity origin: fn 0x3aa470->0x3e9c20 movss [rsi+0x300]->[rsi+0x310] on an entity resolved by 0x7b5e00"
+  },
+  {
+   "file": "src/hand_body_probe.hpp",
+   "contains": "*object+0xc34",
+   "from": "0xc34",
+   "to": "0xd4c",
+   "why": "0x8a7820->0x9161e0 (busy flag): cmp byte [rax+0xc34],0 -> [rax+0xd4c],0 (game+0x1e8960->0x1e8968 and 0x337121->0x34b7e1 were done by the generator)"
+  },
+  {
+   "file": "src/hand_body_spike_engine.hpp",
+   "contains": "player_entity_+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "same idEntity origin move"
+  },
+  {
+   "file": "src/hand_body_native.hpp",
+   "contains": "{0x18cb90,{",
+   "from": "0x18cb90",
+   "to": "0x1903c0",
+   "why": "translate.py: 0x18cb90->0x1903c0 (voted leaf 14/15); the generator rewrote the pin bytes to DOTO's but left the key RVA, so verify() reads the wrong function and disables the owner"
+  },
+  {
+   "file": "src/hand_body_native.hpp",
+   "contains": "userdata_rva=0x18cb90",
+   "from": "0x18cb90",
+   "to": "0x1903c0",
+   "why": "same (arkHavokUserData ctor)"
+  },
+  {
+   "file": "src/hand_body_native.hpp",
+   "contains": "{0x8a7820,{",
+   "from": "0x8a7820",
+   "to": "0x9161e0",
+   "why": "0x8a7820->0x9161e0 (voted leaf 64/64; body matches: cmp [rcx+0x34b7e1]...); key left untranslated"
+  },
+  {
+   "file": "src/hand_body_native.hpp",
+   "contains": "sphere_rva=0xca6550",
+   "from": "0xca6550",
+   "to": "0xd29000",
+   "why": "0xca6550->0xd29000 (voted 20/20; fn_diff identical except 2 rip-rel leas). native_hand_volume.hpp also reads/calls base+0xca6550 and needs DOTO bytes (see notes)"
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "contains": "read_self(m+0x2040,&w[1],8)",
+   "from": "0x2040",
+   "to": "0x2030",
+   "why": "second skin wrapper = model+0x1ff8(DOTO)+0x38 = +0x2030 (D2 +0x2008+0x38=+0x2040). Live: +0x1ff8 and +0x2030 hold the two wrapper pointers, +0x2040 is 0. Generator kept 0x2040 (offset_review 12/14)"
+  },
+  {
+   "file": "src/native_note_source.hpp",
+   "contains": "previous=value<std::int8_t>(read,model+0x1fb3)",
+   "from": "0x1fb3",
+   "to": "0x1fa3",
+   "why": "model skin index: fn 0x25f930->0x265f00 movsx [rcx+0x1fb3]->[rcx+0x1fa3]. Generator moved +0x1fb2 in this file but not +0x1fb3/+0x2000/+0x2008 (outside my list, found while checking model fields)"
+  },
+  {
+   "file": "src/native_note_source.hpp",
+   "contains": "model+0x1fb3)!=previous",
+   "from": "0x1fb3",
+   "to": "0x1fa3",
+   "why": "same"
+  },
+  {
+   "file": "src/native_note_source.hpp",
+   "contains": "packed=value<std::uint32_t>(read,model+0x2000)",
+   "from": "0x2000",
+   "to": "0x1ff0",
+   "why": "0x25f930->0x265f00: mov eax,[rbx+0x2000] -> [rbx+0x1ff0]"
+  },
+  {
+   "file": "src/native_note_source.hpp",
+   "contains": "model+0x2000)!=packed",
+   "from": "0x2000",
+   "to": "0x1ff0",
+   "why": "same"
+  },
+  {
+   "file": "src/native_note_source.hpp",
+   "contains": "wrappers{model+0x2008+static_cast<unsigned>(*current)",
+   "from": "0x2008",
+   "to": "0x1ff8",
+   "why": "0x25f930->0x265f00: add rcx,0x2008 -> 0x1ff8 (stride 0x38 unchanged)"
+  },
+  {
+   "file": "src/native_note_source.hpp",
+   "contains": "model+0x2008+static_cast<unsigned>(*previous)",
+   "from": "0x2008",
+   "to": "0x1ff8",
+   "why": "same"
+  }
+ ],
+ "bytes": [
+  {
+   "file": "src/dxgi_probe.cpp",
+   "d2_at": "0x25f206",
+   "why": "skin_write_expected_bytes (0x25f200->0x2657f0): only disp 0x1fa8->0x1f98 moved (consistent -0x10 of all model skin fields), generator left D2 bytes (status semantic). Correct DOTO 16 bytes: 40 53 55 41 54 41 57 48 83 ec 48 8b 99 98 1f 00 (raw DOTO bytes read). The hook only calls the writer; it does not read this displacement",
+   "safe": true
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "d2_at": "0x25f936",
+   "why": "skin_gpu_upload_expected_bytes already rewritten correctly (0x1fb1->0x1fa1); matches raw DOTO bytes at 0x265f00",
+   "safe": true
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "d2_at": "0x25eff0",
+   "why": "arm_upload_expected_bytes (32 bytes at 0x2655d0) verified byte for byte: only 0x1fe8->0x1fd8 differs, rewritten correctly",
+   "safe": true
+  },
+  {
+   "file": "src/hand_body_native.hpp",
+   "d2_at": "0x18cb90",
+   "why": "pin bytes regenerated correctly, but the table KEY must become 0x1903c0 (see sites); same for key 0x8a7820 -> 0x9161e0",
+   "safe": true
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "d2_at": "0x3742bf",
+   "why": "not my hook (view-jitter ABI pin verify_view_jitter_abi): cmp byte [rcx+0x140],0 -> [rcx+0x130],0; DOTO bytes 80 b9 30 01 00 00 00 (fn_diff 0x3742b0->0x37b1a0, the neighbouring movups also moved -0x10). Pin only; generator left D2 bytes so it fails",
+   "safe": true
+  }
+ ],
+ "blockers": [
+  "player_arms() chain: arkPlayer model +0xf0/+0x360 and components list +0x268 are NOT moved by the generator but are +0xf8/+0x370/+0x270 in DOTO (live-verified). Until fixed every consumer (arm tracking, full body, torso fit, camera; ~35 more files use player+0x268) fails closed. Apply these three player offsets globally, not only in my files",
+  "arm_hierarchy(): skeleton vtable gained one slot (D2 +0x88 -> DOTO +0x90) and the generator left base+0x24f240 untranslated, so the arm hierarchy never validates. native_door_skeleton_content.hpp:100-101 has the same stale vtable slots (+0x80/+0x88 on skeleton, +0x20 on model: DOTO model slot +0x20 is a stub 0x18e6f0, the D2 0x25df10 equivalent is DOTO slot +0x80 = 0x263e30)",
+  "Full body mode: native_torso_fit_token() and body_material_route() accept only models/characters/player/{emily,corvo}/body.md6. Billie fails closed -> current_avatar_torso empty -> dxgi_probe (~line 5212) switches full-body off; configure_calibration() also rejects a fit with torso width and no native width. Needs Billie resource names, material names, mesh vertex/triangle counts and a measured chest-band width (not derivable from exe strings)",
+  "hand_body_native: three RVAs not translated (0x18cb90, 0x8a7820, 0xca6550) -> verify() fails and the hand-body owner is disabled"
+ ],
+ "notes": [
+  "Counts: 39 sites (incl. 1 generator bug and 7 in neighbour files native_note_source/dxgi_probe), 5 bytes entries (all safe). Riskiest: player offsets 0xf0/0x360/0x268; native_player_camera mode field 0x25c50 (out-of-bounds memcpy); skeleton vtable slot shift; unmoved entity/Havok-adjacent offsets in hand_body_probe.",
+  "Verified correct as generated (no action): model +0x1fe8->0x1fd8, +0x1ff8->0x1fe8, +0x2008->0x1ff8, +0x1fb2->0x1fa2, +0x1fb1->0x1fa1, +0x1fb0->0x1fa0 (fns 0x25f930/0x25f200/0x25efe0 aligned, wrapper stride 0x38 unchanged; live wrappers at +0x1ff8/+0x2030); +0x1c30->0x1c2d (tests on bits 0x20/0x01 in many fns; live arm models have 0x1c2d bit 0x10 set and the hidden body model clear); model vtable slots 0x58/0x78/0xb8 (identical fns 0x23c180/0x2659b0/0x265320); model+0x1bb0 (live == descriptor+8); model +0x1c00/+0x18a0/+0x1860/+0x1840 unchanged (fn 0x235990); animation +0x38/+0x2d8/+0x2e8 and 16-byte state entries (fn 0x53d6a0->0x58d220 identical besides +0x1fd8); body+0x58/+0x378/+0x688 (live); skeleton+0x78 bone count (live 69 arm / 20 body) and blob +0x158/+0x1c/+0x40/+0x42 (fn 0x24f240 identical); game singleton 0x3a72280, game+0x327770 player, game+0x60410 world (same 187/187); Havok record stride 0xb0 and +0x30/+0x44/+0x70/+0x90 (createBody/cinfo ctor hashes identical); CF_STARTED state table rows identical; camera +0x25188/+0x25190/+0x251a0/+0x252ac/+0x252b8, physics vtable/+0x30, delegate +0x170 vtable (all live), delegate +0x40/+0xbc/+0xd0 (ctor), +0x158 and +0x220..+0x22c (ctor), camera vtables 0x1cf78d8/0x1cf79b8 (live).",
+  "Unverified (game exited during the review, so no more live reads): joint-name table (global 0x235a570 voted 47/47, vtable idAnimationLocal exact, but list at manager+8 / stride 0x48 / text +0x10 not diffed; fails safe by returning {}), controller+0xd0 look pair (ctor shows 0xcc dword became qword, neighbours unchanged), machine+0x90 pool / state +8,+0x10,+0x18,+0x20 / decl+0x60 (shadow walk only), descriptor+0x68 geometry, surface +0x30/+0x54/+0x58, material +8 name text, record stride 0x80 (torso fit and body material only), model+0x1890 scale, world+0x470 filter object (probe CSV only), a diagnostics string in native_weapon_hands.hpp using model+0x1f48/+0x1fb0 (expect -0x10).",
+  "Same unmoved player offsets outside my list (apply the same fixes): player+0x268->0x270 in native_action_camera, native_assassination_receipt, native_audio_listener, native_carry_snapshot, native_choke_distance_scope, native_contact_assassination, native_equipment_ownership, native_gadget_drop, native_kill_range_scope, native_lean_snapshot, native_ranged_fire, native_slash_speed, native_sword_contact, native_takedown, native_weapon_visibility, native_world_query_source, dxgi_probe.cpp:4294 and :5822 (that line reads data at +0x268 and the packed word at +0x270 -> DOTO +0x270/+0x278); player+0xf0->0xf8 in dxgi_probe.cpp lines 5306, 6093, 9642, 9683, 11788; idEntity entityDef +0x2e8->0x2f8 in dxgi_probe.cpp gun_owner_of (two lines ~6229 and ~6239, medium confidence, live arkPlayer+0x2f8 is an idDeclEntityDef).",
+  "native_hand_volume.hpp constructor_code (113 bytes, 0xca6550->0xd29000): DOTO differs only at indices 9,10 (0xb1,0x21 -> 0xcd,0x23) and 56,57 (0xb8,0x21 -> 0xd4,0x23) (rip-relative leas); generator did not regenerate it, so the pin fails even after the RVA fix. native_held_object.hpp:189 physics_busy_rva=0x8a7820 and native_world_trace.hpp sphere_ctor_rva/collector_add_rva (0xca53a0, 0xca5460) look like the same voted-leaf class left untranslated.",
+  "Pinned-hash data: native_hand_reference.hpp and authored_hand_bank.hpp pin the D2 exe SHA-256 b671f824...; native_torso_fit.hpp pins Emily/Corvo resource names plus vertex/triangle counts and mesh SHA comments. read_native_hand_references() / validate_authored_provenance() only throw std::invalid_argument for another exe, and nothing under src/ calls them or install_reference() at runtime (tests/tools only), so they are inert and fail safe. native_torso_width() returns {} for other resources (fail safe, see blocker). Per-character art files artifacts/game-art/note_hand_{corvo,emily}_{left,right}.bin (dxgi_probe ~18923) are D2-only; avatar_emily (dxgi_probe ~5176) becomes -1 for Billie and falls back to hip_owner.",
+  "Billie resources (read-only strings from base/game1,game2 (_patch).index): body md6 models/characters/dlc01/player/billie/player_body_billie.md6 (+ .md6mesh, generated/basemodel/.../player_body_billie.bmd6model); arms .../player_leftarm_billie.md6, .../player_rightarm_billie.md6 and a VOID variant .../player_rightarm_void_billie.md6 (each with .md6mesh/.bmd6model); entity defs models/characters/dlc01/player/billie/{body,left_arm,right_arm}.def; materials models/characters/dlc01/player/billie/asset/body01/texture/ply_billie_glove.material and ply_billie_void_hand.material (third person: models/characters/dlc01/female/billie/body01/textures/f_billie_body01_{upper,lower,footwear,holster,pouch}.material and body02/textures/f_billie_void_hand_third.material). There is no Billie skeleton file: generated/skeleton only has models/characters/player/emily/player_{body,leftarm,rightarm}_emily.edgeskl/.md6skl, and the live skeletons have the D2 bone counts (69 arm / 20 body), so Billie appears to share the Emily bind skeleton and player_rig_data.hpp / joint names (left_index_end_jnt etc.) should still apply. The first-person body material names used by body.md6mesh could not be read from the index.",
+  "Void/prosthetic arm: Billie's right arm has a separate void-hand md6 and material (ply_billie_void_hand). If the game swaps the right-arm model or descriptor during play, the Arm identity (model, skeleton, animation identity) changes and player_arms() comparisons drop and re-acquire that arm; the hand mesh differs but is on the same skeleton. Unverified when the swap happens; check left glove and right void hand in the headset.",
+  "Shadow Walk (native_shadow_walk_active, native_action_camera_states) is an Emily power; Billie has none, so tracked_shadow_walk should stay false (fail safe). Mode value 7 and the scripted-state vtables are D2-specific (native_action_camera.hpp is not mine).",
+  "The live game exited while I was reviewing (reads taken earlier in the main-menu session: arkPlayer, camera component, physics delegate, controller, arm/body models). After the fixes, re-run tools/doto/live.py in a gameplay level to confirm player_arms() end to end."
+ ]
+}

@@ -1,0 +1,2516 @@
+{
+ "sites": [
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "contains": " auto pool=rig::value<std::uintptr_t>(reader,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 125"
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "contains": "_lease) || rig::value<std::uintptr_t>(reader,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 135"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "contains": "o components=rig::list(reader,lease->player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 134 receiver lease->player"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": " value<std::uint32_t>(guarded,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 60 receiver entity"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "=value<std::uint32_t>(guarded,expected.arm.player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 62 receiver expected.arm.player"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "=value<std::uint32_t>(guarded,expected.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 63 receiver expected.entity"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "=value<std::uint32_t>(guarded,expected.parent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 64 receiver expected.parent"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": " value<std::uint32_t>(guarded,expected.entity+0xac",
+   "from": "0xac",
+   "to": "0xb4",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 67 receiver expected.entity"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "layer_components=list(guarded,expected.arm.player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 71 receiver expected.arm.player"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": " auto components=list(guarded,expected.entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 87 receiver expected.entity"
+  },
+  {
+   "file": "src/native_equipment_ownership.hpp",
+   "contains": "g=value<std::uintptr_t>(read,*child+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 120 receiver child"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "native && *alternative) axis=*alternative+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 201 receiver alternative"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "e<std::array<float,9>>(read_,*alternative+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 204 receiver alternative"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "                row.axis=row.b+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 267 receiver row.b"
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "contains": "field(sensor,0x10,p)) {origin=f3(p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 71 receiver f3(p"
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "contains": "0,p)) {origin=f3(p+0x300);dir=f3(p+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 71 receiver f3(p"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": " auto entries=rig::list(read,*player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 373 receiver player"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "g::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 380"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "ig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 386 receiver e"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "g::value<std::uintptr_t>(read,e+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 389 receiver e"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "ig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 433 receiver entity"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": " auto p=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 456 receiver t.entity"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "ig::value<std::uint32_t>(read,t.entity+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 471 receiver t.entity"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "   p.at=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 472 receiver t.entity"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "onst auto list=rig::list(read,t.entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 473 receiver t.entity"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "      if(const auto at=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 508 receiver t.entity"
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "contains": "         const auto at=rig::value<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 511 receiver t.entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "onst auto id=rig::value<std::uint32_t>(read_,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 391 receiver entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "::value<std::uint32_t>(read_,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 508 receiver entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "e<std::array<float,3>>(read_,*entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 509 receiver entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "ue<std::array<float,3>>(read_,grasp.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 646 receiver grasp.entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "e<std::array<float,3>>(read_,*player+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 834 receiver player"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "            if(read_(body.entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 874 receiver if(read_(body.entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "g::value<unsigned char>(read_,body.entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 901 receiver body.entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "g::value<std::uint32_t>(read_,at+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1222 receiver at"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "ue<std::array<float,3>>(read_,at+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1223 receiver at"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "2_t> {return rig::value<std::uint32_t>(read_,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1333 receiver entity"
+  },
+  {
+   "file": "src/native_grab.hpp",
+   "contains": "        NativeRigidBody b{};b.entity=entity;b.entity_id=rig::value<std::uint32_t>(read_,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1503 receiver entity",
+   "all": true,
+   "occurrences": 2
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "            if(!e || !rig::pointer(*e) || rig::value<std::uint32_t>(read,*e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 162 receiver e",
+   "all": true,
+   "occurrences": 2
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "st auto flags=rig::value<std::uint8_t>(read,*e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 163 receiver e"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "uto id=entity?rig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 172 receiver entity"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": " scale=rig::value<float>(read,entity+0xc8",
+   "from": "0xc8",
+   "to": "0xd0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 180 receiver entity"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 213 receiver entity"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "ig::value<std::uint32_t>(read,e.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 274 receiver e.entity"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "(const auto f=rig::value<std::uint8_t>(read,*e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 353 receiver e"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "auto entries=entity?list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 382 receiver entity"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "cpy(cp,reinterpret_cast<const void*>(t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 485 receiver void*>(t.entity"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "cpy(ca,reinterpret_cast<const void*>(t.entity+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 485 receiver void*>(t.entity"
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "        float mo[3],ma[9],off[3],l[9];std::memcpy(mo,reinterpret_cast<const void*>(m+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 504 receiver void*>(m",
+   "all": true,
+   "occurrences": 2
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "contains": "],off[3],l[9];std::memcpy(mo,reinterpret_cast<const void*>(m+0x300),12);std::memcpy(ma,reinterpret_cast<const void*>(m+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 504 receiver void*>(m",
+   "all": true,
+   "occurrences": 2
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "value<std::uintptr_t>(reader,*entity+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 44 receiver entity"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "ents=entity?rig::list(reader,*entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 45 receiver entity"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "o components=rig::list(reader,proof.entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 127 receiver proof.entity"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": "::value<std::uint32_t>(reader,proof.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 132 receiver proof.entity"
+  },
+  {
+   "file": "src/native_held_placement.hpp",
+   "contains": ":value<std::uintptr_t>(reader,proof.entity+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 132 receiver proof.entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "to kind=rig::value<int>(read_,entity+0x288",
+   "from": "0x288",
+   "to": "0x290",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 381 receiver entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<unsigned char>(read_,entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 381 receiver entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<unsigned char>(read_,entity+0x368",
+   "from": "0x368",
+   "to": "0x378",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 385 receiver entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "::value<std::uintptr_t>(read_,entity+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 390 receiver entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "wn=rig::value<unsigned>(read_,s.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 416 receiver s.entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "f(owner) {e.spawn=rig::value<unsigned>(read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 463 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "::value<std::uintptr_t>(read_,e.owner+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 495 receiver e.owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": " const auto spawn=rig::value<unsigned>(read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 562 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "   rig::value<unsigned>(read_,query.owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 572 receiver query.owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "        const auto spawn=owner?rig::value<unsigned>(read_,*owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 613 receiver owner",
+   "all": true,
+   "occurrences": 5
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<std::uint32_t>(read_,camera->player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 722 receiver camera->player"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "ue<std::uint32_t>(self->read_,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1115 receiver entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "y || body->handle!=handle || !self->read_(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1118 receiver self->read_(entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "            const auto spawn=owner?rig::value<unsigned>(read_,*owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1403 receiver owner",
+   "all": true,
+   "occurrences": 2
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "                rig::value<unsigned>(read_,*owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1415 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "::value<std::uintptr_t>(read_,*machine+0x318",
+   "from": "0x318",
+   "to": "0x370",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1452"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "=owner?rig::value<UINT>(read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1468 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "nst auto list=rig::list(read_,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1659 receiver entity"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "ue<std::uint32_t>(self->read_,owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1784 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "   rig::value<unsigned>(read_,contact.owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1835 receiver contact.owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "lue_or(false),rig::value<std::uint8_t>(read_,owner+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1862 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": ">(read_,reinterpret_cast<std::uintptr_t>(entity)+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1890 receiver uintptr_t>(entity)"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "os(false,true,rig::value<std::uint8_t>(read_,owner+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1947 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": " auto model=rig::value<std::uintptr_t>(read_,owner+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2168 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "            rig::value<std::uintptr_t>(read_,owner+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2175 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "   rig::value<unsigned>(read_,t.owner+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2237 receiver t.owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "e<std::array<float,3>>(read_,*owner+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2251 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "g::value<std::uint32_t>(read_,entities[i]+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2530 receiver entities[i]"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": " auto members=rig::list(read_,door+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2588 receiver door"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "final_members=rig::list(read_,door+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2599 receiver door"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "           rig::value<unsigned>(read_,*owner+0xa8)!=spawn)return {};",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2649 receiver owner"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "ue<std::array<float,3>>(read_,camera.player+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 3027 receiver camera.player"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "mponents=list(snapshot,reader,owner->player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 155 receiver owner->player"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": " auto pool=rig::value<std::uintptr_t>(reader,*machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 102"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "        if(!entity || !rig::typed(reader,base,*entity,0x1ce1e98) || rig::value<std::uint32_t>(reader,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 112 receiver entity"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": " components=rig::list(reader,*entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 117 receiver entity"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "           rig::value<std::uintptr_t>(reader,*machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 126"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "(*spawn>>16)*8ull)!=entity || !rig::typed(reader,base,*entity,0x1ce1e98) || rig::value<std::uint32_t>(reader,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 132 receiver entity"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "_components=rig::list(reader,*entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 137 receiver entity"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "ol=machine?rig::value<std::uintptr_t>(reader,*machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 177"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "    const auto controller=rig::value<std::uintptr_t>(reader,machine+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 108"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": " inventory=rig::value<std::uintptr_t>(reader,expected.owner.machine+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 155"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": " auto body=rig::value<std::uintptr_t>(reader,expected.owner.machine+0x300",
+   "from": "0x300",
+   "to": "0x358",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 156"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "96),requests=rig::list(reader,expected.owner.machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 164"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "           rig::value<std::uintptr_t>(reader,expected.owner.machine+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 168"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "           rig::value<std::uintptr_t>(reader,expected.owner.machine+0x300",
+   "from": "0x300",
+   "to": "0x358",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 169"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "ent_requests=rig::list(reader,expected.owner.machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 179"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,holster_.owner.machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 255"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "ate+0x30),queue=rig::value<rig::List>(reader,machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 259"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "96),requests=rig::list(reader,machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 260"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "30),queue_after=rig::value<rig::List>(reader,machine+0x220",
+   "from": "0x220",
+   "to": "0x260",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 271"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "hine),pool=rig::value<std::uintptr_t>(reader,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 277"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "        Reader reader{read_};const auto pool=rig::value<std::uintptr_t>(reader,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 328",
+   "all": true,
+   "occurrences": 5
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,machine+0x300",
+   "from": "0x300",
+   "to": "0x358",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 335"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,*machine+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 349"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": ":value<std::uintptr_t>(reader,*machine+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 351"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": " if(const auto controller=rig::value<std::uintptr_t>(reader,machine+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 429"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "e std::uint32_t*>(*draw+0x30)=0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 439"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "pid=value<std::uint32_t>(read,s.player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 75 receiver s.player"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "|| value<std::uint32_t>(read,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 84 receiver entity"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "alth=value<std::uint8_t>(read,victim+0xd7",
+   "from": "0xd7",
+   "to": "0xdf",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 95 receiver victim"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "lags=value<std::uint8_t>(read,victim+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 95 receiver victim"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 110 receiver e"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "rig::value<std::uint8_t>(read,victim+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 123 receiver victim"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "ig::value<std::uint32_t>(read,hit.victim+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 131 receiver hit.victim"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "  const auto l=rig::list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 158 receiver entity"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "ress=value<std::uint8_t>(read,owner+0xd2",
+   "from": "0xd2",
+   "to": "0xda",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 313 receiver owner"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "id=value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 474 receiver player"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "|| value<std::uint32_t>(read,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 516 receiver entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": " if(value<std::uint32_t>(read,l.entity+0xac",
+   "from": "0xac",
+   "to": "0xb4",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 520 receiver l.entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "ig::value<std::uint32_t>(read,projectile+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 920 receiver projectile"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "lue<std::array<float,3>>(read,projectile+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 926 receiver projectile"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "ig::value<std::uint32_t>(read,s.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 937 receiver s.entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "ig::value<std::uint32_t>(read,t.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 967 receiver t.entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "lue<std::array<float,3>>(read,t.entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 970 receiver t.entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": "(saved,reinterpret_cast<const void*>(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1013 receiver void*>(entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": " std::memcpy(reinterpret_cast<void*>(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1014 receiver void*>(entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": ";std::memcpy(reinterpret_cast<void*>(entity+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1014 receiver void*>(entity"
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "contains": ";std::memcpy(reinterpret_cast<void*>(entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1016 receiver void*>(entity"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "t auto entries=rig::list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 87 receiver entity"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    const auto id=value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 100 receiver entity",
+   "all": true,
+   "occurrences": 4
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    const auto model=value<std::uintptr_t>(read,entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 103 receiver entity",
+   "all": true,
+   "occurrences": 4
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    const auto entries=list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 106 receiver entity",
+   "all": true,
+   "occurrences": 5
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 158 receiver entity"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "       value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 158 receiver entity"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    const auto state=rig::value<unsigned char>(read,entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 255 receiver entity",
+   "all": true,
+   "occurrences": 2
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": " if(value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 332 receiver entity"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    if(value<std::uint32_t>(read,entity+0xa8)!=id || value<std::uintptr_t>(read,entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 332 receiver entity"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "ate=value<unsigned char>(read,entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 406 receiver entity"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "    if(!read(component+0xc8",
+   "from": "0xc8",
+   "to": "0xd0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 500 receiver read(component"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "ig::value<std::uint32_t>(read,at+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 545 receiver at"
+  },
+  {
+   "file": "src/native_rigid_body.hpp",
+   "contains": "lue<std::array<float,3>>(read,at+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 547 receiver at"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "    const auto pool=value<std::uintptr_t>(read,owner.machine+0x90);if(!pool || !pointer(*pool))return {};",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 30"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "if(value<std::uintptr_t>(read,owner.machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 41"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "nst auto components=list(read,owner.player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 60 receiver owner.player"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "    value<std::uint32_t>(read,sword->entity+0xac",
+   "from": "0xac",
+   "to": "0xb4",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 78 receiver sword->entity"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "ig::value<std::uint32_t>(read,victim+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 99 receiver victim"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "ig::value<std::uint32_t>(read,hit.victim+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 108 receiver hit.victim"
+  },
+  {
+   "file": "src/native_sword_contact.hpp",
+   "contains": "    const auto pool=value<std::uintptr_t>(read,owner.machine+0x90);if(!pool || !pointer(*pool))return fal",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 123"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "   auto components=list(read,*player+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 39 receiver player"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "|| value<std::uint32_t>(read,*entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 94 receiver entity"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "ue<std::array<float,3>>(read,*entity+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 95 receiver entity"
+  },
+  {
+   "file": "src/native_takedown.hpp",
+   "contains": "ol=value<std::uintptr_t>(read,machine+0x90",
+   "from": "0x90",
+   "to": "0x98",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 107"
+  },
+  {
+   "file": "src/native_takedown_range.hpp",
+   "contains": "wn=value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 147 receiver player"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "            const auto model=rig::value<std::uintptr_t>(read,npc+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 324 receiver npc",
+   "all": true,
+   "occurrences": 3
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,t.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 353 receiver t.entity"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ictor,0,decl,rig::value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 385 receiver player"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,npc+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 417 receiver npc"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        const auto state=rig::value<unsigned char>(read,npc+0xd1);return state && !(",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 432 receiver npc"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,grabbed_[side]+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 462 receiver grabbed_[side]"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::array<float,9>>(read,r.target+0x30c",
+   "from": "0x30c",
+   "to": "0x31c",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 490 receiver r.target"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "       run.id=rig::value<std::uint32_t>(read,npc+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 530 receiver npc"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::array<float,3>>(read,run.npc+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 548 receiver run.npc"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,run.npc+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 549 receiver run.npc"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "            const auto state=rig::value<unsigned char>(read,npc+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 582 receiver npc"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,best+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 597 receiver best"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,best+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 603 receiver best"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,e.entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 637 receiver e.entity"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<unsigned char>(read,e.entity+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 637 receiver e.entity"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<unsigned char>(read,e+0xd1",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 668 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 669 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "o pid=player?rig::value<std::uint32_t>(read,*player+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 681 receiver player"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "auto entries=p?rig::list(read,p+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 701 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "0)(params.data(),nullptr,code,0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 711"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "params.bytes.data(),nullptr,0,0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 723"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*weapon_ent+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 778 receiver weapon_ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "pret_cast<const volatile std::uint8_t*>(e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 843 receiver uint8_t*>(e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "einterpret_cast<volatile std::uint8_t*>(e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 859 receiver uint8_t*>(e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "current_spawn=rig::value<std::uint32_t>(read,entity+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 886 receiver entity"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*p+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 926 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,hip_ent_[k]+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 958 receiver hip_ent_[k]"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,p+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1066 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,e+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1075 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nst auto comps=rig::list(read,entity+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1083 receiver entity"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,s.owed+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1155 receiver s.owed"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,s.native+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1192 receiver s.native"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,s.native+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1202 receiver s.native"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,c.ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1225 receiver c.ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,c.ent+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1233 receiver c.ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nt32_t id=ent?rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1418 receiver ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,s.fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1439"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,s.fsm+0x2f8",
+   "from": "0x2f8",
+   "to": "0x350",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1439"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "(params.data(),item,ammo,code,0x5b",
+   "from": "0x5b",
+   "to": "0x68",
+   "why": "player-state \"none\" id/requester: machine ctor 0x801f80->0x869040 mov [rbx+0xa0],0x5b -> [rbx+0xa8],0x68; wheel equip 0x7fb350->0x861b20 mov [rsp+0x20],0x5b->0x68 (fn_diff) line 1468"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,entity+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1473 receiver entity"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,entity+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1474 receiver entity"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        const auto inventory=rig::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1526",
+   "all": true,
+   "occurrences": 3
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,pool_[g.pe].ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1574 receiver pool_[g.pe].ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::array<float,3>>(read,p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1617 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ed.linear,ent,rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1750 receiver ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        const auto fsm=player_fsm(base,read);const auto inv=fsm?rig::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 1790",
+   "all": true,
+   "occurrences": 2
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        std::array<float,12> f{};if(!read(e+0x300,f.data(),sizeof(f))) return std::nullop",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1813 receiver read(e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*weapon+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1820 receiver weapon"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uint32_t>(read,*part+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1831 receiver part"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "lue<std::uint32_t>(read,out[2+k]+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1880 receiver k]"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uint32_t>(read,*native_bolt+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1917 receiver native_bolt"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "t,def,copy_id,rig::value<std::uint32_t>(read,bolt+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 1941 receiver bolt"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint8_t>(read,*b+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2107 receiver b"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "inter(*p) && (rig::value<std::uint8_t>(read,*p+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2109 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "y<float,12> at{};if(!copy || !read(copy+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2182 receiver read(copy"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2185 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,a.ent+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2199 receiver a.ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "const auto id=rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2293 receiver ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "(read,c)) nid=rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2373 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": " auto cid=ent?rig::value<std::uint32_t>(read,ent+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2384 receiver ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "auto bid=bolt?rig::value<std::uint32_t>(read,bolt+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2405 receiver bolt"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": ");const auto f=rig::value<std::uint8_t>(read,bolt+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2407 receiver bolt"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "auto comps=ent?rig::list(read,ent+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2428 receiver ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "onst auto pid=rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2495 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": " const auto fl=rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2496 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,copy+0x288",
+   "from": "0x288",
+   "to": "0x290",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2519 receiver copy"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,anchor+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2550 receiver anchor"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,shown[i].ent+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2581 receiver shown[i].ent"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "    bool need=(rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2588 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "er(*p)) need=(rig::value<std::uint8_t>(read,*p+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2590 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,master+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2594 receiver master"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "            const auto fsm=player_fsm(base,read);const auto inv=fsm?rig::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 2625"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "=\"<<std::hex<<rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2680 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "d0=\"<<unsigned(rig::value<std::uint8_t>(read,e+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2681 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "<<\" model=\"<<rig::value<std::uintptr_t>(read,e+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2682 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "        if(const auto m=rig::value<std::uintptr_t>(read,e+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2684 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,e+0xd4",
+   "from": "0xd4",
+   "to": "0xdc",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2686 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": " c8=\"<<rig::value<float>(read,e+0xc8",
+   "from": "0xc8",
+   "to": "0xd0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2686 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "     std::array<float,3> pp{};read(*p+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2689 receiver read(*p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "::value<std::uintptr_t>(read,*p+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2689 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "0=\"<<unsigned(rig::value<std::uint8_t>(read,*p+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2690 receiver p"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "std::array<float,3> ep{},mp{};read(e+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2692 receiver read(e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": ",ep.data(),12);const auto m=rig::value<std::uintptr_t>(read,e+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2692 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "         const auto bind=rig::value<std::uintptr_t>(read,e+0x358).value_or(0);o<<\" b",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2694 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nst auto comps=rig::list(read,e+0x268",
+   "from": "0x268",
+   "to": "0x270",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2697 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,e+0x288",
+   "from": "0x288",
+   "to": "0x290",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2712 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "std::array<float,3> pp{},mp{};read(part+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2721 receiver read(part"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,part+0xf0",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2721 receiver part"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,part+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2722 receiver part"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "ig::value<std::uint32_t>(read,part+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2723 receiver part"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,part+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2723 receiver part"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "rig::value<std::uint8_t>(read,part+0xd4",
+   "from": "0xd4",
+   "to": "0xdc",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2723 receiver part"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "     std::array<float,3> pp{};read(bolt+0x300",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2729 receiver read(bolt"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,bolt+0x358",
+   "from": "0x358",
+   "to": "0x368",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2729 receiver bolt"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "d0=\"<<unsigned(rig::value<std::uint8_t>(read,bolt+0xd0",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2730 receiver bolt"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "g::value<std::uintptr_t>(read,native+0x2e8",
+   "from": "0x2e8",
+   "to": "0x2f8",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2752 receiver native"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "t_=e;rc_id_=e?rig::value<std::uint32_t>(read,e+0xa8",
+   "from": "0xa8",
+   "to": "0xb0",
+   "why": "idEntity base layout (ctor 0x874c50->0x8e2390 fn_diff: +8 for 0x20..0x2b0, +0x10 from 0x2b8; spawn id fn 0x7b5e00->0x81c320 cmp [rax+0xa8]->[rax+0xb0]) line 2758 receiver e"
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "contains": "nventory=fsm?rig::value<std::uintptr_t>(read,fsm+0x328",
+   "from": "0x328",
+   "to": "0x380",
+   "why": "arkCpntPlayerStateMachine layout (ctor 0x801f80->0x869040 fn_diff: +0x90->0x98 pool, 0x220->0x260 requests, 0x2f8->0x350 controller, 0x300->0x358 body, 0x318->0x370, 0x328->0x380 inventory) line 2770"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "at>=scope->sensor+0x70 && at<=scope->sensor+0x78",
+   "from": "0x78",
+   "to": "0x78",
+   "why": "REVERT the generator (0x78->0x70, \"file context 5/5\"): sensor+0x70..0x78 is the 3-slot volume-ticket array; DOTO sensor job 0x3f6d20 still does lea rsi,[rdi+0x70] (fn_diff 0x3b8430: 0x3b8816 -> 0x3f717c)"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "rig::value<std::uintptr_t>(self->read_,slot+0xb8)==shape",
+   "from": "0xb8",
+   "to": "0xb8",
+   "why": "REVERT the generator (0xb8->0xc4): slot is a hknp query-manager slot (manager fns 0x92630->0x94680 byte identical, stride 0x140, +0x88/+0x8e unchanged); the who_shifts 0xb8->0xc4 pair is the SENSOR flag byte, not the manager slot"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "rig::value<std::uintptr_t>(read_,scope->sensor+0x40)!=scope->camera.camera",
+   "from": "0x40",
+   "to": "0x40",
+   "why": "REVERT the generator (0x40->0x50, \"file context 12/13\"): the interaction sensor job 0x3b8430->0x3f6d20 still loads the camera from [rdi+0x40] (fn_diff 0x3b84e6 -> 0x3f6e09 identical)"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "*getter>=base_+0x1a70000",
+   "from": "0x1a70000",
+   "to": "0x1b80000",
+   "why": ".text of Dishonored_DO is 0x1000..0x1b8107c, .rdata starts 0x1b81000 (D2: 0x1a70000 just below .rdata 0x1a7e000)"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "info<base_+0x3900000",
+   "from": "0x3900000",
+   "to": "0x3a00000",
+   "why": "typeInfo block reached by vtable-0 getters: D2 0x39ad920..0x39f2900 inside [0x3900000,0x3f00000); DOTO 0x3a7ad10..0x3ac3420 (scan of vt_names), DOTO .data 0x2333000..0x3fdc780"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "info>=base_+0x3f00000",
+   "from": "0x3f00000",
+   "to": "0x3fdd000",
+   "why": "end of DOTO .data = start of .pdata 0x3fdd000"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "range_origin_code{0x48,0x8d,0x81,0xd8,0,0,0,0xc3}",
+   "from": "0xd8",
+   "to": "0xc8",
+   "why": "camera range-origin getter D2 0x417820 (lea rax,[rcx+0xd8];ret) = DOTO 0x86d8e0 (lea rax,[rcx+0xc8];ret) (fn_diff); same +0xd8->+0xc8 in the placement sensor"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "std::array<unsigned char,338> scan{}",
+   "from": "338",
+   "to": "363",
+   "why": "DOTO hand-hover scan block: D2 0x3b8b05..0x3b8c57 (338 B) = DOTO 0x3f746c..0x3f75d7 (363 B): sensor result writer gained 3 movss (+0xb8/+0xbc/+0xc0) and its flags byte moved +0xb8->+0xc4; block ends after \"or byte [rdi+0xc4],sil\""
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "contains": "scan_hash!=0xfa858f63011f3e5cull",
+   "from": "0xfa858f63011f3e5cull",
+   "to": "0x901ce20934c4335eull",
+   "why": "FNV-1a-64 over the 363 DOTO image bytes at 0x3f746c (method validated: the D2 image gives 0xfa858f63011f3e5c over its 338 bytes)"
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "contains": "start=f3(s40+0xd8)",
+   "from": "0xd8",
+   "to": "0xc8",
+   "why": "placement sensor 0x3c1e40->0x400990: call 0x417820->0x86d8e0 (lea rax,[rcx+0xc8]); sensor +0x40 camera, +0x48 dir(+0x2c), +0x58 length unchanged (fn_diff)"
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "contains": "caller!=base_+0x7f727a",
+   "from": "0x7f727a",
+   "to": "0x85d96a",
+   "why": "return address of the build call inside the camera finalize: D2 0x7f7275 call 0x7f4b30 -> DOTO 0x85d965 call 0x85b340, return 0x85d96a (disassembly of 0x85d170..0x85dbe1)"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "0x8b,0x02,0x89,0x81,0x3c,0x03,0x00,0x00",
+   "from": "0x3c",
+   "to": "0x4c",
+   "why": "setter D2 0x87c2a0->0x8e9c20: mov [rcx+0x33c],eax -> [rcx+0x34c],eax (entity velocity block, +0x10 past 0x2b8); only the disp byte changes in want[8]"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "call_return_rva=0x633341",
+   "from": "0x633341",
+   "to": "0x69166d",
+   "why": "Throw call site: the only DOTO caller of 0x8e9c20 shaped like D2 0x63333c (3 mulss, call, cmp byte [..], lea rbx,[r14+0x31c]) is 0x691668 (fn 0x69137b chunk); D2 fn 0x6332d0 is unmatched. Medium confidence, test live"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "call_site_rva=0x63333c",
+   "from": "0x63333c",
+   "to": "0x691668",
+   "why": "see call_return_rva"
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "contains": "fire_scene_rva=0x633810",
+   "from": "0x633810",
+   "to": "0x690ff0",
+   "why": "arkCpntWeaponThrowable vtable slot 0x120 is DOTO slot 36 = 0x690ff0, but its prologue/body differ (48 89 5c 24 10 48 89 74 24 18 57 48): the throw-scene rate hook will fail its 12-byte pin and stay off (graceful)"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "snapshot.base_+outcome_vtable+0x10)!=snapshot.base_+0x695390",
+   "from": "0x695390",
+   "to": "0x6f4f50",
+   "why": "arkRule outcome vtable slot 2: D2 0x695390 = DOTO 0x6f4f50 (DOTO vtable 0x1d14d78 slot 2 read from the image; the generator skipped this literal)"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "snapshot.base_+outcome_vtable+0x20)!=snapshot.base_+0x11d080",
+   "from": "0x11d080",
+   "to": "0x120460",
+   "why": "same vtable, slot 4 = DOTO 0x120460"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "(distance?0x9e9df0:0x9e9e30)",
+   "from": "0x9e9df0",
+   "to": "0xa6c220",
+   "why": "accessor distance thunk (push rbx; call getter; movss [rbx],xmm0): getter 0x3b05f0->0x3eef00 exact, thunk at 0xa6c220 (byte pattern scan)"
+  },
+  {
+   "file": "src/native_kill_range_scope.hpp",
+   "contains": "(distance?0x9e9df0:0x9e9e30)",
+   "from": "0x9e9e30",
+   "to": "0xa6c260",
+   "why": "accessor height thunk: getter 0x3b0730 (entity z [+0x308]-slot) = DOTO 0x3ef060 (entity z [+0x318]), thunk 0xa6c260"
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "contains": "reader(base+0x3a6a9d,code.data()",
+   "from": "0x3a6a9d",
+   "to": "0x3e4739",
+   "why": "caller block just before the ret-site 0x3a6ab3->0x3e474f (aligned); D2 fn 0x3a6a05 itself is unmatched; DOTO bytes at 0x3e4739: 48 8b 73 08 48 8b cb 0f 29 74 24 30 0f 29 7c 24 20 e8 .. 8b 4b 50 0f 28 f8 e8 .. f3 0f 10 46 70"
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "contains": "read(base+npc_vtable_rva+0x140,&slot,8)",
+   "from": "0x140",
+   "to": "0x148",
+   "why": "arkNPC vtable: take (D2 0x879270 at slot 40) = DOTO 0x8e6bb0 at slot 41 (+0x148); slot 40 holds 0x8e6df0. Without this NativeMelee::verify() fails and interaction install aborts"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "contains": "0x48,0x8b,0xc4,0x56,0x41,0x56,0x48,0x83,0xec,0x68,0x80,0xb9,0x71,0x01,0x00,0x00",
+   "from": "0x71",
+   "to": "0x79",
+   "why": "wheel 0x7fb350->0x861b20: cmp byte [rcx+0x171],0 -> [rcx+0x179] (fn_diff)"
+  },
+  {
+   "file": "src/native_manual_equip_hooks.hpp",
+   "contains": "0x80,0xb9,0x71,0x01,0,0,0,0x4d",
+   "from": "0x71",
+   "to": "0x79",
+   "why": "same wheel prologue (controller flag +0x171 -> +0x179)"
+  },
+  {
+   "file": "src/native_manual_equip_runtime.hpp",
+   "contains": "rig::value<unsigned char>(reader,controller+0x171)",
+   "from": "0x171",
+   "to": "0x179",
+   "why": "arkCpntPlayerController flag byte (wheel fn cmp [rcx+0x171] -> [rcx+0x179])"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "rig::value<std::array<float,3>>(read_,owner+0xa8)",
+   "from": "0xa8",
+   "to": "0x98",
+   "why": "accessor 0x88e140->0x8fc240: origin float3 [rcx+0xa8]->[rcx+0x98]"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "contains": "rig::value<std::array<float,9>>(read_,owner+0xcc)",
+   "from": "0xcc",
+   "to": "0xbc",
+   "why": "accessor 0x88e140->0x8fc240: axis [rcx+0xcc]->[rcx+0xbc]"
+  }
+ ],
+ "bytes": [
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x6205e0",
+   "why": "DOTO blink per-frame fn 0x674200 is a rewritten function (camera at power+0xc0 not +0x160, cast byte +0xa5 never read, aim read only in a fallback branch): do not hook under the D2 contract; Billie has no Blink",
+   "safe": false
+  },
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x6205e8",
+   "why": "DOTO blink per-frame fn 0x674200 is a rewritten function (camera at power+0xc0 not +0x160, cast byte +0xa5 never read, aim read only in a fallback branch): do not hook under the D2 contract; Billie has no Blink",
+   "safe": false
+  },
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x6205f8",
+   "why": "DOTO blink per-frame fn 0x674200 is a rewritten function (camera at power+0xc0 not +0x160, cast byte +0xa5 never read, aim read only in a fallback branch): do not hook under the D2 contract; Billie has no Blink",
+   "safe": false
+  },
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x954d00",
+   "why": "job thunk 0x954d00->0x9cd420 is byte identical (32 B)",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x9cd420"
+  },
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x954d00",
+   "why": "job thunk 0x954d00->0x9cd420 is byte identical (32 B)",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x9cd420"
+  },
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x954d00",
+   "why": "job thunk 0x954d00->0x9cd420 is byte identical (32 B)",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x9cd420"
+  },
+  {
+   "file": "src/native_blink_aim.hpp",
+   "d2_at": "0x954d00",
+   "why": "job thunk 0x954d00->0x9cd420 is byte identical (32 B)",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x9cd420"
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "d2_at": "0x8031c1",
+   "why": "only constants moved: state count 0x5a->0x67, per-state flag +0x230->+0x270 (and +0x28a->+0x2d7), config comiss +0x100->+0x108; DOTO fn 0x86a2c0 / call site 0x8c43cd otherwise identical",
+   "safe": true
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "d2_at": "0x8031d1",
+   "why": "only constants moved: state count 0x5a->0x67, per-state flag +0x230->+0x270 (and +0x28a->+0x2d7), config comiss +0x100->+0x108; DOTO fn 0x86a2c0 / call site 0x8c43cd otherwise identical",
+   "safe": true
+  },
+  {
+   "file": "src/native_block_eligibility.hpp",
+   "d2_at": "0x85a2ee",
+   "why": "only constants moved: state count 0x5a->0x67, per-state flag +0x230->+0x270 (and +0x28a->+0x2d7), config comiss +0x100->+0x108; DOTO fn 0x86a2c0 / call site 0x8c43cd otherwise identical",
+   "safe": true
+  },
+  {
+   "file": "src/native_crosshair.hpp",
+   "d2_at": "0x672f70",
+   "why": "crosshair update fn 0x672f70->0x6ca220 identical by hash",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x6ca220"
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x632f70",
+   "why": "0x632f70 unmapped in DOTO: leave this observation hook off",
+   "safe": false
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x639970",
+   "why": "only [rax+0xac]->[rax+0xb4] (reads a field of [rcx+0x10])",
+   "safe": true
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x638570",
+   "why": "DOTO 0x68d5d0 (pattern match), prologue identical",
+   "safe": true
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x867330",
+   "why": "FireWeapon state fn 0x8d1240 restructured (extra pushes, reads [rcx+0x18]); hot observation hook: leave off until re-verified",
+   "safe": false
+  },
+  {
+   "file": "src/native_fire_seam_trace.hpp",
+   "d2_at": "0x88e140",
+   "why": "only the origin/axis offsets moved (+0xa8->+0x98, +0xcc->+0xbc)",
+   "safe": true
+  },
+  {
+   "file": "src/native_gadget_aim.hpp",
+   "d2_at": "0x3cec30",
+   "why": "throw-hit sensor 0x3cec30->0x40f8d0: prologue re-allocated (push r14; lea rbp,[rax-0x68]; sub rsp,0x158) but the hook only swaps entity pose fields; DOTO still reads origin [entity+0x310..] and axis [entity+0x31c..], sensor +0x10/+0x38/+0x40. Accept the DOTO bytes, test live",
+   "safe": true
+  },
+  {
+   "file": "src/native_gadget_drop.hpp",
+   "d2_at": "0x63a2b0",
+   "why": "only displacement 0x98->0xa0 changed in fn 0x68f2c0 (body identical by shape)",
+   "safe": true
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a80",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "safe": true
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a88",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "safe": true
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a92",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "safe": true
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f6a98",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "safe": true
+  },
+  {
+   "file": "src/native_gameplay_aim.hpp",
+   "d2_at": "0x7f4b48",
+   "why": "camera finalize 0x7f6a80->0x85d170 restructured (register allocation; new instructions after the build call: if camera+0x25230==0x11 it re-applies the +0x252ac delta). Entry contract rcx=camera unchanged: accept the DOTO bytes",
+   "safe": true
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "d2_at": "0x87c2a0",
+   "why": "setter: only mov [rcx+0x33c],eax -> [rcx+0x34c],eax",
+   "safe": true
+  },
+  {
+   "file": "src/native_grenade_throw.hpp",
+   "d2_at": "0x633810",
+   "why": "scene-rate fn 0x633810 -> slot 0x690ff0 has a different prologue and body: leave the throw-scene rate hook off",
+   "safe": false
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80a1",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80b5",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80dd",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b80f1",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8119",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b812d",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8141",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b81a5",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b81f5",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8209",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8231",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_hand_sphere.hpp",
+   "d2_at": "0x3b8245",
+   "why": "hand-sphere eligibility 0x3b80a0->0x3f6990 (535 B): same logic; differences = register allocation (r12->r13/r15), ids 0x5b->0x68 and 0xe->0xf, machine +0x2f8->+0x350, controller +0x5d0->+0x5e8, entity axis +0x30c/0x310/0x314->+0x31c/0x320/0x324, call 0x3b7aa0 receives the incoming r9 instead of 0 (extra callee arg)",
+   "safe": true
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "d2_at": "0x87b760",
+   "why": "only entity +0xc8 -> +0xd0 (idEntity field after the +8 shift)",
+   "safe": true
+  },
+  {
+   "file": "src/native_held_object.hpp",
+   "d2_at": "0x8a7820",
+   "why": "game flag displacement only",
+   "safe": true
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x95280",
+   "why": "query job prologue (DOTO 0x974c0) byte identical (20 insns equal in fn_diff)",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x974c0"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x95550",
+   "why": "query job prologue (DOTO 0x97790) byte identical",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x97790"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x417820",
+   "why": "range getter = 48 8d 81 c8 00 00 00 c3 at 0x86d8e0 (see site 0xd8->0xc8)",
+   "safe": true,
+   "n": 8,
+   "doto_at": "0x86d8e0"
+  },
+  {
+   "file": "src/native_interaction_aim.hpp",
+   "d2_at": "0x3b80a0",
+   "why": "eligibility prologue at 0x3f6990: push r12 -> push r13 and r9/rcx register moves only",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x3f6990"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "d2_at": "0x8363f0",
+   "why": "EquipChange processor 0x8363f0->0x89ea20: 32-byte prologue identical (the tool failed only because the total lengths differ by 6 bytes)",
+   "safe": true,
+   "n": 32,
+   "doto_at": "0x89ea20"
+  },
+  {
+   "file": "src/native_manual_equip.hpp",
+   "d2_at": "0x7fb351",
+   "why": "wheel fn 0x7fb350->0x861b20: only cmp byte [rcx+0x171] -> [rcx+0x179]",
+   "safe": true
+  },
+  {
+   "file": "src/native_manual_equip_hooks.hpp",
+   "d2_at": "0x8363f0",
+   "why": "hook prologue copy: processor identical / wheel byte 12 0x71->0x79",
+   "safe": true,
+   "n": 32
+  },
+  {
+   "file": "src/native_manual_equip_hooks.hpp",
+   "d2_at": "0x7fb350",
+   "why": "hook prologue copy: processor identical / wheel byte 12 0x71->0x79",
+   "safe": true,
+   "n": 32
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "d2_at": "0x6b8b70",
+   "why": "bloodfly swarm kill 0x6b8b70->0x718930: register allocation (r14d->ebp) and a jne rel32; same arguments (rcx,rdx,r8d). Accept (low value feature)",
+   "safe": true
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "d2_at": "0x75ff0f",
+   "why": "sever pin: params +0x98->+0xa8 and entity +0xd1->+0xd9 only",
+   "safe": true
+  },
+  {
+   "file": "src/native_melee.hpp",
+   "d2_at": "0x60a8b0",
+   "why": "impact-fx play fn 0x60a8b0->0x65f2e0: entity flag +0xd2->+0xda only",
+   "safe": true
+  },
+  {
+   "file": "src/native_quick_health.hpp",
+   "d2_at": "0x719890",
+   "why": "health-elixir count fn 0x719890->0x77b9a0: cmp [rcx+0xf0] -> [rcx+0xf8] only",
+   "safe": true
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "(unlocated)",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "(unlocated)",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "0x44f440",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "(unlocated)",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "0x44f3b0",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "(unlocated)",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "(unlocated)",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "0x63b5f0",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "0x63b3c0",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_ranged_fire.hpp",
+   "d2_at": "(unlocated)",
+   "why": "pistol/crossbow event hooks and pins (gun event handlers, fire fns 0x63b5f0/0x63b3c0): DOTO weapon classes differ (arkCpntWeaponGaussGun); not verified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_shot_aim.hpp",
+   "d2_at": "0x639988",
+   "why": "only [rax+0xac]->[rax+0xb4]",
+   "safe": true
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "d2_at": "0x810240",
+   "why": "event-system getter: add rax,0x1e8968 -> 0x1e8970 only (game struct shift)",
+   "safe": true
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "d2_at": "(unlocated 16 B pin)",
+   "why": "pistol/crossbow animation/scene pins: unverified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "d2_at": "(unlocated 16 B pin)",
+   "why": "pistol/crossbow animation/scene pins: unverified, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "d2_at": "0x810240",
+   "why": "event-system getter: add rax,0x1e8968 -> 0x1e8970 only (game struct shift)",
+   "safe": true
+  },
+  {
+   "file": "src/native_weapon_hands.hpp",
+   "d2_at": "0x61af85",
+   "why": "animation-component pin of the pistol/crossbow body (fn 0x61aed0, lengths differ 0x139/0x13c): not applicable to the Voltaic Gun, leave off",
+   "safe": false
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6980",
+   "why": "choke sensor entry prologue (48 B) at DOTO 0x3e45f0: only the je rel32 (0x30c->0x338) and the machine field disp 0x330->0x388 (+0x58) differ",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a66f0",
+   "why": "choke distance fn 0x3a66f0->0x3e4360: prologue differs by call relocations only",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6a9d",
+   "why": "caller_code 38 B at DOTO 0x3e4739: two call rel32 only",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6abe",
+   "why": "pin movss xmm0,[rsi+0x70] identical at 0x3e475a",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6b18",
+   "why": "pin identical (0x3e47b4)",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6c57",
+   "why": "pin identical (0x3e48f3)",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6c64",
+   "why": "pin identical (0x3e4900)",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6caf",
+   "why": "pin identical (0x3e494b)",
+   "safe": true
+  },
+  {
+   "file": "src/native_choke_distance_scope.hpp",
+   "d2_at": "0x3a6cbc",
+   "why": "pin identical (0x3e4958)",
+   "safe": true
+  }
+ ],
+ "blockers": [
+  "Voltaic Gun (arkCpntWeaponGaussGun, wrist-mounted; new classes arkCpntWeaponGaussGun, arkCpntWeaponStates): every pistol/crossbow assumption is void: NativeRangedFire gun/crossbow event hooks (0x44f430 200/201/242 ...), fire fns 0x63b5f0/0x63b3c0, comp+0x98/0xa0/0xa4/0xa8 (ammo, magazine, capacity), animation/scene pins in native_weapon_hands (0x61af85 ...), typed() vtables of gun/crossbow. The generator's weapon-component rewrites (ranged_fire 395/398/536 0xa0->0xa8, 905 0xb8->0xc8, 1044/1045 0x140->0x158 / 0x148->0x160; weapon_hands 2405/2516 0x160->0x180) have no component-level proof (arkCpntWeaponRanged ctor 0x6375a1->0x68c2a0 is restructured): treat as unverified. Needs a GaussGun design plus live reads.",
+  "Dual wield / second gun in the left hand cannot hold: one wrist gun, no pistol, no crossbow. native_power_hand.hpp is pure maths, but its 69-joint arm skeleton and attach joint 59 must be re-checked against Billie's player arm assets.",
+  "Blink aim (native_blink_aim.hpp): DOTO arkCpntPowerBlink per-frame fn 0x674200 is rewritten (camera pointer power+0xc0, no +0xa5 cast byte, aim read only in a fallback branch) and Billie has no Blink. Displace = arkCpntPowerSwapper (+arkCpntPlayerSensorBlinkSwapper, arkCpntPlayerSensorBlinkCross, arkCpntWeaponPlaceableAfar for the marker); its job is factory slot 4 -> thunk 0x9c8930 -> fn 0x3b9280. Foresight = arkCpntPowerTheEye (0x9c8980 -> 0x3bfbb0), Semblance = arkCpntPowerMimic (0x9c87f0 -> 0x3b5f80). Hand aim for Displace needs a new hook and RE; keep the blink hook off.",
+  "No Heart (arkCpntHeart RTTI only), no runes (arkCpntPlayerSensorRuneCharms RTTI only): the only dependence in my files is the slot-1 / bind-tag comments in native_power_hand.hpp. Health elixir quick use (native_quick_health) survives (DOTO fn 0x77b9a0), but there is no second (mana) elixir.",
+  "native_slash_scene_rate.hpp verify() is called from native_interaction_aim::install and a mismatch aborts the session; its port-report bytes have semantic/site-unmapped entries (0x86cbf0, 0x86cbff, 0x86cc15, 0x86cd7d, 0x86cdb9). Not my file: needs an owner. native_offered_choke.hpp line 47 has one not-located check; native_world_trace / impact_fx / console / door verifiers are also outside my files.",
+  "Hook Mine (arkCpntHookMine, ...Equipment, ...Throwable) replaces mines/razors: native_gadget_aim (placement sensor 0x400990) is fine, but native_gadget_drop and typed() checks written for arkCpntWeaponPlaceable/mine components will not match HookMine components (not re-checked)."
+ ],
+ "notes": [
+  "INTERACTION INSTALL gates (native_interaction_aim::install) and the DOTO result: (1) 6 query prologues of 32 B at rvas {0x3b8430,0x3b8d60,0x3b9650,0x6c6760,0x95280,0x95550}: all identical in DOTO (0x3f6d20,0x3f76e0,0x3f7fd0,0x726be0,0x974c0,0x97790); the tool's two 'not-located' rows (236/237) are identical prologues. (2) ranking_profile x3 (0x92630/0x3a37f0/0x3b7b90 -> 0x94680/0x3e5e70/0x3f6440): the three 32-byte hex strings equal the DOTO bytes. (3) NativeBlockEligibility::verify: prologue 48 B (0x5a->0x67, +0x230->+0x270) and caller code 68 B (+comiss disp 0x100->0x108) need 'bytes' acceptance; the 2 vtable slot pins (block +0x68 -> 0x8c4240, equip +0x30 -> 0x8bd920) were read from the DOTO vtables and match. qualify() also needs machine+0x90->0x98 (sites) and state ids 44/64 (unverified; it returns {} on mismatch, no abort). (4) NativeSlashSceneRate::verify: other file (blockers). (5) NativeChokeDistanceScope::verify: 2 prologues (differ only by rel32 and machine disp), caller block (0x3a6a9d->0x3e4739), 6 consumer pins identical, slot 0x1d0b738->0x1d98e18 == 0x9c7d00 OK; declaration floats {3,1.7,-40,40,-50,50} at decl+0x70/7c/80/84/88/8c must equal the DOTO game data. (6) NativeOfferedChoke::verify: other file. (7) route: range getter 0x417820->0x86d8e0 (site 0xd8->0xc8), eligibility prologue 32 B at 0x3f6990, origin call 0x3b81d3->0x3f6ac3 (relocated), 535-byte native_hand_eligibility_code (hand_sphere.hpp, 19 semantic chunks, bytes acceptance), scan block 338 B -> 363 B with new hash (sites). (8) NativeMelee::verify needs the arkNPC slot 0x140->0x148 site. Door ingress/NativeDoorInteraction/lean lifecycle are other files.",
+  "The generator mis-rewrote three interaction_aim literals; reverts are given as sites with to == from: sensor+0x78 (ticket array), slot+0xb8 (query-manager slot), sensor+0x40 (camera). The other who_shifts pairs for that sensor (0x40->0x50 inside other fns, 0xb8->0xc4, 0x30->0x38, 0x38->0x40, 0x48->0x50) are private fields of other objects/the sensor result flags (+0xb8->+0xc4), not the +0x40/+0x48/+0x58 fields used here. The hknpAllHitsCollector fields (+0x30 array, +0x38 count) were not shown to move (Havok), keep.",
+  "idEntity layout, proven from the ctors 0x874c50 -> 0x8e2390 and the registry lookup 0x7b5e00 -> 0x81c320 (cmp [rax+0xa8] -> [rax+0xb0]) and 0x878c70 -> 0x8e65b0: fields 0x20..0x2b0 shift +8, fields from 0x2b8 shift +0x10: spawn id +0xa8->+0xb0, owner id +0xac->+0xb4, +0xc8->+0xd0, flags +0xd0..+0xd7 -> +0xd8..+0xdf, model +0xf0->+0xf8, component list +0x268->+0x270, kind +0x288->+0x290, decl +0x2e8->+0x2f8, origin +0x300->+0x310, axis rows +0x30c->+0x31c, bind +0x358->+0x368, LOS flags +0x368->+0x378. Registry game+0x327770 (D2 0x3130b0, handled), index id>>16, invalid id 0x3fff0010 unchanged. About 190 sites are of this kind (my literal scan over receivers entity/e/owner/npc/victim/player/ent/bolt/projectile/weapon/part/door/...; comments skipped, lines the generator already rewrote skipped). Excluded: sensor +0xa8/+0xb0 (primary/secondary offer pointers are unchanged in the DOTO sensor writer), weapon component +0xa8, fire-seam accessor, rigid-body component +0xc8/+0xd2, decl +0xd0. Derived-class fields at/above +0x360 (victim+0x360 swarm record, body+0x370/+0x680 arm ids, door+0x370) probably move +0x10 too but I found no proof: unresolved.",
+  "arkCpntPlayerStateMachine layout, from ctor 0x801f80->0x869040 and fn 0x802c20->0x869e90: pool +0x90->+0x98, state count / none id 0x5b->0x68 (states 0x5a->0x67), request list +0x220->+0x260, fields +0x2f0..+0x358 all +0x58 (controller +0x2f8->+0x350, body +0x300->+0x358, interaction +0x318->+0x370, inventory +0x328->+0x380), per-state flag bytes +0x230->+0x270 and +0x28a->+0x2d7. Sites exist for every machine+/fsm+ literal in my files. State ids 18 (lean), 39 (assassination), 44 (block), 53/64 (equip) are NOT proven unchanged (13 states were added; the DOTO block fn keeps `mov edx,0x40`). 'Requester none' 0x5b is 0x68 (3 sites in weapon_hands, the draw-end write in manual_equip_runtime:439); other helpers' files with machine+0x90 / 0x5b need the same.",
+  "Camera: +0x25200 etc. all +0x30 (generator did it); camera range-origin getter +0xd8->+0xc8. Vtable slot ids that moved: arkNPC take slot 40->41 (site). EquipChange slots (+0x30,+0x58,+0x68,+0x70,+0x90) and block slot +0x68 verified equal to the translated values by reading the DOTO vtables.",
+  "Component classes whose aligned vtable functions show NO displaced offsets, so literals on them keep their value: arkCpntRigidBody, arkCpntRigidBodyThrowable (one 0x438->0x43c in a derived fn), arkCpntEquipment, arkCpntPlayerSensorInteraction, arkCpntPlayerInteraction, arkCpntWeaponMelee/MeleePlayer, arkCpntWeaponThrowable, arkCpntPlayerController (except flag +0x171->+0x179). So the generator's 'mixed' review items in native_rigid_body/held_object/grab/melee are entity fields (sites given) or unchanged component/Havok/world fields (component+0x10/0x18/0x20, world+0x28/+0x30, record offsets). Bind record (entity+0x358) rf+0x3d0/+0x3d4 is probably +0x10 (who_shifts fn 0x72fcd0: 0x3c8->0x3d8, 0x3d0->0x3e0) but unproven.",
+  "Unresolved offset families (need a live gameplay entity or more RE): controller+0x190/+0x1a0 (remembered items, manual_equip), equip state +0x20/+0x108/+0x118/+0x150, inventory +0x38/+0x70, decl +0x188/+0x190/+0x68, event manager inside game+0x1e8970 (+0x1d20/+0x1d30 probably 0x1ff0/0x2000, 4/6 votes; generator already moved 0xc8e8->0xcff0 and 0x1e8968->0x1e8970), weapon-class fields (blockers).",
+  "gameplay_aim: the DOTO camera finalize (0x85d170) has a new branch after the build call (mode 0x11 at camera+0x25230 re-adds the +0x252ac delta). The hook rewrites +0x252ac inside the build detour, before that branch, so mode-0x11 camera states may still alter the aim: check in the headset. Caller site fix 0x7f727a->0x85d96a is in sites.",
+  "fire_seam_trace and the crosshair are observation/HUD only; keep the fire_seam hooks 0x632f70 (unmapped) and 0x867330 (restructured) off; 0x639970 and 0x88e140 are layout-only diffs.",
+  "gadget aim: placement sensor 0x400990 has identical logic; the throw-hit sensor 0x40f8d0 is rewritten but still reads entity pose +0x310/+0x31c and sensor +0x10/+0x38/+0x40. Grenade throw setter is layout-only (+0x33c->+0x34c, arkCpntWeaponThrowable/arkGrenade still exist for the Hyperbaric Grenade), but its call site had to be re-found (medium confidence) and the throw-scene rate hook is expected to stay off.",
+  "Hand-sphere eligibility (0x3b80a0 -> 0x3f6990): the descriptor kind compare ebp==0xe became 0xf and the none id 0x5b became 0x68; any mod code that branches on descriptor kind 0xe needs +1 (check native_interaction_aim for 14/0xe); controller mode +0x5d0->+0x5e8 still compares to 0xe.",
+  "kill_range_scope: four literals were missed by the generator (outcome vtable slot fns 0x695390/0x11d080 and the two accessor thunks, now sites); its vtable/evaluator translations were correct. choke_distance_scope poison 0x3a6a9d is a site too. native_choke_distance_scope lines 178-180 and native_takedown_range line 19 are the mod's own shim/data, not game bytes.",
+  "Everything above was derived read-only with scratchpad scripts (vt_names scans, rip-relative xrefs, FNV hash, per-class aligned displacement stats) plus tools/doto fn_diff/translate/who_shifts; no live game access was needed (the game was at the menu)."
+ ]
+}

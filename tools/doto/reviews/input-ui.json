@@ -1,0 +1,431 @@
+{
+ "sites": [
+  {
+   "file": "src/native_menu.hpp",
+   "contains": "update_code=",
+   "from": "48896c2418564883ec60488b0db7372502410fb6e8488bf2488b01ff90b80000",
+   "to": "48896c2418564883ec60488b0d873a3102410fb6e8488bf2488b01ff90b80000",
+   "why": "STRING literal (inventory skips hex strings): rip-rel disp b7372502 -> 873a3102 at DOTO 0x342f0; rest identical. FATAL: install() throws 'Native Iggy menu functions differ'"
+  },
+  {
+   "file": "src/native_menu.hpp",
+   "contains": "!matches(0x2cb20",
+   "from": "4883ec28488b8908160000e8b0fbfd0085c07513488d0db50ea901e8f09c1300",
+   "to": "4883ec28488b8908160000e8902d060185c07513488d0d3564b901e820130100",
+   "why": "STRING literal: dispatch fn D2 0x2cb20 -> DOTO 0x2d4c0; call/lea displacements differ (DOTO bytes read from the image). FATAL for install()"
+  },
+  {
+   "file": "src/native_menu_entry.hpp",
+   "contains": "base+0xA708",
+   "from": "0xA708",
+   "to": "0xa708",
+   "why": "port.py global vote rewrote it to 0xac08 but fn 0x2e4d0->0x2f100 still uses [rdi+0xa708] (fn_diff). Revert (no change)"
+  },
+  {
+   "file": "src/native_menu_entry.hpp",
+   "contains": "base+0xA710",
+   "from": "0xA710",
+   "to": "0xa710",
+   "why": "same: still [rdi+0xa710] (stored at 0x2f2ab)"
+  },
+  {
+   "file": "src/native_menu_entry.hpp",
+   "contains": "base+0xA608",
+   "from": "0xA608",
+   "to": "0xa608",
+   "why": "same: still lea rcx,[rdi+0xa608] (0x2f2c6)"
+  },
+  {
+   "file": "src/native_options_page.hpp",
+   "contains": "call_method{0x100c4c0,{0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x48,0x89}}",
+   "from": "0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x48,0x89",
+   "to": "0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x57,0x41",
+   "why": "DOTO call_method (0x108ffd0) prologue is mov [rsp+0x10],rbx; mov [rsp+0x18],rbp; push rdi; push r14 (extra call to 0x108d6e0 + hook pointer); same (iggy,&result,root,method,nargs,&args) args. IggyApi::verify needs all pins"
+  },
+  {
+   "file": "src/native_prompt_placement.hpp",
+   "contains": "const auto flags=value<std::uint8_t>(read,entry->owner+0xd0)",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "fn 0x8780d0->0x8e5a20: test byte [rcx+0xd0],2 -> [rcx+0xd8],2 (entity flags; render-model cache branch)"
+  },
+  {
+   "file": "src/native_prompt_placement.hpp",
+   "contains": "if(!anchor || value<std::uint8_t>(read,entry->owner+0xd0)!=flags",
+   "from": "0xd0",
+   "to": "0xd8",
+   "why": "same"
+  },
+  {
+   "file": "src/native_prompt_placement.hpp",
+   "contains": "const auto model=value<std::uintptr_t>(read,entry->owner+0xf0)",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "same fn: mov rdx,[rcx+0xf0] -> [rcx+0xf8]"
+  },
+  {
+   "file": "src/native_prompt_placement.hpp",
+   "contains": "value<std::uintptr_t>(read,entry->owner+0xf0)!=model",
+   "from": "0xf0",
+   "to": "0xf8",
+   "why": "same"
+  },
+  {
+   "file": "src/native_prompt_placement.hpp",
+   "contains": "character?value<std::uint8_t>(read,entry->owner+0xd1)",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "entity state byte: 0xd1->0xd9 in 8 aligned fns (0x879e70->0x8e77b0, 0x86bec0->0x8d6ab0, 0x878d20->0x8e6660 ...)"
+  },
+  {
+   "file": "src/native_prompt_placement.hpp",
+   "contains": "(character && value<std::uint8_t>(read,entry->owner+0xd1)!=character_flags)",
+   "from": "0xd1",
+   "to": "0xd9",
+   "why": "same"
+  },
+  {
+   "file": "src/native_prompt_placement.hpp",
+   "contains": "value<std::array<float,3>>(read,entry->owner+0x300)",
+   "from": "0x300",
+   "to": "0x310",
+   "why": "entity origin: fn 0x87d200->0x8eab60 (same fn that has spawn id 0xa8->0xb0 and model 0xf0->0xf8) reads [rcx+0x300..0x308] -> [rcx+0x310..0x318]; also 0x59e7a0->0x5f2c10"
+  },
+  {
+   "file": "src/native_wrist_hud.hpp",
+   "contains": "out.caller==0x6752a8?0x88u",
+   "from": "0x88",
+   "to": "0xa8",
+   "why": "mana element: method sub-object at element+0xa8 in DOTO (lea rcx,[rdi+0xa8] at 0x6cc745) vs +0x88"
+  },
+  {
+   "file": "src/native_wrist_hud.hpp",
+   "contains": "field==WristHudField::mana?0x88u",
+   "from": "0x88",
+   "to": "0xa8",
+   "why": "same (typed() check uses method-offset as the element base)"
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "contains": "read_self(*decl+0xe8,scales.data()",
+   "from": "0xe8",
+   "to": "0x100",
+   "why": "power-wheel decl: StartBendTime 0x4f7490->0x5484a0 reads decl+0x100 (world) / +0x104 (unbent) instead of +0xe8/+0xec; LIVE: arkDeclGameLogicStatePowerwheel +0x100/+0x104 = 0.05/0.05"
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "contains": "reinterpret_cast<void*>(*decl+0xec)",
+   "from": "0xec",
+   "to": "0x104",
+   "why": "same"
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "contains": "read_self(*decl+0xec,&unbent,4)",
+   "from": "0xec",
+   "to": "0x104",
+   "why": "same"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x38f7d0,557,",
+   "from": "557",
+   "to": "589",
+   "why": "DOTO Add6 fn 0x3c6340..0x3c658d is 589 bytes (hash region = whole function)"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x38f7d0,557,0x7dde7a197e64b528ull}",
+   "from": "0x7dde7a197e64b528",
+   "to": "0x1ce8624d45fed1b4",
+   "why": "FNV-1a of DOTO bytes [0x3c6340,+589) (recomputed with the same fnv as verified_abi)"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x38f690,309,0x43ee4b153264f007ull}",
+   "from": "0x43ee4b153264f007",
+   "to": "0xad8d94e965ac973",
+   "why": "FNV-1a of DOTO [0x3c6200,+309); region is the 320-byte gap before Add6 in both builds"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x3903b0,869,0xf45c8ec5bcbf0104ull}",
+   "from": "0xf45c8ec5bcbf0104",
+   "to": "0xa33c5f3e99eda72",
+   "why": "FNV-1a of DOTO [0x3c7040,+869) (Remove1, same size)"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x6dc560,37,0xf3c251b8736d7cf9ull}",
+   "from": "0xf3c251b8736d7cf9",
+   "to": "0x90c05c6abb53c0e7",
+   "why": "FNV-1a of DOTO [0x73dc20,+37)"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x7b5e00,42,0x9c47ab4bb4a5a6fdull}",
+   "from": "0x9c47ab4bb4a5a6fd",
+   "to": "0x6814ebaa42dfaff5",
+   "why": "FNV-1a of DOTO [0x81c320,+42)"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "0x80,0x3d,0x52,0x42,0x05,0x03,0x00,0x74,0x03",
+   "from": "0x52",
+   "to": "0x72",
+   "why": "byte-array literal (cls bytes, may not be applied by the site path): 2nd cmp rip-rel disp 0x3054252 -> 0x311c872 = bytes 72 c8 11 03"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "0x80,0x3d,0x52,0x42,0x05,0x03,0x00,0x74,0x03",
+   "from": "0x42",
+   "to": "0xc8",
+   "why": "same"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "0x80,0x3d,0x52,0x42,0x05,0x03,0x00,0x74,0x03",
+   "from": "0x05",
+   "to": "0x11",
+   "why": "same"
+  }
+ ],
+ "rvas": [
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "getter_rva=0xd1f70",
+   "from": "0xd1f70",
+   "to": "0xd53d0",
+   "why": "classified 'offset' by inventory.py (leaf fn not in pdata / mid-function return address), so port.py never translated it; verified: leaf 'movzx eax,[rcx+8];ret' at DOTO 0xd53d0, called from 0xe45c3 and 0xe3681 (call targets checked)"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "window_rva=0xe3cf0",
+   "from": "0xe3cf0",
+   "to": "0xe6eb0",
+   "why": "classified 'offset' by inventory.py (leaf fn not in pdata / mid-function return address), so port.py never translated it; verified: cmp byte[rip],0;je;cmp byte[rip],0;je;mov al,1;ret;xor al,al;ret identical at 0xe6eb0; called from 0x3b506 (target checked)"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "if(caller-self.base_==0xe1098) ++self.poll_calls_",
+   "from": "0xe1098",
+   "to": "0xe45c8",
+   "why": "classified 'offset' by inventory.py (leaf fn not in pdata / mid-function return address), so port.py never translated it; verified: return address after 'call 0xd53d0' at 0xe45c3 (fn 0xe1060->0xe4590 identical)"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "if(caller-self.base_==0xe0146) ++self.serializer_calls_",
+   "from": "0xe0146",
+   "to": "0xe3686",
+   "why": "classified 'offset' by inventory.py (leaf fn not in pdata / mid-function return address), so port.py never translated it; verified: return address after 'call 0xd53d0' at 0xe3681 (fn 0xe0120->0xe3660 identical)"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "if(caller-self.base_==0x3a4ab) ++self.window_calls_",
+   "from": "0x3a4ab",
+   "to": "0x3b50b",
+   "why": "classified 'offset' by inventory.py (leaf fn not in pdata / mid-function return address), so port.py never translated it; verified: return address of the window call at 0x3b506 (fn 0x3a470->0x3b4d0)"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "self.active_ && caller-self.base_==0x3a4ab",
+   "from": "0x3a4ab",
+   "to": "0x3b50b",
+   "why": "same as above"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "for(auto caller:{std::uintptr_t{0xe1098}",
+   "from": "0xe1098",
+   "to": "0xe45c8",
+   "why": "same as above"
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "contains": "std::uintptr_t{0xe0146}}",
+   "from": "0xe0146",
+   "to": "0xe3686",
+   "why": "same as above"
+  },
+  {
+   "file": "src/pad_focus.hpp",
+   "contains": "caller_rva!=0xe1098",
+   "from": "0xe1098",
+   "to": "0xe45c8",
+   "why": "pad_focus.hpp lease gate: same return address (otherwise every lease allows() is false and the pad is never focused)"
+  },
+  {
+   "file": "src/pad_focus.hpp",
+   "contains": "caller_rva!=0xe0146",
+   "from": "0xe0146",
+   "to": "0xe3686",
+   "why": "same"
+  },
+  {
+   "file": "src/pad_focus.hpp",
+   "contains": "return caller_rva==0x3a4ab",
+   "from": "0x3a4ab",
+   "to": "0x3b50b",
+   "why": "same"
+  },
+  {
+   "file": "src/native_console.hpp",
+   "contains": "append_text_rva=0xfec70",
+   "from": "0xfec70",
+   "to": "0x1023f0",
+   "why": "vtable slot 0x48 of idCmdSystemLocal (DOTO vtable 0x1bf5be8) = 0x1023f0 (static image read); port.py rewrote its byte check for 0x1023f0 but left the rva (verify() then reads D2 address)"
+  },
+  {
+   "file": "src/native_console.hpp",
+   "contains": "set_wait_rva=0x12da30",
+   "from": "0x12da30",
+   "to": "0x4be080",
+   "why": "vtable slot 0x58 = 0x4be080 ('mov [rcx+0x10],edx;ret' leaf)"
+  },
+  {
+   "file": "src/native_console.hpp",
+   "contains": "command_list_rva=0x8832b0",
+   "from": "0x8832b0",
+   "to": "0x2a660",
+   "why": "vtable slot 0x60 = 0x2a660 (leaf 'mov rax,[rcx+8];ret', 372/372 votes)"
+  },
+  {
+   "file": "src/native_console.hpp",
+   "contains": "cheat_gate_rva=0x11d080",
+   "from": "0x11d080",
+   "to": "0x120460",
+   "why": "leaf 'mov al,1;ret' (52/52 votes); byte check b0 01 c3 matches there"
+  },
+  {
+   "file": "src/native_hud_rect.hpp",
+   "contains": "rva=0x100CC30",
+   "from": "0x100CC30",
+   "to": "0x10907c0",
+   "why": "uppercase literal missed; prologue 4885c90f848e000000 66 identical at DOTO 0x10907c0; fn identical (323 insns)"
+  },
+  {
+   "file": "src/native_menu.hpp",
+   "contains": "!matches(0x102c3e0",
+   "from": "0x102c3e0",
+   "to": "0x10b0310",
+   "why": "MoveEvent init fn: 32-byte prologue unique in DOTO .text at 0x10b0310"
+  },
+  {
+   "file": "src/native_menu.hpp",
+   "contains": "move_event_=reinterpret_cast<MoveEvent>(base+0x102c3e0)",
+   "from": "0x102c3e0",
+   "to": "0x10b0310",
+   "why": "same"
+  },
+  {
+   "file": "src/native_options_page.hpp",
+   "contains": "root_path{0x1009a90",
+   "from": "0x1009a90",
+   "to": "0x108d580",
+   "why": "Iggy RootPath, voted; bytes identical in DOTO"
+  },
+  {
+   "file": "src/native_options_page.hpp",
+   "contains": "make_index{0x1009da0",
+   "from": "0x1009da0",
+   "to": "0x108d8a0",
+   "why": "voted; bytes already regenerated for 0x108d8a0"
+  },
+  {
+   "file": "src/native_options_page.hpp",
+   "contains": "ref_free{0x100a170",
+   "from": "0x100a170",
+   "to": "0x108dc70",
+   "why": "voted; bytes identical"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x28700,54,",
+   "from": "0x28700",
+   "to": "0x28d40",
+   "why": "leaf; DOTO 54 bytes at 0x28d40 hash-identical (0x57609a1b3f48ef70)"
+  },
+  {
+   "file": "src/native_prompt_entry.hpp",
+   "contains": "{0x7b5e00,42,",
+   "from": "0x7b5e00",
+   "to": "0x81c320",
+   "why": "entity-by-spawn lookup; same code with cmp [rax+0xb0],r8d (checked)"
+  },
+  {
+   "file": "src/native_wrist_hud.hpp",
+   "contains": "out.caller==0x6752a8?0x88u",
+   "from": "0x6752a8",
+   "to": "0x6cc756",
+   "why": "poisoned by port.py. Mana update (arkHUDElementMana vtable slot 2 = fn 0x6cc6f0) calls SetMember 0x290d0 at 0x6cc751, return 0x6cc756: lea rcx,[rdi+0xa8]; lea rdx,[rdi+0xd8] (delta still 0x30)"
+  },
+  {
+   "file": "src/native_wrist_hud.hpp",
+   "contains": "caller==0x6752a8?WristHudField::mana",
+   "from": "0x6752a8",
+   "to": "0x6cc756",
+   "why": "same"
+  },
+  {
+   "file": "src/native_cvars.hpp",
+   "contains": "{0x3982ef0,\"r_AntiAliasingPreset\"",
+   "from": "0x3982ef0",
+   "to": "0x3a4f3b0",
+   "why": "static init at RVA 0x1407952 passes name string 0x1c81cc8 and object (lea rcx,[rip]) 0x3a4f3b0 to cvar ctor 0x104010; same method reproduces known r_AAMode 0x3a479b0, r_skipSSAO 0x3a472b0, r_skipDOF 0x33bf970"
+  },
+  {
+   "file": "src/dxgi_probe.cpp",
+   "contains": "{0x3987740,\"ark_dbg_infinite_coins\"",
+   "from": "0x3987740",
+   "to": "0x3a53cc0",
+   "why": "apply_test_unlock: static init at RVA 0x1410ec2 (name string 0x1caaeb8) -> object 0x3a53cc0; ark_blackMarket_unlockAll 0x397fee0->0x3a4c3a0 is already right"
+  }
+ ],
+ "bytes": [
+  {
+   "file": "src/dxgi_probe.cpp",
+   "d2_at": "0x4f74df",
+   "why": "wheel_step_decl reads-check (16 bytes): only the two displacements move, 0xec->0x104, 0xe8->0x100; DOTO bytes f30f109a04010000f30f109200010000 at 0x5484ef. Safe together with the decl +0x100/+0x104 sites",
+   "safe": true
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "d2_at": "0xe3cfa",
+   "why": "2nd row of window_code_matches expected bytes (site-unmapped): needs 0x72,0xc8,0x11,0x03 instead of 0x52,0x42,0x05,0x03 (rip-rel disp 0x311c872 at DOTO 0xe6eb9); the first row was already regenerated",
+   "safe": true
+  },
+  {
+   "file": "src/native_pad_focus.hpp",
+   "d2_at": "0xd1f70",
+   "why": "getter prologue check: same bytes, only the rva constant needs the fix",
+   "safe": true
+  },
+  {
+   "file": "src/native_console.hpp",
+   "d2_at": "0x11d080",
+   "why": "cheat_gate b0 01 c3 identical at 0x120460",
+   "safe": true
+  }
+ ],
+ "blockers": [
+  "FATAL until fixed: native_pad_focus.hpp getter_rva/window_rva/return-address constants (and the pad_focus.hpp lease gate) were NOT translated: inventory.py classifies leaf functions without pdata and mid-function return addresses as 'offset'. As generated, code_matches() reads D2 RVA 0xd1f70 in DOTO and install() throws ('Native joystick owner/getter differs'). See rvas.",
+  "FATAL until fixed: native_menu.hpp install(): update_code / dispatch hex STRINGS are not touched by port.py (only 0x.. byte arrays) and 0x102c3e0 (MoveEvent) is untranslated; install() throws 'Native Iggy menu functions differ'. See sites + rvas.",
+  "Silent corruption risk: native_menu_entry.hpp Hub hook. DOTO's Iggy external-call hub (D2 0x34800 -> 0x35630; the 12-byte prologue pin still passes) takes a 4th argument (r9d -> ebp; 'cmp ebp,1' selects call 0x2bb80 vs 0x2c1b0). hub_hook declares 3 params and calls hub_original_(self,player,call), so r9 is garbage on every Iggy external call. Needs a source change: Hub=unsigned long long(__fastcall*)(void*,void*,void*,unsigned long long) and hub_hook(...,unsigned long long arg4) forwarding arg4, or do not install NativeMenuEntry on DOTO. It is hooked even though no movie patch can match (install = hub && load).",
+  "VR Settings menu entry and options page cannot work in DOTO as is: menu_patches.hpp / controller_glyph_atlas.hpp patch D2 ui/*.iggy by exact movie size + SHA-256 (corvo/emily_pause_menu.iggy, main_menu.iggy, hud, ...). DOTO ships different movies, so every patch is rejected by size/hash. Fails safe: size mismatch -> ++mismatched / NativeArtMovieResult::rejected, nothing written, the game keeps its own menu (no VR Settings item, no controller glyph swap); the deferred options-page path (VR_SETTINGS_EVT) never fires. Needs new AS3 RE of DOTO's movies, not regeneration."
+ ],
+ "notes": [
+  "Verified live (game running, read-only): pad root base+0x31feeb0 has vtable idWinInputPads (0x1be6c58), enabled=1, stopping(+0x600)=0, count(+0x5f8)=3, event(+0x5e8)=0x300, so native_pad_root() passes; offsets +8/+0x5e8/+0x5f8/+0x600 unchanged in the pad poll fn (0xe1060->0xe4590). The generator's near mapping 0x3134140->0x31feeb0 is right (leas at the same call-graph position).",
+  "Verified live: XInput IAT slot base+0x1b81cf8 holds XINPUT9_1_0.dll+0x1b40 = XInputGetState (GetProcAddress offset in the local DLL is also 0x1b40), so controller_input install() works unchanged (dxgi_probe passes 0x1b81cf8, left untranslated by port.py, correct).",
+  "Logic mask OK, no edits: game+0x3a72280 is idGameLocal; state int at game+0x355718 == 3 live; manager game+0x1f75f8 holds 20 slots, entries have back-pointer == manager at +8, id at +0x18, active byte at +0x40 (MainMenu active only, correct for the menu); ids 1..16 same enumeration (1 InGame,2 Pause,3 Notification,4 ReadNote,5 Cinematic,6 MainMenu,7 Journal,8 Powerwheel,9 Conversation,10 BlackMarket,11 Results,12 Tutorial,13 GameOver,14 CharacterChoice,15 MapTransition,16 Video) so masks 2/32/512/1<<15 and wheel id 8 keep their meaning. The 0x8b8 read still covers all slots. game+0x2f7c48 (gtm, wheel_step_json) reads 1.0/1.0 live: the generator's offset vote is right, its 'pattern' address 0x2ec5a8 is wrong.",
+  "Menu stack: root base+0x23352c0, manager=root+0x18, callback at manager+0x828 live = idCallbackBindMem<arkIggyInputsManager> vtable 0x1bc4770, +8 = manager, +0x10 = 0x33b00 (all match the generated constants). Iggy wrapper init fn 0x34200->0x35020 writes the same sub-object offsets (0x2b0,0x2e0,0x588,0x860,0x830,0xb08/0xb10,0xdb8) so wrapper stride 0xde8, cursor cache +0xb08, +0x860 look unchanged; file+0x1608/+0x1618/+0x1658 unchanged (fn 0x2c620->0x2cfb0). NOT confirmed live: the batch list was empty at the main menu, so the wrapper walk (stride 0xde8, member list +0x878) was not exercised on a live Iggy menu. Viewport margins base+0x33d5a88/8c (D2 0x3309cb8/bc) correct (aligned refs 0x2dd5c1->0x2e27f1 etc.). Do not apply the global 0xde8/0x878 moves seen in who_shifts: they belong to other structs.",
+  "port.py gaps worth a generic fix: (1) inventory.py misses leaf functions (no pdata) and return addresses (caller==0x...); (2) hex-string byte checks (native_menu.hpp) and FNV-region hashes (native_prompt_entry.hpp) are never regenerated; (3) global offset votes can be wrong for a struct that did not move (native_menu_entry 0xA708 -> 0xac08).",
+  "native_prompt_entry.hpp verified_abi(): the 6 regions are FNV-1a over raw code bytes, which include rip-rel/call displacements, so D2 hashes can never match DOTO (generated file keeps D2 hashes -> feature refused, fail-safe, but interaction-prompt capture is lost). DOTO values are in sites (semantics same: fn_diff only shows moved offsets 0xa8->0xb0, 0x3130b0->0x327770, which the generator already rewrote). DOTO Add6 grew from 557 to 589 bytes (extra prologue check 'cmp [rip],0; call 0x35760; cmp [rdi+0x7ec],eax' -> re-run of a layout refresh), so region 1 changes size too.",
+  "Prompt call sites: Add6/UpdateGauge2/Remove1 return addresses 0x3c64f3/0x3c62b3/0x3c7339 are correct (same lea offsets 0x98/0x128/0xf8, receiver +0x188, args block), arkHUDElementInteractives vtable 0x1c46918 and idRenderModelStatic 0x1c14e28 correct, model AABB +0x1840/+0x1850 unchanged (movaps at DOTO 0x8e5ad6), Iggy bool tags 0x24eee29/0x24eee21 correct (59/115 refs). Entity (owner) fields moved: spawn id 0xa8->0xb0 (done by generator), flags 0xd0->0xd8, model 0xf0->0xf8, state 0xd1->0xd9, origin 0x300->0x310 (not done: sites).",
+  "Wrist HUD: health 0x6cbcfa, gadget 0x6cb199/0x6cb270, power 0x6cb1fe correct (same lea offsets, deltas 0xf0/0x90/0x60 unchanged, element vtables mapped by RTTI). Only mana moved (poisoned by port.py); see rvas+sites. Draw hook 0x2e27b0, SetMember 0x290d0, census setter 0x2a910, child draw 0x10bb830 all hash-identical (iggy display node +0xc8/+0x80/+0x78 unchanged).",
+  "native_cvars: layout unchanged (+0x28 int,+0x2c float,+0x30 name): cvar ctor 0x1008f0->0x1040c0 is hash-identical; apply() re-checks the name pointer, so a wrong object is only skipped. Only r_AntiAliasingPreset (poisoned) needed a fix; the other 10 generated addresses reproduce from the name-string static initialisers. Without the fix r_AntiAliasingPreset=3 silently stays at the game default.",
+  "native_hud_census.hpp: hud_census_crosshair_x/y_delta (0x2b8/0x2c8) and update_delta (0x550) are unused constants; the census is a diagnostic knob wrapped in try/catch; not a blocker.",
+  "native_console.hpp: besides the four rvas, getviewpos_rva and loadgame_rva already match DOTO bytes (direct compare of the generated byte arrays against the DOTO image: OK for 9 of 12; the 3 DIFF were exactly append_text/set_wait/cheat_gate). Vtable slots then match the corrected rvas (static read of DOTO vtable 0x1bf5be8). System pointer 0x234ca60 / object 0x234ca80 voted 151/151.",
+  "IggyApi in native_options_page: all 13 pins verified against DOTO bytes after the rva + call_method fixes, but register_call 0x2c1b0 (D2 0x2b7e0) is only 'neighbour-loose' aligned (adds a null check, 204 vs 201 insns) and DOTO's Iggy ctors take an extra internal bool; calling conventions at our call sites look unchanged but untested. Moot while the menu movies are unpatched.",
+  "No offset or rva items found in controller_input.hpp, logic_mask_cache.hpp, menu_input.hpp, menu_pointer.hpp, native_hud_child_capture.hpp, world_ui_capture.hpp, native_prompt_anchor.hpp (pure logic). Site 'contains' strings are substrings of the D2 source line; sites for the string literals in native_menu.hpp replace the whole hex string."
+ ]
+}

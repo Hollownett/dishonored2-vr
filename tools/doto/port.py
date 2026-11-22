@@ -79,11 +79,15 @@ def site_override(rules, file, line_text, value):
     return None
 
 
-def site_bytes_accepted(rules, file, d2_rva):
+def site_bytes_accepted(rules, file, d2_rva, n=1):
     """offsets.json "bytes": [{"file":..., "d2_at":"0x...", "why":...}] accepts a semantic byte difference
     after a manual review of the hook (for example a changed stack frame the detour never reads)."""
     for r in rules.get('bytes', []):
-        if r['file'] == file and int(r['d2_at'], 0) == d2_rva:
+        try:
+            at = int(r['d2_at'], 0)
+        except ValueError:
+            continue
+        if r['file'] == file and d2_rva <= at < d2_rva + n:
             return True
     return False
 
@@ -196,6 +200,38 @@ def main():
         if v not in cache:
             cache[v] = t.rva(v)
         return cache[v]
+
+    # ---- code addresses the inventory saw as plain numbers: pin-table entries {0xRVA,N,{bytes}} / {0xRVA,N,0xHASHull}
+    # and caller/return-address tables (another code address on the same line), when the value is exactly a D2
+    # instruction start inside a function ----
+    from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+    _md = Cs(CS_ARCH_X86, CS_MODE_64)
+    _starts = {}
+
+    def insn_start(x):
+        f = t.a.function_of(x)
+        if f is None:
+            return False
+        if f not in _starts:
+            _starts[f] = {i.address for i in _md.disasm(t.a.bytes(f, t.a.fns[f][1] - f), f)}
+        return x in _starts[f]
+    code_lines = {(r['file'], r['line']) for r in inv if r['cls'].startswith('rva-code')}
+    pin_after = re.compile(r'\s*,\s*\d+\s*,\s*(?:\{|0x[0-9a-fA-F]+u?ll\})')
+    promoted = 0
+    for r in inv:
+        if r['cls'] != 'offset' or not (0x1000 <= r['value'] < t.a.sections['.text'][1]):
+            continue
+        line = src_lines[r['file']][r['line'] - 1]
+        before = line[:r['col']]
+        after = line[r['col'] + len(r['text']):]
+        if re.search(r'[\w\]\)&|]\s*[+&|^]\s*$|[<>]=?\s*$', before):
+            continue   # a field offset, a mask or a bound
+        if not (pin_after.match(after) or (r['file'], r['line']) in code_lines):
+            continue
+        if insn_start(r['value']):
+            r['cls'] = 'rva-code'
+            promoted += 1
+    print(f'promoted {promoted} table literals to code addresses')
 
     # ---- reviewed per-site address overrides (any literal class but comments and bytes) ----
     handled = set()
@@ -328,7 +364,7 @@ def main():
         status, notes = t.compare_bytes(loc, y, len(bs))
         entry['status'] = status
         entry['notes'] = notes
-        accepted = status in ('relocated', 'layout') or site_bytes_accepted(rules, file, loc)
+        accepted = status in ('relocated', 'layout') or site_bytes_accepted(rules, file, loc, len(bs))
         if status != 'same' and accepted:
             entry['rewritten'] = True
             for r, nb in zip(g, cb):

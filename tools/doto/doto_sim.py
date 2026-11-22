@@ -99,7 +99,7 @@ def foreground_exe():
     return buf.value if ok else ""
 
 
-GAME_PATH_WORDS = ("steamapps\common", "farmingsimulator", "epic games", "xboxgames", "gog galaxy\games")
+GAME_PATH_WORDS = ("steamapps\\common", "farmingsimulator", "epic games", "xboxgames", "gog galaxy\\games")
 
 
 def conflicts(idle_minutes):
