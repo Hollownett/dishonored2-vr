@@ -245,6 +245,7 @@ public:
         {CrashOperation operation("native hip holster");try {service_hip(base,read);} catch(...) {}}
         {CrashOperation operation("native mirrored hands");try {service_mirror(base,read);} catch(...) {}}
         {CrashOperation operation("native gun copies");try {service_guns(base,read);} catch(...) {}}
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) {CrashOperation operation("native forearm gun hide");try {service_forearm_native(base,read);} catch(...) {}}
         {CrashOperation operation("native copy upgrades");try {service_upgrades(base,read);} catch(...) {}}
         hold_down(base,read);
         service_wake_retries(base,read,clock_ms());
@@ -1034,6 +1035,11 @@ public:
         std::lock_guard<std::mutex> l(feed_m_);forearm_on_[side]=offset!=nullptr;if(offset) forearm_offset_[side]=*offset;
     }
     inline static std::atomic<std::uint64_t> forearm_spawned{},forearm_placed{},forearm_hidden{},forearm_presented{};
+    // v145744 (DOTO dual wield, dxgi_probe voltaic arms): the engine's own forearm gun (left arm) is hidden while only the right forearm
+    // carries the Voltaic Gun. Control thread: the entity to keep hidden, 0 for none. Game thread (service): hidden, again whenever the game
+    // shows it, and shown again once no longer wanted (only an entity this hid, still alive).
+    static void forearm_native_hide(std::uintptr_t entity) noexcept {fn_want_.store(entity,std::memory_order_relaxed);}
+    inline static std::atomic<std::uint64_t> forearm_native_hides{},forearm_native_shows{},forearm_native_failed{};
     static void mirror_hands(bool mirrored) noexcept {mirrored_.store(mirrored,std::memory_order_relaxed);}
     static void held_root_step(bool on) noexcept {held_step_on_.store(on,std::memory_order_relaxed);} // v776 test switch (see service_held)
     static void clear_copies() noexcept {clear_req_.store(true,std::memory_order_relaxed);clear_guns_req_.store(true,std::memory_order_relaxed);}
@@ -1093,6 +1099,29 @@ private:
         std::lock_guard<std::mutex> l(feed_m_);const auto& f=feed_[side&1u];
         if(!f.have || std::chrono::duration<double>(std::chrono::steady_clock::now()-f.at).count()>max_age_s) return false;
         pose=f.pose;speed=f.speed;if(root) *root=f.have_root?std::optional<Vec3>{f.root}:std::nullopt;return true;
+    }
+    inline static std::atomic<std::uintptr_t> fn_want_{};inline static std::uintptr_t fn_hidden_{};inline static std::uint32_t fn_hidden_id_{};
+    inline static std::uint64_t fn_failed_until_{};
+    template<class Read> static void service_forearm_native(std::uintptr_t base,Read& read) {
+        if constexpr(!game_traits::ranged_player_weapon_is_voltaic) {(void)base;(void)read;return;}
+        else {
+            const std::uintptr_t want=fn_want_.load(std::memory_order_relaxed);
+            if(fn_hidden_ && fn_hidden_!=want) {   // no longer wanted hidden: shown again if it is still that entity
+                if(alive_entity(base,read,fn_hidden_,fn_hidden_id_) && (rig::value<std::uint8_t>(read,fn_hidden_+game_traits::entity_flags_offset).value_or(0)&1u) &&
+                   visible(base,read,fn_hidden_,true)) ++forearm_native_shows;
+                fn_hidden_=0;fn_hidden_id_=0;
+            }
+            if(!want) return;
+            const auto id=rig::value<std::uint32_t>(read,want+game_traits::entity_id_offset);
+            if(!id || !alive_entity(base,read,want,*id)) return;
+            const auto flags=rig::value<std::uint8_t>(read,want+game_traits::entity_flags_offset);if(!flags) return;
+            if(!(*flags&1u)) {   // shown (first time, or the game showed it again)
+                if(GetTickCount64()<fn_failed_until_) return;
+                if(!visible(base,read,want,false)) {++forearm_native_failed;fn_failed_until_=GetTickCount64()+1000;return;}
+                ++forearm_native_hides;
+            }
+            fn_hidden_=want;fn_hidden_id_=*id;
+        }
     }
     // DOTO forearm copies (forearm_copy): whether `side`'s held copy rides the forearm, its offset, and that forearm's feed (as feed()).
     inline static std::array<HeldFeed,2> forearm_feed_{};inline static std::array<bool,2> forearm_on_{};inline static std::array<held_copy::Pose,2> forearm_offset_{};

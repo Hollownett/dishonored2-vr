@@ -113,6 +113,7 @@
 #include "taa_constants_capture.hpp"
 #include "vr_controls.hpp"
 #include "arm_state.hpp"
+#include "voltaic_arms.hpp"
 #include "held_copy.hpp"
 #include "copy_draw_grip.hpp"
 #include "native_weapon_hands.hpp"
@@ -5959,6 +5960,14 @@ static d2vr::arm::Held arm_copy_now(unsigned side) noexcept {return d2vr::arm::c
 static constexpr unsigned voltaic_native_hand=0,voltaic_copy_hand=1;
 static bool voltaic_pinned() noexcept {return d2vr::game_traits::ranged_player_weapon_is_voltaic && dual_wield_enabled && left_forearm_gun.load(std::memory_order_relaxed);}
 static std::atomic<bool> voltaic_copy_on{false};   // control thread: the copy is wanted (pinned, gameplay); the render thread then feeds its forearm
+// v145744 (user, DOTO headset v145743: "I cannot switch Billie's crossbow to my right arm; when I select it on my right arm it just updates it on my
+// left arm"): which forearms carry the gun follows the wheel that chose it (src/voltaic_arms.hpp): the right forearm alone shows the copy and the
+// engine's left gun is hidden (NativeWeaponHands::forearm_native_hide), the left alone shows the engine's gun, both show both.
+static std::mutex voltaic_arms_mutex;static d2vr::VoltaicArms voltaic_arms_state;   // control thread (wheel events and the per-frame update)
+static std::atomic<unsigned> voltaic_arms_now{0u};   // bit 0 left (the engine's gun), bit 1 right (the copy); 0: not equipped
+static std::atomic<unsigned> voltaic_arms_test{};    // test command "voltaic left|right|both": 0x100 | mask
+static std::atomic<std::uintptr_t> voltaic_native_ent{};   // the engine's slot-1 weapon entity (hand state), the gun hidden while only the right carries it
+static std::array<std::atomic<std::uint64_t>,4> voltaic_arm_stats{};   // [wheel commits, same-item adds, swords sheathed for a right gun, test sets]
 // [copy shots asked, queued, refused, native chord frames, ArmSet pins, forearm feeds, model frame writes, copy aims]
 static std::array<std::atomic<std::uint64_t>,8> voltaic_stats{};
 static std::array<std::atomic<std::uint64_t>,2> voltaic_feed_why{};
@@ -5972,7 +5981,10 @@ static std::string voltaic_json() {
     {std::lock_guard<std::mutex> l(hand_state_mutex);for(const char c:left_equip_name) {if(!c) break;if(std::isalnum(static_cast<unsigned char>(c))) equip+=c;}}
     std::string s="{\"pinned\":"+std::to_string(voltaic_pinned()?1:0)+",\"forearm\":"+std::to_string(left_forearm_gun.load()?1:0)+
         ",\"feed_why\":["+std::to_string(voltaic_feed_why[0].load())+','+std::to_string(voltaic_feed_why[1].load())+"],\"equip\":\""+equip+
-        "\",\"copy\":"+std::to_string(voltaic_copy_on.load()?1:0)+",\"stats\":[";
+        "\",\"copy\":"+std::to_string(voltaic_copy_on.load()?1:0)+",\"arms\":"+std::to_string(voltaic_arms_now.load())+
+        ",\"arm_stats\":["+std::to_string(voltaic_arm_stats[0].load())+','+std::to_string(voltaic_arm_stats[1].load())+','+std::to_string(voltaic_arm_stats[2].load())+','+std::to_string(voltaic_arm_stats[3].load())+
+        "],\"native_hide\":["+std::to_string(d2vr::NativeWeaponHands::forearm_native_hides.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_shows.load())+','+
+        std::to_string(d2vr::NativeWeaponHands::forearm_native_failed.load())+"],\"stats\":[";
     for(unsigned i=0;i<voltaic_stats.size();++i) s+=(i?",":"")+std::to_string(voltaic_stats[i].load(std::memory_order_relaxed));
     s+="],\"copy_entity\":[";
     s+=std::to_string(d2vr::NativeWeaponHands::forearm_spawned.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_placed.load())+','+
@@ -7277,6 +7289,10 @@ static std::string run_test_command(const std::string& line) {
         if(!decl) return "usage: equip pistol|crossbow|regular_grenade|sticky_grenade|stun_mine|springrazor|heart";
         d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::test_equip;r.decl=decl;
         return d2vr::NativeWeaponHands::request(r)?"equip requested":"equip queue full";}
+    if(verb=="voltaic") { // test (sim, v145744, DOTO dual wield): which forearms carry the Voltaic Gun, as a wheel choice would set them
+        std::string what;in>>what;const unsigned m=what=="left"?1u:what=="right"?2u:what=="both"?3u:0u;
+        if(!m) return "usage: voltaic left|right|both";
+        voltaic_arms_test.store(0x100u|m,std::memory_order_relaxed);return "voltaic arms requested";}
     if(verb=="gadget") { // test (sim, v766): "gadget spawn stun_mine|spring_razor|grenade": a free pickup 20 cm under the right hand (NativeGadgetDrop
         // spawn_free: nothing leaves the inventory); status gadget_drop.stun_probe/razor_probe say whether its mine component started and its state.
         std::string op,what;in>>op>>what;using K=d2vr::NativeGadgetDrop::Kind;
@@ -15252,7 +15268,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           left_gun_model=(!body_carry || left_kept) && state->slots[0] && (by_name || by_item)?gun_model_of(state->slots[0]):0;
                                           left_barrel_model=d2vr::is_barrel_equip_name(n)?left_gun_model.load():0;} // isolate barrel routing from holster/draw tracking
                                          // v145727: the slot-1 weapon hangs on the forearm (DOTO's Voltaic Gun): no gun grip, no hip draw, the hand stays free
-                                         {std::array<std::uintptr_t,2> ents{};weapon_models(&ents);
+                                         {std::array<std::uintptr_t,2> ents{};weapon_models(&ents);voltaic_native_ent.store(ents[0],std::memory_order_relaxed);   // v145744
                                           left_forearm_gun=(!body_carry || left_kept) && state->slots[0] && ((ents[0] && weapon_bind_joint(ents[0],0,0)!=59u) ||
                                               (d2vr::game_traits::ranged_player_weapon_is_voltaic && d2vr::is_voltaic_equip_name(n)));}   // v145799: or its pose name (a bind read before the arm skeleton resolves)
                                          left_gadget=(!body_carry || left_kept) && state->slots[0] && !d2vr::NativeGadgetDrop::left_spent.load(std::memory_order_relaxed) && (d2vr::is_gadget_equip_name(n) || d2vr::is_gadget_equip_name(item_decl_name(state->slots[0]))); // pose "Grenade"; decls regular/sticky_grenade, stun_mine, springrazor
@@ -16623,7 +16639,24 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         // It rides that forearm's helper joint with the engine's left bind tag mirrored (an identity tag: the y180 of the crossed
                                         // weapon tag, power_hand::mirror_correction; the gun mesh's bounds are symmetric across its local XZ plane, Y -0.058..0.057).
                                         if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) {
-                                            const bool copy_now=voltaic_copy_knob && voltaic_pinned() && logic==2;voltaic_copy_on.store(copy_now,std::memory_order_relaxed);   // v145743: on unless build/no-voltaic-copy
+                                            // v145744: the forearms that carry the gun follow the wheel that chose it (voltaic_arms_state); the right alone hides
+                                            // the engine's left gun. A right forearm newly given by the right hand's wheel puts away a sword drawn in that hand
+                                            // (as Dishonored 2's dual wield: a gun chosen by the sword's hand displaces the sword; that hand's trigger blocks).
+                                            unsigned varms{},gain{};
+                                            {std::lock_guard<std::mutex> l(voltaic_arms_mutex);
+                                             if(const auto t=voltaic_arms_test.exchange(0);t&0x100u) {voltaic_arms_state.force(t&3u);voltaic_arm_stats[3].fetch_add(1,std::memory_order_relaxed);}
+                                             varms=voltaic_arms_state.update(voltaic_pinned(),GetTickCount64(),left_aim_equip_revision.load(std::memory_order_acquire));
+                                             gain=voltaic_arms_state.take_gain();voltaic_arm_stats[1].store(voltaic_arms_state.same_adds,std::memory_order_relaxed);}
+                                            if(!voltaic_copy_knob && varms) varms=1u;   // no copy (build/no-voltaic-copy): the engine's gun on the left, as before
+                                            voltaic_arms_now.store(varms,std::memory_order_relaxed);
+                                            if((gain&2u) && (varms&2u) && sword_arm_now()==1u && logic==2) {
+                                                bool sword_out{};{std::lock_guard<std::mutex> l(hand_state_mutex);sword_out=(hand_weapon_bits&2u)!=0;}
+                                                if(sword_out) {sword_grip={};d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::sheathe;
+                                                    if(d2vr::NativeWeaponHands::request(r)) voltaic_arm_stats[2].fetch_add(1,std::memory_order_relaxed);
+                                                    dual_wield_event("\"ev\":\"voltaic_sheathe\"");}
+                                            }
+                                            d2vr::NativeWeaponHands::forearm_native_hide(voltaic_pinned() && varms && !(varms&1u)?voltaic_native_ent.load(std::memory_order_relaxed):0);
+                                            const bool copy_now=voltaic_copy_knob && voltaic_pinned() && logic==2 && (varms&2u);voltaic_copy_on.store(copy_now,std::memory_order_relaxed);   // v145743: on unless build/no-voltaic-copy
                                             static const d2vr::held_copy::Pose forearm_offset=[]{const auto c=d2vr::power_hand::mirror_correction(d2vr::power_hand::weapon_tag_rot);
                                                 d2vr::held_copy::Pose p{};for(unsigned i=0;i<3;++i) p.basis[i]={c[i],c[3+i],c[6+i]};return p;}();   // item axis i = column i of C
                                             d2vr::NativeWeaponHands::forearm_copy(voltaic_copy_hand,copy_now?&forearm_offset:nullptr);
@@ -16859,6 +16892,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     wheel_commit_hand=static_cast<int>(h);wheel_commit_seq=wheel_open_seq;g_wheel_commit_tick=now_w;g_no_catch_until[h]=now_w+1000;d2vr::NativeRangedFire::note_wheel(h);wheel_commit_decl=slot1_decl_now.load(std::memory_order_relaxed);wheel_chosen=wheel_dial_sector>=0;
                                     arms_apply(arm_set.wheel_commit(h,now_w,left_aim_equip_revision.load(std::memory_order_acquire)),"wheel");
                                     if(!wheel_chosen) arm_set.wheel_nothing(h);   // the dial pointed at no sector: nothing will arrive
+                                    if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(wheel_chosen) {   // v145744: the arm the Voltaic Gun goes to
+                                        std::lock_guard<std::mutex> l(voltaic_arms_mutex);voltaic_arms_state.commit(h,now_w,left_aim_equip_revision.load(std::memory_order_acquire),voltaic_pinned());
+                                        voltaic_arm_stats[0].fetch_add(1,std::memory_order_relaxed);}
                                     dual_wield_event("\"ev\":\"wheel_commit\",\"hand\":"+std::to_string(wheel_open_hand)+",\"sector\":"+std::to_string(wheel_dial_sector)+",\"dial\":"+std::to_string(wheel_open_dial)+",\"stick\":"+std::to_string(wheel_open_stick)+",\"equip\":\""+[]{std::lock_guard<std::mutex> l(hand_state_mutex);std::string n(left_equip_name);for(auto& c:n) if(c=='"' || c==92 || static_cast<unsigned char>(c)<32) c='?';return n;}()+"\""+
                                         ",\"ranged\":"+std::to_string(plan.slot1_arm)+",\"gun\":"+std::to_string(d2vr::arm::native_gun(held)?static_cast<unsigned>(held):0u)+",\"other\":"+std::to_string(d2vr::arm::slot1_only(held)?1:0)+
                                         ",\"ticket\":"+std::to_string(arm_set.pend[h].ticket)+",\"decl\":"+std::to_string(static_cast<unsigned long long>(wheel_commit_decl)));}};
@@ -16868,6 +16904,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     else if(const auto seq=d2vr::NativeManualEquipRuntime::wheel_choice_seq.load(std::memory_order_acquire);seq!=wheel_commit_seq) {
                                         const auto decl=d2vr::NativeManualEquipRuntime::wheel_choice_decl.load(std::memory_order_relaxed);
                                         const bool same=decl && decl==wheel_commit_decl;wheel_commit_hand=-1;
+                                        if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(same) {std::lock_guard<std::mutex> l(voltaic_arms_mutex);voltaic_arms_state.same(h);}   // v145744
                                         const auto fx=arm_set.wheel_choice(h,same,GetTickCount64());arms_apply(fx,"wheel_choice");
                                         if(fx.same_copy) ++dual_wield_swaps;
                                         arms_publish();
@@ -17046,7 +17083,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         const unsigned gh=forearm_gh;   // v145799: pinned (DOTO dual wield) = the left hand, else the slot-1 arm as before
                                         const auto& gc=game_xr->controller_input;
                                         const float grip_raw=gh?gc.right_grip:gc.left_grip,trigger_raw=gh?gc.right_trigger:gc.left_trigger;
-                                        const bool hand_busy_now=grip_intent_out[gh].grab || (physical_grab_requested && native_grab.holding(gh)) || (voltaic_pin_now && weapon_owns(gh));
+                                        const bool hand_busy_now=grip_intent_out[gh].grab || (physical_grab_requested && native_grab.holding(gh)) || (voltaic_pin_now && weapon_owns(gh)) ||
+                                            (voltaic_pin_now && !(voltaic_arms_now.load(std::memory_order_relaxed)&1u));   // v145744: the left forearm does not carry it (hidden): no native shot
                                         voltaic_fire=!hand_busy_now && grip_raw>=.55f && trigger_raw>=.35f?trigger_raw:0.f;
                                         if(gh==rh) (gh?input.right_trigger:input.left_trigger)=voltaic_fire;   // slot 1's trigger (the swap below carries it to LT)
                                         if(voltaic_pin_now && voltaic_fire>0.f) voltaic_stats[3].fetch_add(1,std::memory_order_relaxed);

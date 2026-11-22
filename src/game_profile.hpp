@@ -49,6 +49,8 @@ inline constexpr std::uintptr_t voltaic_comp_vtable = 0x1c45768, voltaic_decl_vt
 // v145741 (live, lab9: the inventory's GaussGun record 0x40138 -> its component's +0x10 owner): the Voltaic Gun's entity is a plain
 // idEntity (vtable 0x1d0dd88), not the weapon entity class the crossbow uses; owner +0xb4 is the player, id +0xb0 matches.
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0x1d0dd88;
+// v145744: idEntity spawn id and its flags byte (bit 0 hidden, bit 1 not presented), for new code that must not depend on a port rule
+inline constexpr std::uintptr_t entity_id_offset = 0xb0, entity_flags_offset = 0xd8;
 // The second gun the other forearm shows in dual wield: the gun's own entity def, spawned by name (no owner: its components never start).
 inline constexpr const char* voltaic_copy_def = "models/weapons/dlc01/player/billie/gaussgun01/ply_billie_gaussgun01.def";
 // The Gauss fire (combat-port.md section 2): before its create it copies byte comp+0xe0 into the create/sound configure byte comp+0xb0;
@@ -74,6 +76,7 @@ inline constexpr bool ranged_player_weapon_is_voltaic = false;   // the pistol a
 inline constexpr bool bind_any_arm_joint = false;   // D2: hand attachment 59 (and a forearm helper) only, as since v1319
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0, voltaic_decl_vtable = 0;
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0;
+inline constexpr std::uintptr_t entity_id_offset = 0xa8, entity_flags_offset = 0xd0;
 inline constexpr const char* voltaic_copy_def = nullptr;
 inline constexpr std::uintptr_t voltaic_configure = 0, voltaic_configure_from = 0, voltaic_mark_attribute = 0,
     voltaic_entity_decl = 0, voltaic_mark_decl = 0, voltaic_info_def = 0, voltaic_info_value = 0, voltaic_info_field = 0;

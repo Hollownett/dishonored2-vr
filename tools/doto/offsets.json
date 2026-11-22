@@ -329,6 +329,9 @@
  ],
  "sites": [
   {"file": "src/game_profile.hpp", "contains": "voltaic_comp_vtable = 0x1c45768", "from": "0x1c45768", "to": "0x1c45768", "why": "already DOTO's arkCpntWeaponGaussGun vtable (RTTI .?AVarkCpntWeaponGaussGun@@ at 0x1c45768): kept", "source": "review/voltaic-pair"},
+  {"file": "src/native_weapon_hands.hpp", "contains": "read,copy_+0xa8)==copy_id_", "from": "0xa8", "to": "0xb0", "why": "idEntity id +0xa8 -> +0xb0 in alive() (spawn() line 735 already reads +0xb0): without it fly() returns at its alive() guard and a thrown sword hangs where it was released (user, DOTO headset v145743)", "source": "review/sword-throw"},
+  {"file": "src/game_profile.hpp", "contains": "entity_id_offset = 0xb0, entity_flags_offset = 0xd8", "from": "0xb0", "to": "0xb0", "why": "already DOTO's idEntity spawn id (+0xb0) and flags (+0xd8): kept", "source": "review/voltaic-pair"},
+  {"file": "src/game_profile.hpp", "contains": "entity_id_offset = 0xb0, entity_flags_offset = 0xd8", "from": "0xd8", "to": "0xd8", "why": "already DOTO's idEntity flags (+0xd8): kept", "source": "review/voltaic-pair"},
   {"file": "src/game_profile.hpp", "contains": "voltaic_entity_vtable = 0x1d0dd88", "from": "0x1d0dd88", "to": "0x1d0dd88", "why": "already DOTO's idEntity vtable (live RTTI .?AVidEntity@@: the Voltaic Gun's owner entity): kept", "source": "review/voltaic-pair"},
   {"file": "src/game_profile.hpp", "contains": "voltaic_decl_vtable = 0x1c45618", "from": "0x1c45618", "to": "0x1c45618", "why": "already DOTO's arkDeclCpntWeaponGaussGun vtable (RTTI): kept", "source": "review/voltaic-pair"},
   {"file": "src/native_slash_scene_rate.hpp", "contains": "{0x86cd7d,{0xe8,0x5e,0x7e,0xfe,0xff}}", "from": "0x86cd7d", "to": "0x8d81b0", "why": "slash scene caller: D2 call at 0x86cd7d -> 0x854be0; DOTO call at 0x8d81b0 -> 0x8bdca0 (its translated twin; combat-port.md section 3, checked 2026-11-22)", "source": "review/combat-port"},
