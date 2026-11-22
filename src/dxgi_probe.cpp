@@ -318,6 +318,7 @@ static void afw_log_line(const char* line) {
 }
 static int renderer_preference=0,renderer_running=0; // VR menu Renderer row (vr_preferences.hpp v12): saved choice / what this session started
 static bool spacewarp_holds_native=false; // build/spacewarp kept this session in native stereo though performance mode was asked for
+static bool spacewarp_yields_to_afw=false; // Indurhra's fork: the saved AFW renderer started; spacewarp is off this session
 static bool preferences_file_existed=false,aa_chosen_preference=false,crosshair_preference=true,scripted_recenter_preference=true,first_start_pending=false,crosshair_migrated=false;
 static fs::path crosshair_legacy_file; // set while build/no-hand-crosshair awaits its first successful save
 static const char* first_start_state="none";static std::vector<std::string> first_start_removed;
@@ -14971,6 +14972,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(alternate_on()) alternate_select_descriptor(true);
                                 renderer_running=alternate_on()?1:0;game_xr->renderer_setting(renderer_preference,alternate_on()); // alternate-capable: every renderer is live
                                 game_xr->renderer_spacewarp_hold(spacewarp_holds_native);  // one frame generation at a time
+                                game_xr->renderer_spacewarp_yield(spacewarp_yields_to_afw); // the AFW renderer won: the VR menu says spacewarp is off
                                 game_xr->imgui_menu_enabled=!fs::exists(output_directory.always().parent_path()/L"build"/L"menu-gdi"); // ImGui VR settings panel
                                 game_xr->wheel_native_pointer=!fs::exists(output_directory.always().parent_path()/L"build"/L"wheel-no-pointer");
                                 game_xr->wheel_eye_art_enabled=!fs::exists(output_directory.always().parent_path()/L"build"/L"wheel-quad"); // v776: the hand wheel's ring in the eyes unless build/wheel-quad (the quad layer, as v775)
@@ -18661,9 +18663,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             // One frame generation at a time (user 2026-11-20: "when spacewarp is enabled in launcher then other framegens are ignored ...
             // Only one framegen is active"): with build/spacewarp a session never starts alternate-capable, so performance mode (built-in
             // warp or AFW) cannot replace spacewarp, from the saved renderer, a knob or the VR menu. The launcher keeps the runtime's off.
-            spacewarp_holds_native=spacewarp_knob && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"));
+            // Indurhra's fork: the user's chosen AFW renderer (saved Renderer 2) wins over spacewarp. The session starts alternate-capable as
+            // usual and spacewarp sits this session out (spacewarp_enabled needs !alternate_on()), so one frame generation still runs at a time.
+            spacewarp_yields_to_afw=spacewarp_knob && renderer_preference==2;
+            if(spacewarp_yields_to_afw) note_recoverable("AFW is the chosen renderer: spacewarp stays off this session (one frame generation at a time)");
+            spacewarp_holds_native=spacewarp_knob && !spacewarp_yields_to_afw && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"));
             if(spacewarp_holds_native) note_recoverable("spacewarp is on: performance mode stays off (one frame generation at a time)");
-            if(!spacewarp_knob && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"))) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites); the VR menu's Renderer row asks for it too
+            if((!spacewarp_knob || spacewarp_yields_to_afw) && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"))) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites); the VR menu's Renderer row asks for it too
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
                 else {alt_eye_state=2;note_recoverable("alternate-eye needs head-tracked paired XR with native eye capture; staying paired");}
             }

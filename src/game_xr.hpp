@@ -2640,6 +2640,7 @@ public:
     void renderer_setting(int saved,bool capable) noexcept {settings_.set_renderer(saved);settings_.renderer_capable(capable);renderer_live_=capable?saved:0;
         afw::runtime().requested=renderer_live_==2;}
     void renderer_spacewarp_hold(bool v) noexcept {settings_.spacewarp_hold(v);}  // the VR menu says why performance mode did not start
+    void renderer_spacewarp_yield(bool v) noexcept {settings_.spacewarp_yield(v);} // AFW won over spacewarp this session
     std::atomic<int> renderer_live_{0}; // what renders now: 0 both eyes every frame, 1 alternate + built-in warp, 2 alternate + AFW
     int renderer_live() const noexcept {return renderer_live_.load();}
     void open_vr_menu() noexcept {if(imgui_menu_enabled) combined_open_pending_=true;} // `vrmenu` test command (the temple gesture's page 1)
