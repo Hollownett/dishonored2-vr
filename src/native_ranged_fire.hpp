@@ -443,8 +443,10 @@ public:
         for(unsigned side=0;side<2;++side) {
             const auto gun=bolt_gun(base,read,side);
             const auto a=gun.comp?rig::value<std::uintptr_t>(read,gun.comp+0x98):std::nullopt;
-            o<<(side?",":"")<<'"'<<hands[side]<<"\":{\"gun\":\""<<(!gun.comp?"none":gun.copy?"copy":"native")<<"\",\"index\":"<<(a?ammo_index(read,gun.comp,*a):-1)
-             <<",\"name\":"<<(a && gun.comp?"\""+ammo_name(read,gun.comp,*a)+"\"":std::string("null"))<<'}';
+            const bool shared=!gun.copy && copy_kind_[side].load()==1;   // a forearm copy firing through the engine gun's component
+            const auto own=shared?copy_ammo_[side][Shot::crossbow]:0;const auto shown=own?std::optional<std::uintptr_t>(own):a;
+            o<<(side?",":"")<<'"'<<hands[side]<<"\":{\"gun\":\""<<(!gun.comp?"none":gun.copy?"copy":shared?"copy_shared":"native")<<"\",\"index\":"<<(shown?ammo_index(read,gun.comp,*shown):-1)
+             <<",\"name\":"<<(shown && *shown && gun.comp?"\""+ammo_name(read,gun.comp,*shown)+"\"":std::string("null"))<<'}';
         }
         o<<",\"offered\":[";
         Why w{};const auto l=locate(base,read,Shot::crossbow,w);
@@ -872,7 +874,9 @@ private:
         const auto gun=bolt_gun(base,read,side);if(!gun.comp) return;
         const auto entry=ammo_nth(read,gun.comp,index);const auto item=entry?rig::value<std::uintptr_t>(read,entry):std::nullopt;if(!item || !*item) return;
         Why w{};const auto l=locate(base,read,Shot::crossbow,w);
-        if(gun.copy) {
+        // Sim 2026-11-24 (v145765 render check): the forearm copy has no started component of its own (copy_comp_ null), its shots borrow the
+        // engine gun's component with the hand's copy_ammo_; the pick goes through wheel_pick for it too, never to the engine gun.
+        if(gun.copy || copy_kind_[side].load()==1) {
             const auto record_item=l?rig::value<std::uintptr_t>(read,l->record):std::nullopt;if(!record_item || !*record_item) return;
             wheel_hand_=static_cast<int>(side);wheel_pick(base,read,*record_item,*item);return;
         }
@@ -887,11 +891,13 @@ private:
         if(forget_owners_.exchange(false,std::memory_order_acq_rel)) {own_={};seen_comp_={};shown_={};native_seen_={};pick_={};}   // the native's own is re-read from the loaded game
         {Why wb{};const auto lb=locate(base,read,Shot::crossbow,wb);   // v1281 status bolts: [native, left copy, right copy] crossbow ammo index (-1 none)
          bolts_[0]=lb?ammo_index(read,lb->comp,lb->ammo):-1;
-         for(unsigned side=0;side<2;++side) {const auto cc=copy_kind_[side].load()==1?copy_comp_[side]:0;const auto a=cc?rig::value<std::uintptr_t>(read,cc+0x98):std::nullopt;bolts_[1+side]=a?ammo_index(read,cc,*a):-1;}
+         for(unsigned side=0;side<2;++side) {const auto cc=copy_kind_[side].load()==1?copy_comp_[side]:0;const auto a=cc?rig::value<std::uintptr_t>(read,cc+0x98):std::nullopt;bolts_[1+side]=a?ammo_index(read,cc,*a):-1;
+             if(!cc && copy_kind_[side].load()==1 && lb) {const auto own=copy_ammo_[side][Shot::crossbow];bolts_[1+side]=ammo_index(read,lb->comp,own?own:lb->ammo);}}   // a copy sharing the engine gun's component: its own pick
          if constexpr(game_traits::ranged_player_weapon_is_voltaic) {   // v145764 status voltaic_bolts: the bolt each gun shows, by name
             std::array<std::string,3> names;
             if(lb) if(const auto a=rig::value<std::uintptr_t>(read,lb->comp+0x98);a && *a) names[0]=ammo_name(read,lb->comp,*a);
-            for(unsigned side=0;side<2;++side) {const auto cc=copy_kind_[side].load()==1?copy_comp_[side]:0;const auto a=cc?rig::value<std::uintptr_t>(read,cc+0x98):std::nullopt;if(a && *a) names[1+side]=ammo_name(read,cc,*a);}
+            for(unsigned side=0;side<2;++side) {const auto cc=copy_kind_[side].load()==1?copy_comp_[side]:0;const auto a=cc?rig::value<std::uintptr_t>(read,cc+0x98):std::nullopt;if(a && *a) names[1+side]=ammo_name(read,cc,*a);
+                else if(!cc && copy_kind_[side].load()==1 && lb) {const auto own=copy_ammo_[side][Shot::crossbow];const auto e=own?own:lb->ammo;if(e) names[1+side]=ammo_name(read,lb->comp,e);}}
             std::lock_guard<std::mutex> g(bolt_names_m_);bolt_names_=std::move(names);
          }}
         if constexpr(game_traits::ranged_player_weapon_is_voltaic) for(unsigned side=0;side<2;++side) if(const int bi=bolt_request_[side].exchange(-1);bi>=0) apply_bolt(base,read,side,bi);
