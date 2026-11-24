@@ -165,6 +165,7 @@ public:
         for(unsigned b=0;b<edges_.size();++b) if(rising>>b&1u) {edges_[b].fetch_add(1,std::memory_order_relaxed);note(1,b);}
         if(s.found_player && snapshot().found_player && s.hook_mines!=snapshot().hook_mines) note(2,static_cast<std::uint32_t>(s.hook_mines));
         if(s.found_player && snapshot().found_player && s.hook_mine_mode!=snapshot().hook_mine_mode) note(3,static_cast<std::uint32_t>(s.hook_mine_mode));
+        if(s.found_player && snapshot().found_player && s.theeye_state!=snapshot().theeye_state) note(4,static_cast<std::uint32_t>(s.theeye_state));
         snapshot()=s;reads_.fetch_add(1,std::memory_order_relaxed);
         if(!s.found_player) failures_.fetch_add(1,std::memory_order_relaxed);
     }
@@ -192,7 +193,7 @@ public:
     }
 private:
     // The last 16 changes, for timing questions (which press entered a state, which one used a mine): [tick ms, kind, value];
-    // kind 1 = a state entered (value = state bit), 2 = the Hook Mine count changed (value = the new count), 3 = the Hook Mine mode changed. Called under mutex().
+    // kind 1 = a state entered (value = state bit), 2 = the Hook Mine count changed (value = the new count), 3 = the Hook Mine mode changed, 4 = Foresight's state changed (value = the new state). Called under mutex().
     struct Event {std::uint64_t tick;std::uint32_t kind,value;};
     static std::array<Event,16>& ring() {static std::array<Event,16> r{};return r;}
     inline static std::uint32_t ring_n_{};

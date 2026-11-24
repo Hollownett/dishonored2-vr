@@ -87,7 +87,7 @@ public:
         if(!gate) throw std::runtime_error("Native power cancel: cast gate differs");
         base_=base;image_end_=base+image_size;list_offset_=static_cast<std::uint8_t>(code[0x15]);
         resolve_=reinterpret_cast<Resolve>(resolve);route_=route;instance_=this;
-        requested_until_=0;requests_=releases_=applied_=no_aim_=expired_=faults_=0;
+        requested_until_=0;requests_=releases_=applied_=no_aim_=expired_=faults_=casts_=0;
         const auto target=reinterpret_cast<void*>(base+usepower_release_rva);
         if(!original_ && MH_CreateHook(target,reinterpret_cast<void*>(&detour),reinterpret_cast<void**>(&original_))!=MH_OK)
             throw std::runtime_error("Cannot create native power cancel hook");
@@ -106,29 +106,36 @@ public:
         std::ostringstream o;
         o<<"{\"installed\":"<<(enabled_?"true":"false")<<",\"routing\":"<<(route_.load()?"true":"false")<<",\"list_offset\":"<<static_cast<unsigned>(list_offset_)
          <<",\"requests\":"<<requests_.load()<<",\"releases\":"<<releases_.load()<<",\"applied\":"<<applied_.load()<<",\"no_aim\":"<<no_aim_.load()
-         <<",\"expired\":"<<expired_.load()<<",\"faults\":"<<faults_.load()<<'}';
+         <<",\"expired\":"<<expired_.load()<<",\"faults\":"<<faults_.load()<<",\"casts\":"<<casts_.load()<<'}';
         return o.str();
     }
 private:
     using Release=void (__fastcall*)(void*);
     using Resolve=std::uintptr_t (__fastcall*)(const void*,int);
+    static bool aiming(std::uintptr_t power) noexcept {
+        __try {return power && *reinterpret_cast<const volatile std::uint8_t*>(power+power_aim_active)!=0;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    }
     static void __fastcall detour(void* state) {
         auto& self=*instance_;
         releases_.fetch_add(1,std::memory_order_relaxed);
+        std::uintptr_t power=0;
+        __try {power=self.resolve_(reinterpret_cast<const std::byte*>(state)+self.list_offset_,2);}
+        __except(EXCEPTION_EXECUTE_HANDLER) {faults_.fetch_add(1,std::memory_order_relaxed);power=0;}
+        const bool aim=aiming(power);   // the original casts on this release unless the aim is stopped first
         const auto until=requested_until_.exchange(0,std::memory_order_acq_rel);
+        bool stopped=false;
         if(until && self.route_.load(std::memory_order_acquire)) {
             if(GetTickCount64()<=until) {
-                std::uintptr_t power=0;
-                __try {power=self.resolve_(reinterpret_cast<const std::byte*>(state)+self.list_offset_,2);}
-                __except(EXCEPTION_EXECUTE_HANDLER) {faults_.fetch_add(1,std::memory_order_relaxed);power=0;}
-                if(stop_aim(power,self.base_,self.image_end_)) applied_.fetch_add(1,std::memory_order_relaxed);
-                else no_aim_.fetch_add(1,std::memory_order_relaxed);
+                stopped=stop_aim(power,self.base_,self.image_end_);
+                (stopped?applied_:no_aim_).fetch_add(1,std::memory_order_relaxed);
             } else expired_.fetch_add(1,std::memory_order_relaxed);
         }
+        if(aim && !stopped) casts_.fetch_add(1,std::memory_order_relaxed);   // A/B: aim releases that cast (observe-only when routing is off)
         self.original_(state);
     }
     inline static NativePowerCancel* instance_{};
-    inline static std::atomic<std::uint64_t> requested_until_{},requests_{},releases_{},applied_{},no_aim_{},expired_{},faults_{};
+    inline static std::atomic<std::uint64_t> requested_until_{},requests_{},releases_{},applied_{},no_aim_{},expired_{},faults_{},casts_{};
     Release original_{};Resolve resolve_{};
     std::uintptr_t base_{},image_end_{};std::uint8_t list_offset_{};bool enabled_{};
     std::atomic<bool> route_{false};

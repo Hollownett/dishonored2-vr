@@ -17743,7 +17743,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // flat game does. Independent of the issue #6 latch below.
                                 const bool choke_power_hand=logic==2 && left_power_item.load(std::memory_order_relaxed) && (d2vr::NativePowerObserver::latest().states&d2vr::power_state_bit::choke)!=0;
                                 const auto power_latch=power_cancel_latch.update(raw_trigger(rh),raw_grip(rh),
-                                    logic==2 && native_power_cancel_installed && left_power_item.load(std::memory_order_relaxed) && !left_gadget && !timepiece_out());
+                                    logic==2 && power_grip_cancel_enabled && native_power_cancel_installed && left_power_item.load(std::memory_order_relaxed) && !left_gadget && !timepiece_out());
                                 if(power_latch.cancel_edge) {d2vr::NativePowerCancel::request(GetTickCount64());++power_grip_cancels;game_xr->pulse(rh,.35f,.04f);}
                                 if(logic==2) {
                                     if(deliberate_choke) input.right_grip=1;
@@ -19306,11 +19306,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         possession_view_move_enabled=!fs::exists(root/L"build"/L"no-possession-view-move");   // Task 15b
         teleport_fade_enabled=!fs::exists(root/L"build"/L"no-teleport-fade");d2vr::GameXr::fade_enabled=teleport_fade_enabled;   // Task 12
         reticle_policy_enabled=!fs::exists(root/L"build"/L"no-sword-hand-reticle");   // Task 8: the sword hand blocks its gun's crosshair; knob = the old crosshairs
-        if(power_grip_cancel_enabled) {   // issue #6: grip = cancel of a held power aim (StopAim before the UsePower release handler)
+        {   // issue #6: grip = cancel of a held power aim (StopAim before the UsePower release handler). With build/no-power-grip-cancel the hook
+            // still installs, observe-only (power_cancel.casts counts aim releases that cast: the A/B baseline), and the latch never engages.
             try {
                 const auto* dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(image_base);
                 const auto* nt=reinterpret_cast<const IMAGE_NT_HEADERS*>(image_base+static_cast<std::uintptr_t>(dos->e_lfanew));
-                native_power_cancel.install(image_base,nt->OptionalHeader.SizeOfImage,&read_self);native_power_cancel_installed=true;
+                native_power_cancel.install(image_base,nt->OptionalHeader.SizeOfImage,&read_self,power_grip_cancel_enabled);native_power_cancel_installed=true;
             }
             catch(const std::exception& error) {note_recoverable((std::string("Grip power cancel disabled: ")+error.what()).c_str());}
         }
