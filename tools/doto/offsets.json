@@ -329,6 +329,9 @@
  ],
  "sites": [
   {"file": "src/game_profile.hpp", "contains": "slash_state_vtable = 0x1d0b978", "from": "0x1d0b978", "to": "0x1d0b978", "why": "DOTO-only literal: arkPlayerStateSlash vtable (R2 2.4 / R6; slot 10 start 0x8d5520, update 0x8d86c0); D2 trait is 0", "source": "R6/void-strike"},
+  {"file": "src/game_profile.hpp", "contains": "hook_mine_mode_owner = 0x1e8968", "from": "0x1e8968", "to": "0x1e8968", "why": "already DOTO's Hook Mine mode chain ([[game+0x1e8968]+0x778]+0xc, read by HookMineEquipment vslot 0x3b1b60): kept", "source": "review/powers-observer"},
+  {"file": "src/game_profile.hpp", "contains": "hook_mine_mode_owner = 0x1e8968", "from": "0x778", "to": "0x778", "why": "already DOTO's Hook Mine mode chain ([[game+0x1e8968]+0x778]+0xc, read by HookMineEquipment vslot 0x3b1b60): kept", "source": "review/powers-observer"},
+  {"file": "src/game_profile.hpp", "contains": "hook_mine_mode_owner = 0x1e8968", "from": "0xc", "to": "0xc", "why": "already DOTO's Hook Mine mode chain ([[game+0x1e8968]+0x778]+0xc, read by HookMineEquipment vslot 0x3b1b60): kept", "source": "review/powers-observer"},
   {"file": "src/game_profile.hpp", "contains": "hook_mine_equipment_vtable = 0x1c43928", "from": "0x1c43928", "to": "0x1c43928", "why": "already DOTO's arkCpntHookMineEquipment primary vtable (RTTI COL 0x2033278): kept", "source": "review/powers-observer"},
   {"file": "src/game_profile.hpp", "contains": "power_swapper_vtable = 0x1c44a18", "from": "0x1c44a18", "to": "0x1c44a18", "why": "already DOTO's arkCpntPowerSwapper vtable (RTTI .?AVarkCpntPowerSwapper@@): kept", "source": "review/powers-observer"},
   {"file": "src/game_profile.hpp", "contains": "power_swapper_vtable = 0x1c44a18", "from": "0x1c451a8", "to": "0x1c451a8", "why": "already DOTO's arkCpntPowerTheEye vtable (RTTI .?AVarkCpntPowerTheEye@@): kept", "source": "review/powers-observer"},

@@ -35,7 +35,8 @@ struct PowerSnapshot {
     bool found_player{};
     int power_count{};
     std::uint32_t present_mask{};
-    int hook_mines{-1};                   // DOTO: Hook Mines in the inventory (the HookMineEquipment record's count, +0x20), -1 none         // bit PowerKind: the powers the player owns (player list or inventory)
+    int hook_mines{-1};
+    int hook_mine_mode{-1};               // DOTO: the Hook Mine lethal/non-lethal setting ([[game+owner]+states]+index), -1 unknown                   // DOTO: Hook Mines in the inventory (the HookMineEquipment record's count, +0x20), -1 none         // bit PowerKind: the powers the player owns (player list or inventory)
     std::uint32_t aiming_kind{};          // PowerKind of the first power whose aim byte (+0xa4) is set
     bool aim_active{},cast_flag{};        // any power: +0xa4, +0xa5
     bool swapper_present{},swapper_aiming{};
@@ -85,6 +86,11 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
     const auto player=value<std::uintptr_t>(read,*game+0x3130b0);
     if(!player || !typed(read,base,*player,0x1c5e428)) return out;
     out.found_player=true;
+    if constexpr(game_traits::hook_mine_mode_owner!=0) {
+        const auto owner=value<std::uintptr_t>(read,*game+game_traits::hook_mine_mode_owner);
+        const auto states=owner && pointer(*owner)?value<std::uintptr_t>(read,*owner+game_traits::hook_mine_mode_states):std::nullopt;
+        if(states && pointer(*states)) out.hook_mine_mode=value<std::int32_t>(read,*states+game_traits::hook_mine_mode_index).value_or(-1);
+    }
     if(machine) for(unsigned bit=0;bit<vt.state_ids.size();++bit) {
         if(vt.state_ids[bit]==0xffffffffu) continue;
         const auto active=native_player_state(read,base,machine,vt.state_ids[bit],0);
@@ -158,6 +164,7 @@ public:
         const auto rising=s.states&~snapshot().states;   // per state bit: entries seen at the 50 ms reads (a state shorter than that may be missed)
         for(unsigned b=0;b<edges_.size();++b) if(rising>>b&1u) {edges_[b].fetch_add(1,std::memory_order_relaxed);note(1,b);}
         if(s.found_player && snapshot().found_player && s.hook_mines!=snapshot().hook_mines) note(2,static_cast<std::uint32_t>(s.hook_mines));
+        if(s.found_player && snapshot().found_player && s.hook_mine_mode!=snapshot().hook_mine_mode) note(3,static_cast<std::uint32_t>(s.hook_mine_mode));
         snapshot()=s;reads_.fetch_add(1,std::memory_order_relaxed);
         if(!s.found_player) failures_.fetch_add(1,std::memory_order_relaxed);
     }
@@ -174,7 +181,7 @@ public:
          <<",\"has_target\":"<<(s.swapper_has_target?"true":"false")<<",\"target\":["<<s.swapper_target[0]<<","<<s.swapper_target[1]<<","<<s.swapper_target[2]
          <<"]},\"theeye\":{\"state\":"<<s.theeye_state<<",\"body\":["<<s.theeye_body[0]<<","<<s.theeye_body[1]<<","<<s.theeye_body[2]
          <<"],\"yaw\":"<<s.theeye_body_yaw<<"},\"mimic\":{\"present\":"<<(s.mimic_present?"true":"false")<<",\"armed\":"<<(s.mimic_armed?"true":"false")
-         <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines
+         <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines<<",\"hook_mine_mode\":"<<s.hook_mine_mode
          <<",\"state_entries\":{\"choke\":"<<edges_[0].load()<<",\"use_power\":"<<edges_[1].load()<<",\"change_weapon\":"<<edges_[2].load()
          <<",\"swapper\":"<<edges_[3].load()<<",\"cancel_void_strike\":"<<edges_[4].load()<<",\"mimicking\":"<<edges_[5].load()
          <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"},\"events\":"<<events_json()
@@ -185,7 +192,7 @@ public:
     }
 private:
     // The last 16 changes, for timing questions (which press entered a state, which one used a mine): [tick ms, kind, value];
-    // kind 1 = a state entered (value = state bit), 2 = the Hook Mine count changed (value = the new count). Called under mutex().
+    // kind 1 = a state entered (value = state bit), 2 = the Hook Mine count changed (value = the new count), 3 = the Hook Mine mode changed. Called under mutex().
     struct Event {std::uint64_t tick;std::uint32_t kind,value;};
     static std::array<Event,16>& ring() {static std::array<Event,16> r{};return r;}
     inline static std::uint32_t ring_n_{};
