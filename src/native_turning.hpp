@@ -6,8 +6,11 @@
 #include "controller_input.hpp"
 #include "crash_observer.hpp"
 #include "head_locomotion.hpp"
+#include "possession_move.hpp"
 #include "frame_order_trace.hpp"
 #include <atomic>
+#include <sstream>
+#include <string>
 #include <fstream>
 #include <iomanip>
 #include <filesystem>
@@ -46,6 +49,12 @@ class NativeTurning {
     std::atomic<UINT64> head_applied_{0};
     std::atomic<double> follow_total_{0}; // head_follow_ total, readable without feedback_mutex_ (animation workers: Driver::note_root)
     std::atomic<bool> active_{false},failed_{false};
+    // D2 possession (Task 15b): while on, head-follow and the stick turn never write to the (parked) player body, the right stick passes
+    // through so the engine turns the host, and the left stick is rotated by the view yaw relative to the host's frame.
+    std::atomic<bool> possessing_{false};
+    PossessionGate possession_gate_;                       // control thread only
+    std::atomic<UINT64> possession_frames_{0},possession_paused_{0},possession_entries_{0};
+    std::atomic<double> possession_rot_deg_{0};
     std::atomic<UINT> depth_{0};
     std::atomic<UINT64> calls_{0},applied_{0},verified_{0},cancelled_{0},ready_tick_{0},epoch_{0};
     std::mutex log_mutex_;
@@ -101,7 +110,9 @@ class NativeTurning {
                     const auto now=GetTickCount64();
                     // Native lean/wheel owns directional input and body yaw.
                     // Pause body-follow too; retain compensation for normal resumption.
-                    const bool usable=!failed_ && !native_directional_.load(std::memory_order_acquire) && logic_()==2 && ready(*before) && std::isfinite(dt) && dt>0 && dt<=.1f;
+                    const bool possessed=possessing_.load(std::memory_order_acquire);
+                    if(possessed) ++possession_paused_;
+                    const bool usable=!possessed && !failed_ && !native_directional_.load(std::memory_order_acquire) && logic_()==2 && ready(*before) && std::isfinite(dt) && dt>0 && dt<=.1f;
                     ready_tick_.store(usable?now:0,std::memory_order_release);
                     // Carry only skipped simulation time, never replay a delta.
                     if(feedback_.pending()) {
@@ -152,7 +163,7 @@ class NativeTurning {
 public:
     void publish_head(double yaw,UINT64 now,UINT64 reference,const NativePlayerCamera& owner,bool usable) {
         std::lock_guard<std::mutex> lock(feedback_mutex_);
-        head_follow_.publish(yaw,now,reference,owner.player,owner.camera,owner.camera_identity.generation,usable);
+        head_follow_.publish(yaw,now,reference,owner.player,owner.camera,owner.camera_identity.generation,usable && !possessing_.load(std::memory_order_acquire));
         follow_total_.store(head_follow_.total(),std::memory_order_release);
     }
     double head_compensation(UINT64 reference) {
@@ -161,7 +172,28 @@ public:
     void orient_movement(ControllerInput& input,bool gameplay,UINT64 now) {
         if(!gameplay || !input.active || native_directional_stick(input)) return;
         std::lock_guard<std::mutex> lock(feedback_mutex_);
+        if(possessing_.load(std::memory_order_acquire)) {
+            // The host camera's base yaw is the host's heading, so the view's offset from it is the head yaw relative to the anchor.
+            const auto view=head_follow_.view_yaw(now);
+            const auto rot=PossessionMove::rotation(view,0);
+            PossessionMove::orient(input.move_x,input.move_y,view,0);
+            possession_rot_deg_.store(rot*180./3.14159265358979323846,std::memory_order_relaxed);++possession_frames_;
+            return;
+        }
         head_directed_stick(input.move_x,input.move_y,head_follow_.relative_yaw(now));
+    }
+    // Control thread, every gameplay frame: the observer's possession bit (player state 26 in D2) with the gate's exit hold.
+    void possession(bool bit,UINT64 now) {
+        const bool on=possession_gate_.update(bit,now);
+        if(!on) possession_rot_deg_.store(0,std::memory_order_relaxed);
+        possession_entries_.store(possession_gate_.entries(),std::memory_order_relaxed);
+        possessing_.store(on,std::memory_order_release);
+    }
+    std::string possession_json() const {
+        std::ostringstream o;
+        o<<"{\"active\":"<<(possessing_.load()?"true":"false")<<",\"entries\":"<<possession_entries_.load()<<",\"stick_rot_deg\":"<<possession_rot_deg_.load()
+         <<",\"frames\":"<<possession_frames_.load()<<",\"head_follow_paused\":"<<possession_paused_.load()<<"}";
+        return o.str();
     }
     UINT64 head_applied() const {return head_applied_.load();}
     // The player-heading turn head-follow has applied so far (what head_compensation() returns), without the lock: the animation thread reads it at an arm upload.
@@ -202,7 +234,8 @@ public:
         const bool writer=active_ && !failed_ && tick && now>=tick && now-tick<=250;
         const bool directional=native_directional_stick(input);
         native_directional_.store(gameplay && input.active && directional,std::memory_order_release);
-        if(control_.publish(quest_turn_axis_to_native(input.turn_x),input.active,gameplay,!directional,writer,now,epoch)) input.turn_x=0;
+        // Possessing: the right stick is the game's own look, which turns the host; the mod claims nothing.
+        if(control_.publish(quest_turn_axis_to_native(input.turn_x),input.active,gameplay && !possessing_.load(std::memory_order_acquire),!directional,writer,now,epoch)) input.turn_x=0;
     }
     bool disable() noexcept {
         active_=false;ready_tick_=0;

@@ -468,7 +468,7 @@ static d2vr::NativePowerCancel native_power_cancel;static bool native_power_canc
 static d2vr::PowerCancelLatch power_cancel_latch;static std::atomic<UINT64> power_grip_cancels{},power_aim_exempt_frames{},choke_power_trigger_frames{};
 // Task 12 teleport fade (build/no-teleport-fade): edges from the power observer (control thread), alpha read by the render thread. A teleport also
 // resets the vertical anchor smoother (teleport_reset_request) and starts a new hand clamp epoch (teleport_epoch) so the hands never streak.
-static d2vr::TeleportFade teleport_fade;static std::mutex teleport_fade_mutex;static bool teleport_fade_enabled=true;
+static d2vr::TeleportFade teleport_fade;static std::mutex teleport_fade_mutex;static bool teleport_fade_enabled=true;static bool possession_view_move_enabled=true;   // Task 15b (build/no-possession-view-move)
 static std::atomic<UINT64> teleport_fade_last_ms{},teleport_epoch{};static std::atomic<bool> teleport_reset_request{};static std::atomic<float> teleport_fade_alpha_now{};
 static d2vr::NativeHudCensus native_hud_census;static bool native_hud_census_installed=false;
 // VR button prompts: each Xbox prompt glyph is its own small BC7 texture. When the game creates one
@@ -16218,7 +16218,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"target\":[" << d2vr::NativeHudChildDraw::target_size()[0] << ',' << d2vr::NativeHudChildDraw::target_size()[1] << "],\"stage_x\":" << [&]{float x{};return image_base && read_self(image_base+0x3989eac,&x,sizeof x) && std::isfinite(x)?x:0.f;}() << '}'
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}'
-                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << ",\"choke_power_trigger_frames\":" << choke_power_trigger_frames.load() << "}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json() << ",\"teleport_fade\":{\"enabled\":" << (teleport_fade_enabled?"true":"false") << ",\"fades\":" << [&]{std::lock_guard<std::mutex> l(teleport_fade_mutex);return teleport_fade.fades();}() << ",\"last_ms\":" << teleport_fade_last_ms.load() << ",\"alpha_now\":" << teleport_fade_alpha_now.load() << "}"
+                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << ",\"choke_power_trigger_frames\":" << choke_power_trigger_frames.load() << "}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json() << ",\"possession\":" << native_turning.possession_json() << ",\"teleport_fade\":{\"enabled\":" << (teleport_fade_enabled?"true":"false") << ",\"fades\":" << [&]{std::lock_guard<std::mutex> l(teleport_fade_mutex);return teleport_fade.fades();}() << ",\"last_ms\":" << teleport_fade_last_ms.load() << ",\"alpha_now\":" << teleport_fade_alpha_now.load() << "}"
                                      << ",\"native_left_aim\":{\"requested\":" << native_left_aim_requested << ",\"calls\":" << native_left_aim.calls()
                                      << ",\"candidates\":" << native_left_aim.candidates() << ",\"applied\":" << native_left_aim.applied()
                                      << ",\"rejected\":" << native_left_aim.rejected() << ",\"overlaps\":" << native_left_aim.overlap()
@@ -18085,6 +18085,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(game_xr->guide_stick_blocked()) {input.turn_x=input.turn_y=0;input.right_click=false;input.dpad={};}
                                 const double vignette_raw_turn=input.turn_x; // the turn claim below clears turn_x
                                 if(native_turning_requested) {
+                                    native_turning.possession(logic==2 && possession_view_move_enabled && (d2vr::NativePowerObserver::latest().states&d2vr::power_state_bit::possession)!=0,GetTickCount64());   // Task 15b
                                     native_turning.publish(input,logic==2 && !input.menu_modifier && !game_xr->guide_stick_blocked(),GetTickCount64(),game_xr->pose_epoch());
                                     native_turning.orient_movement(input,logic==2,GetTickCount64());
                                     if(native_turning.failed() && !native_turning_failure_noted) {native_turning_failure_noted=true;note_recoverable("Native VR turning repeatedly mismatched its feedback; turning disabled");}
@@ -19278,6 +19279,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             catch(const std::exception& error) {note_recoverable((std::string("Hand-aimed shots disabled: ")+error.what()).c_str());}
         }
         power_grip_cancel_enabled=!fs::exists(root/L"build"/L"no-power-grip-cancel");
+        possession_view_move_enabled=!fs::exists(root/L"build"/L"no-possession-view-move");   // Task 15b
         teleport_fade_enabled=!fs::exists(root/L"build"/L"no-teleport-fade");d2vr::GameXr::fade_enabled=teleport_fade_enabled;   // Task 12
         reticle_policy_enabled=!fs::exists(root/L"build"/L"no-sword-hand-reticle");   // Task 8: the sword hand blocks its gun's crosshair; knob = the old crosshairs
         if(power_grip_cancel_enabled) {   // issue #6: grip = cancel of a held power aim (StopAim before the UsePower release handler)

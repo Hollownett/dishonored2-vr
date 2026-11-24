@@ -249,6 +249,10 @@ build\hand_reticle_policy_check.exe
 if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\teleport_fade_check.cpp /Fo:build\teleport_fade_check.obj /Fe:build\teleport_fade_check.exe
 if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\possession_move_check.cpp /Fo:build\possession_move_check.obj /Fe:build\possession_move_check.exe
+if errorlevel 1 goto build_failed
+build\possession_move_check.exe
+if errorlevel 1 goto build_failed
 build\teleport_fade_check.exe
 if errorlevel 1 goto build_failed
 build\power_cancel_check.exe

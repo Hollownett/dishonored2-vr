@@ -479,6 +479,14 @@
    "label": "Thrown mines stick",
    "help": "Throwing a mine places it where it lands, as in the flat game. Off: a thrown mine drops like any held item.",
    "default": true
+  },
+  {
+   "id": "possession-view-move",
+   "file": "no-possession-view-move",
+   "kind": "disable",
+   "label": "Possession moves where you look",
+   "help": "While possessing a creature or person, the left stick moves where you look and the right stick turns the host.",
+   "default": true
   }
  ]
 }

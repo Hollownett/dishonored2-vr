@@ -52,5 +52,7 @@ public:
     double compensation(std::uint64_t reference) const {return reference==reference_?compensation_:0;}
     double total() const {return compensation_;} // the same total, whichever reference (lock-free mirror in NativeTurning)
     double relative_yaw(std::uint64_t now) const {return fresh(now)?wrapped_yaw(yaw_-compensation_):NAN;}
+    // The same quantity while body-follow is paused (possession): the head yaw relative to the tracking anchor, whoever owns the body.
+    double view_yaw(std::uint64_t now) const {return has_yaw_ && now>=tick_ && now-tick_<=250?wrapped_yaw(yaw_-compensation_):NAN;}
 };
 } // namespace d2vr
