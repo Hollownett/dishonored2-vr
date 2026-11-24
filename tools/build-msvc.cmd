@@ -243,6 +243,10 @@ build\native_power_cancel_check.exe
 if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\power_cancel_check.cpp /Fo:build\power_cancel_check.obj /Fe:build\power_cancel_check.exe
 if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\hand_reticle_policy_check.cpp /Fo:build\hand_reticle_policy_check.obj /Fe:build\hand_reticle_policy_check.exe
+if errorlevel 1 goto build_failed
+build\hand_reticle_policy_check.exe
+if errorlevel 1 goto build_failed
 build\power_cancel_check.exe
 if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\native_power_observer_check.cpp /Fo:build\native_power_observer_check.obj /Fe:build\native_power_observer_check.exe

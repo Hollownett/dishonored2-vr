@@ -76,6 +76,22 @@ int main() {
         s=d2vr::read_powers(r,base,v);
         require(!s.swapper_has_target,"nan means no target");
     }
+    {   // powers_found_in_inventory: no power on the player; the state machine's inventory (machine+0x328) holds a Swapper record
+        // (records of 0x38 bytes, the item's component at +0x10), seen once even if the player's list also holds it
+        auto m=world({0x500000});
+        component(m,0x500000,0x1c44a18);m.set<std::uint8_t>(0x500000+0xa4,1);
+        constexpr uptr inventory=0x700000,records=0x710000;
+        m.set<uptr>(machine+0x328,inventory);m.set<uptr>(inventory+0x38,records);
+        m.set<std::uint32_t>(inventory+0x38+8,3u);m.set<std::uint32_t>(inventory+0x38+12,8u<<8);
+        m.set<uptr>(records+0x10,0x500000);           // the same Swapper component as the player's list
+        m.set<uptr>(records+0x38+0x10,0x520000);component(m,0x520000,0x1b9bb78);   // Blink, only in the inventory
+        m.set<uptr>(records+0x70+0x10,0);                // an empty record
+        auto r=[&](uptr a,void* d,std::size_t n){return m(a,d,n);};
+        const auto s=d2vr::read_powers(r,base,v,machine);
+        require(s.power_count==2 && s.swapper_present && s.swapper_aiming,"inventory powers, no double count");
+        const auto none=d2vr::read_powers(r,base,v);   // no machine: the inventory is not read
+        require(none.power_count==1,"inventory needs the machine");
+    }
     {   // TheEye and Mimic
         auto m=world({0x500000,0x510000});
         component(m,0x500000,0x1c451a8);m.set<std::int32_t>(0x500000+0x19c,4);m.set<float>(0x500000+0x358,7.f);m.set<float>(0x500000+0x35c,8.f);m.set<float>(0x500000+0x360,9.f);m.set<float>(0x500000+0x364,0.5f);

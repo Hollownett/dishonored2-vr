@@ -130,6 +130,7 @@
 #include "native_power_cancel.hpp"
 #include "native_power_observer.hpp"
 #include "power_cancel.hpp"
+#include "hand_reticle_policy.hpp"
 #include "native_hud_census.hpp"
 #include "grab_beam.hpp"
 #include "native_marker_probe.hpp"
@@ -6035,7 +6036,7 @@ static bool legacy_corpse_carry=false;static UINT64 corpse_drop_press_until{},ca
 // hand's native Use target is still that body, and keeps the carry (the v637 auto-drop stands aside) once the game took it.
 static std::array<std::pair<d2vr::WorldTrackedPose,UINT64>,2> shoulder_dock_game{};   // v1387: render thread; the docked body's hold point (game space) and its tick
 static d2vr::ShoulderCarryTrigger shoulder_carry_trigger;static std::atomic<std::uintptr_t> shoulder_place_body{};static std::atomic<unsigned> shoulder_place_hand{2};static std::atomic<UINT64> shoulder_place_tick{};
-static std::atomic<unsigned> shoulder_dock_queries{};static std::array<std::atomic<UINT64>,2> copy_ring_published{},copy_ring_no_pose{};static std::array<std::atomic<float>,2> copy_ring_ndc{};   /* v1389 status crosshair.copy_ring */static std::atomic<unsigned> shoulder_places{},shoulder_presses{},shoulder_started{},shoulder_loot_blocked{},shoulder_failed{},shoulder_takeoffs{};static std::atomic<int> shoulder_offer{-1};   // offer: the placing hand's secondary native action offset (112 = 0x70 Carry, 152 = 0x98 Loot, -1 none)
+static std::atomic<unsigned> shoulder_dock_queries{};static std::array<std::atomic<UINT64>,2> copy_ring_published{},copy_ring_no_pose{};static std::array<std::atomic<float>,4> copy_ring_ndc{};static std::array<std::atomic<UINT64>,2> copy_ring_suppressed{};   /* v1389 status crosshair.copy_ring */static std::atomic<unsigned> shoulder_places{},shoulder_presses{},shoulder_started{},shoulder_loot_blocked{},shoulder_failed{},shoulder_takeoffs{};static std::atomic<int> shoulder_offer{-1};   // offer: the placing hand's secondary native action offset (112 = 0x70 Carry, 152 = 0x98 Loot, -1 none)
 static std::atomic<unsigned> carry_left_redraws{};   // v1041: draws of the left item queued after the carry settled
 static std::atomic<bool> shoulder_native_carry{};   // the carry the placement started (the auto-drop must not put it down)
 static bool shoulder_press_hold{};                  // input thread: hold the game's Use while the handoff is being tried
@@ -6244,7 +6245,13 @@ static bool rotate_hand_to(d2vr::WorldTrackedPose& pose,d2vr::Vec3 from,d2vr::Ve
     for(auto& v:pose.basis) v=v*cosine+d2vr::cross(u,v)*sine+u*(d2vr::dot(u,v)*(1-cosine));
     return true;
 }
-static std::atomic<UINT64> blade_self_hits{};static std::atomic<bool> sword_held_now{};   // G2: blade casts that met the player's own body (dropped); the grip's held bit for the render-thread trace
+static std::atomic<UINT64> blade_self_hits{};static std::atomic<bool> sword_held_now{};
+// Task 8 (user: "block crosshair gun when sword is in this hand"): hand_sword_bits (bit h = that hand's grip holds the sword, drawn or being drawn; not the shoulder zone)
+// and copy_busy_bits (bit h = the copy loop's copy_busy for hand h) are written by the control thread; the render thread runs d2vr::ReticlePolicy on them.
+// Knob build/no-sword-hand-reticle = the old crosshairs (the sword block fix stays). reticle_block_code: 0 none, 1 "sword", 2 "gun_hidden".
+static std::atomic<unsigned> hand_sword_bits{0},copy_busy_bits{0};static std::atomic<int> reticle_block_code{0};static std::atomic<bool> crosshair_settings_visible{true};
+static d2vr::ReticlePolicy reticle_policy;static bool reticle_policy_enabled=true;   // reticle_policy: render thread only (per displayed frame)
+static std::array<d2vr::WorldTrackedPose,2> voltaic_copy_ring_aim{};static std::array<UINT64,2> voltaic_copy_ring_tick{};   // G-c5: the ring's own pose (reticle gate), guarded by voltaic_aim_mutex   // G2: blade casts that met the player's own body (dropped); the grip's held bit for the render-thread trace
 static std::mutex sword_trace_mutex;static std::ofstream sword_trace_csv;static std::chrono::steady_clock::time_point sword_trace_start;static UINT64 sword_trace_rows{};   // build/sword-grip-trace -> artifacts/sword-grip-trace.csv
 // The player's root (feet) as the render thread reads it from the body model frame (Task 8's anchor root); nullopt when unreadable.
 static std::optional<d2vr::Vec3> render_player_root() {
@@ -7320,9 +7327,19 @@ static std::string run_test_command(const std::string& line) {
         d2vr::NativeInteractionAim::request_console(rest.substr(at));return "console requested (result follows)";}
     if(verb=="equip") { // test (sim, v765): the wheel's own equip of the pistol or crossbow (NativeWeaponHands::Op::test_equip)
         std::string what;in>>what; // v769: gadgets too (their weapon entity's decl names them)
-        static constexpr const char* known[]{"pistol","crossbow","regular_grenade","sticky_grenade","stun_mine","springrazor","heart"};
+        static constexpr const char* known[]{"pistol","crossbow","regular_grenade","sticky_grenade","stun_mine","springrazor","heart","hook"};   // "hook": DOTO's Hook Mine
         const char* decl=nullptr;for(const char* k:known) if(what==k) decl=k;
-        if(!decl) return "usage: equip pistol|crossbow|regular_grenade|sticky_grenade|stun_mine|springrazor|heart";
+        // 2026-11-24: a power by name, equipped through its inventory record (NativeWeaponHands::test_equip "power:<vtable rva>")
+        static constexpr std::pair<const char*,d2vr::PowerKind> powers[]{{"blink",d2vr::PowerKind::blink},{"far_reach",d2vr::PowerKind::far_reach},
+            {"doppelganger",d2vr::PowerKind::doppelganger},{"possession",d2vr::PowerKind::possession},{"domino",d2vr::PowerKind::domino},
+            {"mesmerize",d2vr::PowerKind::mesmerize},{"windblast",d2vr::PowerKind::windblast},{"bendtime",d2vr::PowerKind::bendtime},
+            {"dark_vision",d2vr::PowerKind::dark_vision},{"shadow_walk",d2vr::PowerKind::shadow_walk},{"devouring_swarm",d2vr::PowerKind::devouring_swarm},
+            {"displace",d2vr::PowerKind::displace},{"foresight",d2vr::PowerKind::foresight},{"semblance",d2vr::PowerKind::semblance}};
+        static std::string power_decl;   // the request keeps a pointer until the game thread serves it (one test equip at a time)
+        if(!decl) for(const auto& [name,kind]:powers) if(what==name)
+            for(const auto& e:d2vr::PowerVtables::current().entries) if(e.kind==kind && e.vtable) {
+                std::ostringstream o;o<<"power:"<<std::hex<<e.vtable;power_decl=o.str();decl=power_decl.c_str();}
+        if(!decl) return "usage: equip pistol|crossbow|regular_grenade|sticky_grenade|stun_mine|springrazor|heart|hook|<power: blink far_reach possession displace foresight semblance ...>";
         d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::test_equip;r.decl=decl;
         return d2vr::NativeWeaponHands::request(r)?"equip requested":"equip queue full";}
     if(verb=="voltaic") { // test (sim, v145744, DOTO dual wield): which forearms carry the Voltaic Gun, as a wheel choice would set them
@@ -10669,12 +10686,14 @@ void prepare_head_view(void* view) noexcept {
                 if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) for(unsigned cs=0;cs<2;++cs) if(voltaic_copy_at[cs].load(std::memory_order_relaxed)) {   // v145745: either forearm
                     const auto& ca=game_xr->aim_locations[cs];
                     auto copy_gate=gate_in;copy_gate.pose_valid=(ca.locationFlags&required)==required;copy_gate.grip_holds_weapon=true;
-                    if(d2vr::ranged_aim_gate(copy_gate).shots) {
+                    const auto copy_gate_out=d2vr::ranged_aim_gate(copy_gate);
+                    if(copy_gate_out.shots || copy_gate_out.reticle) {
                         const auto& p=ca.pose;
                         const auto copy_aim=d2vr::to_game_pose(d2vr::camera_relative_controller(
                             {{p.position.x,p.position.y,p.position.z},{p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}},hand_centre,head_origin.position),head_origin,anchor,1.0);
-                        std::lock_guard<std::mutex> l(voltaic_aim_mutex);voltaic_copy_aim[cs]=copy_aim;voltaic_copy_aim_tick[cs]=GetTickCount64();
-                        voltaic_stats[7].fetch_add(1,std::memory_order_relaxed);
+                        std::lock_guard<std::mutex> l(voltaic_aim_mutex);
+                        if(copy_gate_out.reticle) {voltaic_copy_ring_aim[cs]=copy_aim;voltaic_copy_ring_tick[cs]=GetTickCount64();}   // G-c5: the ring does not wait for the 500 ms sword-swing clearance
+                        if(copy_gate_out.shots) {voltaic_copy_aim[cs]=copy_aim;voltaic_copy_aim_tick[cs]=GetTickCount64();voltaic_stats[7].fetch_add(1,std::memory_order_relaxed);}
                     }
                 }
             }
@@ -12294,7 +12313,17 @@ void prepare_head_view(void* view) noexcept {
             const auto* aim=per_frame?(shared_aim_ray?&*shared_aim_ray:nullptr):(crosshair_receipt?&*crosshair_receipt:nullptr);
             if(per_frame) {
                 // The in-game switch hides the element (still placed, so turning it on is immediate) and stops the distance cast.
-                crosshair_visible_now=game_xr?game_xr->crosshair_visible():crosshair_preference;
+                const bool settings_visible=game_xr?game_xr->crosshair_visible():crosshair_preference;
+                {   // Task 8: the sword hand blocks its gun's crosshair (d2vr::ReticlePolicy); settings_visible alone feeds the second rings
+                    d2vr::ReticleInputs ri{};const unsigned sb=hand_sword_bits.load(std::memory_order_relaxed),bb=copy_busy_bits.load(std::memory_order_relaxed);
+                    for(unsigned h=0;h<2;++h) {ri.sword_held[h]=(sb>>h)&1u;ri.busy[h]=(bb>>h)&1u;ri.copy_at[h]=voltaic_copy_at[h].load(std::memory_order_relaxed);}
+                    ri.voltaic_arms=voltaic_arms_now.load(std::memory_order_relaxed);ri.aim_hand=static_cast<int>(voltaic_pinned()?voltaic_native_hand:slot1_arm_now());ri.pinned=voltaic_pinned();
+                    reticle_policy.update(ri,GetTickCount64());
+                    const char* why=reticle_policy_enabled?reticle_policy.main_blocked_reason():nullptr;
+                    reticle_block_code.store(!why?0:why[0]=='s'?1:2,std::memory_order_relaxed);
+                    crosshair_settings_visible.store(settings_visible,std::memory_order_relaxed);
+                    crosshair_visible_now=settings_visible && !why;
+                }
                 d2vr::NativeHudChildDraw::crosshair_hidden.store(!crosshair_visible_now,std::memory_order_relaxed);
                 const bool current=aim && aim->current({body->player,body->camera,body->camera_identity.generation},per_frame_target,game_xr->pose_epoch(),game_xr->reference_epoch());
                 d2vr::NativeHudChildDraw::crosshair_composed.store(current && crosshair_visible_now.load() && game_xr->eye_reticle_available() && d2vr::NativeHudChildDraw::has_live_eye(),std::memory_order_relaxed);
@@ -12338,14 +12367,19 @@ void prepare_head_view(void* view) noexcept {
             for(unsigned h=0;h<2;++h) {
                 static std::array<float,2> ring_distance_m{30.f,30.f};
                 d2vr::EyeReticle ring{0,0,alt_display,game_xr->pose_epoch(),game_xr->reference_epoch(),GetTickCount64(),false};
-                const bool copy_gun=dual_wield_enabled && crosshair_visible_now.load() && d2vr::arm::is_gun(arm_copy_now(h));
+                const bool ring_ok=!reticle_policy_enabled || reticle_policy.ring_visible(h),ring_settings=crosshair_settings_visible.load(std::memory_order_relaxed);
+                const bool copy_gun_raw=dual_wield_enabled && ring_settings && d2vr::arm::is_gun(arm_copy_now(h)),copy_gun=copy_gun_raw && ring_ok;
+                if(copy_gun_raw && !ring_ok && per_frame) ++copy_ring_suppressed[h];
                 // v145750 (user, DOTO headset v145749: "there is no second crosshair for the second weapon"): DOTO's forearm Voltaic copy is no
                 // ArmSet copy; its shots leave along its hand's aim ray (voltaic_copy_aim), so its ring stands on that ray.
                 bool voltaic_ring=false;std::optional<d2vr::WorldTrackedPose> pose;
                 if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic)
-                    if(!copy_gun && dual_wield_enabled && crosshair_visible_now.load() && voltaic_copy_at[h].load(std::memory_order_relaxed)) {
-                        std::lock_guard<std::mutex> l(voltaic_aim_mutex);
-                        if(voltaic_copy_aim_tick[h] && GetTickCount64()-voltaic_copy_aim_tick[h]<=250) {pose=voltaic_copy_aim[h];voltaic_ring=true;}
+                    if(!copy_gun && dual_wield_enabled && ring_settings && voltaic_copy_at[h].load(std::memory_order_relaxed)) {
+                        if(!ring_ok) {if(per_frame) ++copy_ring_suppressed[h];}
+                        else {
+                            std::lock_guard<std::mutex> l(voltaic_aim_mutex);
+                            if(voltaic_copy_ring_tick[h] && GetTickCount64()-voltaic_copy_ring_tick[h]<=250) {pose=voltaic_copy_ring_aim[h];voltaic_ring=true;}
+                        }
                     }
                 if(copy_gun) pose=d2vr::NativeWeaponHands::held_copy_pose(h);
                 if((copy_gun || voltaic_ring) && !pose && per_frame) ++copy_ring_no_pose[h];
@@ -12363,7 +12397,7 @@ void prepare_head_view(void* view) noexcept {
                         const double tx=-d2vr::dot(d,world.basis[1])/depth,ty=d2vr::dot(d,world.basis[2])/depth;
                         const double l=std::tan(proj_fov.left),r=std::tan(proj_fov.right),u=std::tan(proj_fov.up),dn=std::tan(proj_fov.down);
                         ring.x=static_cast<float>((2*tx-(r+l))/(r-l));ring.y=static_cast<float>((2*ty-(u+dn))/(u-dn));ring.valid=true;ring.depth=static_cast<float>(depth);
-                        if(per_frame) {++copy_ring_published[h];copy_ring_ndc[0]=ring.x;copy_ring_ndc[1]=ring.y;}
+                        if(per_frame) {++copy_ring_published[h];copy_ring_ndc[h*2]=ring.x;copy_ring_ndc[h*2+1]=ring.y;}
                     }
                 }
                 game_xr->copy_reticle(h,reticle_eye,ring);
@@ -16152,14 +16186,14 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"frame_timing_write_failed\":"<<(frame_timing_write_failed.load()?"true":"false")
                                      << ",\"xr_status_write_failed\":"<<(xr_status_write_failed.load()?"true":"false")
                                      << ",\"crosshair\":{\"installed\":" << native_crosshair_installed << ",\"applied\":" << native_crosshair.applied() << ",\"rejected\":" << native_crosshair.rejected() << ",\"failed\":" << (native_crosshair.failed()?"true":"false")
-                                     << ",\"visible\":" << (crosshair_visible_now?"true":"false") << ",\"hidden_draws\":" << d2vr::NativeHudChildDraw::crosshair_hidden_draws.load()
+                                     << ",\"visible\":" << (crosshair_visible_now?"true":"false") << ",\"blocked_reason\":" << (reticle_block_code.load()==1?"\"sword\"":reticle_block_code.load()==2?"\"gun_hidden\"":"null") << ",\"hand_sword_bits\":" << hand_sword_bits.load() << ",\"copy_busy_bits\":" << copy_busy_bits.load() << ",\"hidden_draws\":" << d2vr::NativeHudChildDraw::crosshair_hidden_draws.load()
                                      << ",\"setup_owner_checks\":" << d2vr::NativeHudChildDraw::setup_eye_checks.load() << ",\"setup_owner_passes\":" << d2vr::NativeHudChildDraw::setup_eye_passes.load()
                                      << ",\"eye_owner_rejects\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<d2vr::NativeHudChildDraw::eye_rejects.size();++i)o<<(i?",":"")<<d2vr::NativeHudChildDraw::eye_rejects[i].load();o<<']';return o.str();}()
                                      << ",\"binding_rejects\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<native_crosshair.ownership_rejects.size();++i)o<<(i?",":"")<<native_crosshair.ownership_rejects[i].load();o<<']';return o.str();}()
                                      << ",\"eye_last_rejects\":" << [&]{const auto states=d2vr::NativeHudChildDraw::eye_diagnostics();if(!states)return std::string("null");std::ostringstream o;o<<'[';for(unsigned i=0;i<states->size();++i){o<<(i?",":"")<<'[';for(unsigned j=0;j<(*states)[i].size();++j)o<<(j?",":"")<<(*states)[i][j];o<<']';}o<<']';return o.str();}()
                                      << ",\"binding_last_rejects\":" << [&]{const auto states=native_crosshair.ownership_diagnostics();if(!states)return std::string("null");std::ostringstream o;o<<'[';for(unsigned i=0;i<states->size();++i){o<<(i?",":"")<<'[';for(unsigned j=0;j<(*states)[i].size();++j)o<<(j?",":"")<<(*states)[i][j];o<<']';}o<<']';return o.str();}()
                                      << ",\"intent_clear_calls\":" << native_crosshair.intent_clear_calls.load() << ",\"validation_record_diff\":" << native_crosshair.validation_record_diff.load() << ",\"owner_record_diff\":" << native_crosshair.owner_record_diff.load()
-                                     << ",\"copy_ring\":{\"published\":[" << copy_ring_published[0].load() << ',' << copy_ring_published[1].load() << "],\"no_pose\":[" << copy_ring_no_pose[0].load() << ',' << copy_ring_no_pose[1].load() << "],\"last_ndc\":[" << copy_ring_ndc[0].load() << ',' << copy_ring_ndc[1].load() << "],\"draws\":" << (game_xr?game_xr->copy_reticle_draws:0) << '}'
+                                     << ",\"copy_ring\":{\"published\":[" << copy_ring_published[0].load() << ',' << copy_ring_published[1].load() << "],\"no_pose\":[" << copy_ring_no_pose[0].load() << ',' << copy_ring_no_pose[1].load() << "],\"suppressed\":[" << copy_ring_suppressed[0].load() << ',' << copy_ring_suppressed[1].load() << "],\"last_ndc\":[[" << copy_ring_ndc[0].load() << ',' << copy_ring_ndc[1].load() << "],[" << copy_ring_ndc[2].load() << ',' << copy_ring_ndc[3].load() << "]],\"draws\":" << (game_xr?game_xr->copy_reticle_draws:0) << '}'
                                      << ",\"direct_eye_draws\":" << (game_xr?game_xr->eye_reticle_draws:0) << ",\"game_art_draws\":" << (game_xr?game_xr->crosshair_art_draws:0) << ",\"game_art_captures\":" << d2vr::NativeHudChildDraw::crosshair_captures.load() << ",\"direct_failed\":" << (game_xr && !game_xr->eye_reticle_available()?"true":"false") << ",\"direct_composed\":" << (d2vr::NativeHudChildDraw::crosshair_composed.load()?"true":"false")
                                      << ",\"eye_shifts\":" << d2vr::NativeHudChildDraw::crosshair_eye_shifts.load() << ",\"unlayouts\":" << d2vr::NativeHudChildDraw::crosshair_unlayouts.load()
                                      << ",\"cast_posts\":" << crosshair_cast_posts << ",\"cast_hits\":" << crosshair_cast_hits << ",\"distance_m\":" << crosshair_distance_m
@@ -16433,7 +16467,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             in.copy_reach=in.copy_distance<.45;in.copy_age_s=static_cast<double>(now_s-copy.since)/1000.;
                                             in.pickup_dot=d2vr::dot(hand_raw.basis[0],d2vr::Vec3{copy.blade[0],copy.blade[1],copy.blade[2]});
                                         }
-                                        const auto o=sword_grip.update(in);sword_reversed=o.reversed;sword_owns=o.owns;sword_held_now=sword_grip.held();
+                                        const auto o=sword_grip.update(in);sword_reversed=o.reversed;sword_owns=o.owns;sword_held_now=sword_grip.held();hand_sword_bits.store(sword_grip.held()?1u<<mh:0u,std::memory_order_relaxed);   // Task 8: held_ covers a draw in flight; the shoulder zone is not the hand holding it
                                         d2vr::NativeManualEquipRuntime::sword_kept.store(sword_grip.held(),std::memory_order_relaxed); // v780: the game may redraw a held sword
                                         // (user, headset v1123 tutorial: "the sword comes out, then vanishes"): also while it is still on its way in. A vetoed
                                         // right draw becomes an unequip (no item, no 4/8 bits), which put away the sword the grip had just drawn.
@@ -17174,9 +17208,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                 }
                                 // v145745: a forearm copy's grip + trigger is that copy's shot (fired below through NativeRangedFire), never the native trigger
-                                // of its hand (a power in the engine's slot, the sword's block)
+                                // of its hand (a power in the engine's slot, the sword's block). Task 8 (R3 G-c4): not while that hand's grip holds its weapon: the sword hand's trigger IS the block
                                 if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(logic==2) for(unsigned s=0;s<2;++s)
-                                    if(voltaic_copy_at[s].load(std::memory_order_relaxed) && raw_grip(s)>=.55f && raw_trigger(s)>=.35f) (s?input.right_trigger:input.left_trigger)=0.f;
+                                    if(voltaic_copy_at[s].load(std::memory_order_relaxed) && !weapon_owns(s) && raw_grip(s)>=.55f && raw_trigger(s)>=.35f) (s?input.right_trigger:input.left_trigger)=0.f;
                                 if(rh && logic==2) std::swap(input.left_trigger,input.right_trigger);
                                 // v145799: the plan still has slot 1 on the right arm (the left arm holds the sword, so pin_slot1 could not move it): the pinned
                                 // gun's trigger is the LEFT hand's chord, and while it fires the sword's trigger (the same hand's) stays released
@@ -17212,10 +17246,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     // v145745: either forearm's copy (voltaic_copy_at), each on its own hand's chord. With the charge upgrade a held chord
                                     // charges (VoltaicCharge) and fires the charged shot on release, as the engine's gun does; without it a held chord fires again
                                     // once the copy is ready.
+                                    if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(logic!=2) copy_busy_bits.store(0,std::memory_order_relaxed);
                                     if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(logic==2) for(unsigned ch=0;ch<2;++ch) {
                                         static std::array<bool,2> copy_down{};static std::array<std::uint64_t,2> copy_retry{};
-                                        if(!voltaic_copy_at[ch].load(std::memory_order_relaxed)) {copy_down[ch]=false;voltaic_charge[ch]={};continue;}
+                                        if(!voltaic_copy_at[ch].load(std::memory_order_relaxed)) {copy_down[ch]=false;voltaic_charge[ch]={};copy_busy_bits.fetch_and(~(1u<<ch),std::memory_order_relaxed);continue;}
                                         const bool copy_busy=grip_intent_out[ch].grab || (physical_grab_requested && native_grab.holding(ch)) || weapon_owns(ch) || fist_take[ch];
+                                        if(copy_busy) copy_busy_bits.fetch_or(1u<<ch,std::memory_order_relaxed);else copy_busy_bits.fetch_and(~(1u<<ch),std::memory_order_relaxed);   // Task 8: the ring hides on the same predicate
                                         const bool pull=!copy_busy && raw_grip(ch)>=.55f && raw_trigger(ch)>=(copy_down[ch]?.35f:.55f),edge=pull && !copy_down[ch];copy_down[ch]=pull;
                                         const auto now_c=GetTickCount64();
                                         const auto step=voltaic_charge[ch].step(pull,now_c,voltaic_charge_owned.load(std::memory_order_relaxed));
@@ -19186,6 +19222,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             catch(const std::exception& error) {note_recoverable((std::string("Hand-aimed shots disabled: ")+error.what()).c_str());}
         }
         power_grip_cancel_enabled=!fs::exists(root/L"build"/L"no-power-grip-cancel");
+        reticle_policy_enabled=!fs::exists(root/L"build"/L"no-sword-hand-reticle");   // Task 8: the sword hand blocks its gun's crosshair; knob = the old crosshairs
         if(power_grip_cancel_enabled) {   // issue #6: grip = cancel of a held power aim (StopAim before the UsePower release handler)
             try {
                 const auto* dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(image_base);

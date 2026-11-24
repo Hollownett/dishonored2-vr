@@ -4,6 +4,7 @@
 #include "game_profile.hpp"
 #include "game_rig.hpp"
 #include "native_takedown.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -77,17 +78,15 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
         out.states_known|=1u<<bit;
         if(*active) out.states|=1u<<bit;
     }
-    const auto components=list(read,*player+0x268,4096);
-    if(!components || !components->packed_count) return out;
-    std::vector<std::uintptr_t> addresses(components->packed_count);
-    if(!read(components->data,addresses.data(),addresses.size()*8)) return out;
-    for(const auto at:addresses) {
-        if(!pointer(at)) continue;
+    std::vector<std::uintptr_t> seen;
+    auto examine=[&](std::uintptr_t at) {
+        if(!pointer(at) || std::find(seen.begin(),seen.end(),at)!=seen.end()) return;
         const auto table=value<std::uintptr_t>(read,at);
-        if(!table) continue;
+        if(!table) return;
         PowerKind kind=PowerKind::none;
         for(const auto& e:vt.entries) if(e.vtable && *table==base+e.vtable) {kind=e.kind;break;}
-        if(kind==PowerKind::none) continue;
+        if(kind==PowerKind::none) return;
+        seen.push_back(at);
         ++out.power_count;
         const auto aim=value<std::uint8_t>(read,at+0xa4),cast=value<std::uint8_t>(read,at+0xa5);
         const bool aiming=aim && *aim==1;
@@ -110,7 +109,17 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
             out.mimic_present=true;
             out.mimic_armed=value<std::uint8_t>(read,at+0x120).value_or(0)==1;
         }
+    };
+    if(const auto components=list(read,*player+0x268,4096); components && components->packed_count) {
+        std::vector<std::uintptr_t> addresses(components->packed_count);
+        if(read(components->data,addresses.data(),addresses.size()*8)) for(const auto at:addresses) examine(at);
     }
+    // Powers are inventory items, like the weapons (sim 2026-11-24, DOTO chapter 2: 0 power components on the player): the player state
+    // machine's inventory (machine+0x328, DOTO +0x380 by the struct rule) lists records of 0x38 bytes whose +0x10 is the item's component
+    // (NativeWeaponHands::test_equip reads them the same way).
+    if(machine) if(const auto inventory=value<std::uintptr_t>(read,machine+0x328); inventory && *inventory && pointer(*inventory))
+        if(const auto entries=list(read,*inventory+0x38,4096)) for(unsigned i=0;i<entries->packed_count && i<1024;++i)
+            if(const auto comp=value<std::uintptr_t>(read,entries->data+i*0x38ull+0x10); comp && *comp) examine(*comp);
     return out;
 }
 class NativePowerObserver {

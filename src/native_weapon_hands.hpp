@@ -46,6 +46,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
 #include <cstring>
 
 namespace d2vr {
@@ -2911,6 +2912,11 @@ private:
         for(unsigned i=0;i<entries->packed_count;++i) {
             const auto record=entries->data+i*0x38ull;const auto comp=rig::value<std::uintptr_t>(read,record+0x10);
             if(!comp || !*comp) continue;
+            if(!std::strncmp(what,"power:",6)) {   // test (sim, 2026-11-24): a power by its component's vtable RVA in hex ("power:1c44a18" = Displace)
+                const auto vtable=static_cast<std::uintptr_t>(std::strtoull(what+6,nullptr,16));
+                if(vtable && rig::typed(read,base,*comp,vtable)) return equip_item(base,read,record,0);
+                continue;
+            }
             if(gun) {
                 if(!rig::typed(read,base,*comp,crossbow?0x1b9cbf8:0x1b53f58)) continue;
                 const auto entry=rig::value<std::uintptr_t>(read,*comp+0x98);const auto ammo_decl=entry && *entry?rig::value<std::uintptr_t>(read,*entry):std::nullopt;
