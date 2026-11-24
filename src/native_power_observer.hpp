@@ -1,6 +1,10 @@
 #pragma once
 // Read-only observer of the player's power components and the player states around them (plan 2026-11-24-doto-billie-vr Task 3;
 // docs/doto-research/2026-11-24-R2-powers.md section 2). Every read goes through the guarded Read: a bad pointer yields defaults.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include "game_profile.hpp"
 #include "game_rig.hpp"
 #include "native_takedown.hpp"
@@ -135,7 +139,8 @@ public:
     static void publish(const PowerSnapshot& s) {
         std::lock_guard<std::mutex> l(mutex());
         const auto rising=s.states&~snapshot().states;   // per state bit: entries seen at the 50 ms reads (a state shorter than that may be missed)
-        for(unsigned b=0;b<edges_.size();++b) if(rising>>b&1u) edges_[b].fetch_add(1,std::memory_order_relaxed);
+        for(unsigned b=0;b<edges_.size();++b) if(rising>>b&1u) {edges_[b].fetch_add(1,std::memory_order_relaxed);note(1,b);}
+        if(s.found_player && snapshot().found_player && s.hook_mines!=snapshot().hook_mines) note(2,static_cast<std::uint32_t>(s.hook_mines));
         snapshot()=s;reads_.fetch_add(1,std::memory_order_relaxed);
         if(!s.found_player) failures_.fetch_add(1,std::memory_order_relaxed);
     }
@@ -153,10 +158,22 @@ public:
          <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines
          <<",\"state_entries\":{\"choke\":"<<edges_[0].load()<<",\"use_power\":"<<edges_[1].load()<<",\"change_weapon\":"<<edges_[2].load()
          <<",\"swapper\":"<<edges_[3].load()<<",\"cancel_void_strike\":"<<edges_[4].load()<<",\"mimicking\":"<<edges_[5].load()
-         <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"}}";
+         <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"},\"events\":"<<events_json()<<"}";
         return o.str();
     }
 private:
+    // The last 16 changes, for timing questions (which press entered a state, which one used a mine): [tick ms, kind, value];
+    // kind 1 = a state entered (value = state bit), 2 = the Hook Mine count changed (value = the new count). Called under mutex().
+    struct Event {std::uint64_t tick;std::uint32_t kind,value;};
+    static std::array<Event,16>& ring() {static std::array<Event,16> r{};return r;}
+    inline static std::uint32_t ring_n_{};
+    static void note(std::uint32_t kind,std::uint32_t value) {ring()[ring_n_++%16]={GetTickCount64(),kind,value};}
+    static std::string events_json() {
+        std::lock_guard<std::mutex> l(mutex());std::ostringstream o;o<<'[';
+        const std::uint32_t n=ring_n_<16?ring_n_:16;
+        for(std::uint32_t i=0;i<n;++i) {const auto& e=ring()[(ring_n_-n+i)%16];o<<(i?",":"")<<'['<<e.tick<<','<<e.kind<<','<<static_cast<std::int32_t>(e.value)<<']';}
+        o<<']';return o.str();
+    }
     static std::mutex& mutex() {static std::mutex m;return m;}
     static PowerSnapshot& snapshot() {static PowerSnapshot s;return s;}
     inline static std::atomic<std::uint64_t> reads_{},failures_{};
