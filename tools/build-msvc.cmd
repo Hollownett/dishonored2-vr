@@ -245,6 +245,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\power_cancel_check.
 if errorlevel 1 goto build_failed
 build\power_cancel_check.exe
 if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\native_power_observer_check.cpp /Fo:build\native_power_observer_check.obj /Fe:build\native_power_observer_check.exe
+if errorlevel 1 goto build_failed
+build\native_power_observer_check.exe
+if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\ranged_aim_gate_check.cpp /Fo:build\ranged_aim_gate_check.obj /Fe:build\ranged_aim_gate_check.exe
 if errorlevel 1 goto build_failed
 build\ranged_aim_gate_check.exe

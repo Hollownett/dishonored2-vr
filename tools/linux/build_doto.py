@@ -3,6 +3,9 @@
 
     python3 tools/linux/build_doto.py <version> [--python PY] [--skip-port]
     -> build/doto/d2vr_render_probe_arm_v<version>.dll (+ .pdb, .map)
+    python3 tools/linux/build_doto.py <version> --game d2
+    -> build/d2/d2vr_render_probe_arm_v<version>.dll: the Dishonored 2 DLL from src/ with build-msvc.cmd's own DLL line
+       (its flags minus /WX: clang-cl raises /W4 diagnostics cl does not; the harness's dxgi_probe step stays the /WX gate)
 
 Same steps as build-doto.cmd: regenerate the target tree with tools/doto/port.py, then compile the cl line written in
 build-doto.cmd (its flags are the single source of truth) through run_build_cmd.cl_to_clang. The MinHook and ImGui
@@ -42,6 +45,22 @@ def cl_line():
     return lines[0]
 
 
+def d2_line(version, out):
+    """build-msvc.cmd's mod DLL line (the one writing %D2VR_DIAGNOSTIC_OUTPUT%), to out/, without /WX."""
+    msvc = ROOT / "tools" / "build-msvc.cmd"
+    lines = [ln.strip() for ln in msvc.read_text(encoding="utf-8").splitlines()
+             if ln.strip().startswith("cl /nologo") and "/Fe:%D2VR_DIAGNOSTIC_OUTPUT%" in ln]
+    if len(lines) != 1:
+        raise SystemExit(f"build_doto: expected one mod DLL line in {msvc}, found {len(lines)}")
+    rel = out.relative_to(ROOT).as_posix()
+    s = (lines[0].replace("/Fe:%D2VR_DIAGNOSTIC_OUTPUT%", f"/Fe:{rel}/d2vr_render_probe_arm_v{version}.dll")
+         .replace("/Fd:build\\dxgi_probe.pdb", f"/Fd:{rel}/dxgi_probe_v{version}.pdb")
+         .replace("/Fo:build\\dxgi_probe.obj", f"/Fo:{rel}/dxgi_probe.obj"))
+    if "%" in s:
+        raise SystemExit("build_doto: unexpanded variable in the D2 line: " + s)
+    return [t.replace("\\", "/") for t in s.split()[1:] if t != "/WX"]
+
+
 def folders(py):
     out = subprocess.run([py, str(ROOT / "tools/doto/target.py"), "folders"], cwd=ROOT, check=True,
                          capture_output=True, text=True).stdout
@@ -72,15 +91,22 @@ def main():
     ap.add_argument("version", help="DLL version number, e.g. 145752")
     ap.add_argument("--python", default=default_python(), help="interpreter for tools/doto (pefile, capstone, numpy)")
     ap.add_argument("--skip-port", action="store_true", help="compile the existing generated tree")
+    ap.add_argument("--game", choices=("doto", "d2"), default="doto", help="d2: the Dishonored 2 DLL from src/ (no port)")
     opts = ap.parse_args()
     if not re.fullmatch(r"\d+", opts.version):
         raise SystemExit("build_doto: version must be digits")
-    if not opts.skip_port:
-        subprocess.run([opts.python, str(ROOT / "tools/doto/port.py")], cwd=ROOT, check=True)
-    src, out = folders(opts.python)
-    out.mkdir(parents=True, exist_ok=True)
-    ensure_objs()
-    argv, degraded = harness.cl_to_clang(expand(cl_line(), opts.version, out))
+    if opts.game == "d2":
+        src, out = ROOT, ROOT / "build" / "d2"
+        out.mkdir(parents=True, exist_ok=True)
+        ensure_objs()
+        argv, degraded = harness.cl_to_clang(d2_line(opts.version, out))
+    else:
+        if not opts.skip_port:
+            subprocess.run([opts.python, str(ROOT / "tools/doto/port.py")], cwd=ROOT, check=True)
+        src, out = folders(opts.python)
+        out.mkdir(parents=True, exist_ok=True)
+        ensure_objs()
+        argv, degraded = harness.cl_to_clang(expand(cl_line(), opts.version, out))
     # clang-cl rejects a single /Fo file once .obj inputs count as several inputs: a directory /Fo writes dxgi_probe.obj
     argv = [("/Fo:" + t[4:].rsplit("/", 1)[0] + "/") if t.startswith("/Fo:") and t.endswith(".obj") else t for t in argv]
     if degraded:

@@ -128,6 +128,7 @@
 #include "native_shot_aim.hpp"
 #include "native_blink_aim.hpp"
 #include "native_power_cancel.hpp"
+#include "native_power_observer.hpp"
 #include "power_cancel.hpp"
 #include "native_hud_census.hpp"
 #include "grab_beam.hpp"
@@ -16165,7 +16166,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"target\":[" << d2vr::NativeHudChildDraw::target_size()[0] << ',' << d2vr::NativeHudChildDraw::target_size()[1] << "],\"stage_x\":" << [&]{float x{};return image_base && read_self(image_base+0x3989eac,&x,sizeof x) && std::isfinite(x)?x:0.f;}() << '}'
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}'
-                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << "}"
+                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << "}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json()
                                      << ",\"native_left_aim\":{\"requested\":" << native_left_aim_requested << ",\"calls\":" << native_left_aim.calls()
                                      << ",\"candidates\":" << native_left_aim.candidates() << ",\"applied\":" << native_left_aim.applied()
                                      << ",\"rejected\":" << native_left_aim.rejected() << ",\"overlaps\":" << native_left_aim.overlap()
@@ -16240,6 +16241,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 }
                                 if(control_takedown.kill) {kill_sensor_spawn=control_takedown.kill_spawn;kill_sensor_tick=GetTickCount64();}
                                 const auto control_machine=native_takedowns.machine(control_reader);
+                                if(logic==2) {static ULONGLONG power_observe_ms=0;const auto pnow=GetTickCount64();   // read-only power/gadget observer, <= every 50 ms
+                                    if(pnow-power_observe_ms>=50) {power_observe_ms=pnow;
+                                        d2vr::NativePowerObserver::publish(d2vr::read_powers(control_reader,image_base,d2vr::PowerVtables::current(),control_machine));}}
                                 const auto choke_owner=d2vr::native_player_state_lease(control_reader,image_base,control_machine);
                                 const bool controls_focus=input.active && game_xr->state==XR_SESSION_STATE_FOCUSED;
                                 auto& manual_equip=d2vr::NativeManualEquipRuntime::process_owner();

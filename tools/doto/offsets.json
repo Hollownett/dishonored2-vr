@@ -328,6 +328,9 @@
   }
  ],
  "sites": [
+  {"file": "src/game_profile.hpp", "contains": "power_swapper_vtable = 0x1c44a18", "from": "0x1c44a18", "to": "0x1c44a18", "why": "already DOTO's arkCpntPowerSwapper vtable (RTTI .?AVarkCpntPowerSwapper@@): kept", "source": "review/powers-observer"},
+  {"file": "src/game_profile.hpp", "contains": "power_swapper_vtable = 0x1c44a18", "from": "0x1c451a8", "to": "0x1c451a8", "why": "already DOTO's arkCpntPowerTheEye vtable (RTTI .?AVarkCpntPowerTheEye@@): kept", "source": "review/powers-observer"},
+  {"file": "src/game_profile.hpp", "contains": "power_swapper_vtable = 0x1c44a18", "from": "0x1c44518", "to": "0x1c44518", "why": "already DOTO's arkCpntPowerMimic vtable (RTTI .?AVarkCpntPowerMimic@@): kept", "source": "review/powers-observer"},
   {"file": "src/game_profile.hpp", "contains": "voltaic_comp_vtable = 0x1c45768", "from": "0x1c45768", "to": "0x1c45768", "why": "already DOTO's arkCpntWeaponGaussGun vtable (RTTI .?AVarkCpntWeaponGaussGun@@ at 0x1c45768): kept", "source": "review/voltaic-pair"},
   {"file": "src/native_weapon_hands.hpp", "contains": "read,copy_+0xa8)==copy_id_", "from": "0xa8", "to": "0xb0", "why": "idEntity id +0xa8 -> +0xb0 in alive() (spawn() line 735 already reads +0xb0): without it fly() returns at its alive() guard and a thrown sword hangs where it was released (user, DOTO headset v145743)", "source": "review/sword-throw"},
   {"file": "src/game_profile.hpp", "contains": "entity_id_offset = 0xb0, entity_flags_offset = 0xd8", "from": "0xb0", "to": "0xb0", "why": "already DOTO's idEntity spawn id (+0xb0) and flags (+0xd8): kept", "source": "review/voltaic-pair"},
