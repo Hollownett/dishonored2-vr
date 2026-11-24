@@ -142,6 +142,7 @@ struct NativeRangedFireTest { // the friend: what NativeRangedFire::service does
     }
     static bool latched() {return Fire::latched_.load();}
     static void track_ammo() {Fire::track_ammo(BASE,M);}
+    static void select_hook(bool (*f)(std::uintptr_t,std::uintptr_t)) {Fire::select_ammo_hook=f;}
     static void swapped(std::uintptr_t base,std::uintptr_t rva,std::uintptr_t comp,std::uintptr_t entity,const float* o,const float* a) {Fire::swapped(base,rva,comp,entity,o,a);}
 };
 }
@@ -156,6 +157,7 @@ static void service(const std::vector<Fire::Request>& w) {Fire::service_with(BAS
 static void run_queued() {service(Test::take());}
 static bool has(const std::string& s,const char* t) {return s.find(t)!=std::string::npos;}
 
+#ifndef D2VR_GAME_DOTO
 int main() {
     // ---- HandState: cooldown, reload, magazine
     { // v1094: the upgrades' scene lengths
@@ -381,10 +383,96 @@ int main() {
         Fire::set_copy_comp(1,CCOMP);assert(Fire::copy_ammo(1,1)==XAMMO);                                            // the same instance keeps its choice
         Fire::set_copy_comp(1,0);Fire::set_copy_comp(1,CCOMP);assert(Fire::copy_ammo(1,1)==XAMMO);                  // hidden and shown again: kept
         Fire::set_copy_comp(1,CCOMP2);assert(Fire::copy_ammo(1,1)==0);                                               // a new instance starts as the weapon it copies
-        Test::track_ammo();assert(Fire::copy_ammo(1,1)==XAMMO && Fire::native_ammo(1)==XAMMO);                       // adopted the native's bolt, and now its own
+        Test::track_ammo();assert(Fire::copy_ammo(1,1)==XAMMO && Fire::native_ammo(1)==XAMMO+0x70);                 // the hand's choice (the native's own is the left wheel's sleep darts since v1279)
         M.put<std::uint64_t>(XCOMP+0x98,XAMMO+0x70);g_now+=3000;Test::track_ammo();                                  // the native hand chose sleep darts, no wheel of a copy hand pending
         assert(Fire::native_ammo(1)==XAMMO+0x70 && Fire::copy_ammo(1,1)==XAMMO);                                     // the copy keeps its own
-        const auto j=Fire::status_json();int depth=0;for(char c:j) {if(c=='{'||c=='[') ++depth;if(c=='}'||c==']') --depth;}assert(depth==0 && has(j,"\"v1094\":[0,0,0,0,0,0,2]"));
+        const auto j=Fire::status_json();int depth=0;for(char c:j) {if(c=='{'||c=='[') ++depth;if(c=='}'||c==']') --depth;}assert(depth==0 && has(j,"\"v1094\":[0,0,0,0,0,0,5,0,0]"));
     }
     std::puts("native ranged fire checks ok");
 }
+#else
+// ---------------------------------------------------------------- Death of the Outsider (game_traits under D2VR_GAME_DOTO): the Voltaic Gun per hand (R3 G-b1..G-b4)
+// The same fake image, the weapon kind "crossbow" being the Voltaic Gun (its comp/decl vtables); the game's own ammo switch (0x63a490) is the
+// hook below: it records the component and the ammo item and writes the component's current ammo, as the game does.
+static std::vector<std::pair<std::uintptr_t,std::uintptr_t>> g_selects;
+static bool f_select(std::uintptr_t comp,std::uintptr_t item) {
+    g_selects.emplace_back(comp,item);
+    const auto decl=M.get<std::uint64_t>(comp+8);const auto first=M.get<std::uint64_t>(decl+0x188);
+    for(unsigned i=0;i<M.get<std::uint32_t>(decl+0x190);++i) if(M.get<std::uint64_t>(first+i*0x70ull)==item) {M.put<std::uint64_t>(comp+0x98,first+i*0x70ull);return true;}
+    return false;
+}
+constexpr std::uintptr_t RCOMP=0x2e000000,RCOMP2=0x2e010000,LCOMP=0x2e020000,SLEEP_DECL=0x2e100000,SLEEP_DEF=0x2e200000,GUN_ITEM=0xb0000;
+static void doto_fresh() {
+    fresh();
+    M.put<std::uint64_t>(XCOMP,BASE+d2vr::game_traits::voltaic_comp_vtable);M.put<std::uint64_t>(XDECL,BASE+d2vr::game_traits::voltaic_decl_vtable);
+    M.put<std::uint64_t>(XDECL+0x188,XAMMO);M.put<std::uint32_t>(XDECL+0x190,2);   // the gun's ammo table: entry 0 = the engine's bolt, entry 1 = another bolt
+    M.put<std::uint64_t>(XAMMO+0x70,SLEEP_DECL);M.put<std::uint64_t>(XAMMO+0x80,SLEEP_DEF);M.put<std::uint64_t>(SLEEP_DECL,0);M.put<std::uint64_t>(SLEEP_DEF,0);
+    M.put<std::uint64_t>(INV+0x70,RECS+2*0x38);   // the gun's record is in slot 1
+    for(const auto c:{RCOMP,RCOMP2,LCOMP}) {M.zero(c,0x200);M.put<std::uint64_t>(c,BASE+d2vr::game_traits::voltaic_comp_vtable);M.put<std::uint64_t>(c+8,XDECL);M.put<std::uint64_t>(c+0x98,XAMMO);}
+    g_selects.clear();Test::select_hook(&f_select);
+    Fire::note_copies(-1,-1);
+    static std::uintptr_t junk=0x3f000000;for(const unsigned side:{0u,1u}) {Fire::set_copy_comp(side,junk+=0x100);Fire::set_copy_comp(side,0);}   // each check starts from no instance and no kept choice
+}
+int main() {
+    // the shared fixture's D2 shot bookkeeping, unused by the Voltaic checks
+    (void)g_pool_bullet;(void)g_pool_bolt;(void)n_flash;(void)g_flash_entity;(void)g_seen_handle;(void)g_own_in_create;(void)g_last_proj;(void)g_speed;(void)g_launch_comp;(void)g_sound_entity;(void)&shot;(void)&fake_shot_fx;(void)&run_queued;
+    {   // doto_right_pick_selects_copy_ammo: the right copy's choice reaches the copy's own component (model, magazine, shots); the engine's gun keeps its bolt
+        doto_fresh();
+        Fire::note_copies(-1,1);Fire::set_copy_comp(1,RCOMP);Fire::note_wheel_open(1);
+        assert(Fire::wheel_pick(BASE,M,GUN_ITEM,SLEEP_DECL)==XAMMO_DECL);                                   // the game is handed the engine gun's own bolt
+        assert(g_selects.size()==1 && g_selects[0].first==RCOMP && g_selects[0].second==SLEEP_DECL);        // the copy's component switched, through the game's own switch
+        assert(M.get<std::uint64_t>(RCOMP+0x98)==XAMMO+0x70 && Fire::copy_ammo(1,1)==XAMMO+0x70);
+        assert(M.get<std::uint64_t>(XCOMP+0x98)==XAMMO);                                                    // the engine gun's bolt untouched
+        assert(Fire::wheel_pick(BASE,M,GUN_ITEM,SLEEP_DECL)==XAMMO_DECL && g_selects.size()==1);            // the same bolt again: nothing to switch
+    }
+    {   // left_pick_keeps_engine_gun: a left choice, the left forearm carrying no copy: the game's own choice for the engine's gun (7ef5612)
+        doto_fresh();
+        Fire::note_copies(-1,1);Fire::set_copy_comp(1,RCOMP);Fire::note_wheel_open(0);
+        assert(Fire::wheel_pick(BASE,M,GUN_ITEM,SLEEP_DECL)==0);
+        assert(g_selects.empty() && M.get<std::uint64_t>(RCOMP+0x98)==XAMMO && Fire::copy_ammo(1,1)==0 && Fire::copy_ammo(0,1)==0);
+    }
+    {   // left_pick_goes_to_left_copy_when_present (G-b2): both forearms carry a copy: each hand's choice is its copy's own
+        doto_fresh();
+        Fire::note_copies(1,1);Fire::set_copy_comp(0,LCOMP);Fire::set_copy_comp(1,RCOMP);Fire::note_wheel_open(0);
+        assert(Fire::wheel_pick(BASE,M,GUN_ITEM,SLEEP_DECL)==XAMMO_DECL);
+        assert(g_selects.size()==1 && g_selects[0].first==LCOMP);
+        assert(M.get<std::uint64_t>(LCOMP+0x98)==XAMMO+0x70 && M.get<std::uint64_t>(RCOMP+0x98)==XAMMO && M.get<std::uint64_t>(XCOMP+0x98)==XAMMO);
+        assert(Fire::copy_ammo(0,1)==XAMMO+0x70 && Fire::copy_ammo(1,1)==0);
+        Fire::note_wheel_open(1);assert(Fire::wheel_pick(BASE,M,GUN_ITEM,XAMMO_DECL)==XAMMO_DECL);           // the right copy back to the first bolt: its own component is already on it
+        assert(g_selects.size()==1 && M.get<std::uint64_t>(LCOMP+0x98)==XAMMO+0x70);
+    }
+    {   // copy_bolt_tracked_in_status: the copy's bolt shows in fire.bolts and survives a re-spawned copy (track_ammo keeps the component on its bolt)
+        doto_fresh();
+        Fire::note_copies(-1,1);Fire::set_copy_comp(1,RCOMP);Fire::note_wheel_open(1);
+        Fire::wheel_pick(BASE,M,GUN_ITEM,SLEEP_DECL);
+        g_now+=500;Test::track_ammo();
+        auto j=Fire::status_json();assert(has(j,"\"bolts\":[0,-1,1]"));                                      // [engine, left copy, right copy]
+        Fire::set_copy_comp(1,RCOMP2);g_selects.clear();g_now+=500;Test::track_ammo();                      // the copy is replaced: the hand's choice is carried over
+        assert(g_selects.size()==1 && g_selects[0].first==RCOMP2 && g_selects[0].second==SLEEP_DECL);
+        g_now+=500;Test::track_ammo();j=Fire::status_json();assert(has(j,"\"bolts\":[0,-1,1]") && g_selects.size()==1);   // (the status reads before the switch of the same look)
+        Fire::note_copies(-1,-1);g_now+=500;Test::track_ammo();j=Fire::status_json();assert(has(j,"\"bolts\":[0,-1,-1]"));   // no copy: no bolt
+    }
+    {   // voltaic bolt <hand> <index> (test command): the hand's gun applies entry <index> as its wheel choice would; the status names each gun's bolt
+        doto_fresh();
+        const char name[]="components/ammo/electrical_burst.inventoryitem\"";M.zero(0x2e300000,128);for(unsigned i=0;i<sizeof name;++i) M.put<char>(0x2e300000+i,name[i]);   // a quote: sanitized away
+        M.put<std::uint64_t>(SLEEP_DECL+8,0x2e300000);
+        Fire::note_copies(-1,1);Fire::set_copy_comp(1,RCOMP);
+        assert(Fire::test_bolt(BASE,M,1,1)=="components/ammo/electrical_burst.inventoryitem" && Fire::test_bolt(BASE,M,1,2).empty() && Fire::test_bolt(BASE,M,1,-1).empty());
+        g_now+=500;Test::track_ammo();                                                                     // the game thread: the right copy's own component switches
+        assert(g_selects.size()==1 && g_selects[0].first==RCOMP && M.get<std::uint64_t>(RCOMP+0x98)==XAMMO+0x70 && M.get<std::uint64_t>(XCOMP+0x98)==XAMMO);
+        assert(Fire::test_bolt(BASE,M,0,1)=="components/ammo/electrical_burst.inventoryitem");              // the left hand shows the engine's gun: the game's own switch
+        g_now+=500;Test::track_ammo();
+        assert(g_selects.size()==2 && g_selects[1].first==XCOMP && M.get<std::uint64_t>(XCOMP+0x98)==XAMMO+0x70 && M.get<std::uint64_t>(RCOMP+0x98)==XAMMO+0x70);
+        g_now+=500;Test::track_ammo();
+        assert(has(Fire::voltaic_bolts_json(),"\"native\":\"components/ammo/electrical_burst.inventoryitem\",\"left_copy\":null,\"right_copy\":\"components/ammo/electrical_burst.inventoryitem\""));
+        const auto r=Fire::bolts_report(BASE,M);
+        assert(has(r,"\"left\":{\"gun\":\"native\",\"index\":1") && has(r,"\"right\":{\"gun\":\"copy\",\"index\":1") && has(r,"\"offered\":[\"ammo0\",\"components/ammo/electrical_burst.inventoryitem\"]"));
+    }
+    {   // the kind note_copies gets (dxgi_probe): the Voltaic copy is a crossbow-kind copy in DOTO only
+        using d2vr::ranged_fire::copy_kind_for;
+        assert(copy_kind_for(true,true,-1)==1 && copy_kind_for(true,false,-1)==-1 && copy_kind_for(true,false,0)==0);
+        assert(copy_kind_for(false,true,-1)==-1 && copy_kind_for(false,true,0)==0 && copy_kind_for(false,false,1)==1);
+    }
+    std::puts("native ranged fire doto checks ok");
+}
+#endif

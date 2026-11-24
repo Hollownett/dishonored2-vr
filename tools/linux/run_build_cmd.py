@@ -66,6 +66,7 @@ TRACKED_WARNING_ALLOW = [
     (r"tests/native_interaction_stop_check\.cpp", r"variable 'native_calls' set but not used"),
     (r"tests/native_kill_range_scope_check\.cpp", r"variable 'reads' set but not used"),
     (r"tests/native_manual_equip_hooks_check\.cpp", r"variable 'after_calls' set but not used"),
+    (r"tests/native_ranged_fire_check\.cpp", r"variable '(g_pool_bullet|g_pool_bolt)' set but not used"),
     (r"tests/native_slash_speed_check\.cpp", r"variable '(primary_calls|secondary_calls)' set but not used"),
 ]
 _TRACKED_RE = re.compile(r"^(\S+?)\(\d+,\d+\): warning: (.*) \[-W(%s)\]" % "|".join(TRACKED_GROUPS), re.M)
