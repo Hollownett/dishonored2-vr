@@ -113,6 +113,32 @@ int main() {
         require((s.states&d2vr::power_state_bit::choke) && !(s.states&d2vr::power_state_bit::use_power),"state bits");
         require(s.states_known==(d2vr::power_state_bit::choke|d2vr::power_state_bit::use_power),"known bits");
     }
+    {   // Void Strike: the Slash state (id 39, vtable 0x1d0b978) read from the pool: owned byte +0xdb, hold time +0x38, decl (+0x18) commit +0xa0, mana +0xf0
+        auto m=world({});
+        m.set<uptr>(machine,base+0x1c73d58);m.set<uptr>(machine+0x90,pool);
+        constexpr uptr slash=0x430000,decl=0x440000;
+        m.set<uptr>(pool+0x10+39*8,slash);m.set<uptr>(slash,base+0x1d0b978);m.set<std::uint32_t>(slash+8,39);m.set<uptr>(slash+0x10,machine);
+        m.set<std::uint8_t>(slash+0x20,0);m.set<uptr>(slash+0x18,decl);m.set<std::uint8_t>(slash+0xdb,1);m.set<float>(slash+0x38,0.25f);
+        m.set<float>(decl+0xa0,0.75f);m.set<std::int32_t>(decl+0xf0,40);
+        auto r=[&](uptr a,void* d,std::size_t n){return m(a,d,n);};
+        auto vs=v;vs.slash_vtable=0x1d0b978;
+        auto s=d2vr::read_powers(r,base,vs,machine);
+        require(s.voidstrike_found && s.voidstrike_owned && s.voidstrike_commit_s==0.75f && s.voidstrike_mana==40 && s.slash_hold_s==0.25f,"void strike fields");
+        require(d2vr::NativePowerObserver::status_json().find("\"void_strike\":")!=std::string::npos,"void strike status key");
+        d2vr::NativePowerObserver::publish(s);
+        const auto js=d2vr::NativePowerObserver::status_json();
+        require(js.find("\"void_strike\":{\"found\":true,\"owned\":true,\"commit_s\":0.75,\"mana\":40,\"hold_s\":0.25,\"presses\":0,\"last_press_ms\":0}")!=std::string::npos,"void strike status values");
+        d2vr::NativePowerObserver::note_void_strike_press(860);d2vr::NativePowerObserver::note_void_strike_press(900);
+        require(d2vr::NativePowerObserver::status_json().find("\"presses\":2,\"last_press_ms\":900")!=std::string::npos,"press counter");
+        s=d2vr::read_powers(r,base,v,machine);   // trait off (vtable 0): never read
+        require(!s.voidstrike_found && !s.voidstrike_owned && s.voidstrike_mana==-1,"trait off leaves defaults");
+        m.set<uptr>(slash,base+0x12345);          // wrong vtable: ignored
+        s=d2vr::read_powers(r,base,vs,machine);
+        require(!s.voidstrike_found && !s.voidstrike_owned,"wrong vtable ignored");
+        m.set<uptr>(slash,base+0x1d0b978);m.set<float>(decl+0xa0,std::numeric_limits<float>::quiet_NaN());
+        s=d2vr::read_powers(r,base,vs,machine);
+        require(s.voidstrike_found && !(s.voidstrike_commit_s>0.f),"nan commit time is not a usable time");
+    }
     {   // a read failure in the middle gives defaults for the rest, no crash
         auto m=world({0x500000});
         component(m,0x500000,0x1c44a18);m.set<std::uint8_t>(0x500000+0xa4,1);

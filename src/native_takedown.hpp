@@ -101,15 +101,22 @@ template<class Read> std::optional<TakedownTarget> takedown_target(Read& read,st
 // Native crouch (artifacts/crouch-re): player state 6 arkPlayerStateSneaking (vtable 0x1c84258) is the
 // crouch; 10 AUTOCROUCH and 11 WALLCROUCH are forced crouches (standing up impossible). The state pool
 // is machine+0x90, state N at *(pool+0x10+N*8): +8 id, +0x10 machine, +0x20 active byte.
+// The state object at pool slot `id` (id, machine and vtable verified), or 0.
+template<class Read> std::uintptr_t native_player_state_object(Read& read,std::uintptr_t base,std::uintptr_t machine,unsigned id,std::uintptr_t vtable) {
+    using namespace rig;
+    if(!pointer(machine) || value<std::uintptr_t>(read,machine)!=base+0x1c73d58) return 0;
+    const auto pool=value<std::uintptr_t>(read,machine+0x90);
+    if(!pool || !pointer(*pool)) return 0;
+    const auto s=value<std::uintptr_t>(read,*pool+0x10+id*8);
+    if(!s || !pointer(*s) || value<std::uint32_t>(read,*s+8)!=id || value<std::uintptr_t>(read,*s+0x10)!=machine) return 0;
+    if(vtable && value<std::uintptr_t>(read,*s)!=base+vtable) return 0;
+    return *s;
+}
 template<class Read> std::optional<bool> native_player_state(Read& read,std::uintptr_t base,std::uintptr_t machine,unsigned id,std::uintptr_t vtable) {
     using namespace rig;
-    if(!pointer(machine) || value<std::uintptr_t>(read,machine)!=base+0x1c73d58) return {};
-    const auto pool=value<std::uintptr_t>(read,machine+0x90);
-    if(!pool || !pointer(*pool)) return {};
-    const auto s=value<std::uintptr_t>(read,*pool+0x10+id*8);
-    if(!s || !pointer(*s) || value<std::uint32_t>(read,*s+8)!=id || value<std::uintptr_t>(read,*s+0x10)!=machine) return {};
-    if(vtable && value<std::uintptr_t>(read,*s)!=base+vtable) return {};
-    const auto active=value<std::uint8_t>(read,*s+0x20);
+    const auto s=native_player_state_object(read,base,machine,id,vtable);
+    if(!s) return {};
+    const auto active=value<std::uint8_t>(read,s+0x20);
     if(!active || *active>1) return {};
     return *active==1;
 }

@@ -47,6 +47,11 @@ struct PowerSnapshot {
     bool mimic_present{},mimic_armed{};   // +0x120 byte
     std::uint32_t states{};               // power_state_bit::*, active flags
     std::uint32_t states_known{};         // bits whose state read succeeded (the id exists in the pool)
+    // DOTO Void Strike (R6): the Slash player state (pool id 39). owned = slash+0xdb (set when a slash starts), commit_s = decl+0xa0 (float
+    // seconds the hold time slash+0x38 must reach), mana = decl+0xf0 (int, -1 unknown), hold_s = slash+0x38 (float seconds, accumulates per frame)
+    bool voidstrike_found{},voidstrike_owned{};
+    float voidstrike_commit_s{},slash_hold_s{};
+    int voidstrike_mana{-1};
 };
 // Per-game table: D2 vtables are D2 literals (tools/doto/port.py maps them by RTTI name); DOTO-only classes and the state ids come from game_traits.
 struct PowerVtables {
@@ -54,6 +59,7 @@ struct PowerVtables {
     std::array<Entry,15> entries{};
     std::array<std::uint32_t,8> state_ids{};   // order of power_state_bit
     std::uintptr_t hook_mine_vtable{};          // arkCpntHookMineEquipment (DOTO), 0 = none
+    std::uintptr_t slash_vtable{};              // arkPlayerStateSlash (DOTO), 0 = no Void Strike read
     static PowerVtables current() {
         namespace t=game_traits;
         PowerVtables v;
@@ -61,7 +67,7 @@ struct PowerVtables {
             {0x1b52ec8,PowerKind::domino},{0x1b9bea8,PowerKind::mesmerize},{0x1b53488,PowerKind::windblast},{0x1b9b748,PowerKind::bendtime},
             {0x1b51c18,PowerKind::dark_vision},{0x1b9c248,PowerKind::shadow_walk},{0x1b51f28,PowerKind::devouring_swarm},{0x1b51828,PowerKind::clone},
             {t::power_swapper_vtable,PowerKind::displace},{t::power_theeye_vtable,PowerKind::foresight},{t::power_mimic_vtable,PowerKind::semblance}}};
-        v.hook_mine_vtable=t::hook_mine_equipment_vtable;
+        v.hook_mine_vtable=t::hook_mine_equipment_vtable;v.slash_vtable=t::slash_state_vtable;
         v.state_ids={t::state_choke,t::state_use_power,t::state_change_weapon,t::state_swapper,t::state_cancel_void_strike,t::state_mimicking,
             t::state_use_mimic,t::state_possession};
         return v;
@@ -85,6 +91,17 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
         if(!active) continue;
         out.states_known|=1u<<bit;
         if(*active) out.states|=1u<<bit;
+    }
+    if(machine && vt.slash_vtable) if(const auto slash=native_player_state_object(read,base,machine,39,vt.slash_vtable)) {
+        out.voidstrike_found=true;
+        out.voidstrike_owned=value<std::uint8_t>(read,slash+0xdb).value_or(0)==1;
+        const auto hold=value<float>(read,slash+0x38);
+        out.slash_hold_s=hold && power_observer_detail::plausible(*hold)?*hold:0.f;
+        if(const auto decl=value<std::uintptr_t>(read,slash+0x18); decl && pointer(*decl)) {
+            const auto commit=value<float>(read,*decl+0xa0);
+            out.voidstrike_commit_s=commit && power_observer_detail::plausible(*commit)?*commit:0.f;
+            out.voidstrike_mana=value<std::int32_t>(read,*decl+0xf0).value_or(-1);
+        }
     }
     std::vector<std::uintptr_t> seen;
     auto examine=[&](std::uintptr_t at) {
@@ -144,6 +161,8 @@ public:
         snapshot()=s;reads_.fetch_add(1,std::memory_order_relaxed);
         if(!s.found_player) failures_.fetch_add(1,std::memory_order_relaxed);
     }
+    // A charged-release press whose length came from the Void Strike commit time (attack_intent.hpp void_strike_press_ms).
+    static void note_void_strike_press(int ms) {void_presses_.fetch_add(1,std::memory_order_relaxed);void_last_ms_.store(ms,std::memory_order_relaxed);}
     static PowerSnapshot latest() {std::lock_guard<std::mutex> l(mutex());return snapshot();}
     static std::string status_json() {
         const auto s=latest();
@@ -158,7 +177,10 @@ public:
          <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines
          <<",\"state_entries\":{\"choke\":"<<edges_[0].load()<<",\"use_power\":"<<edges_[1].load()<<",\"change_weapon\":"<<edges_[2].load()
          <<",\"swapper\":"<<edges_[3].load()<<",\"cancel_void_strike\":"<<edges_[4].load()<<",\"mimicking\":"<<edges_[5].load()
-         <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"},\"events\":"<<events_json()<<"}";
+         <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"},\"events\":"<<events_json()
+         <<",\"void_strike\":{\"found\":"<<(s.voidstrike_found?"true":"false")<<",\"owned\":"<<(s.voidstrike_owned?"true":"false")
+         <<",\"commit_s\":"<<s.voidstrike_commit_s<<",\"mana\":"<<s.voidstrike_mana<<",\"hold_s\":"<<s.slash_hold_s
+         <<",\"presses\":"<<void_presses_.load()<<",\"last_press_ms\":"<<void_last_ms_.load()<<"}}";
         return o.str();
     }
 private:
@@ -178,5 +200,7 @@ private:
     static PowerSnapshot& snapshot() {static PowerSnapshot s;return s;}
     inline static std::atomic<std::uint64_t> reads_{},failures_{};
     inline static std::array<std::atomic<std::uint64_t>,8> edges_{};
+    inline static std::atomic<std::uint64_t> void_presses_{};
+    inline static std::atomic<int> void_last_ms_{};
 };
 } // namespace d2vr

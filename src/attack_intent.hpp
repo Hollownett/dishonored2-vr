@@ -120,19 +120,21 @@ class AttackPress {
 public:
     inline static constexpr std::uint64_t lead_ms=45,min_hold_ms=120,max_ms=500,tail_ms=350;
     inline static constexpr std::uint64_t min_polls=2;
+    inline static constexpr std::uint64_t cap_slack_ms=100;   // a long press's cap is lead + hold + this (never below max_ms)
     bool active() const noexcept {return active_;}
     // hold_ms: 0 = the ordinary 120 ms press. A charged sword strike passes a longer hold (the game turns a held attack
     // into its heavy attack; v963).
     bool start(std::uint64_t now_ms,std::uint64_t polls,std::uint64_t hold_ms=0) noexcept {
         (void)polls;
         if(active_) {++dropped_;return false;}
-        active_=true;rt_=false;rt_started_=false;since_=now_ms;hold_ms_=hold_ms;end_ms_=0;++starts_;return true;
+        active_=true;rt_=false;rt_started_=false;since_=now_ms;hold_ms_=hold_ms;end_ms_=0;++starts_;
+        cap_ms_=std::max<std::uint64_t>(max_ms,hold_ms?lead_ms+hold_ms+cap_slack_ms:0);return true;
     }
     // Advance the state and return whether the attack button is held this frame.
     bool held(std::uint64_t now_ms,std::uint64_t polls) noexcept {
         if(!active_) return false;
-        const std::uint64_t age=now_ms>=since_?now_ms-since_:max_ms;
-        if(age>=max_ms) {finish(now_ms);return false;}
+        const std::uint64_t age=now_ms>=since_?now_ms-since_:cap_ms_;
+        if(age>=cap_ms_) {finish(now_ms);return false;}
         if(age<lead_ms) return false; // Block is let go first
         if(!rt_started_) {rt_started_=true;rt_at_=now_ms;polls_at_rt_=polls;}
         const std::uint64_t hold=hold_ms_?hold_ms_:min_hold_ms;
@@ -147,9 +149,17 @@ public:
     std::uint64_t starts() const noexcept {return starts_;}
     std::uint64_t dropped() const noexcept {return dropped_;}
 private:
-    bool active_{},rt_{},rt_started_{};std::uint64_t since_{},rt_at_{},polls_at_rt_{},end_ms_{},starts_{},dropped_{},hold_ms_{};
+    bool active_{},rt_{},rt_started_{};std::uint64_t since_{},rt_at_{},polls_at_rt_{},end_ms_{},starts_{},dropped_{},hold_ms_{},cap_ms_{max_ms};
     void finish(std::uint64_t now_ms) noexcept {active_=rt_=false;end_ms_=now_ms?now_ms:1;}
 };
+
+// Void Strike (DOTO): the slash state commits when its hold time reaches the declaration's commit time (R6). The release press of a
+// sword charge is that long (commit + 60 ms, at most 1500 ms) when the power is owned and the time is a usable number; else 340 ms.
+inline int void_strike_press_ms(bool owned,float commit_s) noexcept {
+    if(!owned || !std::isfinite(commit_s) || commit_s<=0.f) return 340;
+    const double ms=static_cast<double>(commit_s)*1000.0+60.0;   // never shorter than today's 340 ms press: that one already commits a short threshold
+    return ms>=1500.0?1500:ms<=340.0?340:static_cast<int>(ms+0.5);
+}
 
 // Whether the engine honoured a press: its assassination state (player FSM 13) was seen within window_ms after the press.
 // Without any observation inside the window the press stays "not honoured" (an ordinary attack on an aware guard is that).

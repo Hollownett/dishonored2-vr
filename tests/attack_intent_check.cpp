@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 
 using namespace d2vr;
@@ -197,6 +198,33 @@ static void press_never_outlives_the_cap_or_a_reset() {
     // a clock that went backwards releases instead of holding
     AttackPress r;r.start(5000,0);assert(!r.held(4000,0) && !r.active());
 }
+static void press_length_override_respects_cap() {
+    // a Void Strike commit time of 0.8 s: press = 860 ms, beyond the ordinary 500 ms cap, and the press runs to its own cap
+    const int ms=void_strike_press_ms(true,0.8f);
+    assert(ms==860);
+    AttackPress p;assert(p.start(1000,10,static_cast<std::uint64_t>(ms)));
+    assert(!p.held(1044,10) && p.held(1045,10));
+    assert(p.held(1600,40) && p.held(1900,40));            // past the old 500 ms cap, under 45+860 of RT
+    assert(!p.held(1905,40) && !p.active());               // 860 ms of RT and two polls: released
+    // a stall with no polls still ends at the raised cap, not later
+    AttackPress q;q.start(1000,10,static_cast<std::uint64_t>(ms));
+    assert(q.held(1900,10));
+    assert(!q.held(1000+AttackPress::lead_ms+static_cast<std::uint64_t>(ms)+AttackPress::cap_slack_ms,10) && !q.active());
+    // the cap of the next ordinary 340 ms press is back to 500 ms
+    AttackPress r;r.start(1000,0,340);assert(r.held(1100,0));
+    AttackPress s;s.start(1000,10,340);assert(s.held(1499,10) && !s.held(1500,10));
+    // a long commit time is clamped to 1500 ms
+    assert(void_strike_press_ms(true,5.f)==1500);
+    assert(void_strike_press_ms(true,.05f)==340 && void_strike_press_ms(true,.2f)==340);   // short thresholds: the 340 ms press floor
+}
+static void not_owned_keeps_340() {
+    assert(void_strike_press_ms(false,0.8f)==340);
+    assert(void_strike_press_ms(true,0.f)==340 && void_strike_press_ms(true,-1.f)==340);
+}
+static void nan_keeps_340() {
+    assert(void_strike_press_ms(true,std::numeric_limits<float>::quiet_NaN())==340);
+    assert(void_strike_press_ms(true,std::numeric_limits<float>::infinity())==340);
+}
 static void attack_allowed_needs_every_term() {
     AttackGate g;g.owns=g.allowed=g.tracked=true;
     assert(attack_allowed(g));
@@ -341,7 +369,7 @@ static void wiring_pins_gate_block_release_and_stale_clears() {
     const auto has=[](const std::string& h,const char* n){return h.find(n)!=std::string::npos;};
     assert(has(probe,"const bool live=d2vr::attack_allowed(gate);"));
     for(const char* term:{"gate.carrying=carrying_body || f.hands_busy;","gate.grab_held=physical_grab_requested && (native_grab.holding(0) || native_grab.holding(1));",
-        "gate.left_power=raw.left_trigger>.3f || GetTickCount64()<gesture_cast_until || gesture_release_until!=0;","gate.equip_transition=","gate.ui_open=input.menu_modifier || x_wheel.wheel() || game_xr->settings_open();"})
+        "gate.left_power=raw_trigger(rh)>.3f || GetTickCount64()<gesture_cast_until || gesture_release_until!=0;","gate.equip_transition=","gate.ui_open=input.menu_modifier || x_wheel.wheel() || game_xr->settings_open();"})
         assert(has(probe,term));
     // Block is withheld by the press state (lead + hold + tail), not only while RT is high
     assert(has(probe,"want && !attack_intent_block_off && !left_use_squeeze && input.left_trigger<=.55f"));
@@ -375,6 +403,9 @@ int main() {
     contact_press_uses_the_same_press_path();
     press_lets_block_go_then_holds_120ms_until_two_polls_capped_at_500ms();
     press_never_outlives_the_cap_or_a_reset();
+    press_length_override_respects_cap();
+    not_owned_keeps_340();
+    nan_keeps_340();
     attack_allowed_needs_every_term();
     refused_start_spends_nothing();
     tracking_loss_disarms();
