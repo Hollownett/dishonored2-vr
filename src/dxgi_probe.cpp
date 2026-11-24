@@ -10723,7 +10723,10 @@ void prepare_head_view(void* view) noexcept {
                     // The game's own use/takedown selection follows this aim: on the left hand it favoured left-hand pickups and
                     // dropped guard prompts whenever that hand moved away (headset v309). The reticle stays on the left hand.
                     static UINT64 hand_aim_until{};const auto now_g=GetTickCount64();
-                    if((aim_hand?game_xr->controller_input.right_trigger:game_xr->controller_input.left_trigger)>=.1f) {hand_aim_until=now_g+400;left_aim_wanted=true;}
+                    // Task 11 (DOTO Displace): the hand also owns the aim for as long as the Swapper's native aim is up (power+0xa4, observer), so the
+                    // marker follows the hand through the whole aim, not only while the trigger is above .1 (+400 ms).
+                    if((aim_hand?game_xr->controller_input.right_trigger:game_xr->controller_input.left_trigger)>=.1f ||
+                       (d2vr::game_traits::power_swapper_vtable && d2vr::NativePowerObserver::latest().swapper_aiming)) {hand_aim_until=now_g+400;left_aim_wanted=true;}
                     return native_left_aim_requested && now_g>=hand_aim_until;}()) {
                 ++gaze_takedown_frames;native_gameplay_aim_trace.clear();if(native_blink_aim_installed) native_blink_aim.clear();
                 // Publish the head itself (not "clear"): released, the camera kept the last written pitch (e.g. the holster's
@@ -17909,13 +17912,20 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 const auto ov=d2vr::make_throw_override({fl(hw.position.x),fl(hw.position.y),fl(hw.position.z)},{hv.x,hv.y,hv.z},now_g);
                                                 mine_throw_status.last_speed.store(hand_speed);
                                                 if(ov) {d2vr::NativeGadgetAim::set_throw_override(*ov);++mine_throw_status.throw_place;
-                                                    throw_fallback={true,now_g+400,d2vr::NativeWeaponHands::slot1_count(),hw,hv,rh,grenade};
+                                                    throw_fallback={true,now_g+1500,d2vr::NativeWeaponHands::slot1_count(),hw,hv,rh,grenade};
                                                     dual_wield_event("\"ev\":\"mine_throw_place\",\"hand\":"+std::to_string(rh)+",\"speed\":"+std::to_string(hand_speed));}
                                                 else toss(hw,hv),++mine_throw_status.fallback_drops,g_no_catch_until[rh&1u]=now_g+400; // no usable direction: the old toss
                                             }
-                                            if(throw_fallback.pending && (!left_gadget || now_g>=throw_fallback.deadline)) { // 400 ms after the placement: the count did not drop = not placed
+                                            // Sim 2026-11-24 (DOTO hook mine, v145759): the engine uses the mine at the END of its throw animation, >400 ms after
+                                            // the tap (count 1 at +400 ms, 0 later), so the 400 ms check tossed a second mine. The count is watched every frame
+                                            // and the toss waits 1.5 s.
+                                            if(throw_fallback.pending) {
+                                                const auto c=d2vr::NativeWeaponHands::slot1_count();
+                                                if(!left_gadget || (throw_fallback.count>=0 && c>=0 && c<throw_fallback.count)) throw_fallback.pending=false;   // used: no toss
+                                            }
+                                            if(throw_fallback.pending && now_g>=throw_fallback.deadline) { // 1.5 s after the placement and still not used: the engine refused it
                                                 const auto count=d2vr::NativeWeaponHands::slot1_count();const auto base_count=throw_fallback.count;
-                                                const bool consumed=!left_gadget || count<0 || (base_count>=0 && count<base_count);
+                                                const bool consumed=count<0 || (base_count>=0 && count<base_count);
                                                 throw_fallback.pending=false;
                                                 if(!consumed) {toss(throw_fallback.pose,throw_fallback.vel);++mine_throw_status.fallback_drops;g_no_catch_until[throw_fallback.hand&1u]=now_g+400;
                                                     dual_wield_event("\"ev\":\"mine_throw_fallback\",\"hand\":"+std::to_string(throw_fallback.hand)+",\"count\":"+std::to_string(count));}
