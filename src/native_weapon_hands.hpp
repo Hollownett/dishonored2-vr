@@ -1040,7 +1040,12 @@ public:
     // carries the Voltaic Gun. Control thread: the entity to keep hidden, 0 for none. Game thread (service): hidden, again whenever the game
     // shows it, and shown again once no longer wanted (only an entity this hid, still alive).
     static void forearm_native_hide(std::uintptr_t entity) noexcept {fn_want_.store(entity,std::memory_order_relaxed);}
-    inline static std::atomic<std::uint64_t> forearm_native_hides{},forearm_native_shows{},forearm_native_failed{};
+    // Sim 2026-11-24 (DOTO arm captures, A/B identical on 7ef5612): the engine keeps the equipped Voltaic Gun entity hidden (flags bit 0) in
+    // its default state, so a forearm that carries it showed nothing; only the mod's own hide->show cycle (voltaic right -> both) ever drew it.
+    // forearm_native_show(entity): the control thread names the engine gun while its forearm carries it in gameplay; the game thread shows
+    // it when the engine has it hidden (at most every 250 ms).
+    static void forearm_native_show(std::uintptr_t entity) noexcept {fn_show_.store(entity,std::memory_order_relaxed);}
+    inline static std::atomic<std::uint64_t> forearm_native_hides{},forearm_native_shows{},forearm_native_failed{},forearm_native_forced{};
     inline static std::atomic<std::uint64_t> pool_shown_hidden{},pool_show_failed{};   // v145747: copies spawned hidden, shown / Show refused
     inline static std::atomic<std::uint64_t> forearm_anchors{},forearm_rebinds{},forearm_anchor_failed{};   // v145747: forearm copy anchors spawned, binds, spawn failures
     static void mirror_hands(bool mirrored) noexcept {mirrored_.store(mirrored,std::memory_order_relaxed);}
@@ -1145,7 +1150,7 @@ private:
             }
         }
     }
-    inline static std::atomic<std::uintptr_t> fn_want_{};inline static std::uintptr_t fn_hidden_{};inline static std::uint32_t fn_hidden_id_{};
+    inline static std::atomic<std::uintptr_t> fn_want_{};inline static std::atomic<std::uintptr_t> fn_show_{};inline static std::uint64_t fn_show_at_{};inline static std::uintptr_t fn_hidden_{};inline static std::uint32_t fn_hidden_id_{};
     inline static std::uint64_t fn_failed_until_{};
     template<class Read> static void service_forearm_native(std::uintptr_t base,Read& read) {
         if constexpr(!game_traits::ranged_player_weapon_is_voltaic) {(void)base;(void)read;return;}
@@ -1155,6 +1160,13 @@ private:
                 if(alive_entity(base,read,fn_hidden_,fn_hidden_id_) && (rig::value<std::uint8_t>(read,fn_hidden_+game_traits::entity_flags_offset).value_or(0)&1u) &&
                    visible(base,read,fn_hidden_,true)) ++forearm_native_shows;
                 fn_hidden_=0;fn_hidden_id_=0;
+            }
+            if(const auto show=fn_show_.load(std::memory_order_relaxed);show && show!=want && GetTickCount64()>=fn_show_at_) {
+                fn_show_at_=GetTickCount64()+250;
+                const auto sid=rig::value<std::uint32_t>(read,show+game_traits::entity_id_offset);
+                if(sid && *sid && alive_entity(base,read,show,*sid) && (rig::value<std::uint8_t>(read,show+game_traits::entity_flags_offset).value_or(0)&1u)) {
+                    if(visible(base,read,show,true)) ++forearm_native_forced;else ++forearm_native_failed;
+                }
             }
             if(!want) return;
             const auto id=rig::value<std::uint32_t>(read,want+game_traits::entity_id_offset);

@@ -6011,7 +6011,7 @@ static std::string voltaic_json() {
         std::to_string(d2vr::NativeRangedFire::charged_creates_.load())+','+std::to_string(d2vr::NativeRangedFire::overcharged_creates_.load())+"]"+
         ",\"arm_stats\":["+std::to_string(voltaic_arm_stats[0].load())+','+std::to_string(voltaic_arm_stats[1].load())+','+std::to_string(voltaic_arm_stats[2].load())+','+std::to_string(voltaic_arm_stats[3].load())+
         "],\"native_hide\":["+std::to_string(d2vr::NativeWeaponHands::forearm_native_hides.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_shows.load())+','+
-        std::to_string(d2vr::NativeWeaponHands::forearm_native_failed.load())+"],\"stats\":[";
+        std::to_string(d2vr::NativeWeaponHands::forearm_native_failed.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_forced.load())+"],\"stats\":[";
     for(unsigned i=0;i<voltaic_stats.size();++i) s+=(i?",":"")+std::to_string(voltaic_stats[i].load(std::memory_order_relaxed));
     s+="],\"copy_entity\":[";
     s+=std::to_string(d2vr::NativeWeaponHands::forearm_spawned.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_placed.load())+','+
@@ -16806,6 +16806,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                     dual_wield_event("\"ev\":\"voltaic_sheathe\",\"hand\":"+std::to_string(h));}
                                             }
                                             d2vr::NativeWeaponHands::forearm_native_hide(native && !(varms&1u)?voltaic_native_ent.load(std::memory_order_relaxed):0);
+                                            d2vr::NativeWeaponHands::forearm_native_show(native && (varms&1u) && logic==2?voltaic_native_ent.load(std::memory_order_relaxed):0);   // the engine keeps it hidden by default (sim 2026-11-24)
                                             // the copies: the right forearm whenever it carries the gun; the left only while the engine's slot holds another item
                                             {const int ct=voltaic_charge_test.load(std::memory_order_relaxed);
                                              voltaic_charge_owned.store(ct==2 || (ct==0 && d2vr::NativeRangedFire::voltaic_charge_owned()),std::memory_order_relaxed);}
