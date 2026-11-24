@@ -247,6 +247,17 @@
 - [ ] **Step 3:** Build; sim: `full_body.visible` 0 and hand-contact pushes 0 in states 3/4; origin restored within 0.05 m; one fade at exit; frames paired.
 - [ ] **Step 4:** Commit.
 
+## Phase D2: Dishonored 2 fixes requested during this plan
+
+### Task 15b: Possession: movement follows the view (D2, user request 2026-11-24)
+
+User: "Possession: controls are not aligned with camera direction." Research: `docs/doto-research/2026-11-24-R5-possession.md` (root cause, hook points, scenario).
+
+- [ ] **Step 1:** Pure logic for the correction (whatever R5 recommends: stick rotation by the view/host yaw difference, or host yaw from the head) in its own header with a host check (`tests/possession_move_check.cpp`): forward stick with the view 60° right of the host -> host moves 60° right; no possession -> stick unchanged.
+- [ ] **Step 2:** Wire it behind a default-on feature row (`possession-view-move`), gated on the possession state R5 identifies.
+- [ ] **Step 3:** Build D2; sim in a D2 save with Possession (possess a rat with the head turned 60°, stick forward): host displacement within 15° of the head forward (baseline: along the host's own yaw).
+- [ ] **Step 4:** Commit ("D2: possessed hosts move where the player looks").
+
 ## Phase E: Integration
 
 ### Task 16: Regression pass, docs, launcher rows, review

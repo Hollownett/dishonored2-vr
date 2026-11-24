@@ -237,6 +237,14 @@ if errorlevel 1 goto build_failed
 if not errorlevel 0 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\aim_ray_receipt_check.cpp /Fo:build\aim_ray_receipt_check.obj /Fe:build\aim_ray_receipt_check.exe
 if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\native_power_cancel_check.cpp /Fo:build\native_power_cancel_check.obj /Fe:build\native_power_cancel_check.exe
+if errorlevel 1 goto build_failed
+build\native_power_cancel_check.exe
+if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\power_cancel_check.cpp /Fo:build\power_cancel_check.obj /Fe:build\power_cancel_check.exe
+if errorlevel 1 goto build_failed
+build\power_cancel_check.exe
+if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\ranged_aim_gate_check.cpp /Fo:build\ranged_aim_gate_check.obj /Fe:build\ranged_aim_gate_check.exe
 if errorlevel 1 goto build_failed
 build\ranged_aim_gate_check.exe
