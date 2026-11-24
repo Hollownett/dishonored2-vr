@@ -75,6 +75,23 @@ int main() {
             expect(!reaches(g,2.2) && g.place_dir[0]<-.99f,"a right hand read as a left one points away from its wall");
         }
     }
+    {   // Task 7: the throw-aim override: origin = the hand, direction = the hand's velocity, pitch clamped to +-85 deg, valid 250 ms
+        const auto o=make_throw_override({1,2,3},{0,4,0},1000);
+        expect(o.has_value(),"a moving hand makes an override");
+        const auto pose=throw_override_pose(*o,1000);
+        expect(pose.placement_valid && pose.trigger && pose.throw_free_z && pose.valid() && gadget_aim_fresh(pose,1000),"the override pose is a fresh, valid placement pose");
+        expect(pose.origin==std::array<float,3>{1,2,3} && std::fabs(pose.forward[1]-1.f)<1e-6f && std::fabs(pose.forward[0])<1e-6f,"override_direction_is_velocity: forward = v / |v|");
+        expect(pose.place_origin==pose.origin && pose.place_dir==pose.forward && pose.place_length==static_cast<float>(throw_place_reach_m),"the placement ray is the throw");
+        const auto d=make_throw_override({0,0,0},{3,4,0},0);
+        expect(d && std::fabs(d->dir[0]-.6f)<1e-6f && std::fabs(d->dir[1]-.8f)<1e-6f && d->dir[2]==0,"a 3-4-0 velocity gives (.6,.8,0)");
+        expect(o->active(1000) && o->active(1249) && !o->active(1250) && !o->active(999),"override_expires_250ms");
+        const auto up=make_throw_override({0,0,0},{.1,0,5},0);
+        expect(up && std::fabs(up->dir[2]-std::sin(85*3.14159265358979323846/180))<1e-5f && up->dir[0]>0,"pitch_clamped: steeply up is held at 85 deg");
+        const auto down=make_throw_override({0,0,0},{0,.1,-5},0);
+        expect(down && std::fabs(down->dir[2]+std::sin(85*3.14159265358979323846/180))<1e-5f,"... and steeply down at -85 deg");
+        const auto len=std::sqrt(up->dir[0]*up->dir[0]+up->dir[1]*up->dir[1]+up->dir[2]*up->dir[2]);expect(std::fabs(len-1.f)<1e-5f,"the clamped direction is a unit vector");
+        expect(!make_throw_override({0,0,0},{0,0,5},0) && !make_throw_override({0,0,0},{0,0,0},0) && !make_throw_override({0,0,0},{NAN,0,1},0),"straight up, still, or NaN: no override");
+    }
     std::printf(failures?"gadget_aim_check FAILED\n":"gadget_aim_check ok\n");
     return failures?1:0;
 }

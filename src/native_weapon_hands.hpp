@@ -1380,6 +1380,7 @@ public:
     // The native weapons ride the other hands (the lead's attachment cross while mirrored): grip offsets are measured at the hand they ride.
     static void native_rides_other(bool on) noexcept {ride_other_.store(on,std::memory_order_relaxed);}
     inline static std::atomic<std::uint64_t> slot1_restores{};
+    static std::int32_t slot1_count() noexcept {return slot1_count_.load(std::memory_order_relaxed);}   // Task 7: the slot-1 item's inventory count (50 ms look), -1 none/unknown
     static bool dual_wield() noexcept {return dual_wield_.load(std::memory_order_relaxed);}
     static GunCopy gun_copy(unsigned index=0) {std::lock_guard<std::mutex> l(m_);return published_guns_[index&1u];}
     static std::array<GunCopy,2> gun_copies() {std::lock_guard<std::mutex> l(m_);return published_guns_;}
@@ -1506,6 +1507,7 @@ public:
     }
 private:
     inline static std::atomic<bool> dual_wield_{},clear_guns_req_{};
+    inline static std::atomic<std::int32_t> slot1_count_{-1};
     inline static std::atomic<bool> ride_other_{};inline static std::uintptr_t slot1_cur_{},slot1_prev_{};inline static std::uint64_t slot1_looked_{};
     inline static std::array<LyingGun,2> lying_{};inline static bool gun_native_lying_{},guns_live_{};inline static std::uintptr_t guns_game_{};
     inline static std::array<PoolEnt,8> pool_{};inline static std::array<HeldSide,2> held_{};inline static std::array<Adopt,2> adopt_{};inline static std::atomic<std::uint64_t> handovers{};inline static std::array<HeldSlot,2> meas_{};
@@ -2764,7 +2766,8 @@ private:
             const auto fsm=player_fsm(base,read);const auto inv=fsm?rig::value<std::uintptr_t>(read,fsm+0x328):std::nullopt;
             const auto item=inv && *inv?rig::value<std::uintptr_t>(read,*inv+0x70):std::nullopt;
             const auto decl=item && *item?rig::value<std::uintptr_t>(read,*item):std::nullopt;
-            if(item) {const std::uintptr_t d=decl?*decl:0;if(d!=slot1_cur_) {if(slot1_cur_) slot1_prev_=slot1_cur_;slot1_cur_=d;}}}
+            if(item) {const std::uintptr_t d=decl?*decl:0;if(d!=slot1_cur_) {if(slot1_cur_) slot1_prev_=slot1_cur_;slot1_cur_=d;}}
+            slot1_count_.store(item && *item?rig::value<std::int32_t>(read,*item+0x20).value_or(-1):-1,std::memory_order_relaxed);}   // Task 7: the equipped gadget's count (record +0x20, as test_equip), -1 none
         service_measure(base,read,now);
         service_held(base,read);
         if constexpr(game_traits::ranged_player_weapon_is_voltaic) service_forearm_anchors(base,read);   // v145747
@@ -2912,9 +2915,13 @@ private:
         for(unsigned i=0;i<entries->packed_count;++i) {
             const auto record=entries->data+i*0x38ull;const auto comp=rig::value<std::uintptr_t>(read,record+0x10);
             if(!comp || !*comp) continue;
-            if(!std::strncmp(what,"power:",6)) {   // test (sim, 2026-11-24): a power by its component's vtable RVA in hex ("power:1c44a18" = Displace)
-                const auto vtable=static_cast<std::uintptr_t>(std::strtoull(what+6,nullptr,16));
-                if(vtable && rig::typed(read,base,*comp,vtable)) return equip_item(base,read,record,0);
+            if(!std::strncmp(what,"power:",6) || !std::strncmp(what,"gadget:",7)) {   // test (sim, 2026-11-24): an item by its component's vtable
+                // RVA in hex: "power:1c44a18" = Displace; "gadget:1c43928" = DOTO's Hook Mine (arkCpntHookMineEquipment derives from the
+                // Placeable class the name match below tests by exact vtable, so it never matched); gadgets equip with code 0x30 as below
+                const bool gadget=what[0]=='g';
+                const auto vtable=static_cast<std::uintptr_t>(std::strtoull(what+(gadget?7:6),nullptr,16));
+                if(vtable && rig::typed(read,base,*comp,vtable) && (!gadget || rig::value<std::int32_t>(read,record+0x20).value_or(0)>0))
+                    return gadget?equip_item(base,read,record,0,0x30):equip_item(base,read,record,0);
                 continue;
             }
             if(gun) {

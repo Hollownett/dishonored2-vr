@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 
 namespace d2vr {
 struct GadgetAimPose {
@@ -15,6 +16,7 @@ struct GadgetAimPose {
     bool trigger{};   // the left trigger was held when this pose was published (the throw preview re-aims only then; placement does not need it)
     bool placement_valid{};
     std::array<float,3> place_origin{},place_dir{};float place_length{}; // the mine placement ray when set (place_length > 0): out of the palm
+    bool throw_free_z{};   // Task 7: a throw override: the ThrowHit sensor gets the direction's z too (it is otherwise horizontal)
     bool valid() const noexcept {
         for(unsigned i=0;i<3;++i) if(!std::isfinite(origin[i]) || !std::isfinite(forward[i])) return false;
         const float n=forward[0]*forward[0]+forward[1]*forward[1]+forward[2]*forward[2];
@@ -33,6 +35,35 @@ inline void gadget_palm_ray(GadgetAimPose& pose,unsigned side,const WorldTracked
     pose.place_origin={static_cast<float>(from.x),static_cast<float>(from.y),static_cast<float>(from.z)};
     pose.place_dir={static_cast<float>(palm.x),static_cast<float>(palm.y),static_cast<float>(palm.z)};
     pose.place_length=static_cast<float>(mine_palm_reach_m);
+}
+// Task 7 (user: "mine throw should attach mine"): a mine let go with a moving hand is placed by the engine along the throw. For 250 ms the
+// placement sensor (and the ThrowHit sensor, with its z) takes the hand's position and the hand's velocity direction (pitch held to +-85 deg,
+// like blink_aim_axis_from_hand) instead of the palm ray.
+inline constexpr std::uint64_t throw_override_ms=250;
+inline constexpr double throw_place_reach_m=6.0,throw_override_max_pitch_deg=85;
+struct ThrowAimOverride {
+    std::array<float,3> origin{},dir{};std::uint64_t until_ms{};
+    bool active(std::uint64_t now) const noexcept {return until_ms && now<until_ms && now+throw_override_ms>=until_ms;}
+};
+inline std::optional<ThrowAimOverride> make_throw_override(const std::array<float,3>& origin,const std::array<double,3>& velocity,std::uint64_t now) noexcept {
+    for(unsigned i=0;i<3;++i) if(!std::isfinite(origin[i]) || !std::isfinite(velocity[i])) return {};
+    const double n=std::sqrt(velocity[0]*velocity[0]+velocity[1]*velocity[1]+velocity[2]*velocity[2]);
+    if(n<1e-6) return {};
+    double d[3]{velocity[0]/n,velocity[1]/n,velocity[2]/n};
+    const double limit=std::sin(throw_override_max_pitch_deg*3.14159265358979323846/180.);
+    if(std::fabs(d[2])>limit) {
+        const double xy=std::hypot(d[0],d[1]);
+        if(xy<1e-6) return {};
+        const double scale=std::sqrt(1-limit*limit)/xy;
+        d[0]*=scale;d[1]*=scale;d[2]=d[2]<0?-limit:limit;
+    }
+    ThrowAimOverride o;o.origin=origin;o.dir={static_cast<float>(d[0]),static_cast<float>(d[1]),static_cast<float>(d[2])};o.until_ms=now+throw_override_ms;
+    return o;
+}
+// The pose the sensors see while the override is active: a fresh placement ray along the throw, the trigger held, ThrowHit free in z.
+inline GadgetAimPose throw_override_pose(const ThrowAimOverride& o,std::uint64_t now) noexcept {
+    GadgetAimPose p;p.origin=p.place_origin=o.origin;p.forward=p.place_dir=o.dir;p.place_length=static_cast<float>(throw_place_reach_m);
+    p.placement_valid=p.trigger=p.throw_free_z=true;p.tick=now;return p;
 }
 // Placement follows a valid palm without the trigger; ThrowHit runs even when idle and still needs the trigger.
 inline bool gadget_aim_wanted(const GadgetAimPose& pose,bool placement) noexcept {return placement?pose.placement_valid:pose.trigger;}

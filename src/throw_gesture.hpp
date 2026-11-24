@@ -48,8 +48,11 @@ public:
 class GadgetGrip {
     bool held_{},armed_{},trig_down_{},present_{};std::uint64_t tap_until_{};
 public:
-    struct Out {bool native_trigger{},drop{},held{},armed{};};
-    Out update(bool gadget,bool grenade,float grip,float trigger,std::uint64_t now_ms) noexcept {
+    // Task 7 (user: "mine throw should attach mine, like in the flat game"): a mine let go unarmed while the hand moves faster than mine_throw_min_mps
+    // is not dropped (the mod's own loot-pickup flight never attaches): throw_place starts the native placement tap (the probe aims it along the throw).
+    static constexpr double mine_throw_min_mps=1.5;
+    struct Out {bool native_trigger{},drop{},held{},armed{},throw_place{};};
+    Out update(bool gadget,bool grenade,float grip,float trigger,std::uint64_t now_ms,double hand_speed_mps=0) noexcept {
         Out o{};
         if(!gadget) {held_=armed_=trig_down_=present_=false;tap_until_=0;return o;}
         const bool was=held_;held_=grip>=(held_?.35f:.55f);
@@ -59,8 +62,10 @@ public:
             o.native_trigger=armed_ && held_;   // the grip opening releases the game's trigger: the throw
             if(was && !held_) {o.drop=!armed_;armed_=false;}
         } else {
+            if(was && !held_ && now_ms>=tap_until_) {
+                if(hand_speed_mps>mine_throw_min_mps) {o.throw_place=true;tap_until_=now_ms+150;} else o.drop=true;
+            }
             o.native_trigger=now_ms<tap_until_;
-            if(was && !held_ && !o.native_trigger) o.drop=true;
         }
         o.held=held_;o.armed=armed_;return o;
     }

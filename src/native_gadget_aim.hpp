@@ -29,7 +29,11 @@ class NativeGadgetAim {
 public:
     static constexpr std::uintptr_t placement_rva=0x3c1e40,throw_hit_rva=0x3cec30;
     inline static std::atomic<std::uint64_t> placement_calls{},placement_swapped{},throw_calls{},throw_swapped{},stale{},bad_pointer{},restore_skipped{},palm_placements{};
+    inline static std::atomic<std::uint64_t> override_placements{},override_throw_hits{};
     static void publish(const GadgetAimPose& pose) noexcept {std::lock_guard<std::mutex> l(mutex_);pose_=pose;}
+    // Task 7: a thrown mine: for throw_override_ms both sensors use this ray instead of the hand's own pose (kept apart from pose_, which the probe
+    // republishes every frame).
+    static void set_throw_override(const ThrowAimOverride& o) noexcept {std::lock_guard<std::mutex> l(mutex_);override_=o;}
     static bool installed() noexcept {return targets_[0]!=nullptr;}
     static bool install(std::uintptr_t base) noexcept {
         if(!base) return false;
@@ -56,7 +60,7 @@ public:
 private:
     using Fn=std::uintptr_t (__fastcall *)(void*);
     inline static void* targets_[2]{};inline static Fn original_[2]{};
-    inline static std::mutex mutex_;inline static GadgetAimPose pose_{};
+    inline static std::mutex mutex_;inline static GadgetAimPose pose_{};inline static ThrowAimOverride override_{};
     template<class T> static bool rd(std::uintptr_t at,T& out) noexcept {
         __try {std::memcpy(&out,reinterpret_cast<const void*>(at),sizeof(T));return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
@@ -75,7 +79,8 @@ private:
         ++(placement?placement_calls:throw_calls);
         unsigned char enabled{};   // the sensor's own enable byte (+0x38, tested first by both bodies): idle sensors run every frame and are left alone
         if(!rd(reinterpret_cast<std::uintptr_t>(sensor)+0x38,enabled) || !enabled) return original_[which](sensor);
-        GadgetAimPose pose{};{std::lock_guard<std::mutex> l(mutex_);pose=pose_;}
+        GadgetAimPose pose{};bool thrown=false;
+        {std::lock_guard<std::mutex> l(mutex_);pose=pose_;const auto now=GetTickCount64();if(override_.active(now)) {pose=throw_override_pose(override_,now);thrown=true;}}
         if(!gadget_aim_fresh(pose,GetTickCount64()) || !gadget_aim_wanted(pose,placement)) {++stale;return original_[which](sensor);}
         float *start{},*dir{},*origin{};
         resolve(reinterpret_cast<std::uintptr_t>(sensor),placement,start,dir,origin);
@@ -87,11 +92,12 @@ private:
         float saved_length{};if(length && !rd(reinterpret_cast<std::uintptr_t>(length),saved_length)) length=nullptr;
         FieldSwap swap;
         swap.put(start,palm?pose.place_origin:pose.origin);
-        swap.put(dir,palm?pose.place_dir:pose.forward,!placement);
+        swap.put(dir,palm?pose.place_dir:pose.forward,!placement && !pose.throw_free_z);   // ThrowHit keeps its own z unless a throw override (Task 7) supplies one
         if(origin) swap.put(origin,pose.origin);
         if(length) *length=pose.place_length;
         ++(placement?placement_swapped:throw_swapped);
         if(palm) ++palm_placements;
+        if(thrown) ++(placement?override_placements:override_throw_hits);
         const auto result=original_[which](sensor);
         if(length && *length==pose.place_length) *length=saved_length;
         swap.restore();   // a field the engine rewrote during the call keeps its value

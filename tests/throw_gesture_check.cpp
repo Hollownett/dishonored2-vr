@@ -79,6 +79,36 @@ int main() {
         o=g.update(true,false,1,0,t+=11);o=g.update(true,false,1,1,t+=11);expect(o.native_trigger,"... a press while gripping still places");
         o=g.update(true,true,0,0,t+=11);o=g.update(true,true,0,1,t+=11);expect(!o.armed && !o.native_trigger,"a grenade still needs the grip");
     }
+    {   // Task 7 (user: "mine throw should attach mine, like in the flat game"): a mine let go while the hand moves fast is placed by the engine along the
+        // throw (a native trigger tap + the throw-aim override); slow it is put down as before. Speed is an explicit input (m/s).
+        const auto holding=[](d2vr::GadgetGrip& g,std::uint64_t& t,bool grenade) {d2vr::GadgetGrip::Out o{};for(int i=0;i<3;++i) o=g.update(true,grenade,1,0,t+=11,0);return o;};
+        {   // fast_open_places
+            d2vr::GadgetGrip g;std::uint64_t t=0;holding(g,t,false);
+            auto o=g.update(true,false,0,0,t+=11,2.0);
+            expect(o.throw_place && !o.drop && o.native_trigger,"fast open: a throw placement and a native tap, never a drop");
+            o=g.update(true,false,0,0,t+=11,2.0);expect(!o.throw_place && !o.drop && o.native_trigger,"the tap goes on, one throw_place only");
+            for(int i=0;i<20;++i) o=g.update(true,false,0,0,t+=11,0);
+            expect(!o.native_trigger && !o.throw_place && !o.drop,"the tap is short");
+        }
+        {   // slow_open_drops
+            d2vr::GadgetGrip g;std::uint64_t t=0;holding(g,t,false);
+            const auto o=g.update(true,false,0,0,t+=11,.5);
+            expect(o.drop && !o.throw_place && !o.native_trigger,"slow open: the old drop");
+            d2vr::GadgetGrip e;t=0;holding(e,t,false);
+            expect(e.update(true,false,0,0,t+=11,1.5).drop,"exactly 1.5 m/s is still slow");
+        }
+        {   // grenade_unchanged: fast open of an unarmed grenade drops it, armed one throws; never a throw_place
+            d2vr::GadgetGrip g;std::uint64_t t=0;holding(g,t,true);
+            auto o=g.update(true,true,0,0,t+=11,3.0);expect(o.drop && !o.throw_place && !o.native_trigger,"grenade, fast open, unarmed: drop as today");
+            o=g.update(true,true,1,0,t+=11,0);o=g.update(true,true,1,1,t+=11,0);expect(o.armed && o.native_trigger,"grenade armed as today");
+            o=g.update(true,true,0,0,t+=11,3.0);expect(!o.drop && !o.throw_place && !o.native_trigger,"armed grenade opens into the native throw");
+        }
+        {   // armed_tap_unchanged: the trigger tapped while holding places; opening the grip in the tap neither drops nor re-places
+            d2vr::GadgetGrip g;std::uint64_t t=0;holding(g,t,false);
+            auto o=g.update(true,false,1,1,t+=11,0);expect(o.native_trigger && !o.throw_place,"trigger tap places as today");
+            o=g.update(true,false,0,1,t+=11,3.0);expect(!o.drop && !o.throw_place && o.native_trigger,"grip opening inside the tap: no drop, no second placement");
+        }
+    }
     std::printf(failures?"throw_gesture_check FAILED\n":"throw_gesture_check ok\n");
     return failures?1:0;
 }

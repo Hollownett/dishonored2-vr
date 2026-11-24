@@ -471,6 +471,14 @@
    "label": "Fade on power teleports",
    "help": "A short fade when Displace swaps you or Foresight returns you to your body.",
    "default": true
+  },
+  {
+   "id": "mine-throw-stick",
+   "file": "no-mine-throw-stick",
+   "kind": "disable",
+   "label": "Thrown mines stick",
+   "help": "Throwing a mine places it where it lands, as in the flat game. Off: a thrown mine drops like any held item.",
+   "default": true
   }
  ]
 }
