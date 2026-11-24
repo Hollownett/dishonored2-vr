@@ -16311,6 +16311,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(logic==2) {static ULONGLONG power_observe_ms=0;const auto pnow=GetTickCount64();   // read-only power/gadget observer, <= every 50 ms
                                     if(pnow-power_observe_ms>=50) {power_observe_ms=pnow;
                                         d2vr::NativePowerObserver::publish(d2vr::read_powers(control_reader,image_base,d2vr::PowerVtables::current(),control_machine));
+                                        if constexpr(d2vr::game_traits::power_theeye_vtable!=0) {   // Foresight's spirit camera is tracked (native_player_camera.hpp)
+                                            const int te=d2vr::NativePowerObserver::latest().theeye_state;d2vr::foresight_spirit.store(te==3 || te==4,std::memory_order_relaxed);}
                                         if(teleport_fade_enabled) {   // Task 12: Displace swap (state rising) / Foresight exit (3|4 -> 5|0): a fade, a smoother and clamp reset
                                             static d2vr::TeleportSample prev_sample{};
                                             const auto snap=d2vr::NativePowerObserver::latest();

@@ -1,11 +1,16 @@
 #pragma once
 // Exact-build, read-only gameplay state. Generated camera fields: 0x159baf0.
 // Physics allocation/ownership: 0x7fe310, 0x1b2290 and 0x694c20.
+#include <atomic>
 #include "game_camera.hpp"
 #include "game_rig.hpp"
 #include "native_action_camera.hpp"
 
 namespace d2vr {
+// DOTO Foresight (sim 2026-11-24: the spirit runs under camera mode 17/17, which counted as an authored view, so head pitch, turning and
+// the hand aim stopped while scouting): set by the control thread from NativePowerObserver (TheEye state 3 or 4) in a game that has TheEye.
+inline std::atomic<bool> foresight_spirit{false};
+inline constexpr int foresight_camera_mode=17;
 template<class Read> bool native_shadow_walk_active(Read& read,std::uintptr_t base,
         std::uintptr_t player,std::uintptr_t controller) {
     using namespace rig;
@@ -92,8 +97,12 @@ struct NativePlayerCamera {
     bool tracked_shadow_walk() const noexcept {
         return shadow_walk && mode==7 && target_mode==7 && !blend_body_yaw && !code_lock;
     }
+    // Foresight's spirit is gameplay (the player walks, looks, tags): tracked like Shadow Walk.
+    bool tracked_foresight() const noexcept {
+        return foresight_spirit.load(std::memory_order_relaxed) && mode==foresight_camera_mode && target_mode==foresight_camera_mode && !blend_body_yaw;
+    }
     bool authored_view() const noexcept {
-        return !tracked_shadow_walk() && (mode!=0 || target_mode!=0 || blend_body_yaw || code_lock);
+        return !tracked_shadow_walk() && !tracked_foresight() && (mode!=0 || target_mode!=0 || blend_body_yaw || code_lock);
     }
 };
 
