@@ -46,22 +46,37 @@ public:
 // v779 (user, headset v778: "a mine from the wheel places badly, only after I toss it to the other hand"; the journal: 25 trigger presses with
 // the grip open, none placed): a mine is placed by the trigger with or without the grip, except in the frame the grip closes (a catch).
 class GadgetGrip {
-    bool held_{},armed_{},trig_down_{},present_{};std::uint64_t tap_until_{};
+    bool held_{},armed_{},trig_down_{},present_{},mode_pending_{},mode_hold_{};std::uint64_t tap_until_{},mode_since_{};
 public:
     // Task 7 (user: "mine throw should attach mine, like in the flat game"): a mine let go unarmed while the hand moves faster than mine_throw_min_mps
     // is not dropped (the mod's own loot-pickup flight never attaches): throw_place starts the native placement tap (the probe aims it along the throw).
     static constexpr double mine_throw_min_mps=1.5;
-    struct Out {bool native_trigger{},drop{},held{},armed{},throw_place{};};
-    Out update(bool gadget,bool grenade,float grip,float trigger,std::uint64_t now_ms,double hand_speed_mps=0) noexcept {
+    // Task 6 (DOTO Hook Mine, user: hold the use button to switch lethal / non-lethal, tap to throw): with mode_capable a mine's trigger press waits
+    // mode_hold_ms. Released before: the tap (at the release, as the flat game throws on it). Still down: mode_hold = the game's LT held (native_trigger
+    // too) until the release, then mode_switched and NO tap/throw/drop for that press. The grip opening in a mode hold lets go of LT and does nothing else.
+    struct Out {bool native_trigger{},drop{},held{},armed{},throw_place{},mode_hold{},mode_switched{};};
+    Out update(bool gadget,bool grenade,float grip,float trigger,std::uint64_t now_ms,double hand_speed_mps=0,bool mode_capable=false,std::uint64_t mode_hold_ms=450) noexcept {
         Out o{};
-        if(!gadget) {held_=armed_=trig_down_=present_=false;tap_until_=0;return o;}
+        if(!gadget) {held_=armed_=trig_down_=present_=mode_pending_=mode_hold_=false;tap_until_=0;return o;}
         const bool was=held_;held_=grip>=(held_?.35f:.55f);
         const bool trig=trigger>=(trig_down_?.35f:.55f),edge=trig && !trig_down_ && present_;trig_down_=trig;present_=true; // a trigger already down when it arrives presses nothing
-        if(edge) {if(!grenade) {if(was || !held_) tap_until_=now_ms+150;} else if(was && held_) armed_=true;} // a resting index at the grab arms nothing
+        if(edge) {if(!grenade) {if(was || !held_) {if(mode_capable) {mode_pending_=true;mode_since_=now_ms;} else tap_until_=now_ms+150;}} else if(was && held_) armed_=true;} // a resting index at the grab arms nothing
         if(grenade) {
             o.native_trigger=armed_ && held_;   // the grip opening releases the game's trigger: the throw
             if(was && !held_) {o.drop=!armed_;armed_=false;}
         } else {
+            if(!mode_capable) mode_pending_=mode_hold_=false;
+            if(mode_pending_) {
+                if(!trig) {mode_pending_=false;tap_until_=now_ms+150;}                              // short press: the tap, now
+                else if(now_ms-mode_since_>=mode_hold_ms) {mode_pending_=false;mode_hold_=true;}   // long press: the mode switch
+                else if(was && !held_) mode_pending_=false;                                          // opened before the hold: the old throw/drop below
+            }
+            if(mode_hold_) {
+                if(was && !held_) mode_hold_=false;                // the user let go mid-switch: LT released, nothing else
+                else if(!trig) {mode_hold_=false;o.mode_switched=true;}
+                else {o.mode_hold=true;o.native_trigger=true;}
+                o.held=held_;o.armed=armed_;return o;
+            }
             if(was && !held_ && now_ms>=tap_until_) {
                 if(hand_speed_mps>mine_throw_min_mps) {o.throw_place=true;tap_until_=now_ms+150;} else o.drop=true;
             }

@@ -489,6 +489,14 @@
    "default": true
   },
   {
+   "id": "mine-mode-hold",
+   "file": "no-mine-mode-hold",
+   "kind": "disable",
+   "label": "Hold the trigger to switch a Hook Mine",
+   "help": "Holding the trigger with a Hook Mine in hand switches it between lethal and non-lethal, as holding the use button does in the flat game. A short press still throws.",
+   "default": true
+  },
+  {
    "id": "possession-view-move",
    "file": "no-possession-view-move",
    "kind": "disable",
