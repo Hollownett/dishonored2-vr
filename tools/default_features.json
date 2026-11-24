@@ -465,6 +465,14 @@
    "default": true
   },
   {
+   "id": "power-grip-cancel",
+   "file": "no-power-grip-cancel",
+   "kind": "disable",
+   "label": "Grip cancels a power",
+   "help": "Squeezing the grip while you aim a power (Blink, Far Reach, Displace...) cancels it instead of casting it.",
+   "default": true
+  },
+  {
    "id": "teleport-fade",
    "file": "no-teleport-fade",
    "kind": "disable",
