@@ -30,6 +30,8 @@ inline constexpr std::uint32_t choke=1u<<0,use_power=1u<<1,change_weapon=1u<<2,s
 struct PowerSnapshot {
     bool found_player{};
     int power_count{};
+    std::uint32_t present_mask{};
+    int hook_mines{-1};                   // DOTO: Hook Mines in the inventory (the HookMineEquipment record's count, +0x20), -1 none         // bit PowerKind: the powers the player owns (player list or inventory)
     std::uint32_t aiming_kind{};          // PowerKind of the first power whose aim byte (+0xa4) is set
     bool aim_active{},cast_flag{};        // any power: +0xa4, +0xa5
     bool swapper_present{},swapper_aiming{};
@@ -47,6 +49,7 @@ struct PowerVtables {
     struct Entry {std::uintptr_t vtable;PowerKind kind;};
     std::array<Entry,15> entries{};
     std::array<std::uint32_t,8> state_ids{};   // order of power_state_bit
+    std::uintptr_t hook_mine_vtable{};          // arkCpntHookMineEquipment (DOTO), 0 = none
     static PowerVtables current() {
         namespace t=game_traits;
         PowerVtables v;
@@ -54,6 +57,7 @@ struct PowerVtables {
             {0x1b52ec8,PowerKind::domino},{0x1b9bea8,PowerKind::mesmerize},{0x1b53488,PowerKind::windblast},{0x1b9b748,PowerKind::bendtime},
             {0x1b51c18,PowerKind::dark_vision},{0x1b9c248,PowerKind::shadow_walk},{0x1b51f28,PowerKind::devouring_swarm},{0x1b51828,PowerKind::clone},
             {t::power_swapper_vtable,PowerKind::displace},{t::power_theeye_vtable,PowerKind::foresight},{t::power_mimic_vtable,PowerKind::semblance}}};
+        v.hook_mine_vtable=t::hook_mine_equipment_vtable;
         v.state_ids={t::state_choke,t::state_use_power,t::state_change_weapon,t::state_swapper,t::state_cancel_void_strike,t::state_mimicking,
             t::state_use_mimic,t::state_possession};
         return v;
@@ -86,7 +90,7 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
         PowerKind kind=PowerKind::none;
         for(const auto& e:vt.entries) if(e.vtable && *table==base+e.vtable) {kind=e.kind;break;}
         if(kind==PowerKind::none) return;
-        seen.push_back(at);
+        seen.push_back(at);out.present_mask|=1u<<static_cast<std::uint32_t>(kind);
         ++out.power_count;
         const auto aim=value<std::uint8_t>(read,at+0xa4),cast=value<std::uint8_t>(read,at+0xa5);
         const bool aiming=aim && *aim==1;
@@ -119,13 +123,19 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
     // (NativeWeaponHands::test_equip reads them the same way).
     if(machine) if(const auto inventory=value<std::uintptr_t>(read,machine+0x328); inventory && *inventory && pointer(*inventory))
         if(const auto entries=list(read,*inventory+0x38,4096)) for(unsigned i=0;i<entries->packed_count && i<1024;++i)
-            if(const auto comp=value<std::uintptr_t>(read,entries->data+i*0x38ull+0x10); comp && *comp) examine(*comp);
+            if(const auto comp=value<std::uintptr_t>(read,entries->data+i*0x38ull+0x10); comp && *comp) {
+                examine(*comp);
+                if(vt.hook_mine_vtable && pointer(*comp) && value<std::uintptr_t>(read,*comp).value_or(0)==base+vt.hook_mine_vtable)
+                    out.hook_mines=value<std::int32_t>(read,entries->data+i*0x38ull+0x20).value_or(-1);
+            }
     return out;
 }
 class NativePowerObserver {
 public:
     static void publish(const PowerSnapshot& s) {
         std::lock_guard<std::mutex> l(mutex());
+        const auto rising=s.states&~snapshot().states;   // per state bit: entries seen at the 50 ms reads (a state shorter than that may be missed)
+        for(unsigned b=0;b<edges_.size();++b) if(rising>>b&1u) edges_[b].fetch_add(1,std::memory_order_relaxed);
         snapshot()=s;reads_.fetch_add(1,std::memory_order_relaxed);
         if(!s.found_player) failures_.fetch_add(1,std::memory_order_relaxed);
     }
@@ -134,18 +144,22 @@ public:
         const auto s=latest();
         std::ostringstream o;
         o<<"{\"reads\":"<<reads_.load()<<",\"failures\":"<<failures_.load()<<",\"found_player\":"<<(s.found_player?"true":"false")
-         <<",\"power_count\":"<<s.power_count<<",\"aiming\":\""<<power_kind_name(s.aiming_kind)<<"\",\"aim_active\":"<<(s.aim_active?"true":"false")
+         <<",\"power_count\":"<<s.power_count<<",\"present\":["<<[&]{std::string o;for(std::uint32_t k=1;k<static_cast<std::uint32_t>(PowerKind::count_);++k) if(s.present_mask>>k&1u) {if(!o.empty()) o+=',';o+='"';o+=power_kind_name(k);o+='"';}return o;}()<<"]"<<",\"aiming\":\""<<power_kind_name(s.aiming_kind)<<"\",\"aim_active\":"<<(s.aim_active?"true":"false")
          <<",\"cast_flag\":"<<(s.cast_flag?"true":"false")<<",\"swapper\":{\"present\":"<<(s.swapper_present?"true":"false")
          <<",\"aiming\":"<<(s.swapper_aiming?"true":"false")<<",\"mode\":"<<static_cast<unsigned>(s.swapper_mode)
          <<",\"has_target\":"<<(s.swapper_has_target?"true":"false")<<",\"target\":["<<s.swapper_target[0]<<","<<s.swapper_target[1]<<","<<s.swapper_target[2]
          <<"]},\"theeye\":{\"state\":"<<s.theeye_state<<",\"body\":["<<s.theeye_body[0]<<","<<s.theeye_body[1]<<","<<s.theeye_body[2]
          <<"],\"yaw\":"<<s.theeye_body_yaw<<"},\"mimic\":{\"present\":"<<(s.mimic_present?"true":"false")<<",\"armed\":"<<(s.mimic_armed?"true":"false")
-         <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<"}";
+         <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines
+         <<",\"state_entries\":{\"choke\":"<<edges_[0].load()<<",\"use_power\":"<<edges_[1].load()<<",\"change_weapon\":"<<edges_[2].load()
+         <<",\"swapper\":"<<edges_[3].load()<<",\"cancel_void_strike\":"<<edges_[4].load()<<",\"mimicking\":"<<edges_[5].load()
+         <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"}}";
         return o.str();
     }
 private:
     static std::mutex& mutex() {static std::mutex m;return m;}
     static PowerSnapshot& snapshot() {static PowerSnapshot s;return s;}
     inline static std::atomic<std::uint64_t> reads_{},failures_{};
+    inline static std::array<std::atomic<std::uint64_t>,8> edges_{};
 };
 } // namespace d2vr

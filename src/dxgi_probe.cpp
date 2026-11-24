@@ -81,6 +81,7 @@
 #include "anchor_smoother.hpp"
 #include "comfort_meter.hpp"
 #include "comfort_vignette.hpp"
+#include "teleport_fade.hpp"
 #include "perf_meter.hpp"
 #include "frame_split.hpp"
 #include "elision_ab.hpp"
@@ -464,7 +465,11 @@ static d2vr::NativeShotAim native_shot_aim;static bool native_shot_aim_installed
 static d2vr::NativeBlinkAim native_blink_aim;static bool native_blink_aim_installed=false;
 // GitHub issue #6: the grip cancels a held power aim (power_cancel.hpp, native_power_cancel.hpp). Knob build/no-power-grip-cancel turns it off.
 static d2vr::NativePowerCancel native_power_cancel;static bool native_power_cancel_installed=false,power_grip_cancel_enabled=true;
-static d2vr::PowerCancelLatch power_cancel_latch;static std::atomic<UINT64> power_grip_cancels{},power_aim_exempt_frames{};
+static d2vr::PowerCancelLatch power_cancel_latch;static std::atomic<UINT64> power_grip_cancels{},power_aim_exempt_frames{},choke_power_trigger_frames{};
+// Task 12 teleport fade (build/no-teleport-fade): edges from the power observer (control thread), alpha read by the render thread. A teleport also
+// resets the vertical anchor smoother (teleport_reset_request) and starts a new hand clamp epoch (teleport_epoch) so the hands never streak.
+static d2vr::TeleportFade teleport_fade;static std::mutex teleport_fade_mutex;static bool teleport_fade_enabled=true;
+static std::atomic<UINT64> teleport_fade_last_ms{},teleport_epoch{};static std::atomic<bool> teleport_reset_request{};static std::atomic<float> teleport_fade_alpha_now{};
 static d2vr::NativeHudCensus native_hud_census;static bool native_hud_census_installed=false;
 // VR button prompts: each Xbox prompt glyph is its own small BC7 texture. When the game creates one
 // (identified by size and content signature) it gets a BC7 texture with the Quest control label instead.
@@ -10143,6 +10148,7 @@ void prepare_head_view(void* view) noexcept {
         const std::array<float,3> raw_anchor_position{source_anchor.position[0],source_anchor.position[1],source_anchor.position[2]};
         if(camera_smoothing_enabled) { // vertical only, once per frame: both eyes, the authored view and the listener share the value
             if(anchor_smooth_frame!=frames.load()) {
+                if(teleport_reset_request.exchange(false)) anchor_smoother.reset(); // Task 12: an engine teleport (Displace swap, Foresight exit)
                 static LARGE_INTEGER smooth_freq{};if(!smooth_freq.QuadPart) QueryPerformanceFrequency(&smooth_freq);
                 LARGE_INTEGER smooth_now{};QueryPerformanceCounter(&smooth_now);
                 const double smooth_t=static_cast<double>(smooth_now.QuadPart)/static_cast<double>(smooth_freq.QuadPart);
@@ -10861,7 +10867,7 @@ void prepare_head_view(void* view) noexcept {
                     // re-centre forgets the stored hand). Its clock: QPC seconds.
                     const auto clamp_root=d2vr::level_frame({anchor.position[0],anchor.position[1],anchor.position[2]},{anchor.basis[0],anchor.basis[1],anchor.basis[2]});
                     const double clamp_now=static_cast<double>(qpc.QuadPart)/static_cast<double>(freq.QuadPart);
-                    const auto clamp_epoch=hands.epoch^(hands.reference_epoch<<32)^static_cast<std::uint64_t>(body->player);
+                    const auto clamp_epoch=hands.epoch^(hands.reference_epoch<<32)^static_cast<std::uint64_t>(body->player)^(teleport_epoch.load(std::memory_order_relaxed)<<48);   // Task 12: a power teleport is a new epoch: the hands snap, they do not streak
                     // The arm's reach from the last visible solve (G2, C4): the clamp's target is reach-clamped so the clamp and the IK agree. One
                     // frame stale (Task 4): the palm can fall 15-46 mm short for a frame while walking.
                     auto arm_reach=full_body.diagnostic();
@@ -14841,6 +14847,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                              if(!(dt>=0 && dt<=.25)) comfort_vignette.reset(); // a gap (pause, load, stall): start from nothing instead of jumping
                              opacity=comfort_vignette.update({move,turn,dt>0 && dt<=.25?dt:0});}
                             if(game_xr) game_xr->vignette_opacity.store(opacity,std::memory_order_relaxed);
+                            if(game_xr && teleport_fade_enabled) {   // Task 12: free gameplay only; 0 costs one lock and one store
+                                float fade=0.f;
+                                {std::lock_guard<std::mutex> fade_lock(teleport_fade_mutex);fade=teleport_fade.alpha(GetTickCount64());}
+                                teleport_fade_alpha_now.store(fade,std::memory_order_relaxed);
+                                game_xr->fade_alpha.store(gameplay && owner?fade:0.f,std::memory_order_relaxed);
+                            }
                         }
                         // alternate-eye: authored / settings state is read here, at this Present (the plan lags a frame); a one-view frame in it is dropped
                         const bool alt_nonfree=alternate_on() && !d2vr::alternate_single_view_allowed(authored_camera,game_xr && game_xr->settings_open());
@@ -16200,7 +16212,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"target\":[" << d2vr::NativeHudChildDraw::target_size()[0] << ',' << d2vr::NativeHudChildDraw::target_size()[1] << "],\"stage_x\":" << [&]{float x{};return image_base && read_self(image_base+0x3989eac,&x,sizeof x) && std::isfinite(x)?x:0.f;}() << '}'
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}'
-                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << "}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json()
+                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << ",\"choke_power_trigger_frames\":" << choke_power_trigger_frames.load() << "}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json() << ",\"teleport_fade\":{\"enabled\":" << (teleport_fade_enabled?"true":"false") << ",\"fades\":" << [&]{std::lock_guard<std::mutex> l(teleport_fade_mutex);return teleport_fade.fades();}() << ",\"last_ms\":" << teleport_fade_last_ms.load() << ",\"alpha_now\":" << teleport_fade_alpha_now.load() << "}"
                                      << ",\"native_left_aim\":{\"requested\":" << native_left_aim_requested << ",\"calls\":" << native_left_aim.calls()
                                      << ",\"candidates\":" << native_left_aim.candidates() << ",\"applied\":" << native_left_aim.applied()
                                      << ",\"rejected\":" << native_left_aim.rejected() << ",\"overlaps\":" << native_left_aim.overlap()
@@ -16277,7 +16289,18 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const auto control_machine=native_takedowns.machine(control_reader);
                                 if(logic==2) {static ULONGLONG power_observe_ms=0;const auto pnow=GetTickCount64();   // read-only power/gadget observer, <= every 50 ms
                                     if(pnow-power_observe_ms>=50) {power_observe_ms=pnow;
-                                        d2vr::NativePowerObserver::publish(d2vr::read_powers(control_reader,image_base,d2vr::PowerVtables::current(),control_machine));}}
+                                        d2vr::NativePowerObserver::publish(d2vr::read_powers(control_reader,image_base,d2vr::PowerVtables::current(),control_machine));
+                                        if(teleport_fade_enabled) {   // Task 12: Displace swap (state rising) / Foresight exit (3|4 -> 5|0): a fade, a smoother and clamp reset
+                                            static d2vr::TeleportSample prev_sample{};
+                                            const auto snap=d2vr::NativePowerObserver::latest();
+                                            const d2vr::TeleportSample cur{snap.found_player,(snap.states&d2vr::power_state_bit::swapper)!=0,snap.theeye_state};
+                                            if(const int ms=d2vr::teleport_fade_duration_ms(prev_sample,cur)) {
+                                                {std::lock_guard<std::mutex> fade_lock(teleport_fade_mutex);teleport_fade.edge(pnow,ms);}
+                                                teleport_fade_last_ms.store(pnow,std::memory_order_relaxed);teleport_epoch.fetch_add(1,std::memory_order_relaxed);
+                                                teleport_reset_request.store(true,std::memory_order_relaxed);
+                                            }
+                                            prev_sample=cur;
+                                        }}}
                                 const auto choke_owner=d2vr::native_player_state_lease(control_reader,image_base,control_machine);
                                 const bool controls_focus=input.active && game_xr->state==XR_SESSION_STATE_FOCUSED;
                                 auto& manual_equip=d2vr::NativeManualEquipRuntime::process_owner();
@@ -17692,6 +17715,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                 }
                                 // Issue #6: the power hand's trigger pulled with an open hand is an aim; its grip closing cancels it (StopAim, no cast).
+                                // Task 14 (Semblance): while the choke player state is active (observer states bit 0; DOTO and D2 state 41) the power hand's trigger
+                                // reaches the game even as a fist, which is how Semblance takes the choked guard's face. In D2 a power cast during a choke does what the
+                                // flat game does. Independent of the issue #6 latch below.
+                                const bool choke_power_hand=logic==2 && left_power_item.load(std::memory_order_relaxed) && (d2vr::NativePowerObserver::latest().states&d2vr::power_state_bit::choke)!=0;
                                 const auto power_latch=power_cancel_latch.update(raw_trigger(rh),raw_grip(rh),
                                     logic==2 && native_power_cancel_installed && left_power_item.load(std::memory_order_relaxed) && !left_gadget && !timepiece_out());
                                 if(power_latch.cancel_edge) {d2vr::NativePowerCancel::request(GetTickCount64());++power_grip_cancels;game_xr->pulse(rh,.35f,.04f);}
@@ -17728,7 +17755,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                     // Both hands thrown up above the head = native A (jump), held while they stay up (mantle at a ledge).
                                     {static bool jump_was{};if(gesture.jump && !jump_was) ++gesture_jumps;jump_was=gesture.jump;if(gesture.jump) input.a=true;}
-                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget && !timepiece_out() && !left_forearm_gun.load() && !power_latch.exempt_fist) input.left_trigger=0; if(power_latch.exempt_fist) ++power_aim_exempt_frames;if(power_latch.suppress_trigger) input.left_trigger=0; // issue #6: a held power aim keeps LT through the grip; the grip cancels it (released until the trigger is let go) // v145741: not the forearm Voltaic Gun (its fire chord IS grip + trigger; lab8: 280 chord frames, no shot). a fist never fires; a gripped gun or gadget does; the Timepiece's trigger is its time shift (v1254)
+                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget && !timepiece_out() && !left_forearm_gun.load() && !power_latch.exempt_fist && !choke_power_hand) input.left_trigger=0; if(power_latch.exempt_fist) ++power_aim_exempt_frames;if(choke_power_hand && raw_grip(rh)>.55f) ++choke_power_trigger_frames;if(power_latch.suppress_trigger) input.left_trigger=0; // issue #6: a held power aim keeps LT through the grip; the grip cancels it (released until the trigger is let go) // v145741: not the forearm Voltaic Gun (its fire chord IS grip + trigger; lab8: 280 chord frames, no shot). a fist never fires; a gripped gun or gadget does; the Timepiece's trigger is its time shift (v1254)
                                     if(GetTickCount64()<gesture_cast_until) input.left_trigger=1;
                                     if(gesture_release_until) {if(raw_trigger(rh)<.3f) gesture_release_until=0;else input.left_trigger=0;} // yoink: release the aimed power, held until the trigger is let go
                                 }
@@ -19222,6 +19249,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             catch(const std::exception& error) {note_recoverable((std::string("Hand-aimed shots disabled: ")+error.what()).c_str());}
         }
         power_grip_cancel_enabled=!fs::exists(root/L"build"/L"no-power-grip-cancel");
+        teleport_fade_enabled=!fs::exists(root/L"build"/L"no-teleport-fade");d2vr::GameXr::fade_enabled=teleport_fade_enabled;   // Task 12
         reticle_policy_enabled=!fs::exists(root/L"build"/L"no-sword-hand-reticle");   // Task 8: the sword hand blocks its gun's crosshair; knob = the old crosshairs
         if(power_grip_cancel_enabled) {   // issue #6: grip = cancel of a held power aim (StopAim before the UsePower release handler)
             try {

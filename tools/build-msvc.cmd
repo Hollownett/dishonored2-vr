@@ -247,6 +247,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\hand_reticle_policy
 if errorlevel 1 goto build_failed
 build\hand_reticle_policy_check.exe
 if errorlevel 1 goto build_failed
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\teleport_fade_check.cpp /Fo:build\teleport_fade_check.obj /Fe:build\teleport_fade_check.exe
+if errorlevel 1 goto build_failed
+build\teleport_fade_check.exe
+if errorlevel 1 goto build_failed
 build\power_cancel_check.exe
 if errorlevel 1 goto build_failed
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /I. tests\native_power_observer_check.cpp /Fo:build\native_power_observer_check.obj /Fe:build\native_power_observer_check.exe

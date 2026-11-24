@@ -463,6 +463,14 @@
    "label": "Skip the game intro movies",
    "help": "While the game starts, the launcher taps a key so the logo movies are skipped and you reach the title menu sooner. Applies to the next Launch VR. Untested on a headset: if the intro still plays, leave it off.",
    "default": true
+  },
+  {
+   "id": "teleport-fade",
+   "file": "no-teleport-fade",
+   "kind": "disable",
+   "label": "Fade on power teleports",
+   "help": "A short fade when Displace swaps you or Foresight returns you to your body.",
+   "default": true
   }
  ]
 }

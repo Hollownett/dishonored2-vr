@@ -148,7 +148,7 @@ private:
     // Locomotion comfort vignette: a head-locked quad showing a black ring texture, created by prepare_overlays between frames.
     static constexpr unsigned vignette_texture_size=96; // not a multiple of 64: the wrist test tells wrist canvases apart by width
     XrSwapchain vignette_chain_{};std::vector<XrSwapchainImageD3D11KHR> vignette_images_;std::vector<bool> vignette_filled_;
-    std::vector<std::uint8_t> vignette_ring_,vignette_baked_;
+    std::vector<std::uint8_t> vignette_ring_,vignette_baked_,vignette_solid_pixels_;bool vignette_solid_{};std::uint64_t vignette_mode_gen_{};
     XrSpace view_space_{}; // unused: the VIEW-space quad was rejected by SteamVR (POSE_INVALID); the ring is rebuilt from the head pose in LOCAL space
     bool color_scale_supported_{}; // XR_KHR_composition_layer_color_scale_bias enabled on the instance
     // v1105 probe (read-only): the runtime's extension list and, with XR_KHR_visibility_mask, each eye's hidden area, logged once to
@@ -1656,7 +1656,7 @@ private:
         return layer;
     }
     void ensure_vignette_chain() {
-        if(!vignette_enabled || vignette_chain_) return;
+        if((!vignette_enabled && !fade_enabled) || vignette_chain_) return; // the teleport fade rides the same quad
         constexpr unsigned size=vignette_texture_size;
         XrSwapchainCreateInfo info{};info.type=XR_TYPE_SWAPCHAIN_CREATE_INFO;
         info.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
@@ -1674,13 +1674,23 @@ private:
     // With XR_KHR_composition_layer_color_scale_bias the opacity is the layer's alpha scale over a texture that never changes.
     // Without it the opacity is baked into the texture alpha, at most 10 times a second (a cheap alpha ramp, no per-frame work).
     std::optional<XrCompositionLayerQuad> vignette_layer() {
-        const float wanted=vignette_opacity.load(std::memory_order_relaxed);
-        if(!vignette_enabled || !vignette_chain_ || !std::isfinite(wanted) || wanted<.01f) return {};
+        // Teleport fade (Displace swap, Foresight exit): the same quad, with a solid black texture whose alpha is the fade, 8 m wide so it
+        // covers the whole eye FOV; no work while the fade is 0. It wins over the ring while it runs.
+        const float fade=fade_enabled?fade_alpha.load(std::memory_order_relaxed):0.f;
+        const bool solid=std::isfinite(fade) && fade>=.01f;
+        const float wanted=solid?std::min(fade,1.f):vignette_enabled?vignette_opacity.load(std::memory_order_relaxed):0.f;
+        if(!vignette_chain_ || !std::isfinite(wanted) || wanted<.01f) return {};
         if(vignette_runtime_off_ || !views_valid_) return {};
         const float opacity=std::min(wanted,1.f);
         constexpr unsigned size=vignette_texture_size;
+        if(solid!=vignette_solid_) {vignette_solid_=solid;++vignette_mode_gen_;vignette_filled_.assign(vignette_filled_.size(),false);vignette_baked_.clear();}
         const std::uint8_t* upload=vignette_ring_.data();
-        if(!color_scale_supported_) {
+        if(solid) {
+            vignette_solid_pixels_.assign(static_cast<std::size_t>(size)*size*4,0);
+            const auto a=static_cast<std::uint8_t>(std::lround(opacity*255.f));
+            for(std::size_t i=3;i<vignette_solid_pixels_.size();i+=4) vignette_solid_pixels_[i]=a;
+            upload=vignette_solid_pixels_.data();++vignette_bakes;++fade_layers;
+        } else if(!color_scale_supported_) {
             const auto now=GetTickCount64();
             if(vignette_baked_.empty() || (now-vignette_bake_tick_>=50 && std::fabs(opacity-vignette_baked_opacity_)>=1.f/255)) {
                 vignette_baked_=vignette_ring_;
@@ -1690,7 +1700,7 @@ private:
             upload=vignette_baked_.data();
         }
         OverlayKey overlay_key;
-        if(overlay_needs_image(OverlayKind::vignette,vignette_chain_,vignette_overlay_content(color_scale_supported_,vignette_bakes),0,overlay_key)) {
+        if(overlay_needs_image(OverlayKind::vignette,vignette_chain_,overlay_content({vignette_overlay_content(color_scale_supported_ && !solid,vignette_bakes),vignette_mode_gen_}),0,overlay_key)) {
         XrSwapchainImageAcquireInfo acquire{};acquire.type=XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;uint32_t index{};
         checked(xrAcquireSwapchainImage(vignette_chain_,&acquire,&index),"Acquire comfort vignette");
         XrSwapchainImageWaitInfo wait{};wait.type=XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;wait.timeout=1'000'000'000;
@@ -1698,14 +1708,14 @@ private:
         if(ready==XR_TIMEOUT_EXPIRED) throw std::runtime_error("Comfort vignette wait timed out");
         XrSwapchainImageReleaseInfo release{};release.type=XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
         try {
-            if(!color_scale_supported_ || !vignette_filled_.at(index)) { // scaled layer: each runtime image is filled once
-                context_->UpdateSubresource(vignette_images_.at(index).texture,0,nullptr,upload,size*4,0);vignette_filled_[index]=true;
+            if(solid || !color_scale_supported_ || !vignette_filled_.at(index)) { // scaled layer: each runtime image is filled once
+                context_->UpdateSubresource(vignette_images_.at(index).texture,0,nullptr,upload,size*4,0);vignette_filled_[index]=!solid;
             }
         } catch(...) {xrReleaseSwapchainImage(vignette_chain_,&release);throw;}
         checked(xrReleaseSwapchainImage(vignette_chain_,&release),"Release comfort vignette");
         overlay_rendered(OverlayKind::vignette,overlay_key);
         }
-        constexpr float distance=1.f,extent=3.f; // 3 m square at 1 m: +-56 degrees; the clear centre (radius .55) is +-39 degrees
+        const float distance=1.f,extent=solid?8.f:3.f; // 3 m square at 1 m: +-56 degrees; the clear centre (radius .55) is +-39 degrees
         XrCompositionLayerQuad layer{};layer.type=XR_TYPE_COMPOSITION_LAYER_QUAD;
         layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT|XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
         {   // LOCAL space like every other quad we submit (SteamVR/wineopenxr rejected the VIEW-space quad with POSE_INVALID):
@@ -1718,7 +1728,7 @@ private:
             layer.pose.orientation={static_cast<float>(facing.x),static_cast<float>(facing.y),static_cast<float>(facing.z),static_cast<float>(facing.w)};
             layer.pose.position={static_cast<float>(centre.x),static_cast<float>(centre.y),static_cast<float>(centre.z)};
         }
-        if(color_scale_supported_) {
+        if(color_scale_supported_ && !solid) {
             vignette_scale_.next=nullptr;vignette_scale_.colorScale={1.f,1.f,1.f,opacity};vignette_scale_.colorBias={0.f,0.f,0.f,0.f};
             layer.next=&vignette_scale_;
         }
@@ -2035,6 +2045,8 @@ public:
     UINT64 hint_layers{};
     // Comfort vignette: the opacity (0..1) is set by the render thread each frame; knob `no-comfort-vignette` clears the enable flag
     // before the session starts, so no chain, space or extension is ever made.
+    // Teleport fade: alpha (0..1) set by the render thread each frame; `fade_enabled` is class-wide like vignette_enabled (build/no-teleport-fade)
+    std::atomic<float> fade_alpha{0};static inline bool fade_enabled=false;UINT64 fade_layers{};
     std::atomic<float> vignette_opacity{0};static inline bool vignette_enabled=true,vignette_color_scale_requested=false; UINT64 vignette_layers{},vignette_bakes{}; // vignette_enabled is class-wide: set before the first GameXr exists (the instance extensions and VIEW space follow it)
     bool vignette_color_scale() const noexcept {return color_scale_supported_;}
     std::array<UINT64,4> layer_pose_repaired{},layer_pose_dropped{};UINT64 layer_pose_no_submit{};

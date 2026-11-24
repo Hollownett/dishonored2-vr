@@ -49,6 +49,7 @@ inline constexpr std::uintptr_t voltaic_comp_vtable = 0x1c45768, voltaic_decl_vt
 // Billie's own power components (read-only observer, native_power_observer.hpp) and the player-state ids it records (R2/R4 research;
 // DOTO ids >= 74 are +1 vs D2). 0xffffffff = no such state in this game.
 inline constexpr std::uintptr_t power_swapper_vtable = 0x1c44a18, power_theeye_vtable = 0x1c451a8, power_mimic_vtable = 0x1c44518;
+inline constexpr std::uintptr_t hook_mine_equipment_vtable = 0x1c43928;   // arkCpntHookMineEquipment (R4 P2, RTTI)
 inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_change_weapon = 73, state_swapper = 93, state_cancel_void_strike = 94,
     state_mimicking = 96, state_use_mimic = 102, state_possession = 0xffffffffu;
 // v145741 (live, lab9: the inventory's GaussGun record 0x40138 -> its component's +0x10 owner): the Voltaic Gun's entity is a plain
@@ -86,6 +87,7 @@ inline constexpr bool ranged_player_weapon_is_voltaic = false;   // the pistol a
 inline constexpr bool bind_any_arm_joint = false;   // D2: hand attachment 59 (and a forearm helper) only, as since v1319
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0, voltaic_decl_vtable = 0;
 inline constexpr std::uintptr_t power_swapper_vtable = 0, power_theeye_vtable = 0, power_mimic_vtable = 0;
+inline constexpr std::uintptr_t hook_mine_equipment_vtable = 0;
 inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_change_weapon = 0xffffffffu, state_swapper = 0xffffffffu,
     state_cancel_void_strike = 0xffffffffu, state_mimicking = 0xffffffffu, state_use_mimic = 0xffffffffu, state_possession = 26;
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0;
