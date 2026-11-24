@@ -43,6 +43,11 @@ namespace d2vr {
 // built as the per-session fallback. NGX features are created and evaluated on the immediate context only
 // (DlssEyeUpscaler), isolated from the game's pipeline state by D3D11TemporalOwner, which also retires each
 // generation's features only after an EVENT query proves its GPU work complete.
+namespace detail {
+struct FsrTaaMotionProbe {std::wstring stem;std::string json;Microsoft::WRL::ComPtr<ID3D11Buffer> b1;bool colour{};Microsoft::WRL::ComPtr<ID3D11Resource> scene; // v1169: the TAA dispatch input (HDR scene colour)
+};
+} // namespace detail
+
 class FsrTaa {
 public:
     struct Config {float sharpness=.3f;float mv_x=-1,mv_y=-1;bool mv_full=false;float dlss_jitter_x=1,dlss_jitter_y=1;}; // dlss_jitter_*: multipliers on the FSR-convention jitter for DLSS only (build/dlss-jitter-sign, diagnostics)
@@ -137,8 +142,7 @@ public:
     // copy), optionally <stem>-colour.raw, each the render rectangle at the top left as u32 width,height,DXGI format,bytes per row then
     // tightly packed rows; <stem>-b1.bin (the dispatch's CBPerViewGlobals) and <stem>.json (`json` plus this dispatch's sizes and jitter).
     // Empty stem = nothing. The writes wait for the GPU.
-    struct MotionProbe {std::wstring stem;std::string json;Microsoft::WRL::ComPtr<ID3D11Buffer> b1;bool colour{};Microsoft::WRL::ComPtr<ID3D11Resource> scene; // v1169: the TAA dispatch input (HDR scene colour)
-    };
+    using MotionProbe=detail::FsrTaaMotionProbe; // hoisted: clang-cl needs its default member initializers before FsrTaa completes (probe_{}, default arg)
 private:
     template<class T> struct Ref {
         T* p{};~Ref() {if(p) p->Release();}

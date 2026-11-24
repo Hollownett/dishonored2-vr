@@ -1777,7 +1777,7 @@ private:
     // The last measured grip per kind (other, pistol, crossbow, sword): it outlives the native item (v762, headset v761: a pistol copy beside
     // the native crossbow lost the pistol's measurement and sat on the constant, muzzle up), and serves the same kind's other defs (guard weapons).
     struct KindOffset {held_copy::Pose offset{};unsigned side{};bool have{};};
-    inline static std::array<KindOffset,4> kind_offset_{};
+    static std::array<KindOffset,4> kind_offset_;
     // The grip offset of `def` for a copy at `side`: from a native weapon of the same def (measured here, or by the mirror), mirrored across the hand when it
     // was measured on the other one; else the per-kind constant. true = it came from a native twin.
     static bool grip_offset(const char* def,unsigned side,held_copy::Pose& offset,bool& mirrored) {
@@ -1908,7 +1908,7 @@ private:
         std::array<std::array<std::uintptr_t,2>,max_upgrades> att{};std::array<std::array<std::uint32_t,2>,max_upgrades> att_id{};
         std::array<std::array<std::uintptr_t,5>,max_upgrades> rec{};   // v1094: the copy's own upgrade_t array (m_item = the real item), what 0x61a650 walks
         std::uint64_t shot_seen{},reload_seen{};int side{-1};};
-    inline static std::array<CopyUpgrades,10> ups_{};inline static std::uint64_t ups_looked_{};
+    static std::array<CopyUpgrades,10> ups_;inline static std::uint64_t ups_looked_{};
     inline static std::atomic<std::uint64_t> upgrade_parts{},upgrade_faults{},upgrade_skips{},upgrade_rebinds{};
     inline static std::atomic<std::uint64_t> upgrade_rollbacks{};inline static std::array<std::uintptr_t,8> upgrade_failed_{};inline static unsigned upgrade_failed_next_{};   // v1145
 public:
@@ -1940,7 +1940,7 @@ private:
     // +0x30c) in the weapon's model frame (model+0x1860, the frame a copy is placed with), cached per upgrade decl and part.
     // The player's weapon may clear m_upgrades while it is put away or dropped: the last non-empty list of each kind is kept and used then.
     struct PartPlace {std::uintptr_t decl{};unsigned part{};held_copy::Pose local{};};
-    inline static std::array<PartPlace,32> places_{};inline static std::array<std::array<std::uintptr_t,max_upgrades>,4> last_items_{};inline static std::array<unsigned,4> last_n_{};
+    static std::array<PartPlace,32> places_;static std::array<std::array<std::uintptr_t,max_upgrades>,4> last_items_;inline static std::array<unsigned,4> last_n_{};
     static const PartPlace* place_of(std::uintptr_t decl,unsigned part) {
         for(const auto& p:places_) if(p.decl==decl && p.part==part) return &p;
         return nullptr;
@@ -2032,9 +2032,9 @@ private:
     // weapon and bound to the decl's bolt tag, kept at comp+0x160; the copy has no animation component, so the copy's bolt is bound with no tag
     // at the place the player's bolt has on the player's crossbow (measured live, kept).
     struct CopyBolt {std::uintptr_t copy{},bolt{},def{};std::uint32_t copy_id{},bolt_id{};};
-    struct RealSeen {std::uintptr_t comp{};std::uint64_t shot{},reload{},dry{};};inline static std::array<RealSeen,2> real_seen_{};
+    struct RealSeen {std::uintptr_t comp{};std::uint64_t shot{},reload{},dry{};};static std::array<RealSeen,2> real_seen_;
     static void stand_in_type(std::uintptr_t base,std::uintptr_t comp,int type) {if(type>=0 && !play_upgrades(base,reinterpret_cast<void*>(comp),type)) ++upgrade_faults;}
-    inline static std::array<CopyBolt,2> bolts_{};inline static std::optional<held_copy::Pose> bolt_place_{};
+    static std::array<CopyBolt,2> bolts_;inline static std::optional<held_copy::Pose> bolt_place_{};
     inline static std::atomic<std::uint64_t> upgrade_anims{},copy_bolts{};
     template<class Read> static std::optional<held_copy::Pose> weapon_frame(std::uintptr_t base,Read& read,std::uintptr_t weapon) {
         const auto model=weapon?rig::value<std::uintptr_t>(read,weapon+0xf0):std::nullopt;std::array<float,12> mf{};
@@ -2116,14 +2116,14 @@ private:
     struct SceneFake {   // fake fire state, its player, the player's inventory and the slot-1 record (sizes generous, all zero but the links)
         std::array<std::uintptr_t,0x80> state{},player{};std::array<std::uintptr_t,0x20> equip{};std::array<std::uintptr_t,4> rec{};
         std::array<std::uint32_t,0x100> body{};};   // v1117: the fake player's body (+0x300): +0x370 = the PlayerLeftArm actor's entity id (flag 2)
-    struct ArmActor {std::uintptr_t ent{};std::uint32_t id{};std::uint64_t born{};};inline static std::array<ArmActor,2> arm_actors_{};
+    struct ArmActor {std::uintptr_t ent{};std::uint32_t id{};std::uint64_t born{};};static std::array<ArmActor,2> arm_actors_;
     inline static std::uint64_t natives_noted_{};inline static std::atomic<int> arm_knob_{-1};inline static std::atomic<std::uint64_t> arm_spawned{},arm_bound{},arm_failed{},arm_rehides{},scene_dry{};
     struct Marks {int mag{-1},bolt{-1};unsigned hidden{};};
     struct SceneMarks {Marks native,copy;int d11c{-1};};
     struct SceneNode {int count{-1};std::uint32_t owner{};int active{-1};};
     struct SceneDiag {std::uint32_t prev{};int fin{-2},state{-1},halt{-2};SceneNode node{};};
-    inline static std::array<CopyScene,2> scenes_{};inline static std::array<SceneAfter,2> scene_after_{},scene_probe_{};
-    inline static std::array<SceneFake,2> scene_fakes_{};inline static std::array<std::uintptr_t,64> scene_vt_{};inline static std::uintptr_t scene_base_{};
+    static std::array<CopyScene,2> scenes_;static std::array<SceneAfter,2> scene_after_,scene_probe_;
+    static std::array<SceneFake,2> scene_fakes_;inline static std::array<std::uintptr_t,64> scene_vt_{};inline static std::uintptr_t scene_base_{};
     inline static std::array<int,2> scene_cond_src_{};inline static std::array<std::uint32_t,2> scene_cond_arg_{};inline static unsigned scene_rows_{};
     inline static std::atomic<int> scene_knob_{-1},scene_pin_{-1};   // -1 not read yet; knob 1 = build/no-copy-scenes; pin 1 = verified
     static constexpr std::array<std::uintptr_t,9> scene_pin_rvas{0x854be0,0x7d6040,0x7d9270,0x7d8fe0,0x7d63f0,0x7d9590,0x63a7c0,0x63bd40,0x998b0};   // v1117: + the out-of-ammo getter
@@ -2376,7 +2376,7 @@ private:
         {0xcb,0x44f470,0x44e451,0x44e469},{0xcc,0x44f4b0,0x44e484,0x44e49c},{0xcd,0x44f4c0,0x44e4b7,0x44e4cf},{0xf2,0x44f3b0,0x44e4ea,0x44e502}}};
     static constexpr std::array<EventPair,3> crossbow_pairs{{{0xc8,0x62bfd0,0x62bc72,0x62bc8d},{0xc9,0x62bfe0,0x62bcaa,0x62bcc5},{0xcc,0x44f4b0,0x62bce2,0x62bcfd}}};
     struct CopyEvents {std::uintptr_t comp{},game{};std::uint32_t id{};bool crossbow{};unsigned added{};};
-    inline static std::array<CopyEvents,2> copy_events_{};inline static std::atomic<int> events_pin_{-1};
+    static std::array<CopyEvents,2> copy_events_;inline static std::atomic<int> events_pin_{-1};
     inline static std::atomic<std::uint64_t> event_adds{},event_removes{},event_skips{},event_faults{};
     inline static std::array<std::atomic<int>,6> handler_census_{{{-1},{-1},{-1},{-1},{-1},{-1}}};   // [copy0 200, copy0 169, copy1 200, copy1 169, native 200, native 169]
     template<class Read> static bool events_pinned(std::uintptr_t base,Read& read) {
@@ -2449,7 +2449,7 @@ private:
     // holster's Suspend (Resume leaves a running component as it is; the handle goes through the engine's 0x3da910, so a removed copy is
     // never touched). build/no-copy-anim turns it off (read once).
     struct CopyAnim {std::array<unsigned char,16> handle{};std::uintptr_t comp{},game{};};
-    inline static std::array<CopyAnim,2> copy_anim_{};inline static std::atomic<int> anim_pin_{-1},anim_knob_{-1};
+    static std::array<CopyAnim,2> copy_anim_;inline static std::atomic<int> anim_pin_{-1},anim_knob_{-1};
     inline static std::array<std::atomic<int>,2> anim_seen_{{{-1},{-1}}};   // the hand copy's animation component: state*100 + suspend count (0 = running), -1 none
     inline static std::atomic<std::uint64_t> anim_resumes{},anim_suspends{},anim_faults{};
     static bool anim_on() {
@@ -2663,7 +2663,7 @@ private:
     // instead (0x875e80, no tag, zero offset, identity: joint index -1) to a hidden anchor of its own (the kind's *_midnight.def, spawned raw)
     // that teleport() moves wherever the copy is placed; re-bound whenever its master is not the anchor. An anchor goes with its copy.
     struct Anchor {std::uintptr_t copy{},anchor{};std::uint32_t copy_id{},anchor_id{};};
-    inline static std::array<Anchor,16> anchors_{};
+    static std::array<Anchor,16> anchors_;
     struct ShownRef {std::uintptr_t ent;std::uint32_t id;held_copy::Kind kind;};
     template<class Read> static void service_anchors(std::uintptr_t base,Read& read,const void* shown_v,unsigned ns) {
         struct S {std::uintptr_t ent;std::uint32_t id;held_copy::Kind kind;};const auto* shown=static_cast<const S*>(shown_v);
@@ -2945,6 +2945,20 @@ private:
         std::lock_guard<std::mutex> l(m_);published_=c;
     }
 };
+inline std::array<NativeWeaponHands::KindOffset,4> NativeWeaponHands::kind_offset_{};
+inline std::array<NativeWeaponHands::CopyUpgrades,10> NativeWeaponHands::ups_{};
+inline std::array<NativeWeaponHands::PartPlace,32> NativeWeaponHands::places_{};
+inline std::array<std::array<std::uintptr_t,NativeWeaponHands::max_upgrades>,4> NativeWeaponHands::last_items_{};
+inline std::array<NativeWeaponHands::RealSeen,2> NativeWeaponHands::real_seen_{};
+inline std::array<NativeWeaponHands::CopyBolt,2> NativeWeaponHands::bolts_{};
+inline std::array<NativeWeaponHands::ArmActor,2> NativeWeaponHands::arm_actors_{};
+inline std::array<NativeWeaponHands::CopyScene,2> NativeWeaponHands::scenes_{};
+inline std::array<NativeWeaponHands::SceneAfter,2> NativeWeaponHands::scene_after_{};
+inline std::array<NativeWeaponHands::SceneAfter,2> NativeWeaponHands::scene_probe_{};
+inline std::array<NativeWeaponHands::SceneFake,2> NativeWeaponHands::scene_fakes_{};
+inline std::array<NativeWeaponHands::CopyEvents,2> NativeWeaponHands::copy_events_{};
+inline std::array<NativeWeaponHands::CopyAnim,2> NativeWeaponHands::copy_anim_{};
+inline std::array<NativeWeaponHands::Anchor,16> NativeWeaponHands::anchors_{};
 inline NativeWeaponHands::Copy NativeWeaponHands::published_{};
 inline NativeWeaponHands::PropFlight NativeWeaponHands::prop_{};
 inline NativeWeaponHands::Hip NativeWeaponHands::hip_req_{};

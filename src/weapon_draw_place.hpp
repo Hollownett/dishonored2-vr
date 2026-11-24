@@ -477,11 +477,13 @@ private:
         for(auto& k:known_[hand]) {if(k.identity==s.identity && k.source==s.source && k.space==s.space) {slot=&k;break;}if(k.used<slot->used) slot=&k;}
         *slot=Known{s.identity,s.source,s.space,s.g,++tick_};
     }
-    inline static std::array<State,2> states_{};
-    inline static std::array<std::array<Known,8>,2> known_{};inline static std::uint64_t tick_{};
+    static std::array<State,2> states_;
+    static std::array<std::array<Known,8>,2> known_;inline static std::uint64_t tick_{};
     inline static std::array<std::atomic<std::uint64_t>,2> recalls_{},mismatches_{};
     inline static std::mutex mutex_;
 };
+inline std::array<Binder::State,2> Binder::states_{};
+inline std::array<std::array<Binder::Known,8>,2> Binder::known_{};
 
 // The known-writer log: the writers state the exact world hand pose they composed/moved the item from. The binder uses the newest
 // applicable note only to learn/refresh G; it is not consulted for a frame that already has G.
@@ -603,11 +605,12 @@ public:
 private:
     struct Slot {unsigned total{},next{};std::array<Write,ring> ring{};};
     inline static std::mutex mutex_{};
-    inline static std::array<Slot,2> slots_{};
+    static std::array<Slot,2> slots_;
     inline static std::atomic<std::uint64_t> serial_{};
     inline static std::atomic<std::uint64_t> dropped_{};
     inline static std::atomic<std::uint64_t> generation_{1};
 };
+inline std::array<WriteLog::Slot,2> WriteLog::slots_{};
 // v1283 (plan A3): why a hand's G is or is not learned, per physical hand: renders with no candidate note at all (note_none), with candidates but
 // none drawn-like (note_far: the newest note's world residual, and the same carried by its arm model / by the player's rig, mm and deg), notes
 // taken only after the arm carry (carried, v1284), two disagreeing notes in a row, recalled and learned G (Binder); none/far split by the player's
@@ -638,8 +641,9 @@ private:
     using Hist=std::array<std::atomic<std::uint64_t>,bins>;
     struct Hand {std::array<std::atomic<std::uint64_t>,3> none_{},far_{};std::atomic<std::uint64_t> carried{};Hist raw_mm{},raw_deg{},arm_mm{},arm_deg{},rig_mm{};};
     static void add(Hist& h,double v,const double* edge) noexcept {if(!(v>=0) || !std::isfinite(v)) return;unsigned i=0;while(i+1<bins && !(v<=edge[i])) ++i;h[i].fetch_add(1,std::memory_order_relaxed);}
-    inline static std::array<Hand,2> h_{};
+    static std::array<Hand,2> h_;
 };
+inline std::array<BindWhy::Hand,2> BindWhy::h_{};
 
 // The two views' view-projections (index = the mod's eye 0/1) of the render, and per side the views of that side's previous published
 // render. The previous drawn hand is the previous publish's bound frame B_prev (the same G), so prev rows are VP_prev * B_prev * inv(F) * M.
@@ -920,10 +924,10 @@ private:
         return l;
     }
     struct RenderL {std::uint32_t frame{};unsigned n{};std::array<unsigned,16> ref{};std::array<Mat,16> l{};};
-    inline static std::array<RenderL,2> render_l_{};
+    static std::array<RenderL,2> render_l_;
     inline static std::uint64_t settle_seq_{};
     struct Placed {unsigned side{},ref{};Mat l{},vp{};std::array<float,16> out{};};
-    inline static std::array<Placed,32> placed_{};inline static unsigned placed_n_{};inline static std::uint32_t placed_frame_{};inline static bool placed_spread_{};
+    static std::array<Placed,32> placed_;inline static unsigned placed_n_{};inline static std::uint32_t placed_frame_{};inline static bool placed_spread_{};
     inline static std::uint64_t pass_pairs_{},pass_spread_renders_{};
     // v1239: one object's model (the same draw in another eye or pass) vs another object's
     static bool same_object(const Mat& a,const Mat& b) noexcept {return distance(a,b)<=.001 && frame_angle(a,b)<=.01;}
@@ -944,7 +948,7 @@ private:
     }
     struct Other {std::uint64_t key{};std::uint32_t frame{};Mat m{};};   // frame = render + 1 (0 = empty)
     static constexpr unsigned others_n=24;
-    inline static std::array<std::array<Other,others_n>,2> others_{};
+    static std::array<std::array<Other,others_n>,2> others_;
     static void remember(unsigned side,std::uint64_t key,std::uint32_t frame,const Mat& m) noexcept {
         Other* slot=&others_[side][0];
         for(auto& o:others_[side]) {
@@ -965,7 +969,7 @@ private:
     // v1362: only between holds on the same publisher path (a cluster's ref names a child of the hold's kids list, whose make-up the path decides).
     static constexpr std::uint64_t keep_folds=540;   // two folds a render: ~3 s at 90 Hz
     struct Kept {std::uintptr_t id{};std::uint64_t at{};unsigned path{};std::array<Cluster,clusters> c{};};
-    inline static std::array<Kept,2> kept_{};inline static std::uint64_t folds_{},kept_takes_{};inline static std::array<unsigned,2> hold_path_{};
+    static std::array<Kept,2> kept_;inline static std::uint64_t folds_{},kept_takes_{};inline static std::array<unsigned,2> hold_path_{};
     static void keep(unsigned side) noexcept {
         Kept* k=&kept_[0];
         for(auto& e:kept_) {if(e.id==id_[side]) {k=&e;break;}if(e.at<k->at) k=&e;}
@@ -979,7 +983,7 @@ private:
         side_[side]=*from;for(auto& c:side_[side]) c.pending_frame=0;++kept_takes_;
     }
     inline static std::mutex mutex_;
-    inline static std::array<std::array<Cluster,clusters>,2> side_{};
+    static std::array<std::array<Cluster,clusters>,2> side_;
     inline static std::array<std::uintptr_t,2> id_{};
     inline static std::array<std::atomic<unsigned>,2> path_{};
     inline static std::array<std::array<std::uint64_t,2>,paths> step_seen_{};
@@ -989,6 +993,11 @@ private:
     inline static std::array<std::uint64_t,bins> dev_{},step_{};
     inline static std::uint64_t dev_max_um_{},dev_max_mdeg_{},step_max_um_{},step_max_mdeg_{};
 };
+inline std::array<RigidLocal::RenderL,2> RigidLocal::render_l_{};
+inline std::array<RigidLocal::Placed,32> RigidLocal::placed_{};
+inline std::array<std::array<RigidLocal::Other,RigidLocal::others_n>,2> RigidLocal::others_{};
+inline std::array<RigidLocal::Kept,2> RigidLocal::kept_{};
+inline std::array<std::array<RigidLocal::Cluster,RigidLocal::clusters>,2> RigidLocal::side_{};
 
 class Place {
 public:
@@ -1882,12 +1891,12 @@ private:
     static void note_l(const Mat& f,const Mat& x,std::uint32_t frame) noexcept {Mat inv_f{};last_l_=inverse(f,inv_f)?mul(inv_f,x):Mat{};sev_frame_=frame;}
     inline static thread_local Mat last_l_{};inline static thread_local std::uint32_t sev_frame_{};
     struct SevDraw {std::uint64_t key{},layout{},passes{},placed{};unsigned size{};double scale_min{1e9},scale_max{},ortho_max{};std::array<double,3> l_mm{};};
-    inline static std::mutex sev_mutex_;inline static std::array<SevDraw,8> sev_{};inline static unsigned sev_n_{};
+    inline static std::mutex sev_mutex_;static std::array<SevDraw,8> sev_;inline static unsigned sev_n_{};
     inline static std::uint32_t last_frame_l_{};inline static Mat sev_first_{};inline static std::uint64_t sev_first_key_{},sev_pairs_{},sev_apart_{};inline static double sev_spread_um_{};
     struct Staged {unsigned kind{},extras{};std::array<Mat,Side::max_extra> extra{};std::array<std::uintptr_t,Side::max_extra> extra_id{};unsigned bucket{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};bool provisional{};};   // v1258: motion bucket, source poses
-    inline static std::array<Staged,2> staged_{};
+    static std::array<Staged,2> staged_;
     struct KidK {std::uintptr_t id{};Mat k{},e{},l0{},l1{};bool ok{},have_e{},have_l{};};   // v1304 (publisher thread): a part's place on the weapon (v1317: + its two candidates last publish)
-    inline static std::array<std::array<KidK,16>,2> kidk_{};inline static std::array<std::uintptr_t,2> kid_owner_{};
+    static std::array<std::array<KidK,16>,2> kidk_;inline static std::array<std::uintptr_t,2> kid_owner_{};
     inline static std::atomic<std::uint64_t> kid_lagged_{},kid_current_{},kid_unlearned_{};inline static std::array<std::atomic<std::uint64_t>,3> kid_learn_{};   // v1317: learned [at rest, in motion lagged, in motion current]
     static constexpr double kid_learn_m=1e-4;   // v1317: a step change under 0.1 mm teaches nothing (both candidates agree to a hair)
 public:
@@ -1942,11 +1951,11 @@ public:
     static void reset_one_pose() {std::lock_guard<std::mutex> lock(cert_mutex_);cert_={};cert_prev_={};cert_pending_={};for(auto& s:src_min_um_) for(auto& v:s) v.store(0);}
 private:
     struct CertRender {bool valid{};Mat f{},b{};unsigned bucket{},kind{};std::uintptr_t id{};std::array<Mat,2> src{};unsigned nsrc{};double rig_mm{-1},rig_deg{-1};};
-    inline static std::array<CertRender,2> cert_pending_{};
+    static std::array<CertRender,2> cert_pending_;
     inline static std::array<std::array<std::atomic<std::uint64_t>,4>,2> src_min_um_{};
     struct CertPrev {bool ok{};std::uintptr_t id{};std::array<double,3> dev{};};
-    inline static std::array<CertPrev,2> cert_prev_{};
-    inline static std::mutex cert_mutex_;inline static std::array<std::array<OneCell,buckets>,kinds> cert_{};
+    static std::array<CertPrev,2> cert_prev_;
+    inline static std::mutex cert_mutex_;static std::array<std::array<OneCell,buckets>,kinds> cert_;
     // The offset of F's origin from B's in B's (normalised) axes, metres.
     static std::array<double,3> offset_in(const Mat& b,const Mat& f) noexcept {
         std::array<double,3> o{};const double d[3]={f[3]-b[3],f[7]-b[7],f[11]-b[11]};
@@ -2002,7 +2011,7 @@ private:
     inline static std::array<std::atomic<std::uint64_t>,10> refuse_deg_{},refuse_mm_{};inline static std::array<std::atomic<std::uint64_t>,4> refuse_cls_{};
     inline static std::atomic<std::uint64_t> refuse_renders_{};
     struct Refused {std::uint32_t frame{};unsigned side{},cls{};double deg{},mm{},mps{};};
-    inline static std::mutex refused_mutex_;inline static std::array<Refused,64> refused_{};inline static unsigned refused_n_{};
+    inline static std::mutex refused_mutex_;static std::array<Refused,64> refused_;inline static unsigned refused_n_{};
     static void note_refused(unsigned s,std::uint32_t frame,std::uint64_t key) noexcept {
         static constexpr double deg_edge[10]={.05,.1,.23,.5,1,2,5,10,45,1e9},mm_edge[10]={1,5,10,20,50,100,200,400,800,1e9};
         const double deg=static_cast<double>(key>>24)/1000.,mm=static_cast<double>((key>>8)&0xffffu);const unsigned cls=static_cast<unsigned>(key&3u);
@@ -2021,18 +2030,29 @@ private:
         return o;
     }
     struct Last {bool valid{},have_prev{};std::uint32_t frame{},prev_frame{};Mat model{},placed{},prev{},relative{};};
-    inline static std::array<Last,2> older_{},older2_{};
+    static std::array<Last,2> older_,older2_;
     struct Read {bool cur_ok{},prior_ok{};std::uint32_t cur_frame{};std::uintptr_t cur_id{},prior_id{};Mat cur{},prior{};
         std::uintptr_t ring_id{};unsigned ring_n{};std::array<Mat,Side::max_hist+1> ring{};std::array<double,Side::max_hist+1> ring_t{};}; // v1239: distinct reads, newest first
-    inline static std::array<Read,2> reads_{};
+    static std::array<Read,2> reads_;
     inline static std::array<Slot,slots> ring_{};
     inline static std::atomic<std::uint64_t> provisional_renders_{};   // v1284 (C2)
     inline static std::array<std::atomic<std::uint64_t>,6> own_prev_gap_{};   // v1284 (C5): one-view own previous [by eye: gap 1, 2, 3, 4+; the v1191 rule; none]
-    inline static std::array<Last,2> last_{};
+    static std::array<Last,2> last_;
     inline static std::atomic<std::uint64_t> published_{};
     inline static std::array<std::atomic<std::uint64_t>,2> published_side_{};
     inline static std::atomic<std::uint32_t> latest_frame_{};
 };
+inline std::array<Place::SevDraw,8> Place::sev_{};
+inline std::array<Place::Staged,2> Place::staged_{};
+inline std::array<std::array<Place::KidK,16>,2> Place::kidk_{};
+inline std::array<Place::CertRender,2> Place::cert_pending_{};
+inline std::array<Place::CertPrev,2> Place::cert_prev_{};
+inline std::array<std::array<Place::OneCell,Place::buckets>,Place::kinds> Place::cert_{};
+inline std::array<Place::Refused,64> Place::refused_{};
+inline std::array<Place::Last,2> Place::older_{};
+inline std::array<Place::Last,2> Place::older2_{};
+inline std::array<Place::Read,2> Place::reads_{};
+inline std::array<Place::Last,2> Place::last_{};
 // v1243 (user v1239: held props "not stable in movement", double image, still is fine; weapons fine): the decisive number for a hand-locked
 // thing. The arm's palette is the image (FullBodyDriver::begin_image, the same solve B is built from) re-expressed at the GPU skin copy in the
 // arm model's LIVE frame f (image_skin_commit), but the arm draw's cb2 carries the model frame M the engine composed for that draw, so the
@@ -2135,10 +2155,15 @@ private:
     }
     inline static std::mutex m_;
     inline static std::atomic<std::uint32_t> want_{};
-    inline static std::array<Copy,2> copy_{};
-    inline static std::array<Hand,2> hand_{};
-    inline static std::array<std::array<std::array<Cell,hand_speeds>,speeds>,kinds> cells_{};
-    inline static std::array<Hist,speeds> arm_{},slip_mm_{};
+    static std::array<Copy,2> copy_;
+    static std::array<Hand,2> hand_;
+    static std::array<std::array<std::array<Cell,hand_speeds>,speeds>,kinds> cells_;
+    static std::array<Hist,speeds> arm_,slip_mm_;
     inline static std::array<std::atomic<std::uint64_t>,3> slip_n_{};
 };
+inline std::array<HandLock::Copy,2> HandLock::copy_{};
+inline std::array<HandLock::Hand,2> HandLock::hand_{};
+inline std::array<std::array<std::array<HandLock::Cell,HandLock::hand_speeds>,HandLock::speeds>,HandLock::kinds> HandLock::cells_{};
+inline std::array<HandLock::Hist,HandLock::speeds> HandLock::arm_{};
+inline std::array<HandLock::Hist,HandLock::speeds> HandLock::slip_mm_{};
 } // namespace d2vr::weapon_draw

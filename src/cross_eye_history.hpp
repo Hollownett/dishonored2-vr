@@ -208,7 +208,7 @@ private:
     struct Buffer {std::atomic<ID3D11DeviceContext*> context{};std::vector<Event> events;};
     // renders_back histogram per (pixel shader, slot): [0] same render, [1] previous, [2] two or more back, [3] no write seen (apply_mutex_)
     struct Shaped {std::uintptr_t ps{};int pass{-1};unsigned slot{},w{},h{},format{};std::uint64_t reads{};std::array<std::uint64_t,4> back{};};
-    inline static std::array<Shaped,32> shaped_{};
+    static std::array<Shaped,32> shaped_;
     static void shaped_read(const Event& ev,std::uint64_t back) noexcept {
         Shaped* pick=nullptr;
         for(auto& h:shaped_) {if(h.reads && h.ps==ev.ps && h.slot==ev.slot) {pick=&h;break;} if(!h.reads && !pick) pick=&h;}
@@ -217,10 +217,10 @@ private:
         ++pick->reads;++pick->back[back==0?0:back==1?1:back==~0ull?3:2];
     }
     static constexpr unsigned table_size=4096,max_roles=8,context_slots=64;
-    inline static std::array<Entry,table_size> table_{};
-    inline static std::array<Role,max_roles> roles_{};inline static std::atomic<unsigned> role_count_{};
+    static std::array<Entry,table_size> table_;
+    static std::array<Role,max_roles> roles_;inline static std::atomic<unsigned> role_count_{};
     inline static std::mutex mutex_,lists_mutex_,apply_mutex_;
-    inline static std::array<Buffer,context_slots> buffers_{};
+    static std::array<Buffer,context_slots> buffers_;
     inline static std::unordered_map<ID3D11CommandList*,std::vector<Event>> lists_;
     inline static std::atomic<std::uint64_t> render_{1},frames_{},learned_{},cross_reads_{},restores_{},other_writes_{},applied_{},dropped_lists_{};
     // Events of one call: applied at once on the immediate context, else buffered for the context's command list.
@@ -345,6 +345,10 @@ private:
         ro.device=device;return true;
     }
 };
+inline std::array<CrossEyeHistory::Shaped,32> CrossEyeHistory::shaped_{};
+inline std::array<CrossEyeHistory::Entry,CrossEyeHistory::table_size> CrossEyeHistory::table_{};
+inline std::array<CrossEyeHistory::Role,CrossEyeHistory::max_roles> CrossEyeHistory::roles_{};
+inline std::array<CrossEyeHistory::Buffer,CrossEyeHistory::context_slots> CrossEyeHistory::buffers_{};
 inline void CrossEyeHistory::install(ID3D11Device* device) noexcept {
     if(!device || targets_[0]) return;
     ID3D11DeviceContext* deferred{};ID3D11DeviceContext* immediate{};

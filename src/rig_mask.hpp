@@ -194,9 +194,9 @@ public:
     // same mesh, e.g. the bolt mesh drawn with 2, 3, 7 and 10 instances): the mask replay of such a draw binds, at the VS slot of the engine's
     // direct-instancing buffer, a copy of it with every record that is not a held part zeroed (ObjectMotion::held_instance_view), so only the
     // held instances leave pixels. Thread-local for the draw in this Scope; the view is AddRef'd here and released with the Scope.
-    static void swap_instances(UINT slot,ID3D11ShaderResourceView* view) noexcept {
+    static void swap_instances(UINT slot,ID3D11ShaderResourceView* v) noexcept {
         if(tl_swap_view_) tl_swap_view_->Release();
-        tl_swap_view_=view;tl_swap_slot_=slot;if(view) {view->AddRef();instance_swaps_.fetch_add(1,std::memory_order_relaxed);}
+        tl_swap_view_=v;tl_swap_slot_=slot;if(v) {v->AddRef();instance_swaps_.fetch_add(1,std::memory_order_relaxed);}
     }
     static std::uint64_t instance_swaps() noexcept {return instance_swaps_.load(std::memory_order_relaxed);}
     // v1315: the instanced held mesh of this Scope HAS a rig target after all: per slice, a copy of its instance buffer whose held records are
@@ -217,7 +217,7 @@ public:
     // v1316 diagnostics (user v1315 session: 20 % of renders lost the rig target to rig draws ObjectMotion could not retarget, its VS without a
     // reflected layout): which draws those are - kind (0 indexed, 1 indexed instanced, 2 draw, 3 instanced), index count, instances, held
     struct NoRetarget {std::atomic<std::uint64_t> key{},n{};};
-    inline static std::array<NoRetarget,12> no_retarget_draws_{};
+    static std::array<NoRetarget,12> no_retarget_draws_;
     static void note_no_retarget(const DrawArgs& a) noexcept {
         const std::uint64_t key=(static_cast<std::uint64_t>(a.kind&3u)<<62)|(static_cast<std::uint64_t>(tl_held_?1:0)<<61)|(static_cast<std::uint64_t>(std::min<UINT>(a.instances,255u))<<32)|a.count;
         for(auto& e:no_retarget_draws_) {std::uint64_t k=e.key.load(std::memory_order_relaxed);
@@ -604,8 +604,8 @@ private:
     inline static Microsoft::WRL::ComPtr<ID3D11PixelShader> ps_target_rig_,ps_target_held_;inline static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> nearest_;
     struct Entry {std::atomic<ID3D11DepthStencilState*> key{};std::atomic<bool> used{};bool writes{};};
     static constexpr unsigned slots=1024;
-    inline static std::array<Entry,slots> table_{};inline static std::atomic<int> default_writes_{1}; // a null state is the default: depth written
-    inline static std::mutex mutex_;inline static Target target_{};
+    static std::array<Entry,slots> table_;inline static std::atomic<int> default_writes_{1}; // a null state is the default: depth written
+    inline static std::mutex mutex_;static Target target_;
     inline static std::atomic<ID3D11Resource*> scene_depth_{};   // v1327: FsrTaa's selected scene depth (identity only; FsrTaa holds it); null: not chosen yet
     // v1327: the draw bound to `c` writes the scene depth FsrTaa takes (true before FsrTaa has chosen one: the v1326 behaviour)
     static bool on_scene_depth(ID3D11DeviceContext* c) noexcept {
@@ -646,12 +646,12 @@ private:
     // v1212 forensics: the image skin per engine frame (skin_copied, under mutex_): calls / uploads / commits per model, the outcome codes seen
     // (bit = why), and the full-body rig-turn count at the frame's first upload
     struct SkinFrame {std::uint32_t frame{~0u};std::uint8_t calls[3]{},uploads[3]{},commits[3]{},why[3]{};std::uint64_t turns{};};
-    inline static std::array<SkinFrame,64> skin_log_{};
+    static std::array<SkinFrame,64> skin_log_;
     inline static unsigned dumps_wild_{},dumps_clean_{};inline static std::uint64_t dump_clean_display_{~0ull},probes_seen_{};
     inline static std::atomic<std::uint64_t> pair_rows_mismatch_{},skin_switch_{};inline static std::array<std::atomic<bool>,3> skin_vr_{},skin_held_{}; // v1213, v1214
     // v1214: per render, what its own rig pairs were made of (OR over its draws): 1 the previous render drew an engine pose (no VR pose), 2 it drew
     // the held image, 4 this render draws the held image. A wild census of that render is filed by it (guard_cause: engine pose / held / motion).
-    struct PairSrc {std::atomic<std::uint64_t> display{~0ull};std::atomic<unsigned> bits{};};inline static std::array<PairSrc,128> pair_src_{};
+    struct PairSrc {std::atomic<std::uint64_t> display{~0ull};std::atomic<unsigned> bits{};};static std::array<PairSrc,128> pair_src_;
     inline static thread_local unsigned tl_pair_src_{};
 public:
     inline static std::array<std::atomic<std::uint64_t>,3> guard_cause_{}; // v1214: wild renders [after an engine-pose render, held image involved, neither = true motion]
@@ -693,7 +693,7 @@ public:
     inline static std::wstring dump_dir; // v1212: dxgi_probe (Present thread) sets it when the probe is on; dumps are written on that thread
     inline static std::atomic<std::uint64_t> rig_turns_now{}; // v1212: dxgi_probe, each Present: full_body.rig_turns()
 private:
-    inline static std::array<Probe,32> probes_{};inline static unsigned probe_next_{};
+    static std::array<Probe,32> probes_;inline static unsigned probe_next_{};
     inline static std::array<std::atomic<std::uint64_t>,8> probe_tally_{}; // [wild*4 + pal_eq*2 + cb_eq]
     inline static std::array<std::string,120> probe_notes_{};inline static unsigned probe_notes_n_{}; // v1213: every wild display of a run (was 12)
     inline static std::atomic<std::uint64_t> races_{},no_commit_{},nested_scopes_{},probe_dropped_{},capture_refused_{},probe_prev_unknown_{};
@@ -791,14 +791,14 @@ private:
 public:
 private:
     struct Fingerprint {Microsoft::WRL::ComPtr<ID3D11Buffer> cur,oth;std::vector<std::uint8_t> cpu;bool pending{};};
-    inline static std::array<Fingerprint,3> fingerprints_{};inline static std::array<std::atomic<std::uint64_t>,4> fp_{};inline static std::atomic<std::uint64_t> fp_first_diff_{~0ull};
+    static std::array<Fingerprint,3> fingerprints_;inline static std::array<std::atomic<std::uint64_t>,4> fp_{};inline static std::atomic<std::uint64_t> fp_first_diff_{~0ull};
     inline static std::atomic<std::uint64_t> uploads_{},no_upload_{},layout_refused_{};
     struct MaskCensus {std::atomic<std::uint64_t> display{~0ull};std::array<std::atomic<std::uint32_t>,3> n{};};
-    inline static std::array<MaskCensus,128> mask_census_{};
+    static std::array<MaskCensus,128> mask_census_;
     struct Guard {ID3D11Device* device{};Microsoft::WRL::ComPtr<ID3D11VertexShader> vs;Microsoft::WRL::ComPtr<ID3D11PixelShader> ps;Microsoft::WRL::ComPtr<ID3D11BlendState> blend;
         Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth;Microsoft::WRL::ComPtr<ID3D11RasterizerState> raster;Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;ID3D11Resource* rtv_of{};bool failed{};};
-    inline static Guard guard_{};
-    inline static std::array<Ring,3> ring_{};inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};
+    static Guard guard_;
+    static std::array<Ring,3> ring_;inline static thread_local bool tl_own_{};inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_view_;inline static thread_local bool tl_held_{},tl_depth_{};
     inline static std::atomic<std::uint64_t> held_draws_{};
     // v1295: the context of a draw outside the one-view's mapped passes (Scope), and the outcome of each held mark (mark_held)
     inline static thread_local ID3D11DeviceContext* tl_unmapped_c_{};inline static thread_local bool tl_scoped_{};inline static std::array<std::atomic<std::uint64_t>,6> held_marks_{};
@@ -1185,4 +1185,14 @@ private:
         replays_.fetch_add(1,std::memory_order_relaxed);replays_frame_.fetch_add(1,std::memory_order_relaxed);
     }
 };
+inline std::array<RigMask::NoRetarget,12> RigMask::no_retarget_draws_{};
+inline std::array<RigMask::Entry,RigMask::slots> RigMask::table_{};
+inline RigMask::Target RigMask::target_{};
+inline std::array<RigMask::SkinFrame,64> RigMask::skin_log_{};
+inline std::array<RigMask::PairSrc,128> RigMask::pair_src_{};
+inline std::array<RigMask::Probe,32> RigMask::probes_{};
+inline std::array<RigMask::Fingerprint,3> RigMask::fingerprints_{};
+inline std::array<RigMask::MaskCensus,128> RigMask::mask_census_{};
+inline RigMask::Guard RigMask::guard_{};
+inline std::array<RigMask::Ring,3> RigMask::ring_{};
 } // namespace d2vr

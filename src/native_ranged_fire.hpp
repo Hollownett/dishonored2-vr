@@ -716,7 +716,7 @@ private:
 public:
     inline static std::atomic<std::uint64_t> own_shots_{},copy_ammo_sets_{},wheel_picks_{};
 private:
-    inline static std::array<unsigned,2> burst_left_{};inline static std::array<std::uint64_t,2> burst_next_{},reload_len_{};inline static std::array<Shot,2> burst_shot_{};
+    inline static std::array<unsigned,2> burst_left_{};inline static std::array<std::uint64_t,2> burst_next_{},reload_len_{};static std::array<Shot,2> burst_shot_;
     inline static std::array<bool,2> reload_noted_{true,true},burst_follow_{};inline static std::array<std::uint64_t,2> shot_serial_{},reload_serial_{};
 public:
     inline static std::atomic<std::uint64_t> ammo_swaps_{},ammo_splits_{},spreads_{},bursts_{};
@@ -842,17 +842,17 @@ private:
         }
     }
     struct Try {std::uintptr_t comp{},entry{};std::uint64_t at{};};
-    inline static std::array<Try,2> copy_try_{};inline static std::array<std::uint64_t,2> native_try_{};
+    static std::array<Try,2> copy_try_;inline static std::array<std::uint64_t,2> native_try_{};
     // v1279: each weapon instance's own ammo entry, by component (game thread). ponytail: 16 instances, least recently used replaced.
     struct OwnAmmo {std::uintptr_t comp{},entry{};std::uint64_t used{};};
-    inline static std::array<OwnAmmo,16> own_{};inline static std::uint64_t own_tick_{};
+    static std::array<OwnAmmo,16> own_;inline static std::uint64_t own_tick_{};
     inline static std::atomic<std::uint64_t> native_follows_{};inline static std::array<std::atomic<int>,3> bolts_{{-1,-1,-1}};
     inline static std::atomic<bool> forget_owners_{};   // v1284
     // v1372: per hand (game thread) the copy it showed at the last look, the native it last drew (weapon, that weapon's ammo entry, when), and
     // its last wheel choice per weapon (ammo item, when) still waiting for the copy it was made for (track_ammo, ranged_fire::fresh_copy_take).
     struct NativeSeen {int kind{-1};std::uintptr_t entry{};std::uint64_t at{};};
     struct Pick {std::uintptr_t ammo{};std::uint64_t at{};};
-    inline static std::array<std::uintptr_t,2> shown_{};inline static std::array<NativeSeen,2> native_seen_{};inline static std::array<std::array<Pick,2>,2> pick_{};
+    inline static std::array<std::uintptr_t,2> shown_{};static std::array<NativeSeen,2> native_seen_;static std::array<std::array<Pick,2>,2> pick_;
     inline static std::atomic<std::uint64_t> fresh_picks_{},fresh_carries_{};
     // v1372 status "picks": the last 8 wheel bolt choices as [hand, weapon (0 pistol, 1 crossbow), route (0 its copy, 1 the copy to come,
     // 2 the native), ammo index] - the v1381 log could not show which bolt a choice was or where it went.
@@ -1134,7 +1134,7 @@ private:
         }
         ~VoltaicConfigure() {if(!comp) return;if(old>=0) voltaic_configure(comp,old);if(old_e0>=0) voltaic_byte(comp+game_traits::voltaic_configure_from,old_e0);if(old_e1>=0) voltaic_byte(comp+game_traits::voltaic_shot_overcharged,old_e1);}
     };
-    struct NoConfigure {};
+    struct NoConfigure {void begin(std::uintptr_t,bool,bool) noexcept {}}; // clang-cl checks the discarded if constexpr branch (voltaic is not dependent)
     static bool voltaic_info(std::uintptr_t projectile_component,std::uintptr_t value) noexcept {
         __try {*reinterpret_cast<volatile std::uintptr_t*>(projectile_component+game_traits::voltaic_info_field)=value;return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
@@ -1165,4 +1165,9 @@ public:
 private:
     inline static std::atomic<bool> charge_owned_{};
 };
+inline std::array<NativeRangedFire::Shot,2> NativeRangedFire::burst_shot_{};
+inline std::array<NativeRangedFire::Try,2> NativeRangedFire::copy_try_{};
+inline std::array<NativeRangedFire::OwnAmmo,16> NativeRangedFire::own_{};
+inline std::array<NativeRangedFire::NativeSeen,2> NativeRangedFire::native_seen_{};
+inline std::array<std::array<NativeRangedFire::Pick,2>,2> NativeRangedFire::pick_{};
 } // namespace d2vr

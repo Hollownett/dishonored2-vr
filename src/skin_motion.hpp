@@ -109,7 +109,7 @@ public:
 private:
     struct Entry {std::uintptr_t model{};ID3D11Buffer* w0{};ID3D11Buffer* w1{};Microsoft::WRL::ComPtr<ID3D11Buffer> p,a,b;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
         ID3D11Device* device{};UINT bytes{};std::uint32_t last{~0u},seen{},used{};unsigned run{};};
-    inline static std::array<Entry,max_models> entries_{};inline static std::uint64_t bytes_{};inline static std::mutex mutex_;
+    static std::array<Entry,max_models> entries_;inline static std::uint64_t bytes_{};inline static std::mutex mutex_;
     inline static std::atomic<std::uint64_t> evictions_{},overflow_{},rotations_{},restarts_{},binds_{},unknown_{},not_ready_{},failures_{};
     inline static thread_local ID3D11ShaderResourceView* tl_saved_t0_{};inline static thread_local bool tl_saved_set_{};
     inline static thread_local Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tl_held_;
@@ -137,4 +137,5 @@ private:
         return pick;
     }
 };
+inline std::array<SkinMotion::Entry,SkinMotion::max_models> SkinMotion::entries_{};
 } // namespace d2vr

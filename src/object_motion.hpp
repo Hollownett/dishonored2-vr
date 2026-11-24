@@ -548,7 +548,7 @@ private:
         std::uint32_t prev_frame{};bool has_prev{},receipt{};std::uint64_t display{~0ull};}; // v1206: from the render's receipt (alternate)
     struct EyeView {std::uint32_t frame{};bool valid{};float m[4][16]{};float inv[2][4]{}; // view, view^T, VP, VP^T
         bool receipt{},has_prev{};std::uint32_t prev_frame{},phase{};std::uint64_t display{~0ull};float prev_vp[16]{},jitter[2]{};}; // v1206: alternate receipt record
-    inline static BufferViews<View> buffer_views_{}; // v1193: per b1 buffer, its last classified view
+    static BufferViews<View> buffer_views_; // v1193: per b1 buffer, its last classified view
     struct Shadow {const void* buffer{};UINT size{};float data[max_floats]{};};
     struct ContextState { // a context is used by one thread at a time: no locks
         unsigned type{}; // 0 deferred, 1 immediate: whose original methods this context takes
@@ -589,12 +589,12 @@ private:
     }
     inline static std::array<std::atomic<ID3D11DeviceContext*>,context_slots> context_keys_{};
     inline static std::array<std::atomic<ContextState*>,context_slots> context_states_{};
-    inline static std::array<Learned,learned_slots> learned_{};
-    inline static std::array<Latest,2> latest_{}; // v950: per eye (was one, the newest anywhere)
+    static std::array<Learned,learned_slots> learned_;
+    static std::array<Latest,2> latest_; // v950: per eye (was one, the newest anywhere)
     inline static std::atomic<unsigned> latest_eye_{}; // the eye classified last at the newest frame: the old fallback
     inline static std::array<std::array<std::atomic<const void*>,2>,2> taa_b1_{}; // v950: per eye, the CS b1 its native TAA binds
     inline static std::atomic<bool> b1_eye_on_{true}; // build/no-object-motion-b1-eye: the old tag
-    inline static std::array<B1Seen,8> b1_seen_{};
+    static std::array<B1Seen,8> b1_seen_;
     inline static std::atomic<std::uint32_t> newest_frame_{};
     inline static std::mutex views_mutex_;
     inline static std::array<std::atomic<std::uintptr_t>,2> eye_views_{};
@@ -604,7 +604,7 @@ private:
     inline static std::array<std::atomic<std::uint64_t>,17> oversize_kb_{}; // v1158: oversize cb2 writes by size in KB (16 = 16 KB or more)
     inline static std::atomic<std::uintptr_t> alt_view_{};inline static std::atomic<AlternateEye> alt_eye_{}; // v1151
     inline static std::array<std::atomic<std::uint64_t>,PrevMvpTable::kinds> alt_kinds_{};inline static std::atomic<std::uint64_t> alt_camera_{},alt_untagged_{},alt_rig_{},alt_rig_own_{};
-    inline static std::array<std::array<EyeView,4>,2> eye_records_{};
+    static std::array<std::array<EyeView,4>,2> eye_records_;
     inline static std::array<std::atomic<std::uint32_t>,2> newest_eye_frame_{}; // the frame of that eye's newest recorded view (lock-free for the draw hooks)
     inline static std::array<std::array<std::atomic<float>,4>,2> eye_z_{};       // that view's VP z row (0,0,0,near), for a layout without a z row
     inline static std::atomic<unsigned> vp_at_{~0u}; // float index of the VP in the per-view constants, as last matched
@@ -612,7 +612,7 @@ private:
     inline static std::array<std::array<std::atomic<std::uint32_t>,64>,2> unmatched_size_{}; // per eye: unmatched draws by cb2 float4s
     inline static thread_local std::array<std::uint64_t,counters> local_{};
     inline static thread_local unsigned local_n_{};
-    inline static thread_local std::array<Pending,4> pending_{};
+    static thread_local std::array<Pending,4> pending_;
     inline static thread_local unsigned pending_next_{};
     inline static thread_local ID3D11DeviceContext* tl_context_{};
     inline static thread_local ContextState* tl_state_{};
@@ -645,7 +645,7 @@ private:
     inline static std::array<std::atomic<std::uint64_t>,2> weapon_placed_side_{},weapon_alt_side_{};   // alt (v1072): placed from the previous read F
     inline static std::array<std::array<std::atomic<std::uint64_t>,weapon_draw::stages>,2> weapon_skip_side_{}; // per hand by rejection stage
     struct ViewsEntry {std::atomic<std::uint32_t> ready{};std::uint32_t previous0{},previous1{};weapon_draw::Views views{};std::uint64_t ver{};};   // v1366: ver = record_versions at build
-    inline static std::array<ViewsEntry,8> views_cache_{};
+    static std::array<ViewsEntry,8> views_cache_;
     inline static std::mutex views_cache_mutex_;
     inline static std::mutex probe_mutex_;
     inline static std::string probe_text_;
@@ -742,7 +742,7 @@ public:
     static std::uint64_t held_matches() noexcept {return held_matches_.load(std::memory_order_relaxed);}
 private:
     struct HeldSnap {std::array<HeldFrames,2> g{};std::array<weapon_draw::Sphere,12> sph{};unsigned nsph{};};
-    inline static weapon_draw::Snap<HeldSnap> held_{};inline static std::atomic<std::uint64_t> held_matches_{};
+    static weapon_draw::Snap<HeldSnap> held_;inline static std::atomic<std::uint64_t> held_matches_{};
     static bool held_match(const View& view,const float* cur) noexcept {return held_match(view.vp,cur);}
     static bool held_match(const float* view_vp,const float* cur) noexcept {
         weapon_draw::Mat vp{};for(int i=0;i<16;++i) vp[static_cast<std::size_t>(i)]=view_vp[i];
@@ -884,7 +884,7 @@ private:
     // per thread when a snapshot changes them (records_gen_). Each candidate carries its full View (fill_view) and its projection's x/y terms.
     struct Candidate {View view{};ProjectionXY p{};};
     inline static std::atomic<std::uint64_t> records_gen_{1};
-    inline static thread_local std::uint64_t tl_cand_gen_{};inline static thread_local std::array<Candidate,8> tl_cand_{};inline static thread_local int tl_cand_n_{};
+    inline static thread_local std::uint64_t tl_cand_gen_{};static thread_local std::array<Candidate,8> tl_cand_;inline static thread_local int tl_cand_n_{};
     static void refresh_candidates() noexcept {
         const auto gen=records_gen_.load(std::memory_order_acquire);if(gen==tl_cand_gen_) return;
         std::lock_guard<std::mutex> lock(views_mutex_);tl_cand_n_=0;
@@ -944,7 +944,7 @@ private:
     static constexpr unsigned render_ring=64;
     struct RenderRow {std::atomic<std::uint64_t> display{~0ull};std::uint32_t frame{},prev_frame{},phase{};unsigned eye{};bool reset{},has_prev{},src_known{};
         float jitter[2]{},prev_jitter[2]{},src_jitter[2]{};std::array<std::atomic<std::uint32_t>,rr_count> n{};};
-    inline static std::array<RenderRow,render_ring> render_rows_{};
+    static std::array<RenderRow,render_ring> render_rows_;
     inline static std::atomic<std::uint64_t> newest_display_{~0ull}; // uncertain draws are filed under the newest render (approximate)
     // v1207: the probe pins the renders it dumps (at its TAA dispatch the scene draws are often not processed yet): when the ring reuses a pinned
     // render's slot, its final row is kept as text (status "probed")
@@ -1017,7 +1017,7 @@ private:
     // the status when the census finds that render wild (and the same eye's render before a wild one, for a side-by-side)
     struct RigDraw {std::uint32_t model,slot,tag,kind,own,chained,foreign,vs_w,vs_h;std::uint64_t t1,slot_buffer,t0,cur,raw,used;};
     struct RigDraws {std::atomic<std::uint64_t> display{~0ull};std::atomic<unsigned> n{};std::array<RigDraw,16> d{};};
-    inline static std::array<RigDraws,render_ring> rig_draws_{};
+    static std::array<RigDraws,render_ring> rig_draws_;
     inline static std::array<std::string,8> forensics_{};inline static unsigned forensics_n_{};
     static std::uint64_t hash64(const float* m) noexcept {std::uint64_t h=0xcbf29ce484222325ull;for(int i=0;i<16;++i) {std::uint32_t w;std::memcpy(&w,m+i,4);h=(h^w)*0x100000001b3ull;}return h;}
     static void rig_record(ID3D11DeviceContext* c,std::uint64_t display,const float* cur,const float* raw,const float* used,unsigned kind,bool own,bool chained) noexcept {
@@ -1044,7 +1044,7 @@ private:
     // v1210: n[2] = MV-texture writers of another engine view (not applicable); `which` = the view's identity when first seen (2 the alternate
     // one-view, 0/1 a paired eye view, -1 another view) and its view-projection (+0x7510: row norms of the 3x3 = the projection's x/y scales)
     struct DrawView {std::atomic<std::uint64_t> key{};std::uint32_t vp_w{},vp_h{};std::uintptr_t view{},dsv{},rtv0{};float near_w{};std::array<std::atomic<std::uint64_t>,3> n{};int which{-1};float vp[16]{};bool vp_ok{};};
-    inline static std::array<DrawView,16> draw_views_{};
+    static std::array<DrawView,16> draw_views_;
     static void draw_view_note(ID3D11DeviceContext* c,unsigned certain) noexcept { // certain: 0 fallback, 1 certain, 2 another view (n/a)
         UINT nv=1;D3D11_VIEWPORT vp{};c->RSGetViewports(&nv,&vp);
         ID3D11RenderTargetView* r0{};ID3D11DepthStencilView* d{};c->OMGetRenderTargets(1,&r0,&d);
@@ -1809,7 +1809,7 @@ private:
     // drawn hand before the Unmap. Recognised by its description (cached per buffer). build/no-instance-place: off.
     inline static std::atomic<bool> instance_place{true};
     struct InstMap {ID3D11DeviceContext* c{};ID3D11Resource* r{};void* data{};UINT bytes{};};
-    inline static thread_local InstMap tl_inst_{};
+    static thread_local InstMap tl_inst_;
     inline static std::array<std::atomic<std::uintptr_t>,256> inst_seen_{};inline static std::array<std::atomic<std::uint32_t>,256> inst_bytes_{};
     inline static std::atomic<std::uint64_t> inst_maps_{},inst_records_{};inline static std::array<std::atomic<std::uint64_t>,2> inst_placed_{},inst_order_{};
     static UINT instance_buffer_bytes(ID3D11Resource* r) noexcept {
@@ -1832,7 +1832,7 @@ private:
         std::vector<std::uint8_t> data;std::vector<float> fill_rows;std::vector<std::uint8_t> side,order;std::uint32_t fill_frame{},rows_frame{};
         std::vector<weapon_draw::Mat> local,model;std::vector<std::uint8_t> local_ok;   // v1317: each held record's place on its hand at the fill, and that hand's thing
         Microsoft::WRL::ComPtr<ID3D11Buffer> draw;Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> draw_view;UINT draw_bytes{};};
-    inline static std::array<Mirror,8> mirrors_{};inline static std::mutex mirror_m_;inline static std::uint64_t mirror_use_{};
+    static std::array<Mirror,8> mirrors_;inline static std::mutex mirror_m_;inline static std::uint64_t mirror_use_{};
     inline static std::atomic<bool> instance_mirror{true};inline static std::atomic<std::uint64_t> mirror_fills_{},mirror_failures_{};
     static void fill_mirror(ID3D11DeviceContext* c,ID3D11Resource* r,const void* data,UINT bytes,const std::uint8_t* held,bool any,Map map,Unmap unmap,
                             const std::vector<std::uint8_t>& sides,const std::vector<std::uint8_t>& order,std::uint32_t frame,
@@ -2166,6 +2166,20 @@ public:
         ID3D11DeviceContext* c_;bool nested_;ContextState* s_;
     };
 };
+inline weapon_draw::Snap<ObjectMotion::HeldSnap> ObjectMotion::held_{};
+inline BufferViews<ObjectMotion::View> ObjectMotion::buffer_views_{};
+inline std::array<ObjectMotion::Learned,ObjectMotion::learned_slots> ObjectMotion::learned_{};
+inline std::array<ObjectMotion::Latest,2> ObjectMotion::latest_{};
+inline std::array<ObjectMotion::B1Seen,8> ObjectMotion::b1_seen_{};
+inline std::array<std::array<ObjectMotion::EyeView,4>,2> ObjectMotion::eye_records_{};
+inline thread_local std::array<ObjectMotion::Pending,4> ObjectMotion::pending_{};
+inline std::array<ObjectMotion::ViewsEntry,8> ObjectMotion::views_cache_{};
+inline thread_local std::array<ObjectMotion::Candidate,8> ObjectMotion::tl_cand_{};
+inline std::array<ObjectMotion::RenderRow,ObjectMotion::render_ring> ObjectMotion::render_rows_{};
+inline std::array<ObjectMotion::RigDraws,ObjectMotion::render_ring> ObjectMotion::rig_draws_{};
+inline std::array<ObjectMotion::DrawView,16> ObjectMotion::draw_views_{};
+inline thread_local ObjectMotion::InstMap ObjectMotion::tl_inst_{};
+inline std::array<ObjectMotion::Mirror,8> ObjectMotion::mirrors_{};
 // v1101 status, in arm_flicker.weapon_draw (and object-motion.json): per hand published/placed and skipped by stage, and every render pass
 // that saw a near weapon draw with how many of them were placed (per hand). "near" is the count of candidate draws, not a rejection count.
 inline std::string ObjectMotion::weapon_status_json() {

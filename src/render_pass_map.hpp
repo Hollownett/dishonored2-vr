@@ -160,9 +160,9 @@ private:
     // v1011: `records` is entry+0x18's low 24 bits, the count TLFLIGHTCULL copies (0x2f7646).
     struct LightLink {void* light{};std::uintptr_t info{};std::uint32_t records{};};
     struct SavedLightLink {void* light{};std::uintptr_t previous{};void* entry{};std::uint32_t previous_records{};};
-    inline static thread_local std::array<LightLink,shadow_share::light_capture_capacity> light_links_{};
+    static thread_local std::array<LightLink,shadow_share::light_capture_capacity> light_links_;
     inline static thread_local unsigned light_link_count_{};
-    inline static thread_local std::array<SavedLightLink,shadow_share::light_capture_capacity> saved_light_links_{};
+    static thread_local std::array<SavedLightLink,shadow_share::light_capture_capacity> saved_light_links_;
     inline static thread_local unsigned saved_light_link_count_{};
     static unsigned collect_light_links(void* item) noexcept {
         light_link_count_=0;
@@ -761,4 +761,6 @@ public:
         return out.str();
     }
 };
+inline thread_local std::array<RenderPassMap::LightLink,shadow_share::light_capture_capacity> RenderPassMap::light_links_{};
+inline thread_local std::array<RenderPassMap::SavedLightLink,shadow_share::light_capture_capacity> RenderPassMap::saved_light_links_{};
 } // namespace d2vr

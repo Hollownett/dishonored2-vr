@@ -135,8 +135,9 @@ public:
     static void clear() noexcept {std::lock_guard<std::mutex> l(m_);g_={};}
 private:
     struct Entry {Pose pose{};bool have{};};
-    inline static std::mutex m_{};inline static std::array<Entry,4> g_{};
+    inline static std::mutex m_{};static std::array<Entry,4> g_;
 };
+inline std::array<SolverGrips::Entry,4> SolverGrips::g_{};
 // The grip a copy of kind k shown at `side` takes when no native weapon of its def or kind has been measured (NativeWeaponHands::grip_offset;
 // the measurement needs 12 calm samples 20 ms apart of the native weapon riding its hand): the solver's grip of the kind (left hand, mirrored
 // for the right as a measured grip is), else the kind's constant. v1371: the constant first (v767, another hand frame) sat 25.7 mm / 16.3 deg

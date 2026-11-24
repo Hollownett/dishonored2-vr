@@ -268,7 +268,7 @@ private:
         double last_s{},rest_s{},spawn_s{},probe_s{};
         std::vector<std::uintptr_t> struck;        // v783: the guards this throw stunned (NativeWeaponHands::thrown_stun)
     };
-    inline static std::mutex m_;inline static std::vector<Request> queue_;inline static std::vector<Published> published_;inline static std::atomic<std::uint64_t> take_seq_{};inline static TakeResult take_result_{};
+    inline static std::mutex m_;inline static std::vector<Request> queue_;inline static std::vector<Published> published_;inline static std::atomic<std::uint64_t> take_seq_{};static TakeResult take_result_;
     inline static Probe probe_{};inline static std::array<Probe,2> mine_probes_{};inline static const char* last_error_=""; // stun mine, spring razor
     inline static std::vector<Tracked> tracked_;   // game thread only
     inline static std::vector<Flying> flights_;    // game thread only (flights())
@@ -563,4 +563,5 @@ private:
         std::lock_guard<std::mutex> l(m_);published_=std::move(out);
     }
 };
+inline NativeGadgetDrop::TakeResult NativeGadgetDrop::take_result_{};
 } // namespace d2vr
