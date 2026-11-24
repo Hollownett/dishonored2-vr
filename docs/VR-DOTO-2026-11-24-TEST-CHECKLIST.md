@@ -29,7 +29,7 @@ turns the change off if it feels wrong (`%LOCALAPPDATA%\DishonoredVR-DOTO\build\
 
 | # | Do | Expect | Off switch |
 |---|---|---|---|
-| 12 | Possess a creature or a person; turn your head and push the stick | The host moves where you look; the right stick turns the host | `no-possession-view-move` |
+| 12 | Possess a creature or a person; turn your head and push the stick | The host moves where you look; the right stick turns the host (host-checked only: no lab save owns Possession, please test this one first) | `no-possession-view-move` |
 
 ## Known limits (not fixed in this branch)
 
