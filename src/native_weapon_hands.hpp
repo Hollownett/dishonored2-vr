@@ -1045,7 +1045,7 @@ public:
     // forearm_native_show(entity): the control thread names the engine gun while its forearm carries it in gameplay; the game thread shows
     // it when the engine has it hidden (at most every 250 ms).
     static void forearm_native_show(std::uintptr_t entity) noexcept {fn_show_.store(entity,std::memory_order_relaxed);}
-    inline static std::atomic<std::uint64_t> forearm_native_hides{},forearm_native_shows{},forearm_native_failed{},forearm_native_forced{};
+    inline static std::atomic<std::uint64_t> forearm_native_hides{},forearm_native_shows{},forearm_native_failed{},forearm_native_forced{},forearm_native_unforced{};
     inline static std::atomic<std::uint64_t> pool_shown_hidden{},pool_show_failed{};   // v145747: copies spawned hidden, shown / Show refused
     inline static std::atomic<std::uint64_t> forearm_anchors{},forearm_rebinds{},forearm_anchor_failed{};   // v145747: forearm copy anchors spawned, binds, spawn failures
     static void mirror_hands(bool mirrored) noexcept {mirrored_.store(mirrored,std::memory_order_relaxed);}
@@ -1150,8 +1150,21 @@ private:
             }
         }
     }
-    inline static std::atomic<std::uintptr_t> fn_want_{};inline static std::atomic<std::uintptr_t> fn_show_{};inline static std::uint64_t fn_show_at_{};inline static std::uintptr_t fn_hidden_{};inline static std::uint32_t fn_hidden_id_{};
+    inline static std::atomic<std::uintptr_t> fn_want_{};inline static std::atomic<std::uintptr_t> fn_show_{};inline static std::uint64_t fn_show_at_{};inline static std::uintptr_t fn_forced_{};inline static std::uint32_t fn_forced_id_{};inline static std::uintptr_t fn_hidden_{};inline static std::uint32_t fn_hidden_id_{};
     inline static std::uint64_t fn_failed_until_{};
+public:
+    // Out of gameplay (cutscene, menu, load): the forearm gun the mod un-hid is hidden again; the engine keeps it hidden by default.
+    template<class Read> static void restore_forced(std::uintptr_t base,Read& read) {
+        if constexpr(!game_traits::ranged_player_weapon_is_voltaic) {(void)base;(void)read;return;}
+        else {
+            if(!fn_forced_) return;
+            CrashOperation operation("native forearm gun restore");
+            if(alive_entity(base,read,fn_forced_,fn_forced_id_) && !(rig::value<std::uint8_t>(read,fn_forced_+game_traits::entity_flags_offset).value_or(1)&1u) &&
+               visible(base,read,fn_forced_,false)) ++forearm_native_unforced;
+            fn_forced_=0;fn_forced_id_=0;fn_show_at_=0;
+        }
+    }
+private:
     template<class Read> static void service_forearm_native(std::uintptr_t base,Read& read) {
         if constexpr(!game_traits::ranged_player_weapon_is_voltaic) {(void)base;(void)read;return;}
         else {
@@ -1161,11 +1174,17 @@ private:
                    visible(base,read,fn_hidden_,true)) ++forearm_native_shows;
                 fn_hidden_=0;fn_hidden_id_=0;
             }
-            if(const auto show=fn_show_.load(std::memory_order_relaxed);show && show!=want && GetTickCount64()>=fn_show_at_) {
+            const auto show=fn_show_.load(std::memory_order_relaxed);
+            if(fn_forced_ && fn_forced_!=show) {   // review 2026-11-24: no longer named (cutscene, menu, the arm gave it up): the engine's hidden state back
+                if(alive_entity(base,read,fn_forced_,fn_forced_id_) && !(rig::value<std::uint8_t>(read,fn_forced_+game_traits::entity_flags_offset).value_or(1)&1u) &&
+                   visible(base,read,fn_forced_,false)) ++forearm_native_unforced;
+                fn_forced_=0;fn_forced_id_=0;
+            }
+            if(show && show!=want && GetTickCount64()>=fn_show_at_) {
                 fn_show_at_=GetTickCount64()+250;
                 const auto sid=rig::value<std::uint32_t>(read,show+game_traits::entity_id_offset);
                 if(sid && *sid && alive_entity(base,read,show,*sid) && (rig::value<std::uint8_t>(read,show+game_traits::entity_flags_offset).value_or(0)&1u)) {
-                    if(visible(base,read,show,true)) ++forearm_native_forced;else ++forearm_native_failed;
+                    if(visible(base,read,show,true)) {++forearm_native_forced;fn_forced_=show;fn_forced_id_=*sid;} else ++forearm_native_failed;
                 }
             }
             if(!want) return;

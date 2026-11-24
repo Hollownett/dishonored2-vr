@@ -6011,7 +6011,7 @@ static std::string voltaic_json() {
         std::to_string(d2vr::NativeRangedFire::charged_creates_.load())+','+std::to_string(d2vr::NativeRangedFire::overcharged_creates_.load())+"]"+
         ",\"arm_stats\":["+std::to_string(voltaic_arm_stats[0].load())+','+std::to_string(voltaic_arm_stats[1].load())+','+std::to_string(voltaic_arm_stats[2].load())+','+std::to_string(voltaic_arm_stats[3].load())+
         "],\"native_hide\":["+std::to_string(d2vr::NativeWeaponHands::forearm_native_hides.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_shows.load())+','+
-        std::to_string(d2vr::NativeWeaponHands::forearm_native_failed.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_forced.load())+"],\"stats\":[";
+        std::to_string(d2vr::NativeWeaponHands::forearm_native_failed.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_forced.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_unforced.load())+"],\"stats\":[";
     for(unsigned i=0;i<voltaic_stats.size();++i) s+=(i?",":"")+std::to_string(voltaic_stats[i].load(std::memory_order_relaxed));
     s+="],\"copy_entity\":[";
     s+=std::to_string(d2vr::NativeWeaponHands::forearm_spawned.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_placed.load())+','+
@@ -17746,7 +17746,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // Task 14 (Semblance): while the choke player state is active (observer states bit 0; DOTO and D2 state 41) the power hand's trigger
                                 // reaches the game even as a fist, which is how Semblance takes the choked guard's face. In D2 a power cast during a choke does what the
                                 // flat game does. Independent of the issue #6 latch below.
-                                const bool choke_power_hand=logic==2 && left_power_item.load(std::memory_order_relaxed) && (d2vr::NativePowerObserver::latest().states&d2vr::power_state_bit::choke)!=0;
+                                const bool choke_power_hand=d2vr::game_traits::power_mimic_vtable!=0 && logic==2 && left_power_item.load(std::memory_order_relaxed) && (d2vr::NativePowerObserver::latest().states&d2vr::power_state_bit::choke)!=0;   // Semblance: DOTO only (review: in D2 a choke must not cast the equipped power)
                                 const auto power_latch=power_cancel_latch.update(raw_trigger(rh),raw_grip(rh),
                                     logic==2 && power_grip_cancel_enabled && native_power_cancel_installed && left_power_item.load(std::memory_order_relaxed) && !left_gadget && !timepiece_out());
                                 if(power_latch.cancel_edge) {d2vr::NativePowerCancel::request(GetTickCount64());++power_grip_cancels;game_xr->pulse(rh,.35f,.04f);}
@@ -17918,7 +17918,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             const bool grenade=left_gadget && []{std::lock_guard<std::mutex> l(hand_state_mutex);return std::string_view(left_equip_name).find("renade")!=std::string_view::npos;}();
                                             // Task 7: the hand's speed is an explicit input; with the knob off it reads 0, so an open is always today's drop
                                             d2vr::WorldTrackedPose hw{};d2vr::Vec3 hv{};{std::lock_guard<std::mutex> l(hand_state_mutex);hw=hand_world[rh];hv=hand_velocity[rh];}
-                                            const double hand_speed=std::sqrt(hv.x*hv.x+hv.y*hv.y+hv.z*hv.z);
+                                            // Review 2026-11-24: the throw is the hand's motion relative to the player (as the grenade throw takes it): walking alone
+                                            // is above 1.5 m/s, and a mine let go while walking must still drop (or be caught), not be thrown ahead.
+                                            const d2vr::Vec3 hrel=hv-player_velocity;
+                                            const double hand_speed=std::sqrt(hrel.x*hrel.x+hrel.y*hrel.y+hrel.z*hrel.z);
                                             const auto now_g=GetTickCount64();
                                             const auto g=gadget_grip.update(left_gadget,grenade,raw_grip(rh),raw_trigger(rh),now_g,mine_throw_stick?hand_speed:0.,mine_mode_hold);
                                             const auto fl=[](double v){return static_cast<float>(v);};
@@ -17928,7 +17931,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                     {fl(p.basis[0].x),fl(p.basis[0].y),fl(p.basis[0].z),fl(p.basis[1].x),fl(p.basis[1].y),fl(p.basis[1].z),fl(p.basis[2].x),fl(p.basis[2].y),fl(p.basis[2].z)});};
                                             static struct {bool pending{};std::uint64_t deadline{};std::int32_t count{};d2vr::WorldTrackedPose pose{};d2vr::Vec3 vel{};unsigned hand{};bool grenade{};} throw_fallback;
                                             if(g.throw_place) { // Task 7: the engine places it along the throw: a native tap (g.native_trigger) aimed by the 250 ms override
-                                                const auto ov=d2vr::make_throw_override({fl(hw.position.x),fl(hw.position.y),fl(hw.position.z)},{hv.x,hv.y,hv.z},now_g);
+                                                const auto ov=d2vr::make_throw_override({fl(hw.position.x),fl(hw.position.y),fl(hw.position.z)},{hrel.x,hrel.y,hrel.z},now_g);
                                                 mine_throw_status.last_speed.store(hand_speed);
                                                 if(ov) {d2vr::NativeGadgetAim::set_throw_override(*ov);++mine_throw_status.throw_place;
                                                     throw_fallback={true,now_g+1500,d2vr::NativeWeaponHands::slot1_count(),hw,hv,rh,grenade};

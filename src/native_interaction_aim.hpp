@@ -1099,6 +1099,7 @@ private:
             if(const auto arms=arm_show_.exchange(0)) {if(self->active_ && self->logic_()==2) try {NativeHeldObject::show_arms(self->base_,self->read_,arms);} catch(...) {}}
             // Full-grip sword: equip requests from the input thread and the dropped copy (native_weapon_hands.hpp).
             if(self->logic_()==2) try {NativeWeaponHands::service(self->base_,self->read_);} catch(...) {}
+            else try {NativeWeaponHands::restore_forced(self->base_,self->read_);} catch(...) {}   // a forearm gun the mod showed goes back to hidden out of gameplay
             if(self->logic_()==2) if(const auto tag=part_batch::game_service.load(std::memory_order_acquire)) tag();   // v1318: held parts' own shader-parm entry (game thread)
             if(self->logic_()==2 && NativeWeaponHands::dual_wield()) { // dual wield, two active hands (docs/dual-wield-two-hands-plan.md)
                 try {NativeRangedFire::service(self->base_,self->read_);} catch(...) {}
