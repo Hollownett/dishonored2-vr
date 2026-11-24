@@ -10,7 +10,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .steam import GAME_SHA256, Install, SteamError, check_game_exe, sha256_file
+from .steam import D2, GAME_SHA256, GameProfile, expected_sha256 as steam_expected, Install, SteamError, check_game_exe, sha256_file
 
 MOD_HOME_WIN = r"C:\users\steamuser\AppData\Local\DishonoredVR"
 MOD_HOME_REL = Path("drive_c/users/steamuser/AppData/Local/DishonoredVR")
@@ -52,8 +52,10 @@ def _basename(member: str) -> str:
     return re.split(r"[/\\]", member)[-1]
 
 
-def read_release_zip(zip_path: Path, game_sha256: str = GAME_SHA256) -> ModRelease:
-    """Validate a published d2vr-v*-dll.zip (members matched by basename; names may use backslashes)."""
+def read_release_zip(zip_path: Path, game_sha256: "str | None" = None, profile: GameProfile = D2) -> ModRelease:
+    """Validate a published d2vr-v*-dll.zip (members matched by basename; names may use backslashes).
+    The manifest's game_sha256 must equal game_sha256 (default: the profile's pinned executable)."""
+    game_sha256 = steam_expected(profile) if game_sha256 is None else game_sha256
     try:
         zf = zipfile.ZipFile(zip_path)
     except (OSError, zipfile.BadZipFile) as e:
@@ -150,8 +152,8 @@ def is_our_proxy(path: Path) -> bool:
         return False
 
 
-def mod_home_dir(prefix: Path) -> Path:
-    return Path(prefix) / MOD_HOME_REL
+def mod_home_dir(prefix: Path, profile: GameProfile = D2) -> Path:
+    return Path(prefix) / profile.mod_home_rel
 
 
 def _write(path: Path, data: bytes) -> bool:
@@ -453,16 +455,16 @@ def set_feature(home: Path, feature_id: str, on: bool, list_path: "Path | None" 
 
 
 def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None", cache_dir: Path,
-            game_sha256: str = GAME_SHA256, openxr_source=OPENXR_SOURCE,
-            urlopen=urllib.request.urlopen) -> list:
+            game_sha256: "str | None" = None, openxr_source=OPENXR_SOURCE,
+            urlopen=urllib.request.urlopen, profile: GameProfile = D2) -> list:
     """Install the mod into the Proton prefix and the proxy into the game dir. All checks precede all writes.
     openxr_source is the path of source.json (a parsed dict is accepted too). Returns the changed paths."""
     # 1-5: checks
     try:
-        check_game_exe(inst.game_dir, game_sha256)
+        check_game_exe(inst.game_dir, game_sha256, profile)
     except SteamError as e:
         raise InstallError(str(e))
-    release = read_release_zip(Path(zip_path), game_sha256)
+    release = read_release_zip(Path(zip_path), game_sha256, profile)
     source, source_bytes, source_dir = _load_source(openxr_source)
     license_path = source_dir / "LICENSE"
     if not license_path.is_file():
@@ -482,7 +484,7 @@ def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None
 
     # 6: mod home
     changed = []
-    home = mod_home_dir(inst.prefix)
+    home = mod_home_dir(inst.prefix, profile)
     if not (home / ".git").is_dir():
         (home / ".git").mkdir(parents=True)  # StartProbe returns 3 without <root>/.git
         changed.append(".git")
@@ -516,7 +518,7 @@ def install(inst: Install, zip_path: Path, proxy: Path, openxr_zip: "Path | None
     # 7: game dir
     if _write(target, proxy_bytes):
         changed.append(PROXY_NAME)
-    if _write(inst.game_dir / INI_NAME, (MOD_HOME_WIN + "\r\n").encode("ascii")):
+    if _write(inst.game_dir / INI_NAME, (profile.mod_home_win + "\r\n").encode("ascii")):
         changed.append(INI_NAME)
     return changed
 

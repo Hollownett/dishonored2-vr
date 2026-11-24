@@ -12,7 +12,8 @@ class CliError(Exception):
 
 
 def _parser():
-    p = argparse.ArgumentParser(prog="d2vr-linux", description="Dishonored 2 VR mod for Linux (Proton).")
+    p = argparse.ArgumentParser(prog="d2vr-linux", description="Dishonored 2 / Death of the Outsider VR mod for Linux (Proton).")
+    p.add_argument("--game", choices=sorted(steam.PROFILES), default="d2", help="game to act on: d2 (Dishonored 2, default) or doto (Death of the Outsider)")
     p.add_argument("--steam-root", type=Path, help="Steam root directory (default: auto-detect)")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
     s = sub.add_parser("install", help="install a release zip into the Proton prefix and the proxy into the game")
@@ -53,7 +54,8 @@ def _parser():
                    help="xr-live-status.json field to print, dotted path (repeatable; default gameplay, logic_mask, game_layers_submitted, carry)")
     s.add_argument("--start-timeout", type=float, default=480, help="seconds to wait for the session to start (default 480)")
     s.add_argument("--close-timeout", type=float, default=30, help="seconds between the polite and the forced close (default 30)")
-    s.add_argument("--steam-cmd", default=sim.DEFAULT_STEAM_CMD, help="command that launches the game (default: steam -applaunch 403640)")
+    s.add_argument("--steam-cmd", default=None, help="command that launches the game (default: steam -applaunch <app id>: 403640, or 614570 with --game doto)")
+    s.add_argument("--slot", metavar="SLOTnn", help="make this save slot the one Continue loads (stamps its mtimes newest inside the backed-up save tree; the verified restore puts everything back)")
     s.add_argument("--backup-root", type=Path, default=None, help="default ~/d2vr-test-builds/save-backups")
     s.add_argument("--out-root", type=Path, default=None, help="default ~/d2vr-test-builds/sim-runs")
     s.add_argument("--mod-home", type=Path, help="mod home directory")
@@ -76,15 +78,21 @@ def _parser():
     return p
 
 
+def _profile(a):
+    return steam.PROFILES[getattr(a, "game", "d2")]
+
+
 def _cmd_sim(a, home, proc_root, sim_env):
     root = home / "d2vr-test-builds"
     a.backup_root = a.backup_root or root / "save-backups"
     a.out_root = a.out_root or root / "sim-runs"
     env = sim_env or sim.Env(proc_root=proc_root)
-    env.steam_cmd = a.steam_cmd
+    profile = _profile(a)
+    env.profile = profile
+    env.steam_cmd = a.steam_cmd or profile.steam_cmd
     env.close_timeout = a.close_timeout
     try:
-        return sim.run_sim(a, home, env)
+        return sim.run_sim(a, home, env, profile)
     except sim.SimError as e:
         raise CliError(str(e))
 
@@ -95,15 +103,16 @@ def _gpu_launch_line(proc_root):
 
 
 def _cmd_install(a, home, proc_root, urlopen):
-    inst = steam.locate(home, a.steam_root)
+    profile = _profile(a)
+    inst = steam.locate(home, a.steam_root, profile)
     changed = modhome.install(
         inst, a.zip_path, a.proxy or modhome.DEFAULT_PROXY, a.openxr_zip, home / ".cache/d2vr-linux",
-        game_sha256=steam.GAME_SHA256, openxr_source=modhome.OPENXR_SOURCE, urlopen=urlopen)
+        game_sha256=steam.expected_sha256(profile), openxr_source=modhome.OPENXR_SOURCE, urlopen=urlopen, profile=profile)
     print("Changed files:" if changed else "Already up to date.")
     for c in changed:
         print(f"  {c}")
     try:
-        _print_dlss(dlss.find_and_configure(modhome.mod_home_dir(inst.prefix), inst.libraries or dlss.libraries(home, a.steam_root)), quiet_missing=True)
+        _print_dlss(dlss.find_and_configure(modhome.mod_home_dir(inst.prefix, profile), inst.libraries or dlss.libraries(home, a.steam_root)), quiet_missing=True)
     except OSError as e:  # DLSS is optional: never fail a finished install over it
         print(f"Warning: DLSS auto-find skipped: {e}", file=sys.stderr)
     line = _gpu_launch_line(proc_root)
@@ -124,25 +133,28 @@ def _print_dlss(result, quiet_missing=False):
 
 
 def _cmd_dlss_find(a, home):
-    mod_home = a.mod_home or modhome.mod_home_dir(steam.locate(home, a.steam_root).prefix)
+    profile = _profile(a)
+    mod_home = a.mod_home or modhome.mod_home_dir(steam.locate(home, a.steam_root, profile).prefix, profile)
     _print_dlss(dlss.find_and_configure(mod_home, dlss.libraries(home, a.steam_root)))
     return 0
 
 
 def _cmd_uninstall(a, home):
-    inst = steam.locate(home, a.steam_root)
+    profile = _profile(a)
+    inst = steam.locate(home, a.steam_root, profile)
     removed = modhome.uninstall(inst.game_dir)
     print("Removed files:" if removed else "Nothing to remove.")
     for r in removed:
         print(f"  {r}")
-    print(f"Mod home left in place: {modhome.mod_home_dir(inst.prefix)}")
+    print(f"Mod home left in place: {modhome.mod_home_dir(inst.prefix, profile)}")
     return 0
 
 
 def _cmd_doctor(a, home, proc_root, icd_dirs):
+    profile = _profile(a)
     inst, error = None, ""
     try:
-        inst = steam.locate(home, a.steam_root)
+        inst = steam.locate(home, a.steam_root, profile)
     except steam.SteamError as e:
         error = str(e)
     if a.fix_openxr:
@@ -161,7 +173,7 @@ def _cmd_doctor(a, home, proc_root, icd_dirs):
                 print(f"Not changed: {e} already exists; remove it yourself if it should point at SteamVR.")
     checks = doctor.run_checks(
         inst, error, home, proc_root, icd_dirs, mod_home=a.mod_home,
-        game_sha256=steam.GAME_SHA256, openxr_source=modhome.OPENXR_SOURCE)
+        game_sha256=steam.expected_sha256(profile), openxr_source=modhome.OPENXR_SOURCE, profile=profile)
     print(doctor.format_checks(checks), end="")
     return 0 if all(c.ok for c in checks) else 1
 
@@ -175,7 +187,8 @@ def _cmd_launch_options(proc_root):
 
 
 def _cmd_feature(a, home):
-    mod_home = a.mod_home or modhome.mod_home_dir(steam.locate(home, a.steam_root).prefix)
+    profile = _profile(a)
+    mod_home = a.mod_home or modhome.mod_home_dir(steam.locate(home, a.steam_root, profile).prefix, profile)
     if not (mod_home / "build").is_dir():
         raise CliError(f"{mod_home / 'build'} does not exist; run: d2vr-linux install --zip <d2vr-vNNN-dll.zip>")
     if a.feature_cmd == "list":
@@ -191,10 +204,11 @@ def _cmd_feature(a, home):
 
 
 def _cmd_request(a, home, name):
+    profile = _profile(a)
     if a.mod_home:
         mod_home = a.mod_home
     else:
-        mod_home = modhome.mod_home_dir(steam.locate(home, a.steam_root).prefix)
+        mod_home = modhome.mod_home_dir(steam.locate(home, a.steam_root, profile).prefix, profile)
     if not (mod_home / "build").is_dir():
         raise CliError(f"{mod_home / 'build'} does not exist; run: d2vr-linux install --zip <d2vr-vNNN-dll.zip>")
     print(modhome.write_request(mod_home, name))

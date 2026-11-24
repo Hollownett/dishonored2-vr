@@ -141,8 +141,8 @@ def _proxy_check(game_dir: Path) -> tuple:
 
 def run_checks(inst: "Install | None", locate_error: str, home: Path, proc_root: Path, icd_dirs: list,
                mod_home: "Path | None" = None, game_sha256: "str | None" = None,
-               openxr_source: "Path | None" = None) -> list:
-    game_sha256 = steam.GAME_SHA256 if game_sha256 is None else game_sha256
+               openxr_source: "Path | None" = None, profile: "steam.GameProfile" = steam.D2) -> list:
+    game_sha256 = steam.expected_sha256(profile) if game_sha256 is None else game_sha256
     openxr_source = modhome.OPENXR_SOURCE if openxr_source is None else openxr_source
     out = []
 
@@ -153,13 +153,13 @@ def run_checks(inst: "Install | None", locate_error: str, home: Path, proc_root:
         add(name, False, _NO_GAME, fix)
 
     install_fix = "d2vr-linux install --zip <d2vr-vNNN-dll.zip>"
-    add("Dishonored 2", inst is not None, str(inst.game_dir) if inst else locate_error,
-        "Install Dishonored 2 (app 403640) in a Linux Steam library, then start Steam once.")
+    add(profile.name, inst is not None, str(inst.game_dir) if inst else locate_error,
+        f"Install {profile.name} (app {profile.appid}) in a Linux Steam library, then start Steam once.")
 
     game_fixes = {
-        "Game build": "Steam updated the game; this mod supports only build 17576867. Use a mod build made for "
-                      "the installed version, or restore 17576867 (Steam console: download_depot).",
-        "Proton prefix": "Set Proton Experimental for Dishonored 2 and start it once.",
+        "Game build": "Steam updated the game; this mod supports only build " + profile.build + ". Use a mod build made for "
+                      "the installed version, or restore " + profile.build + " (Steam console: download_depot).",
+        "Proton prefix": f"Set Proton Experimental for {profile.name} and start it once.",
         "Mod home": install_fix,
         "Proxy": "d2vr-linux install --zip …",
     }
@@ -168,12 +168,12 @@ def run_checks(inst: "Install | None", locate_error: str, home: Path, proc_root:
             no_game(n, fix)
     else:
         try:
-            steam.check_game_exe(inst.game_dir, game_sha256)
-            add("Game build", True, "Dishonored2.exe matches build 17576867", "")
+            steam.check_game_exe(inst.game_dir, game_sha256, profile)
+            add("Game build", True, f"{profile.exe} matches build {profile.build}", "")
         except (steam.SteamError, OSError) as e:
             add("Game build", False, str(e), game_fixes["Game build"])
         add("Proton prefix", inst.prefix.exists(), str(inst.prefix), game_fixes["Proton prefix"])
-        mh = Path(mod_home) if mod_home else modhome.mod_home_dir(inst.prefix)
+        mh = Path(mod_home) if mod_home else modhome.mod_home_dir(inst.prefix, profile)
         ok, detail = _mod_home_check(mh, openxr_source)
         add("Mod home", ok, detail, install_fix)
         ok, detail = _proxy_check(inst.game_dir)
@@ -197,8 +197,8 @@ def run_checks(inst: "Install | None", locate_error: str, home: Path, proc_root:
         "d2vr-linux doctor --fix-openxr (or SteamVR Settings > OpenXR > Set SteamVR as OpenXR runtime)")
 
     oxr_fix = "Start the game once with Proton Experimental so Proton registers wineopenxr."
-    vcrt_fix = "protontricks 403640 vcrun2022"
-    d3dc_fix = "protontricks 403640 d3dcompiler_47"
+    vcrt_fix = f"protontricks {profile.appid} vcrun2022"
+    d3dc_fix = f"protontricks {profile.appid} d3dcompiler_47"
     if inst is None:
         no_game("Prefix OpenXR runtime", oxr_fix)
         no_game("VC++ runtime (native)", vcrt_fix)

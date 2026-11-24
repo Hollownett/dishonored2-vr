@@ -153,7 +153,7 @@ python3 -m unittest discover -s linux/tests -v
 python3 linux/tests/proxy_check/run_proxy_check.py -v
 ```
 
-`tests/test_sim.py` covers the `sim` safety refusals and the save backup/restore logic against a fake prefix and fake `/proc`. For simulated game runs see section 9.
+`tests/test_sim.py` covers the `sim` safety refusals and the save backup/restore logic against a fake prefix and fake `/proc`; `tests/test_doto.py` covers the Death of the Outsider profile and `--slot` (section 10). For simulated game runs see section 9.
 
 The second one runs under Wine in the harness prefix. Never run it at the same time as `tools/linux/run_build_cmd.py`.
 
@@ -201,3 +201,19 @@ How it works: the proxy (`linux/proxy`) honours two opt-in files in the mod home
 
 **Scenario `oil_tank_drop` (UNTESTED).** Holds the right grip next to a whale-oil tank, lifts to the chest, lowers the hand to the floor, releases and waits (`tools/linux/scenarios/oil_tank_drop.py`, hand poses from the `hold` scenario of `vr_selftest.py`). It needs a save that starts the player standing next to a tank, facing it, with the tank on the floor within reach in front of the knees. To make one: play to a tank in the headset or on the desktop, stand about half a metre from it looking at it, save (a manual save slot), quit the game, and copy `savegame/` (the `SLOT*` folders and `profile.bin`) to a folder of your own; pass that folder as `--test-save`. Without such a save the scenario grabs whatever physical object is nearest the right hand and drops it, which still exercises the carry/drop path but proves nothing about tanks. No real run has been done yet.
 
+
+## 10. Death of the Outsider
+
+The CLI also handles Dishonored: Death of the Outsider (DOTO). Put the global option `--game doto` before the subcommand (default `--game d2`); it applies to `install`, `uninstall`, `doctor`, `feature`, `dlss-find`, `start`, `stop` and `sim`. DOTO uses its own Steam app (614570, folder `Dishonored_DeathOfTheOutsider`, `Dishonored_DO.exe`, supported build 17712087), its own Proton prefix (`compatdata/614570/pfx`, so run the game once with Proton first) and its own mod home `drive_c/users/steamuser/AppData/Local/DishonoredVR-DOTO` (the Windows launcher uses `%LOCALAPPDATA%\DishonoredVR-DOTO`). The two games can live in different Steam libraries; each is looked up by its own appmanifest.
+
+```
+linux/d2vr-linux --game doto install --zip <candidate zip>   # manifest game_sha256 must be DOTO's be73d979...b955d
+linux/d2vr-linux --game doto doctor
+linux/d2vr-linux --game doto sim --dry-run
+linux/d2vr-linux --game doto sim --scenario doto_idle_look --slot SLOT03
+linux/d2vr-linux --game doto sim --restore
+```
+
+`install` checks the release manifest and `Dishonored_DO.exe` against DOTO's SHA-256 (a Dishonored 2 release is refused and the other way round) and writes `d2vr-linux.ini` pointing at the DOTO mod home. `sim` backs up and restores `Saved Games/Arkane Studios/Dishonored_DO/base/savegame` and `dishonored_DOConfig.cfg`, refuses to run while `Dishonored_DO.exe` or SteamVR's `vrserver` runs, and launches with `steam -applaunch 614570` (override with `--steam-cmd`). Each backup records its game; `sim --restore` only restores the backups of the selected `--game` and names the right option for the others (a pending backup of either game still blocks new runs). `doto_idle_look` is a 60 s baseline (stand 5 s, look left/right/up/down over 15 s, look down 8 s, each hand grip then trigger, idle).
+
+**`--slot SLOTnn`** (any game) makes that save slot the one Continue loads. Continue takes the newest slot by modification time, so after the backup (and after a `--test-save` swap) the rig sets the mtimes of that slot's folder and files to now, or to 2 s past the newest other file if that is later. Only timestamps change, inside the backed-up save tree; the verified restore copies the backup back with its original mtimes. The slot must exist in your saves (or in `--test-save` when given); `--dry-run` checks it.

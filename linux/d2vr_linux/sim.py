@@ -3,9 +3,9 @@
 Runs the real game under Proton with the mod's scripted XR backend (src/simulated_xr.hpp, no headset) by writing a dev probe
 config override that the proxy honours, then restores the user's saves and removes every dev knob. Safety rules:
 
-- refuses to start while Dishonored2.exe or SteamVR's vrserver runs (the user's own VR session), and never signals a game it
+- refuses to start while the game (Dishonored2.exe, or Dishonored_DO.exe with --game doto) or SteamVR's vrserver runs (the user's own VR session), and never signals a game it
   did not launch itself;
-- backs up the saves and dishonored2Config.cfg before touching anything (never deleted) and marks the backup `restore-pending`
+- backs up the saves and the game config (dishonored2Config.cfg / dishonored_DOConfig.cfg) before touching anything (never deleted) and marks the backup `restore-pending`
   until a verified restore; a pending backup blocks further runs until `sim --restore`.
 """
 import contextlib
@@ -45,18 +45,19 @@ ENV_KEYS = ("DXVK_HUD", "DXVK_LOG_LEVEL", "__GL_THREADED_OPTIMIZATIONS")
 VR_SETTING_KEYS = ("temporal_aa", "resolution", "mirror")
 SCRIPT_CFG = "simulated-gameplay-script.cfg"
 SCRIPT_JSON = "simulated-gameplay-script.json"
-SAVE_BASE_REL = Path("drive_c/users/steamuser/Saved Games/Arkane Studios/Dishonored2/base")
+SAVE_BASE_REL = steam.D2.save_base_rel
+SLOT_RE = re.compile(r"SLOT[0-9]{2}")
 PENDING = "restore-pending"
 REPO_ROOT = modhome.REPO_ROOT
 SCENARIO_DIR = REPO_ROOT / "tools/linux/scenarios"
 DEFAULT_ROOT = Path.home() / "d2vr-test-builds"
 DEFAULT_FIELDS = ["gameplay", "logic_mask", "game_layers_submitted", "carry"]
-DEFAULT_STEAM_CMD = "steam -applaunch 403640"
+DEFAULT_STEAM_CMD = steam.D2.steam_cmd
 REFUSAL_MARKERS = ("expected exactly one", "lacks required", "cannot load", "restart the game", "ProbeStatus=",
                    "does not export", "cannot write build", "StartProbe returned")
 LEAD_SECONDS = 75  # the save loads inside the session (tools/vr_selftest.py --inject-at-title)
 SESSION_PAD_SECONDS = 6
-LOOSE_GAME_NAMES = ("dishonored2.exe",)
+LOOSE_GAME_NAMES = steam.D2.loose_names
 
 
 class SimError(Exception):
@@ -88,15 +89,15 @@ def _base(arg):
     return re.split(r"[/\\]", arg)[-1].lower()
 
 
-def game_processes(proc_root, strict=False):
-    """pids touching Dishonored2.exe. strict: only the game process itself (comm or argv[0]); loose also wrappers that name it."""
+def game_processes(proc_root, strict=False, profile=steam.D2):
+    """pids touching the profile's exe (Dishonored2.exe / Dishonored_DO.exe). strict: only the game process itself (comm or argv[0]); loose also wrappers that name it."""
     pids = []
     for pid, comm, argv in _scan(proc_root):
         if pid == os.getpid():
             continue
-        if comm.lower().startswith("dishonored2") or (argv and _base(argv[0]) in LOOSE_GAME_NAMES):
+        if comm.lower().startswith(profile.process_prefix) or (argv and _base(argv[0]) in profile.loose_names):
             pids.append(pid)
-        elif not strict and any(_base(a) in LOOSE_GAME_NAMES for a in argv):
+        elif not strict and any(_base(a) in profile.loose_names for a in argv):
             pids.append(pid)
     return pids
 
@@ -106,11 +107,11 @@ def vr_server_processes(proc_root):
             if pid != os.getpid() and (comm == "vrserver" or (argv and _base(argv[0]) == "vrserver"))]
 
 
-def conflicts(proc_root):
+def conflicts(proc_root, profile=steam.D2):
     found = []
-    g = game_processes(proc_root)
+    g = game_processes(proc_root, profile=profile)
     if g:
-        found.append(f"Dishonored2.exe is running (pid {', '.join(map(str, g))})")
+        found.append(f"{profile.exe} is running (pid {', '.join(map(str, g))})")
     v = vr_server_processes(proc_root)
     if v:
         found.append(f"SteamVR vrserver is running (pid {', '.join(map(str, v))})")
@@ -119,9 +120,9 @@ def conflicts(proc_root):
 
 # ---------------------------------------------------------------- saves
 
-def save_paths(prefix):
-    base = Path(prefix) / SAVE_BASE_REL
-    return base / "savegame", base / "dishonored2Config.cfg"
+def save_paths(prefix, profile=steam.D2):
+    base = Path(prefix) / profile.save_base_rel
+    return base / "savegame", base / profile.config_name
 
 
 def _clear_slots(savegame):
@@ -137,9 +138,26 @@ def _copy_into(src, dst):
     shutil.copytree(src, dst, dirs_exist_ok=True, copy_function=shutil.copy2)  # copy2 keeps mtimes: Continue loads the newest slot
 
 
-def backup_saves(prefix, backup_root, stamp):
-    """Copy savegame/ and dishonored2Config.cfg to <backup_root>/<stamp>-sim/ and mark it restore-pending. Never overwrites."""
-    savegame, cfg = save_paths(prefix)
+def select_slot(prefix, slot, profile=steam.D2, now_ns=None):
+    """Make `slot` (SLOTnn) the slot "Continue" loads: Continue picks the newest slot by mtime, so stamp that slot's folder and
+    files newer than everything else in savegame/. Only mtimes change; the verified restore puts the backed-up tree (with its
+    original mtimes) back. Returns the slot directory."""
+    savegame = save_paths(prefix, profile)[0]
+    if not SLOT_RE.fullmatch(slot or ""):
+        raise SimError(f"bad save slot {slot!r} (expected SLOTnn, e.g. SLOT03)")
+    target = savegame / slot
+    if not target.is_dir() or target.is_symlink():
+        raise SimError(f"save slot {slot} not found in {savegame}")
+    others = [p.stat().st_mtime_ns for p in savegame.rglob("*") if target not in p.parents and p != target]
+    when = max([time.time_ns() if now_ns is None else now_ns] + [m + 2_000_000_000 for m in others])
+    for p in [*target.rglob("*"), target]:
+        os.utime(p, ns=(when, when), follow_symlinks=False)
+    return target
+
+
+def backup_saves(prefix, backup_root, stamp, profile=steam.D2):
+    """Copy savegame/ and the game config (dishonored2Config.cfg or dishonored_DOConfig.cfg) to <backup_root>/<stamp>-sim/ and mark it restore-pending. Never overwrites."""
+    savegame, cfg = save_paths(prefix, profile)
     if not savegame.is_dir():
         raise SimError(f"{savegame} does not exist; start the game once so it creates its saves")
     backup = Path(backup_root) / f"{stamp}-sim"
@@ -153,7 +171,7 @@ def backup_saves(prefix, backup_root, stamp):
     if problems:
         raise SimError("save backup does not match the saves: " + "; ".join(problems[:5]))
     (backup / "info.json").write_text(json.dumps(
-        {"savegame": str(savegame), "config": str(cfg), "created": stamp, "files": manifest(backup / "savegame"),
+        {"savegame": str(savegame), "config": str(cfg), "created": stamp, "game": profile.id, "files": manifest(backup / "savegame"),
          "config_sha256": steam.sha256_file(cfg) if cfg.is_file() else None}, indent=1) + "\n")
     (backup / PENDING).write_text("Saves of the user are in this folder; a sim run (or crash) left them swapped.\n"
                                   "Run: d2vr-linux sim --restore\n")
@@ -189,9 +207,9 @@ def compare_dirs(a, b):
     return out
 
 
-def swap_in_test_save(prefix, test_dir):
+def swap_in_test_save(prefix, test_dir, profile=steam.D2):
     test_dir = Path(test_dir)
-    savegame, _ = save_paths(prefix)
+    savegame, _ = save_paths(prefix, profile)
     _clear_slots(savegame)
     _copy_into(test_dir, savegame)
 
@@ -375,13 +393,13 @@ def restore_dll(backup, seen=None, known=()):
     return done(True, [f"installed DLL restored and verified ({orig})"])
 
 
-def restore_saves(prefix, backup, seen=None, known=()):
+def restore_saves(prefix, backup, seen=None, known=(), profile=steam.D2):
     """Restore the DLL first (it needs only dll.json), then put the saves and config back and verify; drop the restore-pending
     marker only if both match. Returns (ok, notes). Extra files the run created in savegame/ are reported, not deleted."""
     backup = Path(backup)
     dll_ok, notes = restore_dll(backup, seen, known)
     try:
-        ok, snotes = _restore_save_files(prefix, backup)
+        ok, snotes = _restore_save_files(prefix, backup, profile)
     except Exception as e:  # noqa: BLE001 - the DLL is already handled; report and keep the marker
         ok, snotes = False, [f"saves could not be restored ({type(e).__name__}: {e})"]
     notes = notes + snotes
@@ -393,8 +411,8 @@ def restore_saves(prefix, backup, seen=None, known=()):
     return ok, notes
 
 
-def _restore_save_files(prefix, backup):
-    savegame, cfg = save_paths(prefix)
+def _restore_save_files(prefix, backup, profile=steam.D2):
+    savegame, cfg = save_paths(prefix, profile)
     if not (backup / "savegame").is_dir():
         return False, [f"{backup / 'savegame'} is missing"]
     try:
@@ -402,6 +420,8 @@ def _restore_save_files(prefix, backup):
         expected = info["files"]
     except (OSError, ValueError, KeyError) as e:
         return False, [f"cannot read {backup / 'info.json'}: {e}"]
+    if info.get("game", "d2") != profile.id:
+        return False, [f"{backup} holds saves of game {info.get('game')!r}, not {profile.id!r}; restore it with --game {info.get('game')}"]
     _clear_slots(savegame)
     _copy_into(backup / "savegame", savegame)
     if (backup / cfg.name).is_file():
@@ -725,6 +745,7 @@ class Env:
         self.launch = launch or self._launch
         self.lock_probe = lock_probe or self._lock_probe
         self.out = out or (lambda s: print(s, flush=True))
+        self.profile = steam.D2
         self.steam_cmd = DEFAULT_STEAM_CMD
         self.close_timeout = 30.0
         self.launch_env = {}  # --env pairs, added to the launch environment
@@ -776,7 +797,8 @@ def close_game(env, launched, notes):
     """Polite SIGTERM, forced SIGKILL after env.close_timeout; only for a game this run started."""
     if not launched:
         return True
-    strict = game_processes(env.proc_root, strict=True)
+    profile = env.profile
+    strict = game_processes(env.proc_root, strict=True, profile=profile)
     if strict:
         env.out(f"[sim] closing the game (SIGTERM {', '.join(map(str, strict))})")
         for pid in strict:
@@ -784,8 +806,8 @@ def close_game(env, launched, notes):
                 env.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-        if not _wait(env, lambda: not game_processes(env.proc_root, strict=True), env.close_timeout):
-            left = game_processes(env.proc_root, strict=True)
+        if not _wait(env, lambda: not game_processes(env.proc_root, strict=True, profile=profile), env.close_timeout):
+            left = game_processes(env.proc_root, strict=True, profile=profile)
             env.out(f"[sim] still running after {env.close_timeout:g} s: forcing {', '.join(map(str, left))}")
             for pid in left:
                 try:
@@ -793,8 +815,8 @@ def close_game(env, launched, notes):
                 except OSError:
                     pass
             notes.append("game force-closed")
-    # wrappers (proton, reaper) follow the game; saves are only safe once nothing names Dishonored2.exe any more
-    return _wait(env, lambda: not game_processes(env.proc_root), 60)
+    # wrappers (proton, reaper) follow the game; saves are only safe once nothing names the game exe any more
+    return _wait(env, lambda: not game_processes(env.proc_root, profile=profile), 60)
 
 
 ARTIFACT_SLACK_NS = 2_000_000_000  # file systems stamp mtimes from a coarse clock; a previous run is minutes older
@@ -931,30 +953,44 @@ def user_knob_files(build, rig_names):
 def do_restore(a, home, env):
     """`sim --restore [BACKUP]`: restore the DLL and saves of every pending (or the named) backup, oldest first, and clean
     the dev knobs. All backups are tried; the oldest backup owns the original DLL per path."""
-    inst = steam.locate(home, a.steam_root)
-    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix)
+    inst = steam.locate(home, a.steam_root, env.profile)
+    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix, env.profile)
     with run_lock(mod_home):
         return _do_restore(a, home, env)
 
 
+def _backup_game(backup):
+    try:
+        return json.loads((Path(backup) / "info.json").read_text()).get("game", "d2")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _do_restore(a, home, env):
-    inst = steam.locate(home, a.steam_root)
-    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix)
+    profile = env.profile
+    inst = steam.locate(home, a.steam_root, profile)
+    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix, profile)
     backup_root = Path(a.backup_root)
-    bad = conflicts(env.proc_root)
+    bad = conflicts(env.proc_root, profile)
     if bad:
         raise SimError("refusing to restore: " + "; ".join(bad))
     if a.restore is not True:
         pending = [Path(a.restore)]
     else:
-        pending = pending_backups(backup_root)
+        pending = []
+        for b in pending_backups(backup_root):
+            g = _backup_game(b)
+            if g in (None, profile.id):
+                pending.append(b)
+            else:
+                env.out(f"[sim] {b} belongs to game {g}; run: d2vr-linux --game {g} sim --restore")
     if not pending:
         env.out("[sim] nothing to restore (no restore-pending backup)")
     failed, seen = False, {}
     known = {r["candidate_sha256"] for r in (read_dll_record(p)[0] for p in pending) if r}
     with defer_sigint(env.out):
         for backup in sorted(pending, key=lambda p: p.name):
-            ok, notes = restore_saves(inst.prefix, backup, seen, known)
+            ok, notes = restore_saves(inst.prefix, backup, seen, known, profile)
             for n in notes:
                 env.out(f"[sim]   {n}")
             env.out(f"[sim] {'restored' if ok else 'RESTORE INCOMPLETE, backup kept at'} {backup}")
@@ -972,10 +1008,11 @@ def _do_restore(a, home, env):
 
 
 def _plan(a, home, env):
-    inst = steam.locate(home, a.steam_root)
-    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix)
+    profile = env.profile
+    inst = steam.locate(home, a.steam_root, profile)
+    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix, profile)
     problems = []
-    bad = conflicts(env.proc_root)
+    bad = conflicts(env.proc_root, profile)
     if bad:
         raise SimError("refusing to run: " + "; ".join(bad) + ". Close it first; the sim rig never touches a running session.")
     if not a.dry_run:
@@ -1014,6 +1051,14 @@ def _plan(a, home, env):
         t = Path(a.test_save)
         if not t.is_dir() or not (list(t.glob("SLOT*")) or (t / "profile.bin").exists()):
             problems.append(f"--test-save {t} must be a savegame folder (SLOT* / profile.bin)")
+    slot = getattr(a, "slot", None)
+    if slot:
+        if not SLOT_RE.fullmatch(slot):
+            problems.append(f"--slot {slot!r} must look like SLOT03")
+        else:
+            src = Path(a.test_save) if a.test_save else save_paths(inst.prefix, profile)[0]
+            if not (src / slot).is_dir():
+                problems.append(f"--slot {slot}: {src / slot} does not exist")
     if problems:
         raise SimError("; ".join(problems))
 
@@ -1036,18 +1081,21 @@ def _plan(a, home, env):
     return inst, mod_home, seconds, script_json, script_cfg, candidate
 
 
-def run_sim(a, home, env):
+def run_sim(a, home, env, profile=None):
+    if profile is not None:
+        env.profile = profile
     if a.restore:
         return do_restore(a, home, env)
     if a.dry_run:
         return _run_sim(a, home, env)
-    inst = steam.locate(home, a.steam_root)
-    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix)
+    inst = steam.locate(home, a.steam_root, env.profile)
+    mod_home = Path(a.mod_home) if a.mod_home else modhome.mod_home_dir(inst.prefix, env.profile)
     with run_lock(mod_home):
         return _run_sim(a, home, env)
 
 
 def _run_sim(a, home, env):
+    profile = env.profile
     knobs = parse_knobs(getattr(a, "knob", None))
     knob_values = parse_knob_values(getattr(a, "knob", None))
     launch_env = parse_env(getattr(a, "env", None))
@@ -1070,6 +1118,8 @@ def _run_sim(a, home, env):
         env.out("  " + override.strip())
         env.out(f"[sim] script: {script_cfg.splitlines()[0]}")
         env.out(f"[sim] probe mode {probe_mode}")
+        if getattr(a, "slot", None):
+            env.out(f"[sim] slot {a.slot} would be made the newest slot (mtimes only, restored afterwards)")
         for n in knobs:
             env.out(f"[sim] knob build/{n}" + (f" = {settings['temporal_aa']}" if n == AA_MODE_KNOB and "temporal_aa" in settings
                                                else f" = {knob_values[n]}" if n in knob_values else " (empty)"))
@@ -1083,7 +1133,7 @@ def _run_sim(a, home, env):
         return 0
 
     stamp = _timestamp()
-    backup = backup_saves(inst.prefix, a.backup_root, stamp)
+    backup = backup_saves(inst.prefix, a.backup_root, stamp, profile)
     env.out(f"[sim] saves backed up to {backup}")
     guard, notes, launched, rc, reason, placed, user_knobs = FileGuard(), [], False, 1, "", False, []
     run_dir = Path(a.out_root) / stamp
@@ -1104,11 +1154,14 @@ def _run_sim(a, home, env):
                 raise SimError("candidate DLL was not placed correctly")
             env.out(f"[sim] candidate DLL placed (installed {before[:12]} backed up to {backup}; restored afterwards)")
         if game_cvars:
-            append_game_cvars(save_paths(inst.prefix)[1], game_cvars)
+            append_game_cvars(save_paths(inst.prefix, profile)[1], game_cvars)
             env.out("[sim] game config cvars appended (restored afterwards): " + ", ".join(f"{n}={v}" for n, v in game_cvars))
         if a.test_save:
-            swap_in_test_save(inst.prefix, a.test_save)
+            swap_in_test_save(inst.prefix, a.test_save, profile)
             env.out(f"[sim] test save {a.test_save} swapped in")
+        if getattr(a, "slot", None):
+            select_slot(inst.prefix, a.slot, profile)
+            env.out(f"[sim] {a.slot} made the newest slot, so Continue loads it (mtimes only; restored afterwards)")
         guard.remember(build / "dxgi-probe.cfg")
         as_bytes = lambda x: x if isinstance(x, bytes) else x.encode("utf-8")  # noqa: E731
         planned = {build / OVERRIDE_NAME: as_bytes(override), build / SCRIPT_CFG: as_bytes(script_cfg), art / SCRIPT_JSON: as_bytes(script_json)}
@@ -1131,7 +1184,7 @@ def _run_sim(a, home, env):
             env.out("[sim] warning: build/ already holds knobs that change rendering: " + ", ".join(rendering) +
                     ". They apply to this run (the probe reads them unconditionally); the report lists them per run")
         env.launch_env = launch_env
-        bad = conflicts(env.proc_root)
+        bad = conflicts(env.proc_root, profile)
         if bad:
             raise SimError("refusing to launch: " + "; ".join(bad))
         log = art / "linux-proxy.log"
@@ -1145,12 +1198,12 @@ def _run_sim(a, home, env):
         seen = []
 
         def game_up():
-            if game_processes(env.proc_root):
+            if game_processes(env.proc_root, profile=profile):
                 seen.append(1)
             return bool(seen)
 
         def stop_waiting():
-            return refused() or (game_up() and not game_processes(env.proc_root))
+            return refused() or (game_up() and not game_processes(env.proc_root, profile=profile))
 
         env.out("[sim] waiting for the proxy to start the session")
         if not _wait(env, lambda: begin() or stop_waiting(), a.start_timeout, 2.0):
@@ -1159,7 +1212,7 @@ def _run_sim(a, home, env):
             reason = "the proxy refused to start the session or the game exited: " + _read(log).strip().splitlines()[-1]
         else:
             env.out(f"[sim] session running ({seconds} s)")
-            if not _wait(env, lambda: "StartProbe returned" in _read(log) or not game_processes(env.proc_root),
+            if not _wait(env, lambda: "StartProbe returned" in _read(log) or not game_processes(env.proc_root, profile=profile),
                          seconds + 150, 2.0):
                 reason = "StartProbe did not return in time"
             elif "StartProbe returned" not in _read(log):
@@ -1181,7 +1234,7 @@ def _run_sim(a, home, env):
                 env.out(f"[sim] closing the game failed ({type(e).__name__}: {e})")
                 gone = False
                 with contextlib.suppress(Exception):
-                    gone = not game_processes(env.proc_root)
+                    gone = not game_processes(env.proc_root, profile=profile)
             try:
                 snapshot(mod_home, run_dir, {"scenario": a.script or a.scenario, "seconds": seconds, "override": override,
                                              "return_code": rc, "reason": reason, "notes": notes, "backup": str(backup),
@@ -1198,7 +1251,7 @@ def _run_sim(a, home, env):
                 env.out("[sim] could not reset dev files: " + "; ".join(failed))
             if gone:
                 try:
-                    ok, rnotes = restore_saves(inst.prefix, backup)
+                    ok, rnotes = restore_saves(inst.prefix, backup, profile=profile)
                 except Exception as e:  # noqa: BLE001
                     ok, rnotes = False, [f"restore raised {type(e).__name__}: {e}"]
                 for n in rnotes:

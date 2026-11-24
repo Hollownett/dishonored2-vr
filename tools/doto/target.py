@@ -29,6 +29,8 @@ def steam_libraries():
     except ImportError:
         pass
     roots.append(Path(r"C:\Program Files (x86)\Steam"))
+    if os.name != "nt":   # Linux Steam (native package): libraryfolders.vdf lists the other libraries
+        roots += [Path.home() / ".local/share/Steam", Path.home() / ".steam/steam"]
     libs = []
     for r in roots:
         vdf = r / "steamapps" / "libraryfolders.vdf"
