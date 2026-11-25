@@ -74,8 +74,9 @@
       <Using Namespace="System.Security.Cryptography" />
       <Using Namespace="System.Text.RegularExpressions" />
       <Code Type="Fragment" Language="cs"><![CDATA[
-        var art = Path.Combine(Root, string.IsNullOrEmpty(ArtDir) ? "artifacts" : ArtDir);
-        var bld = Path.Combine(Root, string.IsNullOrEmpty(BuildDir) ? "build" : BuildDir);
+        // the target passes Windows separators (artifacts\doto); a Linux build (EnableWindowsTargeting) needs its own
+        var art = Path.Combine(Root, (string.IsNullOrEmpty(ArtDir) ? "artifacts" : ArtDir).Replace('\\', Path.DirectorySeparatorChar));
+        var bld = Path.Combine(Root, (string.IsNullOrEmpty(BuildDir) ? "build" : BuildDir).Replace('\\', Path.DirectorySeparatorChar));
         var manifests = (Directory.Exists(art) ? Directory.GetFiles(art, "repair-v*-test-candidate.json") : new string[0])
             .Select(f => new { f, m = Regex.Match(Path.GetFileName(f), @"^repair-v(\d+)-test-candidate\.json$") })
             .Where(x => x.m.Success).OrderByDescending(x => int.Parse(x.m.Groups[1].Value)).Select(x => x.f);
