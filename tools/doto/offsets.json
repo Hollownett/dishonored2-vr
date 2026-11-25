@@ -329,6 +329,10 @@
   }
  ],
  "sites": [
+  {"file": "src/game_profile.hpp", "contains": "void_strike_attr_index = 0x124", "from": "0x124", "to": "0x124", "why": "already DOTO's (slash start 0x8d56b6: attributes +0x124 Void Strike index, entries +0x48, 0x28 stride, value +0x24; test only): kept", "source": "review/void-strike-test"},
+  {"file": "src/game_profile.hpp", "contains": "void_strike_attr_index = 0x124", "from": "0x48", "to": "0x48", "why": "already DOTO's (slash start 0x8d56b6: attributes +0x124 Void Strike index, entries +0x48, 0x28 stride, value +0x24; test only): kept", "source": "review/void-strike-test"},
+  {"file": "src/game_profile.hpp", "contains": "void_strike_attr_index = 0x124", "from": "0x28", "to": "0x28", "why": "already DOTO's (slash start 0x8d56b6: attributes +0x124 Void Strike index, entries +0x48, 0x28 stride, value +0x24; test only): kept", "source": "review/void-strike-test"},
+  {"file": "src/game_profile.hpp", "contains": "void_strike_attr_index = 0x124", "from": "0x24", "to": "0x24", "why": "already DOTO's (slash start 0x8d56b6: attributes +0x124 Void Strike index, entries +0x48, 0x28 stride, value +0x24; test only): kept", "source": "review/void-strike-test"},
   {"file": "src/game_profile.hpp", "contains": "slash_state_vtable = 0x1d0b978", "from": "0x1d0b978", "to": "0x1d0b978", "why": "DOTO-only literal: arkPlayerStateSlash vtable (R2 2.4 / R6; slot 10 start 0x8d5520, update 0x8d86c0); D2 trait is 0", "source": "R6/void-strike"},
   {"file": "src/game_profile.hpp", "contains": "weapon_states_vtable = 0x1c45e18", "from": "0x1c45e18", "to": "0x1c45e18", "why": "already DOTO's (R7: arkCpntWeaponStates vtable, idEntity component list +0x270, current state index +0x20, pending +0x24): kept", "source": "review/hook-mine-lethal"},
   {"file": "src/game_profile.hpp", "contains": "weapon_states_vtable = 0x1c45e18", "from": "0x270", "to": "0x270", "why": "already DOTO's (R7: arkCpntWeaponStates vtable, idEntity component list +0x270, current state index +0x20, pending +0x24): kept", "source": "review/hook-mine-lethal"},

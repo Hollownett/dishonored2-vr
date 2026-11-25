@@ -138,7 +138,7 @@ class NativeWeaponHands {
     friend struct GunCopiesFixture;
 public:
     enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake,living_start,living_pull,
-        gun_drop,gun_pickup,slot1_restore,test_equip,slot1_unequip,carry_left_redraw,real_copy}; // dual wield (row A): see gun_drop / gun_pickup / slot1_restore below; test_equip: the "equip" test command; slot1_unequip: the Heart let go (v771)
+        gun_drop,gun_pickup,slot1_restore,test_equip,slot1_unequip,carry_left_redraw,real_copy,test_give}; // dual wield (row A): see gun_drop / gun_pickup / slot1_restore below; test_equip: the "equip" test command; slot1_unequip: the Heart let go (v771)
     // G6 (plan Task 14): the hold of a living NPC pulls him (the existing teleport 0x87d1e0, horizontal steps toward the hand) only when the guard_probe
     // experiments (plan Task 13, docs/BONELAB-FEEL-GUARD-PULL-RE.md) showed no snap-back and no yaw pop. Set from that verdict.
     static constexpr bool living_pull_enabled=false;
@@ -236,6 +236,7 @@ public:
             case Op::gun_pickup: try {ok=gun_pickup(base,read,r,manual_equip);} catch(...) {ok=false;} if(!ok) ++gun_failed;break;
             case Op::slot1_restore: try {ok=slot1_restore(base,read);} catch(...) {ok=false;} if(ok) ++slot1_restores;else ++gun_failed;break;
             case Op::test_equip: try {ok=test_equip(base,read,r.decl);} catch(...) {ok=false;} break;
+            case Op::test_give: try {ok=test_give(base,read,static_cast<int>(r.target));} catch(...) {ok=false;give_result_.store(-9,std::memory_order_relaxed);} break;
             case Op::real_copy: {CrashOperation copy_operation("real copy experiment");try {ok=real_copy(base,read,r.decl,r.pos);} catch(...) {ok=false;}} break;
             case Op::carry_left_redraw: try {ok=carry_redraw(base,read,r.target);} catch(...) {ok=false;} break; // v1041/v1044: the left item CarryCorpse put away, equipped again
             case Op::slot1_unequip: try {ok=dual_wield_.load(std::memory_order_relaxed) && equip(base,read,0x20,64);} catch(...) {ok=false;} break; // the engine's own instant unequip (as a native gun_drop)
@@ -2936,7 +2937,36 @@ public:
             {dump_entity(base,read,o,side?"HELD_RIGHT":"HELD_LEFT",pool_[h.pe].ent);const auto& c=held_[side].cmd.position;o<<"  target=["<<c.x<<","<<c.y<<","<<c.z<<"] player="<<std::hex<<player(base,read)<<std::dec<<"\n";}
         return true;
     }
+public:
+    // Test (sim, 2026-11-25; docs/doto-research/2026-11-25-R8-d2-add-power.md): "d2vr give power possession|far_reach": the power menu's own purchase,
+    // arkCpntPlayerPowerSystem::AddPower (0x455850; arkPlayerPower_t Far Reach 6, Possession 7), so a lab save without the power can test it (the sim
+    // runner restores the saves afterwards). Dishonored 2 only (the RVAs are D2's). give_result_: 1 given, 0 AddPower refused (owned already),
+    // -1 not D2 / code bytes differ, -2 no game or player, -3 no power system, -4 no item record for that power in this save, -9 fault.
+    inline static std::atomic<int> give_result_{-10};inline static std::array<char,96> give_item_{};
 private:
+    template<class Read> static bool test_give(std::uintptr_t base,Read& read,int power) {
+        give_result_.store(-1,std::memory_order_relaxed);
+        if constexpr(game_traits::power_mimic_vtable!=0) {(void)base;(void)read;(void)power;return false;}
+        else {
+            static constexpr std::array<unsigned char,16> add_code{0x48,0x8b,0xc4,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x50};
+            static constexpr std::array<unsigned char,16> item_code{0x40,0x57,0x48,0x83,0xec,0x50,0x48,0xc7,0x44,0x24,0x30,0xfe,0xff,0xff,0xff,0x48};
+            static constexpr std::array<unsigned char,16> find_code{0x48,0x89,0x5c,0x24,0x10,0x44,0x89,0x44,0x24,0x18,0x55,0x56,0x57,0x41,0x54,0x41};
+            const auto code=[&](std::uintptr_t rva,const std::array<unsigned char,16>& want) {std::array<unsigned char,16> got{};return read(base+rva,got.data(),got.size()) && got==want;};
+            if(power<1 || power>20 || !code(0x455850,add_code) || !code(0x456b70,item_code) || !code(0x877720,find_code)) return false;
+            give_result_.store(-2,std::memory_order_relaxed);
+            const auto game=rig::value<std::uintptr_t>(read,base+0x39a5290);if(!game || !*game) return false;
+            const auto player=rig::value<std::uintptr_t>(read,*game+0x3130b0);if(!player || !rig::pointer(*player)) return false;
+            give_result_.store(-3,std::memory_order_relaxed);
+            using FindCpntFn=void*(__fastcall*)(void*,void*,int);using ItemFn=void*(__fastcall*)(void*,int);using AddPowerFn=bool(__fastcall*)(void*,int);
+            void* const ps=reinterpret_cast<FindCpntFn>(base+0x877720)(reinterpret_cast<void*>(*player),reinterpret_cast<void*>(base+0x39e2bb0),0);
+            if(!ps || !rig::typed(read,base,reinterpret_cast<std::uintptr_t>(ps),0x1b550e8)) return false;   // arkCpntPlayerPowerSystem
+            give_result_.store(-4,std::memory_order_relaxed);
+            void* const item=reinterpret_cast<ItemFn>(base+0x456b70)(ps,power);if(!item) return false;
+            give_item_={};if(const auto name=rig::value<std::uintptr_t>(read,reinterpret_cast<std::uintptr_t>(item)+0x8);name && rig::pointer(*name)) read(*name,give_item_.data(),give_item_.size()-1);
+            const bool added=reinterpret_cast<AddPowerFn>(base+0x455850)(ps,power);
+            give_result_.store(added?1:0,std::memory_order_relaxed);return added;
+        }
+    }
     template<class Read> static bool test_equip(std::uintptr_t base,Read& read,const char* what) {
         if(!what) return false;
         const bool crossbow=!std::strcmp(what,"crossbow"),gun=crossbow || !std::strcmp(what,"pistol");

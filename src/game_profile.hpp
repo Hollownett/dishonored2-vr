@@ -56,6 +56,9 @@ inline constexpr std::uintptr_t hook_mine_equipment_vtable = 0x1c43928;   // ark
 inline constexpr std::uintptr_t weapon_states_vtable = 0x1c45e18, entity_components_offset = 0x270, weapon_state_current = 0x20, weapon_state_pending = 0x24;
 inline constexpr bool gadget_mode_switch = true;   // a held Hook Mine has lethal/non-lethal modes: the use button held switches them (GadgetGrip mode hold)
 inline constexpr std::uintptr_t slash_state_vtable = 0x1d0b978;   // arkPlayerStateSlash (R6 void strike; pool id 39)
+// The Void Strike attribute (ARK_ATTRIBUTE_VOID_STRIKE), as the slash start 0x8d56b6 reads it: the player state machine's attributes object
+// (+0x388 in DOTO), int +0x124 the attribute's index (-1 none), entries of 0x28 bytes at +0x48, float +0x24 the value (> 0 = owned). Test only.
+inline constexpr std::uintptr_t void_strike_attr_index = 0x124, attribute_entries = 0x48, attribute_stride = 0x28, attribute_value = 0x24;
 inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_change_weapon = 74, state_swapper = 93, state_cancel_void_strike = 94,
     state_mimicking = 96, state_use_mimic = 102, state_possession = 0xffffffffu;
 // v145741 (live, lab9: the inventory's GaussGun record 0x40138 -> its component's +0x10 owner): the Voltaic Gun's entity is a plain
@@ -98,6 +101,7 @@ inline constexpr std::uintptr_t hook_mine_equipment_vtable = 0;
 inline constexpr std::uintptr_t weapon_states_vtable = 0, entity_components_offset = 0, weapon_state_current = 0, weapon_state_pending = 0;
 inline constexpr bool gadget_mode_switch = false;  // D2's stun mine / spring razor have no modes
 inline constexpr std::uintptr_t slash_state_vtable = 0;
+inline constexpr std::uintptr_t void_strike_attr_index = 0, attribute_entries = 0, attribute_stride = 0, attribute_value = 0;
 inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_change_weapon = 0xffffffffu, state_swapper = 0xffffffffu,
     state_cancel_void_strike = 0xffffffffu, state_mimicking = 0xffffffffu, state_use_mimic = 0xffffffffu, state_possession = 26;
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0;

@@ -465,7 +465,8 @@ static d2vr::NativeShotAim native_shot_aim;static bool native_shot_aim_installed
 static d2vr::NativeBlinkAim native_blink_aim;static bool native_blink_aim_installed=false;
 // GitHub issue #6: the grip cancels a held power aim (power_cancel.hpp, native_power_cancel.hpp). Knob build/no-power-grip-cancel turns it off.
 static d2vr::NativePowerCancel native_power_cancel;static bool native_power_cancel_installed=false,power_grip_cancel_enabled=true;
-static d2vr::PowerCancelLatch power_cancel_latch;static std::atomic<UINT64> power_grip_cancels{},power_aim_exempt_frames{},choke_power_trigger_frames{};
+static d2vr::PowerCancelLatch power_cancel_latch;static std::atomic<UINT64> power_grip_cancels{},power_aim_exempt_frames{},choke_power_trigger_frames{};static std::array<std::atomic<UINT64>,4> choke_lt{};static std::atomic<unsigned> choke_lt_kills{};static std::array<std::atomic<UINT64>,2> offer_lt{};static std::atomic<unsigned> offer_lt_kills{};static std::atomic<unsigned> offer_lt_kinds{},offer_lt_free{},gun_hand_free_bits{};   // GripIntent kinds (bits: left | right<<8), why the gun hand was not free   // DOTO: power trigger pulled while a choke is offered, LT sent; gates
+static std::array<std::atomic<UINT64>,3> native_chord_lt{};static std::atomic<unsigned> native_chord_lt_kills{};   // engine Voltaic chord frames, LT not sent, RT sent; gates   // choke frames, power trigger pulled, LT sent, RT sent; gates (lt_kill bits)
 // Task 12 teleport fade (build/no-teleport-fade): edges from the power observer (control thread), alpha read by the render thread. A teleport also
 // resets the vertical anchor smoother (teleport_reset_request) and starts a new hand clamp epoch (teleport_epoch) so the hands never streak.
 static d2vr::TeleportFade teleport_fade;static std::mutex teleport_fade_mutex;static bool teleport_fade_enabled=true;static bool possession_view_move_enabled=true;   // Task 15b (build/no-possession-view-move)
@@ -5989,7 +5990,7 @@ static std::array<std::atomic<std::uint64_t>,6> voltaic_arm_events_n{};
 static int voltaic_restore_hand=-1;static std::uintptr_t voltaic_restore_decl{};static std::atomic<std::uint64_t> voltaic_restores{};
 // v145745: each forearm copy's charge (control thread), whether the player owns the charge upgrade (NativeRangedFire reads it from the gun's
 // upgrade list), and the charged copy shots fired
-static std::array<d2vr::VoltaicCharge,2> voltaic_charge{};static std::atomic<bool> voltaic_charge_owned{};static std::atomic<std::uint64_t> voltaic_charged_shots{};
+static std::array<d2vr::VoltaicCharge,2> voltaic_charge{};static std::atomic<bool> voltaic_charge_owned{};static std::atomic<std::uint64_t> voltaic_charged_shots{};static std::atomic<std::uint64_t> voltaic_native_charge_ticks{};   // 2026-11-25: charge-ready ticks of the engine gun's held chord
 static std::atomic<int> voltaic_charge_test{};   // test command "voltaic charge on|off": 2 on, 1 off, 0 the player's own upgrade
 static std::string voltaic_arm_events() {std::string s;for(unsigned i=0;i<voltaic_arm_events_n.size();++i) s+=(i?",":"")+std::to_string(voltaic_arm_events_n[i].load(std::memory_order_relaxed));return s;}
 // [copy shots asked, queued, refused, native chord frames, ArmSet pins, forearm feeds, model frame writes, copy aims]
@@ -7454,9 +7455,57 @@ static void update_wrist_hud_cvar(bool want) noexcept {
         }
     } catch(...) {}
 }
+static std::atomic<std::uintptr_t> last_guard_target{};   // test "guard behind": the NPC the player was put behind (status powers.guard_target)
 static std::string run_test_command(const std::string& line) {
     std::istringstream in(line);std::string verb;in>>verb;
     if(verb=="unlock") return "unlock applied="+std::to_string(apply_test_unlock());
+    if(verb=="give") { // test (sim, 2026-11-25, D2): "give power possession|far_reach": the game's own AddPower (NativeWeaponHands::test_give); "give status"
+        std::string what,name;in>>what>>name;
+        if(what=="status") return "give: result "+std::to_string(d2vr::NativeWeaponHands::give_result_.load())+" item "+std::string(d2vr::NativeWeaponHands::give_item_.data());
+        const int power=name=="possession"?7:name=="far_reach"?6:0;
+        if(what!="power" || !power) return "usage: give power possession|far_reach | give status";
+        if constexpr(d2vr::game_traits::power_mimic_vtable!=0) return "give: Dishonored 2 only";
+        d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::test_give;r.target=static_cast<std::uintptr_t>(power);
+        return d2vr::NativeWeaponHands::request(r)?"give requested":"give queue full";}
+    if(verb=="voidstrike") { // test (sim, 2026-11-25): "voidstrike own|off": DOTO's Void Strike attribute set to 1 / put back (VoidStrikeTest), for saves without it
+        std::string what;in>>what;if(what!="own" && what!="off") return "usage: voidstrike own|off";
+        if constexpr(d2vr::game_traits::void_strike_attr_index==0) return "voidstrike: Death of the Outsider only";
+        d2vr::VoidStrikeTest::want.store(what=="own"?1:2,std::memory_order_relaxed);return "voidstrike "+what+" requested "+d2vr::VoidStrikeTest::json();}
+    if(verb=="guard") { // test (sim, 2026-11-25: Semblance / choke in any save): "guard list": the nearest living NPCs (guards first); "guard behind [metres] [index]":
+        // the player put (setviewpos through the engine console, as the D2 guard probe) that far behind the nearest one (or entry <index> of the list),
+        // facing his back, where an unaware NPC offers his choke. The name is read at entity+0x20 (D2) or +0x28 (DOTO: idEntity fields 0x20..0x2b0 moved +8)
+        std::string what;double back=.7;int pick=0;in>>what;if(!(in>>back)) back=.7;if(!(in>>pick)) pick=0;
+        if(what!="list" && what!="behind") return "usage: guard list | guard behind [metres 0.3..3] [index]";
+        back=std::clamp(back,.3,3.);
+        std::uintptr_t game{},player{};std::array<float,3> me{};
+        if(!read_self(image_base+0x39a5290,&game,8) || !game || !read_self(game+0x3130b0,&player,8) || !player || !read_self(player+0x300,me.data(),12)) return "guard: not in a game";
+        std::vector<std::uintptr_t> slots(0x3fff);if(!read_self(game+0x3130b0,slots.data(),slots.size()*8)) return "guard: no entity list";
+        struct Hit {std::uintptr_t npc{};double d{};std::array<float,3> at{},fwd{};std::string name;bool guard{};};std::vector<Hit> hits;
+        const std::uintptr_t name_first=d2vr::game_traits::power_mimic_vtable?0x28:0x20,name_second=d2vr::game_traits::power_mimic_vtable?0x20:0x28;
+        auto text_at=[&](std::uintptr_t field) {std::uintptr_t t{};char b[97]{};if(!read_self(field,&t,8) || !t || !read_self(t,b,96)) return std::string();
+            std::string out;for(char c:b) {if(!c) break;if(c<0x20 || c>0x7e) return std::string();out+=c;}return out.size()>=3?out:std::string();};
+        for(std::size_t i=1;i<slots.size();++i) {
+            const auto npc=slots[i];if(!npc_entity(npc)) continue;
+            unsigned char state{};if(!read_self(npc+0xd1,&state,1) || !state || (state&0x28)) continue;   // living and conscious
+            Hit h{};h.npc=npc;float axes[9]{};
+            if(!read_self(npc+0x300,h.at.data(),12) || !read_self(npc+0x30c,axes,sizeof axes)) continue;
+            const double fl=std::hypot(axes[0],axes[1]);if(!(fl>1e-4) || !std::isfinite(h.at[0]) || !std::isfinite(h.at[1]) || !std::isfinite(h.at[2])) continue;
+            h.fwd={static_cast<float>(axes[0]/fl),static_cast<float>(axes[1]/fl),0.f};
+            h.d=std::sqrt(std::pow(h.at[0]-me[0],2.)+std::pow(h.at[1]-me[1],2.)+std::pow(h.at[2]-me[2],2.));
+            h.name=text_at(npc+name_first);if(h.name.empty()) h.name=text_at(npc+name_second);
+            std::string low=h.name;for(auto& c:low) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            h.guard=low.find("guard")!=std::string::npos || low.find("soldier")!=std::string::npos || low.find("officer")!=std::string::npos;
+            hits.push_back(h);
+        }
+        std::sort(hits.begin(),hits.end(),[](const Hit& a,const Hit& b) {return a.guard!=b.guard?a.guard:a.d<b.d;});
+        std::ostringstream o;o<<std::fixed<<std::setprecision(2)<<"guard: player ("<<me[0]<<','<<me[1]<<','<<me[2]<<") living npcs "<<hits.size();
+        if(what=="list" || hits.empty()) {for(std::size_t i=0;i<hits.size() && i<10;++i) o<<" | "<<i<<' '<<hits[i].name<<" d="<<hits[i].d<<" at=("<<hits[i].at[0]<<','<<hits[i].at[1]<<','<<hits[i].at[2]<<")";return o.str();}
+        const auto& h=hits[static_cast<std::size_t>(std::clamp(pick,0,static_cast<int>(hits.size())-1))];
+        const double x=h.at[0]-h.fwd[0]*back,y=h.at[1]-h.fwd[1]*back,z=h.at[2]+1.65,yaw=std::atan2(h.fwd[1],h.fwd[0])*180/3.14159265358979323846;
+        char line[160];std::snprintf(line,sizeof line,"setviewpos %.3f %.3f %.3f %.1f",x,y,z,yaw);
+        d2vr::NativeInteractionAim::request_console(line);
+        last_guard_target.store(h.npc,std::memory_order_relaxed);
+        o<<" -> "<<h.name<<" d="<<h.d<<" at=("<<h.at[0]<<','<<h.at[1]<<','<<h.at[2]<<") "<<line;return o.str();}
     if(verb=="console") {std::string rest;std::getline(in,rest);const auto at=rest.find_first_not_of(' ');if(at==std::string::npos) return "usage: console <engine command line>";
         d2vr::NativeInteractionAim::request_console(rest.substr(at));return "console requested (result follows)";}
     if(verb=="equip") { // test (sim, v765): the wheel's own equip of the pistol or crossbow (NativeWeaponHands::Op::test_equip)
@@ -7491,7 +7540,14 @@ static std::string run_test_command(const std::string& line) {
         if(what=="bolt") {std::string hand;int index=-1;in>>hand>>index;const int h=hand=="left"?0:hand=="right"?1:-1;if(h<0 || index<0) return "usage: voltaic bolt left|right <index>";
             auto rd=&read_self;const auto name=d2vr::NativeRangedFire::test_bolt(image_base,rd,static_cast<unsigned>(h),index);
             return name.empty()?"voltaic bolt: that hand shows no gun, or it offers no entry "+std::to_string(index):"voltaic bolt "+hand+" "+std::to_string(index)+": "+name;}
-        if(what=="charge") {std::string on;in>>on;voltaic_charge_test.store(on=="on"?2:on=="off"?1:0,std::memory_order_relaxed);return "voltaic charge test "+on;}
+        if(what=="chargestate") return "voltaic chargestate: owned "+std::to_string(voltaic_charge_owned.load()?1:0)+" engine_bit "+std::to_string(d2vr::NativeRangedFire::voltaic_charge_owned()?1:0)+" flags "+std::to_string(d2vr::NativeRangedFire::native_flags_.load())+
+            " native_e0 "+std::to_string(d2vr::NativeRangedFire::native_e0_.load())+" native_e1 "+std::to_string(d2vr::NativeRangedFire::native_e1_.load())+
+            " native_changes "+std::to_string(d2vr::NativeRangedFire::native_charge_changes_.load())+" forced_writes "+std::to_string(d2vr::NativeRangedFire::charge_forced_writes_.load())+
+            " copy_charged_shots "+std::to_string(voltaic_charged_shots.load())+" charged_creates "+std::to_string(d2vr::NativeRangedFire::charged_creates_.load())+
+            " overcharged_creates "+std::to_string(d2vr::NativeRangedFire::overcharged_creates_.load())+" native_ticks "+std::to_string(voltaic_native_charge_ticks.load())+" chord_lt "+std::to_string(native_chord_lt[0].load())+"/"+std::to_string(native_chord_lt[1].load())+"/"+std::to_string(native_chord_lt[2].load())+"/"+std::to_string(native_chord_lt_kills.load());   // 2026-11-25: the charge test's read-back
+        if(what=="charge") {std::string on;in>>on;voltaic_charge_test.store(on=="on"?2:on=="off"?1:0,std::memory_order_relaxed);
+            d2vr::NativeRangedFire::charge_force_.store(on=="on",std::memory_order_relaxed);   // 2026-11-25: the engine gun's charge bit too (probe_charge)
+            return "voltaic charge test "+on;}
         const unsigned m=what=="left"?1u:what=="right"?2u:what=="both"?3u:what=="none"?4u:0u;
         if(!m) return "usage: voltaic left|right|both|none|drop left|right|charge on|off";
         voltaic_arms_test.store(0x100u|(m&3u),std::memory_order_relaxed);return "voltaic arms requested";}
@@ -15427,7 +15483,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     for(const auto& line:simulated_gameplay_script.take_console(script_elapsed,gameplay)) {
                                         // v1432: a line "d2vr <command>" is the mod's own test command (`spacewarp capture 2` at an exact script time)
                                         if(line.rfind("d2vr ",0)==0) {const auto result=run_test_command(line.substr(5));
-                                            std::ofstream(simulated_gameplay_output/L"simulated-gameplay-console.txt",std::ios::app)<<script_elapsed<<' '<<line<<" -> "<<result.substr(0,200)<<std::endl;continue;}
+                                            std::ofstream(simulated_gameplay_output/L"simulated-gameplay-console.txt",std::ios::app)<<script_elapsed<<' '<<line<<" -> "<<result.substr(0,1200)<<std::endl;continue;}
                                         d2vr::NativeInteractionAim::request_console(line);
                                         std::ofstream(simulated_gameplay_output/L"simulated-gameplay-console.txt",std::ios::app)<<script_elapsed<<' '<<line<<'\n';}
                                     if(index!=simulated_gameplay_last_index || gameplay!=simulated_gameplay_last_gameplay || focused!=simulated_gameplay_last_focused) {
@@ -16355,7 +16411,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"target\":[" << d2vr::NativeHudChildDraw::target_size()[0] << ',' << d2vr::NativeHudChildDraw::target_size()[1] << "],\"stage_x\":" << [&]{float x{};return image_base && read_self(image_base+0x3989eac,&x,sizeof x) && std::isfinite(x)?x:0.f;}() << '}'
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}'
-                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << ",\"choke_power_trigger_frames\":" << choke_power_trigger_frames.load() << "}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json() << ",\"possession\":" << native_turning.possession_json() << ",\"teleport_fade\":{\"enabled\":" << (teleport_fade_enabled?"true":"false") << ",\"fades\":" << [&]{std::lock_guard<std::mutex> l(teleport_fade_mutex);return teleport_fade.fades();}() << ",\"last_ms\":" << teleport_fade_last_ms.load() << ",\"alpha_now\":" << teleport_fade_alpha_now.load() << "}"
+                                     << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << ",\"choke_power_trigger_frames\":" << choke_power_trigger_frames.load() << ",\"choke_lt\":[" << choke_lt[0].load() << ',' << choke_lt[1].load() << ',' << choke_lt[2].load() << ',' << choke_lt[3].load() << ',' << choke_lt_kills.load() << "],\"offer_lt\":[" << offer_lt[0].load() << ',' << offer_lt[1].load() << ',' << offer_lt_kills.load() << ',' << offer_lt_kinds.load() << ',' << offer_lt_free.load() << "]}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json() << ",\"guard_target\":" << [&]{const auto npc=last_guard_target.load();unsigned char st{};
+                                         return std::string("{\"set\":")+(npc?"true":"false")+",\"state\":"+std::to_string(npc && read_self(npc+0xd1,&st,1)?static_cast<int>(st):-1)+"}";}() << ",\"void_strike_test\":" << d2vr::VoidStrikeTest::json() << ",\"possession\":" << native_turning.possession_json() << ",\"teleport_fade\":{\"enabled\":" << (teleport_fade_enabled?"true":"false") << ",\"fades\":" << [&]{std::lock_guard<std::mutex> l(teleport_fade_mutex);return teleport_fade.fades();}() << ",\"last_ms\":" << teleport_fade_last_ms.load() << ",\"alpha_now\":" << teleport_fade_alpha_now.load() << "}"
                                      << ",\"native_left_aim\":{\"requested\":" << native_left_aim_requested << ",\"calls\":" << native_left_aim.calls()
                                      << ",\"candidates\":" << native_left_aim.candidates() << ",\"applied\":" << native_left_aim.applied()
                                      << ",\"rejected\":" << native_left_aim.rejected() << ",\"overlaps\":" << native_left_aim.overlap()
@@ -16393,6 +16450,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 controller_bridge.set_game_window(desc.OutputWindow);
                                 const auto logic=game_logic_mask();
                                 auto input=game_xr->controller_input;
+                                unsigned lt_kill=0;   // 2026-11-25 diagnostics: the gates that released the power trigger this frame (status power_grip.choke_lt)
                                 // User's paged guide owns the right stick before Menu+stick, crouch, zoom and turning.
                                 if(game_xr->guide_stick_blocked()) {input.turn_x=input.turn_y=0;input.right_click=false;}
                                 { // Track T C2: hold A or X 0.6 s in an exact cutscene or a Bink video = the game's skip (held Interact); the press is masked until released
@@ -16433,6 +16491,22 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(logic==2) {static ULONGLONG power_observe_ms=0;const auto pnow=GetTickCount64();   // read-only power/gadget observer, <= every 50 ms
                                     if(pnow-power_observe_ms>=50) {power_observe_ms=pnow;
                                         d2vr::NativePowerObserver::publish(d2vr::read_powers(control_reader,image_base,d2vr::PowerVtables::current(),control_machine));
+                                        d2vr::VoidStrikeTest::apply(control_reader,control_machine);   // test "voidstrike own|off" (DOTO; idle unless asked)
+                                        if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(d2vr::diag::on() && control_machine) {   // 2026-11-25: the engine gun's fire state (56) while it runs:
+                                            // phase +0x78 (4 = charging), +0x24 (the timer runs only while > 0), charge timer +0xf0 (0x8d12ec; charged at decl+0xa8, auto fire at decl+0xac)
+                                            static unsigned fire_rows{};static bool fire_first=true;
+                                            if(const auto fs=d2vr::native_player_state_object(control_reader,image_base,control_machine,56,0);fs && fire_rows<3000) {
+                                                const auto act=d2vr::rig::value<std::uint8_t>(control_reader,fs+0x20).value_or(0);
+                                                if(act==1) {std::ofstream f(output_directory/L"fire-state-trace.csv",fire_first?std::ios::trunc:std::ios::app);
+                                                    if(fire_first) f<<"tick_ms,phase,f24,timer,chord\n";fire_first=false;++fire_rows;
+                                                    f<<pnow<<','<<d2vr::rig::value<std::int32_t>(control_reader,fs+0x78).value_or(-9)<<','<<d2vr::rig::value<std::int32_t>(control_reader,fs+0x24).value_or(-9)<<','
+                                                     <<d2vr::rig::value<float>(control_reader,fs+0xf0).value_or(-9.f)<<','<<(voltaic_native_chord_now.load()?1:0)<<'\n';}}}
+                                        if(d2vr::diag::on()) {   // 2026-11-25: every player state transition (artifacts/player-state-transitions.csv: which states a possession / a mimic choke runs)
+                                            static std::array<std::uint64_t,2> prev_ids{};static bool first_ids=true;const auto ids=d2vr::NativePowerObserver::latest().active_ids;
+                                            if(ids!=prev_ids) {std::ofstream f(output_directory/L"player-state-transitions.csv",first_ids?std::ios::trunc:std::ios::app);
+                                                if(first_ids) f<<"tick_ms,id,on\n";first_ids=false;
+                                                for(unsigned id=0;id<128;++id) {const bool now_on=(ids[id>>6]>>(id&63u))&1u,was_on=(prev_ids[id>>6]>>(id&63u))&1u;if(now_on!=was_on) f<<pnow<<','<<id<<','<<(now_on?1:0)<<'\n';}
+                                                prev_ids=ids;}}
                                         if constexpr(d2vr::game_traits::power_theeye_vtable!=0) {   // Foresight's spirit camera is tracked (native_player_camera.hpp)
                                             const int te=d2vr::NativePowerObserver::latest().theeye_state;d2vr::foresight_spirit.store(te==3 || te==4,std::memory_order_relaxed);}
                                         if(teleport_fade_enabled) {   // Task 12: Displace swap (state rising) / Foresight exit (3|4 -> 5|0): a fade, a smoother and clamp reset
@@ -16756,7 +16830,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                          if(hand_state_tick && now_gi-hand_state_tick<=300) body_carry_active=hand_carrying_bits!=0 && !hand_holding_object;}
                                         // Dual wield: the gun's hand (rh) keeps the left hand's rules and the sword's hand (mh) the right hand's (the game's: rh 0, mh 1).
                                         const std::array<float,2> rg{rc.left_grip,rc.right_grip},rt{rc.left_trigger,rc.right_trigger},pg{physical_left_grip,physical_right_grip};
-                                        const auto gun_hand_intent=grip_intent[rh].update(rg[rh],rt[rh],now_gi,!gun_owns && !left_gadget && !extra_owns[rh] && !(rg[rh]>.35f && pg[rh]<.35f) && !(shoulder_consume_bits.load()&(1u<<rh)),100,idle(rh) && !(choke_side==rh && (choke_offer || control_active_choke)),400,40,grip_choice[rh],one_list,pending_max,carry_handoff_now[rh],body_carry_active);
+                                        const bool gun_hand_free=!gun_owns && !left_gadget && !extra_owns[rh] && !(rg[rh]>.35f && pg[rh]<.35f) && !(shoulder_consume_bits.load()&(1u<<rh));
+                                        gun_hand_free_bits.store((gun_owns?1u:0u)|(left_gadget?2u:0u)|(extra_owns[rh]?4u:0u)|((rg[rh]>.35f && pg[rh]<.35f)?8u:0u)|((shoulder_consume_bits.load()&(1u<<rh))?16u:0u)|(rh?32u:0u),std::memory_order_relaxed);   // 2026-11-25 diagnostics (offer_lt)
+                                        const auto gun_hand_intent=grip_intent[rh].update(rg[rh],rt[rh],now_gi,gun_hand_free,100,idle(rh) && !(choke_side==rh && (choke_offer || control_active_choke)),400,40,grip_choice[rh],one_list,pending_max,carry_handoff_now[rh],body_carry_active);
                                         const auto sword_hand_intent=grip_intent[mh].update(rg[mh],rt[mh],now_gi,
                                                              // a right hand holding a body (or anything) physically is not the sword holster's at the right shoulder (it puts the body
                                                              // there); a grip the holster, the temple or the shoulder dock consumed is nobody else's (right_consumed, as left_consumed)
@@ -17360,7 +17436,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 const bool voltaic_pin_now=voltaic_pinned();const unsigned forearm_gh=voltaic_pin_now?voltaic_native_hand:rh;float voltaic_fire=0.f;   // v145799: the hand whose forearm carries the native gun
                                 if(logic==2) { // a fist never casts, fires or blocks; a trigger pulled first waits 100 ms for its grip
                                     const bool timepiece=timepiece_out();   // v1254: the Timepiece's trigger is the time shift, never a fist's
-                                    if(!grip_intent_out[0].pass_trigger && !timepiece) input.left_trigger=0;else if(grip_intent_out[0].tap_trigger) input.left_trigger=1;
+                                    if(!grip_intent_out[0].pass_trigger && !timepiece) {input.left_trigger=0;lt_kill|=1u;} else if(grip_intent_out[0].tap_trigger) input.left_trigger=1;
                                     if(!grip_intent_out[1].pass_trigger) input.right_trigger=0;else if(grip_intent_out[1].tap_trigger) input.right_trigger=1;
                                     // v145727 (user, DOTO headset: "fire only when I have a squeezed grip, and then I click trigger"): the forearm gun's hand
                                     // fires on grip + trigger and on nothing else. The trigger alone never fires it, a hand holding or grabbing never fires,
@@ -17377,6 +17453,15 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                 }
                                 voltaic_native_chord_now.store(voltaic_pin_now && voltaic_fire>0.f,std::memory_order_relaxed);   // v145773 (publish_voltaic_native's chord window)
+                                // 2026-11-25: the engine gun's charge had no cue in the hand (the copy ticks at VoltaicCharge charge_started): the same tick when its
+                                // held chord passes the engine's own 2 s charge hold (m_chargedShotHoldDuration) with the Charged Shot upgrade owned
+                                if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) {
+                                    static UINT64 native_chord_since{};static bool native_charge_ticked{};
+                                    if(!(logic==2 && left_forearm_gun.load() && voltaic_fire>0.f)) {native_chord_since=0;native_charge_ticked=false;}
+                                    else {const auto n=GetTickCount64();if(!native_chord_since) native_chord_since=n;
+                                        if(!native_charge_ticked && n-native_chord_since>=d2vr::VoltaicCharge::charge_ms && voltaic_charge_owned.load(std::memory_order_relaxed)) {
+                                            native_charge_ticked=true;game_xr->pulse(forearm_gh,.25f,.05f);voltaic_native_charge_ticks.fetch_add(1,std::memory_order_relaxed);}}
+                                }
                                 // v145745: a forearm copy's grip + trigger is that copy's shot (fired below through NativeRangedFire), never the native trigger
                                 // of its hand (a power in the engine's slot, the sword's block). Task 8 (R3 G-c4): not while that hand's grip holds its weapon: the sword hand's trigger IS the block
                                 if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(logic==2) for(unsigned s=0;s<2;++s)
@@ -17385,7 +17470,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // v145799: the plan still has slot 1 on the right arm (the left arm holds the sword, so pin_slot1 could not move it): the pinned
                                 // gun's trigger is the LEFT hand's chord, and while it fires the sword's trigger (the same hand's) stays released
                                 if(logic==2 && left_forearm_gun.load() && forearm_gh!=rh) {input.left_trigger=voltaic_fire;if(voltaic_fire>0.f) input.right_trigger=0.f;}
-                                if(dual_wield_enabled && logic==2 && !voltaic_pin_now && d2vr::arm::is_gun(arm_set.copy_at(rh))) input.left_trigger=0; // v773: the slot-1 hand's copy fires, its power (slot 1) does not cast. v145735: not the pinned Voltaic Gun's trigger (it is the left chord, routed above; the right copy fires through NativeRangedFire)
+                                if(dual_wield_enabled && logic==2 && !voltaic_pin_now && d2vr::arm::is_gun(arm_set.copy_at(rh))) {input.left_trigger=0;lt_kill|=2u;} // v773: the slot-1 hand's copy fires, its power (slot 1) does not cast. v145735: not the pinned Voltaic Gun's trigger (it is the left chord, routed above; the right copy fires through NativeRangedFire)
                                 {static bool fire_live{};if(dual_wield_enabled && fire_live && logic!=2) d2vr::NativeRangedFire::reset();fire_live=logic==2;}
                                 if(dual_wield_enabled) { // two active hands: a hand's mod-owned gun fires a real shot from its barrel on its own trigger (NativeRangedFire)
                                     using E=d2vr::arm::Held;static std::array<bool,2> shot_down{};
@@ -17679,11 +17764,11 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // A press that uses something is consumed: a grip carry is not native RB, a trigger Use is not a power,
                                 // shot or block (the right trigger's RB below checks consume_trigger itself).
                                 if(logic==2 && interaction.consume_trigger[1] && grip_use[1]) input.right_grip=0;
-                                if(logic==2 && interaction.consume_trigger[rh] && !grip_use[rh]) input.left_trigger=0;
+                                if(logic==2 && interaction.consume_trigger[rh] && !grip_use[rh]) {input.left_trigger=0;lt_kill|=4u;}
                                 // The gun is in the hip holster: an empty left hand's trigger would draw it natively (Draw 65, code 8: the
                                 // sword too). It comes out only by hand, from the hip.
                                 if(logic==2 && hip_loaded && !left_gun_model.load()) {bool empty{};{std::lock_guard<std::mutex> l(hand_state_mutex);empty=(hand_weapon_bits&1u)==0;}
-                                    if(empty) input.left_trigger=0;}
+                                    if(empty) {input.left_trigger=0;lt_kill|=8u;}}
                                 // The sword attacks only by swinging; the right trigger just interacts (pointing).
                                 // A left trigger squeezed while the left grip is held (fist/grab) never fires.
                                 // Hand gestures (vr_gestures.hpp): sword held across the body blocks; optional power casts.
@@ -17906,9 +17991,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     }
                                     // Both hands thrown up above the head = native A (jump), held while they stay up (mantle at a ledge).
                                     {static bool jump_was{};if(gesture.jump && !jump_was) ++gesture_jumps;jump_was=gesture.jump;if(gesture.jump) input.a=true;}
-                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget && !timepiece_out() && !left_forearm_gun.load() && !power_latch.exempt_fist && !choke_power_hand) input.left_trigger=0; if(power_latch.exempt_fist) ++power_aim_exempt_frames;if(choke_power_hand && raw_grip(rh)>.55f) ++choke_power_trigger_frames;if(power_latch.suppress_trigger) input.left_trigger=0; // issue #6: a held power aim keeps LT through the grip; the grip cancels it (released until the trigger is let go) // v145741: not the forearm Voltaic Gun (its fire chord IS grip + trigger; lab8: 280 chord frames, no shot). a fist never fires; a gripped gun or gadget does; the Timepiece's trigger is its time shift (v1254)
+                                    input.right_trigger=0;if(raw_grip(rh)>.55f && !gun_grip.held() && !left_gadget && !timepiece_out() && !left_forearm_gun.load() && !power_latch.exempt_fist && !choke_power_hand) {input.left_trigger=0;lt_kill|=16u;} if(power_latch.exempt_fist) ++power_aim_exempt_frames;if(choke_power_hand && raw_grip(rh)>.55f) ++choke_power_trigger_frames;if(power_latch.suppress_trigger) input.left_trigger=0; // issue #6: a held power aim keeps LT through the grip; the grip cancels it (released until the trigger is let go) // v145741: not the forearm Voltaic Gun (its fire chord IS grip + trigger; lab8: 280 chord frames, no shot). a fist never fires; a gripped gun or gadget does; the Timepiece's trigger is its time shift (v1254)
                                     if(GetTickCount64()<gesture_cast_until) input.left_trigger=1;
-                                    if(gesture_release_until) {if(raw_trigger(rh)<.3f) gesture_release_until=0;else input.left_trigger=0;} // yoink: release the aimed power, held until the trigger is let go
+                                    if(gesture_release_until) {if(raw_trigger(rh)<.3f) gesture_release_until=0;else {input.left_trigger=0;lt_kill|=32u;}} // yoink: release the aimed power, held until the trigger is let go
                                 }
                                 // Native RB supplies block/choke mechanics; ordinary combat keeps tracked hands.
                                 // Physical sword swing owns one pulse per tracked motion.
@@ -18029,7 +18114,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // swallows a trigger pulled within 400 ms of its grip's squeeze. A hand whose grip is a gun's own (the forearm gun's fire
                                 // chord IS grip + trigger; a drawn gun held by its grip) and that holds nothing is not grabbing: its first shot goes.
                                 const bool gun_chord_hand=!(physical_grab_requested && native_grab.holding(rh)) && (left_forearm_gun.load() || (left_gun_model.load()!=0 && gun_grip.held()));
-                                if(grab_guard[rh] && !timepiece_out() && !gun_chord_hand) input.left_trigger=0;   // v1254: the trigger that shifts time is the Timepiece's, not a grab's
+                                if(grab_guard[rh] && !timepiece_out() && !gun_chord_hand) {input.left_trigger=0;lt_kill|=64u;}   // v1254: the trigger that shifts time is the Timepiece's, not a grab's
                                     {   // A grenade or mine in the slot-1 hand. Last word on the left trigger.
                                         // Without dual wield (user, headset v671): the fist holds the game's left trigger (aim / cook), opening the hand lets it go
                                         // (the throw / the placement); the trigger alone still works.
@@ -18327,8 +18412,27 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 // the trigger's 220 ms claim above can. This is the last write before publish, so no other path (grip
                                 // latch, gaze, legacy corpse Use) can talk/pickpocket from the grip.
                                 if(logic==2 && (npc_owns_frame[0] || npc_owns_frame[1])) input.x=npc_trigger_interact[0] || npc_trigger_interact[1];
-                                if(npc_trigger_consume[0]) input.left_trigger=0;   // claimed by Talk/Pickpocket: never a shot or a cast
+                                if(npc_trigger_consume[0]) {input.left_trigger=0;lt_kill|=128u;}   // claimed by Talk/Pickpocket: never a shot or a cast
                                 if(npc_trigger_consume[1]) input.right_trigger=0;  // nor the sword hand's block
+                                if constexpr(d2vr::game_traits::power_mimic_vtable!=0) if(logic==2 && (d2vr::NativePowerObserver::latest().states&d2vr::power_state_bit::choke)!=0) {   // Semblance: what reaches LT in a choke
+                                    choke_lt[0].fetch_add(1,std::memory_order_relaxed);
+                                    if(raw_trigger(rh)>.35f) {choke_lt[1].fetch_add(1,std::memory_order_relaxed);if(input.left_trigger>0.f) choke_lt[2].fetch_add(1,std::memory_order_relaxed);choke_lt_kills.fetch_or(lt_kill,std::memory_order_relaxed);}
+                                    if(input.right_trigger>0.f) choke_lt[3].fetch_add(1,std::memory_order_relaxed);}
+                                if(d2vr::diag::on() && logic==2) {   // 2026-11-25: every frame the power hand's trigger is pulled (and 300 ms after): what the game got (artifacts/power-trigger-trace.csv)
+                                    static UINT64 lt_trace_until{};static unsigned lt_trace_rows{};static bool lt_trace_first=true;const auto lt_now=GetTickCount64();
+                                    if(raw_trigger(rh)>.35f) lt_trace_until=lt_now+300;
+                                    if(lt_now<lt_trace_until && lt_trace_rows<4000) {
+                                        std::ofstream f(output_directory/L"power-trigger-trace.csv",lt_trace_first?std::ios::trunc:std::ios::app);
+                                        if(lt_trace_first) f<<"tick_ms,rh,raw_trigger,raw_grip,sent_lt,sent_rt,kills,left_power_item,left_gadget,forearm_gun,intent_kind,pass,states\n";
+                                        lt_trace_first=false;++lt_trace_rows;
+                                        f<<lt_now<<','<<rh<<','<<raw_trigger(rh)<<','<<raw_grip(rh)<<','<<input.left_trigger<<','<<input.right_trigger<<','<<lt_kill<<','<<(left_power_item.load()?1:0)<<','<<(left_gadget?1:0)
+                                         <<','<<(left_forearm_gun.load()?1:0)<<','<<static_cast<int>(grip_intent[rh].kind())<<','<<(grip_intent_out[rh].pass_trigger?1:0)<<','<<d2vr::NativePowerObserver::latest().states<<'\n';}}
+                                if constexpr(d2vr::game_traits::power_mimic_vtable!=0) if(logic==2 && raw_trigger(rh)>.35f && GetTickCount64()-offered_choke_tick.load(std::memory_order_relaxed)<=250) {   // R9: Semblance = LT while a choke is OFFERED
+                                    offer_lt[0].fetch_add(1,std::memory_order_relaxed);if(input.left_trigger>0.f) offer_lt[1].fetch_add(1,std::memory_order_relaxed);else offer_lt_kills.fetch_or(lt_kill,std::memory_order_relaxed);
+                                    offer_lt_kinds.fetch_or((1u<<static_cast<unsigned>(grip_intent[0].kind()))|((1u<<static_cast<unsigned>(grip_intent[1].kind()))<<8),std::memory_order_relaxed);offer_lt_free.fetch_or(gun_hand_free_bits.load(std::memory_order_relaxed),std::memory_order_relaxed);}
+                                if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(logic==2 && voltaic_native_chord_now.load(std::memory_order_relaxed)) {   // 2026-11-25: the engine gun's held chord as the game gets it
+                                    native_chord_lt[0].fetch_add(1,std::memory_order_relaxed);if(!(input.left_trigger>0.f)) {native_chord_lt[1].fetch_add(1,std::memory_order_relaxed);native_chord_lt_kills.fetch_or(lt_kill,std::memory_order_relaxed);}
+                                    if(input.right_trigger>0.f) native_chord_lt[2].fetch_add(1,std::memory_order_relaxed);}
                                 // Native hands phase 1 (user 2026-11-06): heavy held things slow the walk (hand_feel.hpp, at most 75%).
                                 if(hand_feel_enabled && logic==2 && physical_grab_requested) {const double kg=native_grab.held_total_kg();const float k=d2vr::held_move_scale(kg);input.move_x*=k;input.move_y*=k;if(kg>held_kg_peak.load())held_kg_peak=static_cast<float>(kg);if(k<move_scale_min.load())move_scale_min=k;}
                                 {   // v145722: the pad paths without window focus need in_controlInactiveWindow 1 and win_pauseOnFocusLoss 0 (focus_cvars.hpp)

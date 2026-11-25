@@ -55,6 +55,7 @@ struct PowerSnapshot {
     bool voidstrike_found{},voidstrike_owned{};
     float voidstrike_commit_s{},slash_hold_s{};
     int voidstrike_mana{-1};
+    std::array<std::uint64_t,2> active_ids{};   // 2026-11-25: every active player state id 0..127 (diagnostics: which states run in a possession / a mimic choke)
 };
 // Per-game table: D2 vtables are D2 literals (tools/doto/port.py maps them by RTTI name); DOTO-only classes and the state ids come from game_traits.
 struct PowerVtables {
@@ -95,6 +96,7 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
         out.states_known|=1u<<bit;
         if(*active) out.states|=1u<<bit;
     }
+    if(machine) for(unsigned id=0;id<128;++id) if(const auto a=native_player_state(read,base,machine,id,0);a && *a) out.active_ids[id>>6]|=1ull<<(id&63u);
     if(machine && vt.slash_vtable) if(const auto slash=native_player_state_object(read,base,machine,39,vt.slash_vtable)) {
         out.voidstrike_found=true;
         out.voidstrike_owned=value<std::uint8_t>(read,slash+0xdb).value_or(0)==1;
@@ -161,6 +163,35 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
             }
     return out;
 }
+// Test (sim, 2026-11-25: "d2vr voidstrike own|off"): DOTO's Void Strike attribute, as the slash start 0x8d56b6 reads it (game_traits
+// void_strike_attr_index...): attributes object = machine+0x330 in D2 terms (the port's structs rule: DOTO +0x388), entry index at +0x124, entries
+// of 0x28 bytes, float value +0x24, owned when > 0. On: the control thread keeps the value at 1 (the game may recompute it); off: the old value goes
+// back. The slash reads it at its start (slash+0xdb, the observer's void_strike.owned), so ownership shows from the next sword strike.
+struct VoidStrikeTest {
+    inline static std::atomic<int> want{},index{-2};   // want: 0 untouched, 1 own, 2 restore; index: the attribute's (-2 not read)
+    inline static std::atomic<std::uint64_t> writes{};inline static std::atomic<float> old_value{-1.f},value_now{-1.f};
+    static bool write_float(std::uintptr_t a,float v) noexcept {__try {*reinterpret_cast<volatile float*>(a)=v;return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
+    template<class Read> static void apply(Read& read,std::uintptr_t machine) noexcept {
+        if constexpr(game_traits::void_strike_attr_index!=0) {
+            const int w=want.load(std::memory_order_relaxed);if(!w || !machine) return;
+            const auto attrs=rig::value<std::uintptr_t>(read,machine+0x330);if(!attrs || !rig::pointer(*attrs)) return;
+            const auto idx=rig::value<std::int32_t>(read,*attrs+game_traits::void_strike_attr_index);if(!idx) return;
+            index.store(*idx,std::memory_order_relaxed);if(*idx<0 || *idx>4096) return;
+            const auto entries=rig::value<std::uintptr_t>(read,*attrs+game_traits::attribute_entries);if(!entries || !rig::pointer(*entries)) return;
+            const auto at=*entries+static_cast<std::uintptr_t>(*idx)*game_traits::attribute_stride+game_traits::attribute_value;
+            const auto cur=rig::value<float>(read,at);if(!cur || !std::isfinite(*cur)) return;
+            value_now.store(*cur,std::memory_order_relaxed);
+            if(w==1) {if(old_value.load(std::memory_order_relaxed)<0) old_value.store(*cur,std::memory_order_relaxed);
+                if(*cur<=0.f && write_float(at,1.f)) {writes.fetch_add(1,std::memory_order_relaxed);value_now.store(1.f,std::memory_order_relaxed);}}
+            else {const float o=old_value.load(std::memory_order_relaxed);if(o>=0 && write_float(at,o)) writes.fetch_add(1,std::memory_order_relaxed);
+                old_value.store(-1.f,std::memory_order_relaxed);want.store(0,std::memory_order_relaxed);}
+        } else {(void)read;(void)machine;}
+    }
+    static std::string json() {
+        std::ostringstream o;o<<"{\"want\":"<<want.load()<<",\"index\":"<<index.load()<<",\"writes\":"<<writes.load()<<",\"old\":"<<old_value.load()<<",\"now\":"<<value_now.load()<<'}';return o.str();
+    }
+};
+
 class NativePowerObserver {
 public:
     static void publish(const PowerSnapshot& s) {
@@ -170,6 +201,8 @@ public:
         if(s.found_player && snapshot().found_player && s.hook_mines!=snapshot().hook_mines) note(2,static_cast<std::uint32_t>(s.hook_mines));
         if(s.found_player && snapshot().found_player && s.hook_mine_mode!=snapshot().hook_mine_mode) note(3,static_cast<std::uint32_t>(s.hook_mine_mode));
         if(s.found_player && snapshot().found_player && s.theeye_state!=snapshot().theeye_state) note(4,static_cast<std::uint32_t>(s.theeye_state));
+        if(s.found_player && snapshot().found_player) for(unsigned w=0;w<2;++w) if(const auto d=s.active_ids[w]^snapshot().active_ids[w]) for(unsigned b=0;b<64;++b) if(d>>b&1u)
+            note(5,(w*64+b)|((s.active_ids[w]>>b&1u)?0x1000u:0u));   // any player state on (id | 0x1000) / off (id)
         if(s.swapper_aiming && s.swapper_has_target) {   // where the Displace marker sits while aiming (compare with native-left-aim.csv at that tick)
             aim_target_={static_cast<double>(GetTickCount64()),s.swapper_target[0],s.swapper_target[1],s.swapper_target[2]};++aim_target_samples_;
         }
@@ -193,6 +226,7 @@ public:
          <<",\"state_entries\":{\"choke\":"<<edges_[0].load()<<",\"use_power\":"<<edges_[1].load()<<",\"change_weapon\":"<<edges_[2].load()
          <<",\"swapper\":"<<edges_[3].load()<<",\"cancel_void_strike\":"<<edges_[4].load()<<",\"mimicking\":"<<edges_[5].load()
          <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"},\"events\":"<<events_json()
+         <<",\"active_ids\":["<<[&]{std::string o;for(unsigned id=0;id<128;++id) if(s.active_ids[id>>6]>>(id&63u)&1u) {if(!o.empty()) o+=',';o+=std::to_string(id);}return o;}()<<"]"
          <<",\"swapper_aim\":"<<[]{std::lock_guard<std::mutex> l(mutex());std::ostringstream a;a<<std::setprecision(10)<<"{\"samples\":"<<aim_target_samples_
             <<",\"last\":["<<aim_target_[0]<<','<<aim_target_[1]<<','<<aim_target_[2]<<','<<aim_target_[3]<<"]}";return a.str();}()
          <<",\"void_strike\":{\"found\":"<<(s.voidstrike_found?"true":"false")<<",\"owned\":"<<(s.voidstrike_owned?"true":"false")
@@ -201,16 +235,17 @@ public:
         return o.str();
     }
 private:
-    // The last 16 changes, for timing questions (which press entered a state, which one used a mine): [tick ms, kind, value];
-    // kind 1 = a state entered (value = state bit), 2 = the Hook Mine count changed (value = the new count), 3 = the Hook Mine mode changed, 4 = Foresight's state changed (value = the new state). Called under mutex().
+    // The last 64 changes, for timing questions (which press entered a state, which one used a mine): [tick ms, kind, value];
+    // kind 1 = a state entered (value = state bit), 2 = the Hook Mine count changed (value = the new count), 3 = the Hook Mine mode changed, 4 = Foresight's state changed (value = the new state), 5 = any player state on (value = id | 0x1000) or off (id). Called under mutex().
     struct Event {std::uint64_t tick;std::uint32_t kind,value;};
-    static std::array<Event,16>& ring() {static std::array<Event,16> r{};return r;}
+    static constexpr std::uint32_t ring_size=64;
+    static std::array<Event,ring_size>& ring() {static std::array<Event,ring_size> r{};return r;}
     inline static std::uint32_t ring_n_{};
-    static void note(std::uint32_t kind,std::uint32_t value) {ring()[ring_n_++%16]={GetTickCount64(),kind,value};}
+    static void note(std::uint32_t kind,std::uint32_t value) {ring()[ring_n_++%ring_size]={GetTickCount64(),kind,value};}
     static std::string events_json() {
         std::lock_guard<std::mutex> l(mutex());std::ostringstream o;o<<'[';
-        const std::uint32_t n=ring_n_<16?ring_n_:16;
-        for(std::uint32_t i=0;i<n;++i) {const auto& e=ring()[(ring_n_-n+i)%16];o<<(i?",":"")<<'['<<e.tick<<','<<e.kind<<','<<static_cast<std::int32_t>(e.value)<<']';}
+        const std::uint32_t n=ring_n_<ring_size?ring_n_:ring_size;
+        for(std::uint32_t i=0;i<n;++i) {const auto& e=ring()[(ring_n_-n+i)%ring_size];o<<(i?",":"")<<'['<<e.tick<<','<<e.kind<<','<<static_cast<std::int32_t>(e.value)<<']';}
         o<<']';return o.str();
     }
     static std::mutex& mutex() {static std::mutex m;return m;}

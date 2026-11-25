@@ -1,6 +1,6 @@
 """Gameplay-script scenario (D2 only, plan Task 15b): Possession moves the host where the head looks, not where the host faces.
 
-NOT RUN YET. Needs a D2 save with the Possession power and a rat or guard within reach in front of the start point; see the TODO.
+2026-11-25: runs on any D2 save: `d2vr give power possession` (the game's own AddPower) and `d2vr guard behind 3` (setviewpos) set it up.
 Timeline after the lead-in (absolute head poses via idle.head_quaternion(yaw, pitch); positive yaw = left):
   0 s       `d2vr equip possession`, 3 s idle
   3-4.5 s   LT held 1.5 s aiming at the host (TODO: a setviewpos line below places the player facing it), then released = cast
@@ -26,7 +26,7 @@ _idle_spec = importlib.util.spec_from_file_location("d2vr_scenario_idle", Path(_
 _idle = importlib.util.module_from_spec(_idle_spec)
 _idle_spec.loader.exec_module(_idle)
 
-TOTAL_MS = 60000
+TOTAL_MS = 56000
 HEAD_Y = 1.65
 YAW_DEG = 60.0
 
@@ -43,20 +43,35 @@ def build(lead_ms):
         out.append({"start_ms": t, "end_ms": t + ms, "input": dict(inp), "head_pitch_degrees": 0, "head_pose": head(yaw)})
         t += ms
 
-    # TODO: replace with the save's rat/guard position: _lib.console(t, "setviewpos X Y Z YAW") so the host is in front, ~3 m away.
-    out.append(_lib.console(t, "d2vr equip possession"))
-    t += _lib.FRAME_MS
-    seg({"move_x": 0.0}, 3000)
-    seg({"left_trigger": 1.0}, 1500)      # aim at the host
+    def console(line):
+        nonlocal t
+        out.append(_lib.console(t, line))
+        t += _lib.FRAME_MS
+
+    # 2026-11-25: no lab save owns Possession: the game's own purchase (AddPower, `d2vr give power possession`; the sim runner restores the
+    # saves afterwards), then Corvo is put 3 m behind the nearest guard, facing his back (`d2vr guard behind 3`), god mode against alerts.
+    console("god")
+    console("d2vr give power possession")
+    seg({"move_x": 0.0}, 1000)
+    console("d2vr give status")
+    console("d2vr equip possession")
+    seg({"move_x": 0.0}, 3000)            # the equip (run 20261125T131404: an aim 3 s after the give never started UsePower)
+    console("d2vr guard behind 2.5")
+    seg({"move_x": 0.0}, 1500)
+    console("d2vr spacewarp capture 2")
+    seg({"left_trigger": 1.0}, 300)       # a tap at the host (runs 2026-11-25: a 0.3 s tap possessed, 0.8 / 1.5 s holds took no host)
     seg({"move_x": 0.0}, 4000)            # released = cast; fly-in and possession start
+    console("d2vr spacewarp capture 2")
+    console("d2vr guard list")            # the host's position before A (the possessed guard)
     seg({"move_x": 0.0}, 1000, YAW_DEG)   # turn the head 60 deg left
     seg({"move_y": 1.0}, 2000, YAW_DEG)   # A: walk the host
+    console("d2vr guard list")            # after A
+    console("d2vr spacewarp capture 2")
     seg({"move_x": 0.0}, 1000, -YAW_DEG)
     seg({"move_y": 1.0}, 2000, -YAW_DEG)  # B
+    console("d2vr guard list")            # after B
     seg({"move_x": 0.0}, 1000, 0.0)
-    seg({"left_trigger": 1.0}, 300)       # end the possession (re-cast); TODO confirm with B if the flat game needs it
-    seg({"b": 1.0}, 300)
-    seg({"move_x": 0.0}, 4000)
+    seg({"move_x": 0.0}, 4300)            # the possession ends by itself (a re-cast here possessed a second host in run 20261125T131404)
     seg({"move_x": 0.0}, 1000, YAW_DEG)   # control run, outside possession
     seg({"move_y": 1.0}, 2000, YAW_DEG)
     out.append({"start_ms": t, "end_ms": lead_ms + TOTAL_MS, "input": {"move_x": 0.0}, "head_pitch_degrees": 0, "head_pose": head(0.0)})

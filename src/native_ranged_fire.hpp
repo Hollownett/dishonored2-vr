@@ -555,6 +555,7 @@ public:
         for(std::size_t i=0;i<plans_.size();++i) o<<(i?",":"")<<'"'<<plans_[i]<<'"';
         o<<"]";
         if constexpr(game_traits::ranged_player_weapon_is_voltaic) o<<",\"voltaic\":["<<voltaic_marks_.load()<<','<<voltaic_infos_.load()<<','<<(charge_owned_.load()?1:0)<<','<<charged_creates_.load()<<','<<overcharged_creates_.load()<<']';   // DOTO: Gauss shots marked, special-ammo info set; v145745 charge upgrade owned, charged / overcharged copy creates
+        if constexpr(game_traits::ranged_player_weapon_is_voltaic) o<<",\"voltaic_native_charge\":["<<native_e0_.load()<<','<<native_e1_.load()<<','<<(charge_force_.load()?1:0)<<','<<native_charge_changes_.load()<<','<<charge_forced_writes_.load()<<']';   // 2026-11-25: the engine gun's last release charged / overcharged (comp+0xe0/+0xe1), the test force, e0/e1 changes seen, forced flag writes
         o<<'}';
         return o.str();
     }
@@ -1282,12 +1283,21 @@ private:
     template<class Read> static void probe_charge(std::uintptr_t base,Read& read) {
         if constexpr(game_traits::ranged_player_weapon_is_voltaic) {
             Why why{};const auto l=locate(base,read,Shot::crossbow,why);if(!l) {charge_owned_.store(false,std::memory_order_relaxed);return;}
-            const auto f=rig::value<std::uint8_t>(read,l->comp+game_traits::voltaic_charge_flags);
+            auto f=rig::value<std::uint8_t>(read,l->comp+game_traits::voltaic_charge_flags);
+            // 2026-11-25 test ("d2vr voltaic charge on"): the charge upgrade's bit ORed in as the modifier rebuild does, so a save without the upgrade
+            // charges (the rebuild may clear it again: rewritten each second while forced)
+            if(f && charge_force_.load(std::memory_order_relaxed) && !(*f&game_traits::voltaic_charge_bit) &&
+               voltaic_byte(l->comp+game_traits::voltaic_charge_flags,*f|game_traits::voltaic_charge_bit)>=0) {++charge_forced_writes_;f=rig::value<std::uint8_t>(read,l->comp+game_traits::voltaic_charge_flags);}
             charge_owned_.store(f && (*f&game_traits::voltaic_charge_bit)!=0,std::memory_order_relaxed);
+            native_flags_.store(f?static_cast<int>(*f):-1,std::memory_order_relaxed);   // 2026-11-25: the whole byte (0x4d4ec0 bit 0, 0x4d4eb0 bit 1: the fire state's phase 1 wins over the charge, 0x4d5180 bit 2: charge)
+            const int e0=rig::value<std::uint8_t>(read,l->comp+game_traits::voltaic_configure_from).value_or(255),e1=rig::value<std::uint8_t>(read,l->comp+game_traits::voltaic_shot_overcharged).value_or(255);
+            if(e0!=native_e0_.load(std::memory_order_relaxed) || e1!=native_e1_.load(std::memory_order_relaxed)) {native_e0_=e0;native_e1_=e1;++native_charge_changes_;}
         } else {(void)base;(void)read;}
     }
 public:
     inline static std::atomic<std::uint64_t> voltaic_marks_{},voltaic_infos_{},charged_creates_{},overcharged_creates_{};
+    inline static std::atomic<bool> charge_force_{};   // test "voltaic charge on": the engine gun's charge bit forced too (probe_charge, game thread)
+    inline static std::atomic<int> native_e0_{-1},native_e1_{-1},native_flags_{-1};inline static std::atomic<std::uint64_t> native_charge_changes_{},charge_forced_writes_{};
     static bool voltaic_charge_owned() noexcept {return charge_owned_.load(std::memory_order_relaxed);}
     inline static std::atomic<unsigned> voltaic_native_hands_{1u};   // v145750: bit h = hand h's forearm carries the engine's gun (dxgi_probe, control thread)
 private:
