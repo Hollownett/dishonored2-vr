@@ -15,8 +15,8 @@ public sealed class Prefs
     public string CutsceneMode = "vr_comfort";
     /// <summary>Version 11: the game's per-mode upscaler render scale, 50..100 (0 = the mode's preset). Set in game; the launcher keeps it.</summary>
     public int UpscalePercent = 0;
-    /// <summary>Version 12: the VR menu's Renderer row, 0 native stereo, 1 alternate eye + built-in warp (v1443: 2, the removed
-    /// PureDark AFW, reads as 1). 1 or 2 starts the game in performance mode even without build\alternate-eye (dxgi_probe.cpp), so the launcher's Performance
+    /// <summary>Version 12: the VR menu's Renderer row, 0 native stereo, 1 alternate eye + built-in warp, 2 alternate eye + AFW (VR Stereo
+    /// Hub's open rebuild, compiled in since PR #7). 1 or 2 starts the game in performance mode even without build\alternate-eye (dxgi_probe.cpp), so the launcher's Performance
     /// mode row writes it too.</summary>
     public int Renderer = 0;
     public static readonly string[] CutsceneModes = { "vr_comfort", "vr_full", "theater" };
@@ -135,7 +135,7 @@ public sealed class Prefs
         if (Crosshair is < 0 or > 1) return "Crosshair must be on or off.";
         if (ScriptedRecenter is < 0 or > 1) return "Recenter on scripted moments must be on or off.";
         if (Array.IndexOf(CutsceneModes, CutsceneMode) < 0) return "Cutscenes must be VR comfort, VR full or Theater.";
-        if (Renderer is < 0 or > 2) return "Renderer must be native stereo or alternate eye (an old AFW value, 2, reads as alternate eye).";
+        if (Renderer is < 0 or > 2) return "Renderer must be native stereo (0), alternate eye with the built-in warp (1) or AFW (2).";
         return "";
     }
 

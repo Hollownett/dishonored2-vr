@@ -154,7 +154,10 @@ sealed class MainForm : Form
     static readonly (string text, object val) AaSmaaSsaa = ("SSAA 125% - MSAA-equivalent clarity", 10);
     static readonly (string text, object val) AaSmaaSsaa150 = ("SSAA 200% + SMAA - maximum clarity", 11);
     const string SpacewarpHelp = "When the game cannot hold the headset's frame rate, it runs at half rate and the mod generates every frame in between from the last real one (its depth, your head and controller motion, your walking and turning). Auto switches when a frame takes longer than one display period; Always holds half rate. On by default (Auto). Set the headset to 90 Hz: Spacewarp renders every second frame, so the game needs 45 fps at 90 Hz (60 at 120 Hz; 72 Hz leaves longer gaps). Works only with an FSR or DLSS anti-aliasing mode. Only one frame generation runs at a time: with Spacewarp on, performance mode stays off and the launcher switches SteamVR's Motion Smoothing off for Dishonored 2 (put back when Spacewarp is Off). Switch the rest off yourself: Virtual Desktop's Synchronous Spacewarp (headset app > Settings > Streaming), Meta ASW, NVIDIA Smooth Motion, Lossless Scaling. Setup checks, Save and Launch list them. Not together with performance mode: turning Spacewarp on turns performance mode off, and while it is on the anti-aliasing list offers only FSR and DLSS.";
-    const string PerfHelp = "Draws one eye per frame for a higher frame rate. Note: it can show some visual artifacts, mostly around moving hands and objects. The mod's own warp rebuilds the other eye. Not together with Spacewarp: turning performance mode on turns Spacewarp off.";
+    const string PerfHelp = "Draws one eye per frame for a higher frame rate. Note: it can show some visual artifacts, mostly around moving hands and objects. "
+        + "Built-in warp re-projects the other eye's last image; AFW (alternate frame warping, VR Stereo Hub's open rebuild) rebuilds it from the fresh eye and its own last image: "
+        + "steadier arms and hands in motion, a slightly softer image, needs an FSR or DLSS anti-aliasing mode. The in-game VR menu's Renderer row switches between them live. "
+        + "Not together with Spacewarp: turning performance mode on turns Spacewarp off.";
     const string AaHelp = "Game TAA is not recommended: moving things leave ghost trails in VR. The default follows your GPU: DLSS Quality on NVIDIA RTX with DLSS (DLAA is sharper and slower), FSR 4 native where FSR 4 runs, otherwise FSR 3 native. Quality/balanced render fewer pixels for speed. SMAA is its own edge anti-aliasing mode with no temporal pass. SSAA 125% renders 25% more pixels per axis and does not use SMAA; SSAA 150% renders 50% more for thin distant geometry. Supersampling is the deferred renderer's MSAA equivalent (it cannot use hardware MSAA). Choose SSAA in the launcher before starting: a mid-session resolution change recreates every XR surface and Virtual Desktop can fault. The in-game VR menu can change it at any time.";
     readonly List<Feature> shownFeatures = new();  // the Features page rows, in order (main-settings features have none)
     IReadOnlyList<Feature> features = Array.Empty<Feature>();
@@ -220,7 +223,7 @@ sealed class MainForm : Form
         { IsSlider = true, Min = 50, Max = 200, Step = 5, Page = 25, Format = v => (v / 100.0).ToString("0.00", CultureInfo.InvariantCulture) + "x" };
         aa = new Option("Anti-aliasing", AaHelp, AaBase);
         RefreshDlssChoices();
-        perf = new Option("Performance mode", PerfHelp, ("Off", 0), ("On", 1));  // v1443: the mod's own warp only (PureDark's AFW removed); alternate-eye through the Features path and the saved renderer, written on Save
+        perf = new Option("Performance mode", PerfHelp, ("Off", 0), ("On (built-in warp)", 1), ("On (AFW)", 2));  // the saved renderer (1 built-in warp, 2 AFW: PR #7, compiled in); alternate-eye through the Features path, written on Save
         spacewarp = new Option("Spacewarp", SpacewarpHelp, ("Off", 0), ("Auto", 1), ("Always (half rate)", 2));  // build\spacewarp: none / empty / "always", written on Save
         sharp = new Option("Sharpening", "Contrast-adaptive sharpening after upscaling.", ("Off", 0.0), ("Low", .25), ("Medium", .5), ("High", .75), ("Max", 1.0));
         hud = new Option("HUD size", "How large the game HUD is drawn around the centre of your view.", ("55% (centre)", 55), ("65% (default)", 65), ("75%", 75), ("85%", 85), ("100% (game layout)", 100), ("125%", 125), ("150%", 150), ("200%", 200));
@@ -1287,9 +1290,9 @@ sealed class MainForm : Form
             var st = Features.State(FeatureBuild, features);
             for (int i = 0; i < shownFeatures.Count; i++) featList.Rows[i].SetSilently(st[shownFeatures[i].Id].On);
             if (!keepPerf && features.FirstOrDefault(f => f.Id == "performance-mode") is { } pf)
-            {   // v1443: performance mode (build\alternate-eye), else the renderer the VR menu saved (an old saved 2, the removed AFW, shows as On)
+            {   // performance mode (build\alternate-eye) with the renderer the VR menu saved (2 = AFW, else the built-in warp), else that saved renderer
                 // also starts performance mode (dxgi_probe.cpp), so the row shows what the game will run.
-                Select(perf, st[pf.Id].On ? 1 : Math.Clamp(prefs.Renderer, 0, 1), "");
+                Select(perf, st[pf.Id].On ? (prefs.Renderer == 2 ? 2 : 1) : Math.Clamp(prefs.Renderer, 0, 2), "");
                 loadedPerf = Val<int>(perf);
             }
             if (!keepPerf)
