@@ -138,7 +138,7 @@ struct Fixture {
         Guard g("create"); auto& f = *fixture; const auto eye = f.creation++ % 2;
         assert(c && f.maps.count(p) && create->Feature.InWidth == f.expect_render_w && create->Feature.InHeight == f.expect_render_h);
         assert(create->Feature.InTargetWidth == f.expect_target_w && create->Feature.InTargetHeight == f.expect_target_h);
-        assert(create->Feature.InPerfQualityValue == f.expect_quality && create->InEnableOutputSubrects == f.expect_output_subrects);
+        assert(create->Feature.InPerfQualityValue == f.expect_quality && create->InEnableOutputSubrects); // Indurhra's fork: always (expect_output_subrects only names the region path)
         assert(create->InFeatureCreateFlags == f.expect_flags);
         const bool failure = f.fails("create" + std::to_string(eye));
         if ((!failure && !f.null_on_success && f.null_operation != "create" + std::to_string(eye)) || (failure && f.out_on_failure)) {

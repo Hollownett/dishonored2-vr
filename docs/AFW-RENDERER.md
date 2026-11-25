@@ -18,7 +18,7 @@ Row 13 of page 1, **Renderer**, has three choices (saved in `build\vr-settings.c
 |---|---|
 | Native stereo | both eyes every frame |
 | Alternate eye (built-in warp) | one eye per frame; the other eye's last image is re-projected (`stale_eye_warp.hpp`) |
-| AFW (PureDark reconstruction) | one eye per frame; the other eye is **rebuilt** from the fresh eye with `PDAFWPlugin.dll` |
+| AFW (alternate frame warping) | one eye per frame; the other eye is **rebuilt** from the fresh eye and its own last image (VR Stereo Hub's open AFW, compiled in) |
 
 Choose with the stick, then press **A** (or point at the green **A: APPLY** chip): every switch is live, no restart. Sessions start
 alternate-capable, and Native simply renders both eyes every frame (as menus already did). If alternate eye could not start (its
@@ -27,32 +27,47 @@ ative-classic` restores upstream's paired-only start for
 Native. Any AFW refusal falls back to the built-in warp for that frame; a hard failure (plugin missing, ABI mismatch, eye-size change)
 falls back for the session, and the description plate shows the reason.
 
-Requirements: `PDAFWPlugin.dll` (the user's own D3D12 build, SHA256 `48D5849F…E5D5` verified) next to `Dishonored2.exe`, and an
-**FSR or DLSS anti-aliasing mode** (AFW reads the per-eye depth and motion copies those modes make). Nothing is redistributed.
+Requirements: none beyond alternate eye. AFW is VR Stereo Hub's open-source held-eye rebuild from their Dishonored 1 VR mod
+(`third_party/vsh_afw`, zlib license, modified; credited in `THIRD_PARTY_NOTICES.md`), compiled into the mod DLL. The closed PureDark
+plugin is no longer used.
 
 ## How AFW is wired
 
-- `src/afw_puredark.hpp`: ABI subset of PureDark's plugin (size-checked), a same-adapter D3D12 device/queue, shared D3D11/D3D12
-  textures and fences, three command slots (no CPU waits), a compute adapter that crops the render rectangle of depth (R32) and motion
-  (RG16F) to the output size, and the camera matrices (view from the stale-warp `WarpCamera` basis, projection from the OpenXR FOV
-  tangents with the engine's reverse-Z `m10/m11`).
-- `src/fsr_taa.hpp`: `keep_motion` keeps a per-eye copy of the motion vectors the FSR/DLSS dispatch consumed (the engine reuses its
-  target for the next eye), plus the raster jitter.
-- `src/game_xr.hpp`: at the held-eye seam (`v792` stale-eye warp), AFW is tried first: fresh colour + depth + motion + fresh camera
-  (src) and the held eye's camera at this Setup (dest). The held eye's layer carries the dest view, as the built-in warp's does.
+- `third_party/vsh_afw/core/gfx/afw_warp.cpp`: the rebuild (D3D11). Per held-eye pixel it takes the hands and weapon from the fresh eye
+  (reprojected by depth), the world from the held eye's own last image carried by the camera change, and the fresh eye's world where
+  the held one moved or was uncovered (the stale test), with a disocclusion fill. Small adapters stand in for VSH's logging, depth
+  probe and clarity headers.
+- `src/afw_vsh.hpp` (the Dishonored 2 adapter): per captured fresh eye, one compute pass turns the R32 reverse-Z device depth into
+  linear metres and writes the foreground mask; the eye pose and grip poses come from the stale warp's `WarpCamera`. No engine matrices.
+- `src/game_xr.hpp`: at the held-eye seam (`v792`), AFW is tried first; on refusal the built-in warp draws that frame.
+
+### Player-model depth (the part that made it work in D2)
+
+Dishonored 2 compresses the depth of the player's models (`r_playerDepthHack`) so flat-screen arms never clip walls. The mod's cvar
+override only changes the cache; loading a player restores the models' value, so the arms keep compressed depth. Measured from the
+stereo disparity of still hands in the simulator (`afw capture` with depth dumps): world pixels need a factor 1.00, the free hand and
+arms 5.04 (IQR 5.00-5.07), the held sword and **the hand that holds it** 9.0 (IQR 8.96-9.10). Device depth alone cannot tell the two
+classes apart, so per pixel the adapter takes the class whose point lands nearer one of this render's grips or palms. Held items are
+not in the rig mask; device depth above 0.04 (a world surface reaches that only within 25 cm) marks them. When the native
+player-depth path (`build\world-hand-depth`) has verifiably set the models to world depth, the factors drop to 1 automatically.
 
 ## Tuning
 
-Console (`artifacts\vr-command.txt`): `afw status`, `afw on|off`, `afw tune <key> <value>`:
+Console (`artifacts\vr-command.txt`): `afw status`, `afw on|off`, `afw capture N`, `afw tune <key> <value>` (also one `key value` per
+line in `build\afw-tune`):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mv` | **1.0** | motion-vector multiplier. The guide predicts 2.0 under alternation; the simulator A/B showed 2.0 cracks the hands and arm (background through them), 1.0 keeps them solid. |
-| `halo` | **2** | depth/motion dilation (source texels) toward the nearest surface, so hand/weapon silhouettes warp with them. 0 left background-coloured cracks along the sleeve and fingers. |
-| `threshold` | 2.5 | per-object motion (px) the plugin ignores (10 made no visible difference) |
-| `jitter` | 0 | fraction of the raster jitter removed from depth/motion sampling (1 was no better) |
-| `gap` | 1 | fresh frames further apart than this reset the plugin history |
-| `reset` | 1 | clear history on a gap |
+| `mask` | 1 | the foreground (arms, body, held items) from the rig mask + near range; 0 = nearer than `fg` metres |
+| `rigdepth` | auto (5) | arms' depth compression; setting it pins it |
+| `helddepth` | 9 | held items' (and the holding hand's) compression |
+| `near` | 0.04 | device depth above which a non-rig pixel is a held item (0 = rig mask only) |
+| `stillmm`, `stilldeg` | 3, 1 | hands moving less than this (head-relative, per two frames) count as still: the held eye keeps its own shading |
+| `stale` | 0.015 | the stale test's relative depth tolerance |
+| `nearmiss` | 6 | texels: a near-miss candidate beats the fill |
+| `fg`, `body` | 0.75, 0.45 | metres, used only with `mask 0` |
+| `heldhands`, `edgehands`, `stillshade`, `ownhands` | VSH defaults | VSH switches (-1 keeps the default) |
+| `debug` | 0 | tints the held eye by source: green fresh hands, orange held own hands, blue fresh world, red last resort, magenta fill |
 
 Knobs (files in `build\`): `afw` (start with AFW, for development runs without saved settings), `alternate-eye`, `menu-gdi` (old
 GDI panel), `no-psvr2-triggers`.
@@ -77,28 +92,30 @@ reports 9 pre-existing upstream warnings under `/WX`). The full `tools\build.ps1
 (`third_party\dlss\lib\nvsdk_ngx_d.lib` 310.9.16, `third_party\fidelityfx\libs\*.lib` from Luma Framework) and currently stops at the
 upstream `tests\note_tablet_check.cpp:45` assertion.
 
-## AFW capture and the tuning record (2026-11-11, simulator)
+## AFW capture and the tuning record (2026-11-20, simulator)
 
-`afw capture N` saves N triples to `artifacts\`: `afw-capture-NN-rebuilt` (the rebuilt held eye), `-native` (the same eye's next native
-frame, one alternation later: the reference, as on the Dishonored 1 AFW sheet) and `-held` (the eye's previous native frame: what
-the held eye shows without AFW). `python tools/afw_capture_sheet.py <dir> <out.png> [--crop hand]` draws rebuilt | next native |
-difference and writes hand-region error (MAE 0-255) and ghost fraction (pixels off by more than 48) for AFW and for the held frame.
-Run with `vr_selftest.py ... --every "afw capture 2"` (about 50 triples per walk run).
+`afw capture N` saves, per rebuilt held eye: `-rebuilt`, `-native` (the same eye's next native frame, one alternation later: the
+reference, as on the Dishonored 1 AFW sheet), `-held` (what the held eye shows without AFW), `-fresh`, and the fresh eye's
+`-freshdepth` (R32) and `-freshrig` (R8). `python tools/afw_capture_sheet.py <dir> <out.png> [--crop hand]` scores hand-region error
+(MAE 0-255) and ghost fraction (pixels off by more than 48) for AFW and for the held frame. Runs: `vr_selftest.py ... --every
+"afw capture 12"` (about 200 pairs per scenario). Pairs whose held-frame hand error is 15 or more are "motion".
 
-Scene: Edge of the World balcony save, walk scenario, FSR 3 Native, simulated headset. Ratios are AFW / held (lower is better):
+Ratios are AFW / held frame (lower is better; 1.00 = as good as holding the old frame):
 
-| Setting | static hand error | motion hand error | motion ghost |
-|---|---|---|---|
-| mv 2, halo 0 | 1.16 | 0.78 | 0.74 |
-| mv 1, halo 0 | 1.14 | 0.87 | 0.87 |
-| mv 1, halo 1 | 1.12 | 0.94 | 0.99 |
-| **mv 1, halo 2** | 1.13 | **0.77** | **0.70** |
+| Scenario | still hands | hands in motion | ghosting in motion | whole image |
+|---|---|---|---|---|
+| head sway | 0.84 | 0.65 | 0.55 | **0.77** |
+| run (sword held) | 1.00 | 0.86 | 0.81 | **0.92** |
+| walk | 0.97 | - | - | **0.95** |
+| sword swing (two runs) | 1.00 / 1.00 | 0.93 / 0.91 | 0.90 / 0.87 | **0.98 / 0.97** |
+| flick | 1.01 | - | - | **1.00** |
 
-mv 2 scored similarly in ratio but its absolute hand error in motion was higher (24.0 vs 19.8) and the arm cracked visibly; halo 2
-removed the edge cracks. Static pairs are about one point worse than the held frame: that is frame-to-frame FSR jitter noise (no colour
-bias, no pixel offset, equal detail), not reconstruction error. Remaining known artefact: the first frames after a history reset (load
-fade-in) can show a doubled weapon until the plugin's history fills. A simulator is not a headset: comfort, latency and the real
-compositor are untested.
+How it got there (swing, whole image): depth threshold only 1.30 -> rig mask 1.13 -> still-hands report 1.11 -> arms x5 ~1.15 (motion
+0.65 in its best run) -> held sword x9 and per-pixel class by grip distance 0.97-0.98 with still hands exactly 1.00. Fast swings have a
+floor: the reference is one tick later than the fresh eye, and the rebuild shows the fresh eye's pose (no extrapolation). A simulator is
+not a headset: comfort, latency and the real compositor are untested.
+
+## History in Hollow's line (PureDark bridge era, kept for reference)
 
 ## Merged into this codebase (2026-11-19, branch `feat/indurhra-afw-psvr2-imgui`, build v1411; not installed)
 

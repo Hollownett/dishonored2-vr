@@ -317,8 +317,15 @@ static d2vr::MirrorMode mirror_mode_requested=d2vr::MirrorMode::both_eyes;
 static double sharpness_requested=.5;
 static int taa_preference=2,hud_preference=65,upscale_percent_preference=0; /* upscale_percent_preference: the player's Upscaler scale for taa_preference (0 = preset) */static bool hint_preference=true;
 // v609: the saved AA-chosen marker, whether a settings file existed, and the one-time first-start AA decision (made at Present once the adapter vendor is known)
+// AFW (afw_vsh.hpp): the rebuild's own log lines, to <mod home>artifacts\afw.log (at most 2000 lines a session).
+static std::filesystem::path afw_log_path;
+static void afw_log_line(const char* line) {
+    static std::atomic<unsigned> lines{0};if(afw_log_path.empty() || ++lines>2000) return;
+    try {std::ofstream out(afw_log_path,std::ios::app);out<<GetTickCount64()<<' '<<line<<std::endl;} catch(...) {}
+}
 static int renderer_preference=0,renderer_running=0; // VR menu Renderer row (vr_preferences.hpp v12): saved choice / what this session started
 static bool spacewarp_holds_native=false; // build/spacewarp kept this session in native stereo though performance mode was asked for
+static bool spacewarp_yields_to_afw=false; // Indurhra's fork: the saved AFW renderer started; spacewarp is off this session
 static bool preferences_file_existed=false,aa_chosen_preference=false,crosshair_preference=true,scripted_recenter_preference=true,first_start_pending=false,crosshair_migrated=false;
 static fs::path crosshair_legacy_file; // set while build/no-hand-crosshair awaits its first successful save
 static const char* first_start_state="none";static std::vector<std::string> first_start_removed;
@@ -4276,6 +4283,88 @@ bool write_self_aim(std::uintptr_t address,const void* data,std::size_t size) no
     __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
 
+
+// Diagnostic (knob build/compile-census): every call into d3dcompiler_47's compile/reflect/disassemble/preprocess exports in the process
+// (the mod's, the game's, any helper's, by name or ordinal), keyed by export + entry point (compiles) or calling module (the others), so
+// shader work during play instead of once shows by name. Hooks the exports; off by default.
+struct CompileCensusSlot {std::atomic<std::uint64_t> calls{};std::atomic<std::uintptr_t> caller_rva{};char key[48]{};wchar_t module[40]{};std::atomic<int> state{};};
+static std::array<CompileCensusSlot,64> compile_census;static std::atomic<std::uint64_t> compile_census_total{},compile_census_overflow{};
+static bool compile_census_installed{};
+static void compile_census_note(const char* api,const char* entry,std::uintptr_t caller) noexcept {
+    compile_census_total.fetch_add(1,std::memory_order_relaxed);
+    HMODULE module{};wchar_t path[MAX_PATH]{};const wchar_t* base=L"?";
+    if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(caller),&module)) {
+        GetModuleFileNameW(module,path,MAX_PATH);const wchar_t* slash=std::wcsrchr(path,L'\\');base=slash?slash+1:path;
+    }
+    char key[48]{};
+    {char m[24]{};WideCharToMultiByte(CP_UTF8,0,base,-1,m,sizeof m,nullptr,nullptr);
+     _snprintf_s(key,_TRUNCATE,"%s:%s@%s",api,entry?entry:"",m);}
+    for(auto& slot:compile_census) {
+        int st=slot.state.load(std::memory_order_acquire);
+        if(st==0) {
+            int expected=0;
+            if(slot.state.compare_exchange_strong(expected,1)) {
+                std::memcpy(slot.key,key,sizeof key);wcsncpy_s(slot.module,base,_TRUNCATE);
+                slot.caller_rva=module?caller-reinterpret_cast<std::uintptr_t>(module):caller;
+                slot.calls.fetch_add(1,std::memory_order_relaxed);slot.state.store(2,std::memory_order_release);return;
+            }
+            st=slot.state.load(std::memory_order_acquire);
+        }
+        while(st==1) st=slot.state.load(std::memory_order_acquire);
+        if(std::strcmp(slot.key,key)==0) {slot.calls.fetch_add(1,std::memory_order_relaxed);return;}
+    }
+    compile_census_overflow.fetch_add(1,std::memory_order_relaxed);
+}
+using D3DCompileFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,ID3DInclude*,LPCSTR,LPCSTR,UINT,UINT,ID3DBlob**,ID3DBlob**);
+using D3DCompile2Fn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,ID3DInclude*,LPCSTR,LPCSTR,UINT,UINT,UINT,LPCVOID,SIZE_T,ID3DBlob**,ID3DBlob**);
+using D3DReflectFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,REFIID,void**);
+using D3DDisassembleFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,UINT,LPCSTR,ID3DBlob**);
+using D3DPreprocessFn=HRESULT (WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,ID3DInclude*,ID3DBlob**,ID3DBlob**);
+static D3DCompileFn original_d3d_compile{};static D3DCompile2Fn original_d3d_compile2{};static D3DReflectFn original_d3d_reflect{};
+static D3DDisassembleFn original_d3d_disassemble{};static D3DPreprocessFn original_d3d_preprocess{};
+static HRESULT WINAPI d3d_compile_census_hook(LPCVOID a,SIZE_T b,LPCSTR c,const D3D_SHADER_MACRO* d,ID3DInclude* e,LPCSTR entry,LPCSTR g,UINT h,UINT i,ID3DBlob** j,ID3DBlob** k) {
+    compile_census_note("D3DCompile",entry,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_compile(a,b,c,d,e,entry,g,h,i,j,k);}
+static HRESULT WINAPI d3d_compile2_census_hook(LPCVOID a,SIZE_T b,LPCSTR c,const D3D_SHADER_MACRO* d,ID3DInclude* e,LPCSTR entry,LPCSTR g,UINT h,UINT i,UINT j,LPCVOID k,SIZE_T l,ID3DBlob** m,ID3DBlob** n) {
+    compile_census_note("D3DCompile2",entry,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_compile2(a,b,c,d,e,entry,g,h,i,j,k,l,m,n);}
+static HRESULT WINAPI d3d_reflect_census_hook(LPCVOID a,SIZE_T b,REFIID c,void** d) {
+    compile_census_note("D3DReflect",nullptr,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_reflect(a,b,c,d);}
+static HRESULT WINAPI d3d_disassemble_census_hook(LPCVOID a,SIZE_T b,UINT c,LPCSTR d,ID3DBlob** e) {
+    compile_census_note("D3DDisassemble",nullptr,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_disassemble(a,b,c,d,e);}
+static HRESULT WINAPI d3d_preprocess_census_hook(LPCVOID a,SIZE_T b,LPCSTR c,const D3D_SHADER_MACRO* d,ID3DInclude* e,ID3DBlob** f,ID3DBlob** g) {
+    compile_census_note("D3DPreprocess",nullptr,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));return original_d3d_preprocess(a,b,c,d,e,f,g);}
+template<class Fn> static void compile_census_hook_export(HMODULE compiler,const char* name,void* detour,Fn& original) noexcept {
+    void* target=reinterpret_cast<void*>(GetProcAddress(compiler,name));
+    if(!target || MH_CreateHook(target,detour,reinterpret_cast<void**>(&original))!=MH_OK) {original=nullptr;return;}
+    if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);original=nullptr;}
+}
+static void install_compile_census() noexcept {
+    if(compile_census_installed) return;
+    const HMODULE compiler=LoadLibraryW(L"d3dcompiler_47.dll");
+    if(!compiler) return;
+    compile_census_installed=true;
+    compile_census_hook_export(compiler,"D3DCompile",reinterpret_cast<void*>(&d3d_compile_census_hook),original_d3d_compile);
+    compile_census_hook_export(compiler,"D3DCompile2",reinterpret_cast<void*>(&d3d_compile2_census_hook),original_d3d_compile2);
+    compile_census_hook_export(compiler,"D3DReflect",reinterpret_cast<void*>(&d3d_reflect_census_hook),original_d3d_reflect);
+    compile_census_hook_export(compiler,"D3DDisassemble",reinterpret_cast<void*>(&d3d_disassemble_census_hook),original_d3d_disassemble);
+    compile_census_hook_export(compiler,"D3DPreprocess",reinterpret_cast<void*>(&d3d_preprocess_census_hook),original_d3d_preprocess);
+}
+// Diagnostic (knob build/region-cache-stats): read_self's region-cache hits and why lookups missed (native_readable_range.hpp).
+static std::string region_cache_json() {
+    auto& st=d2vr::region_cache_stats();if(!st.on.load()) return "null";
+    std::ostringstream o;o<<"{\"lookups\":"<<st.lookups.load()<<",\"hit_readable\":"<<st.hit_readable.load()<<",\"hit_unreadable\":"<<st.hit_unreadable.load()
+        <<",\"miss_empty\":"<<st.miss_empty.load()<<",\"miss_expired\":"<<st.miss_expired.load()<<",\"miss_other_region\":"<<st.miss_other_region.load()
+        <<",\"miss_past_end\":"<<st.miss_past_end.load()<<",\"queries\":"<<st.queries.load()<<",\"query_unreadable\":"<<st.query_unreadable.load()<<"}";
+    return o.str();
+}
+static std::string compile_census_json() {
+    if(!compile_census_installed) return "null";
+    std::ostringstream o;o<<"{\"total\":"<<compile_census_total.load()<<",\"overflow\":"<<compile_census_overflow.load()<<",\"entries\":[";
+    bool first=true;
+    for(auto& slot:compile_census) if(slot.state.load()==2) {
+        o<<(first?"":",")<<"{\"key\":"<<std::quoted(slot.key)<<",\"calls\":"<<slot.calls.load()<<",\"caller_rva\":"<<slot.caller_rva.load()<<"}";first=false;
+    }
+    return o.str()+"]}";
+}
 // Called on the native Present thread alongside XR retirement.
 void restore_audio_session() noexcept {
     native_audio_listener.clear();
@@ -7724,10 +7813,17 @@ static std::string run_test_command(const std::string& line) {
         else if(v=="overlays") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_baked_overlays_knob=m=="off";}  // v1432 A/B: spacewarp overlays on|off
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
-    if(verb=="afw") { // v1443: the PureDark AFW renderer is gone; `afw capture N` still saves the built-in warp's rebuilt eyes (tools/afw_compare.py)
-        std::string v;in>>v;
-        if(v=="capture") {int n=6;in>>n;if(game_xr) game_xr->afw_capture_requested=std::clamp(n,1,32);}
-        std::ostringstream o;o<<"afw (built-in warp) running "<<renderer_running<<" captures "<<(game_xr?game_xr->afw_captures_saved:0);
+    if(verb=="afw") { // AFW renderer: afw [on|off|status] | afw tune <threshold|jitter|gap|reset> <value>
+        std::string v;in>>v;auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();
+        if(v=="on") rt.requested=renderer_running!=0;else if(v=="off") rt.requested=false;
+        else if(v=="capture") {int n=6;in>>n;if(game_xr) game_xr->afw_capture_requested=std::clamp(n,1,32);}
+        else if(v=="tune") {std::string k;double x{};in>>k>>x;
+            if(k=="mask") t.mask=x!=0;else if(k=="stale") t.stale=static_cast<float>(std::clamp(x,.002,.2));else if(k=="fg") t.fg_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="body") t.body_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="nearmiss") t.near_miss=static_cast<float>(std::clamp(x,0.,32.));else if(k=="debug") t.debug=x!=0;else if(k=="ownhands") t.own_hands=static_cast<float>(std::clamp(x,0.,1.));else if(k=="edgehands") t.edge_hands=x!=0;else if(k=="heldhands") t.held_hands=x!=0;else if(k=="stillshade") t.still_shade=x!=0;else if(k=="stillmm") t.still_mm=static_cast<float>(std::clamp(x,0.,50.));else if(k=="stilldeg") t.still_deg=static_cast<float>(std::clamp(x,0.,30.));else if(k=="rigdepth") {t.rig_depth=static_cast<float>(std::clamp(x,.1,50.));t.rig_depth_manual=true;}else if(k=="near") t.near_range=static_cast<float>(std::clamp(x,0.,1.));else if(k=="helddepth") t.held_depth=static_cast<float>(std::clamp(x,.1,50.));else
+            if(k=="threshold") t.ignore_motion_threshold=static_cast<float>(std::clamp(x,0.,64.));else if(k=="jitter") t.jitter_scale=static_cast<float>(std::clamp(x,-2.,2.));
+            else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));else if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));else if(k=="reset") t.reset_on_gap=x!=0;else return "afw tune: threshold|jitter|gap|reset|mv <value>";}
+        std::ostringstream o;o<<"afw requested "<<rt.requested.load()<<" running "<<renderer_running<<" rebuilt "<<rt.rebuilt.load()<<" refused "<<rt.refused.load()
+            <<" fallbacks "<<rt.fallbacks.load()<<" busy "<<rt.busy()<<" threshold "<<t.ignore_motion_threshold.load()<<" jitter "<<t.jitter_scale.load()
+            <<" captures "<<(game_xr?game_xr->afw_captures_saved:0)<<" gap "<<t.max_frame_gap.load()<<" mv "<<t.motion_scale.load()<<" reset "<<t.reset_on_gap.load()<<" | "<<rt.problem();
         return o.str();
     }
     if(verb=="eyeburst") {unsigned n=12;in>>n;n=std::clamp(n,2u,24u);alt_band_request=n;return "eyeburst "+std::to_string(n)+" presents (alternate-eye gameplay only)";}
@@ -13449,7 +13545,10 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"alternate_eye\":{\"state\":\"" << (alt_eye_state.load()==1?"on":alt_eye_state.load()==2?"fallback":"off") << "\",\"alternated\":" << alt_alternated.load()
                << ",\"paired\":" << alt_paired.load() << ",\"scope_held\":" << alt_scope_held.load() << ",\"fallbacks\":" << alt_fallbacks.load()
                << ",\"parity_flip\":" << (d2vr::alternate_parity_flip.load()?"true":"false") << ",\"band_bursts\":" << alt_band_bursts
-               << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << ",\"renderer_live\":" << (game_xr?game_xr->renderer_live():-1) << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
+               << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << [&]{auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();std::string pr=rt.problem();for(auto& ch:pr) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';
+                   std::ostringstream o;o<<",\"renderer_live\":"<<(game_xr?game_xr->renderer_live():-1)<<",\"afw\":{\"requested\":"<<(rt.requested.load()?"true":"false")<<",\"rebuilt\":"<<rt.rebuilt.load()<<",\"masked\":"<<rt.masked.load()<<",\"captured\":"<<rt.captured.load()<<",\"submitted\":"<<(game_xr?game_xr->afw_rebuilds:0)
+                    <<",\"refused\":"<<rt.refused.load()<<",\"fallbacks\":"<<rt.fallbacks.load()<<",\"busy\":"<<rt.busy()<<",\"mv\":"<<t.motion_scale.load()<<",\"jitter\":"<<t.jitter_scale.load()
+                    <<",\"halo\":"<<t.halo.load()<<",\"threshold\":"<<t.ignore_motion_threshold.load()<<",\"problem\":\""<<pr<<"\"}";return o.str();}() << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
                << ",\"stale_warp_failures\":" << (game_xr?game_xr->stale_eye_warp_failures:0)
                << ",\"stale_parallax\":" << (stale_eye_parallax_knob?"true":"false") << ",\"stale_parallax_warps\":" << (game_xr?game_xr->stale_parallax_passes():0)
                << ",\"stale_parallax_misses\":" << (game_xr?game_xr->stale_eye_parallax_misses:0) << ",\"stale_near_range\":" << stale_near_range << ",\"stale_fresh_warps\":" << (game_xr?game_xr->stale_fresh_passes():0)
@@ -15218,6 +15317,9 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             }
                             alt_motion_times.note(number,alt_fresh);
                             game_xr->stale_fresh_part=alt_motion_times.fresh_part(number);game_xr->stale_kept_part=alt_motion_times.kept_part(number);
+                            fsr_taa.afw_keep_motion=false; // AFW (afw_vsh.hpp) works from depth and camera poses: no motion-vector copy
+                            if(auto& at=d2vr::afw::tuning();!at.rig_depth_manual.load()) at.rig_depth=d2vr::NativePlayerDepth::process_owner().world_depth_current(read_self_ref)?1.f:5.f;
+                            if(fsr_taa.afw_keep_motion.load()) {float jx{},jy{};if(const auto motion=fsr_taa.afw_eye_motion(alt_fresh,jx,jy)) game_xr->afw_eye_motion(static_cast<UINT>(alt_fresh),motion.Get(),jx,jy,number);}
                         }
                         // G2 VR cutscenes (cutscene_policy.hpp): classify this Present. Immersive = exact 32 with a complete native pair of two distinct
                         // eyes (two textures, two eye poses, both layer views recorded), the player camera read, no fault since the cutscene began. Any
@@ -15333,6 +15435,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(alternate_on()) alternate_select_descriptor(true);
                                 renderer_running=alternate_on()?1:0;game_xr->renderer_setting(renderer_preference,alternate_on()); // alternate-capable: every renderer is live
                                 game_xr->renderer_spacewarp_hold(spacewarp_holds_native);  // one frame generation at a time
+                                game_xr->renderer_spacewarp_yield(spacewarp_yields_to_afw); // the AFW renderer won: the VR menu says spacewarp is off
                                 game_xr->imgui_menu_enabled=!fs::exists(output_directory.always().parent_path()/L"build"/L"menu-gdi"); // ImGui VR settings panel
                                 game_xr->wheel_native_pointer=!fs::exists(output_directory.always().parent_path()/L"build"/L"wheel-no-pointer");
                                 game_xr->wheel_eye_art_enabled=!fs::exists(output_directory.always().parent_path()/L"build"/L"wheel-quad"); // v776: the hand wheel's ring in the eyes unless build/wheel-quad (the quad layer, as v775)
@@ -15856,6 +15959,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                             game_xr->alternate_enabled=alternate_on();game_xr->alternate_fresh_eye=alt_fresh;game_xr->alternate_frame=number;
                             game_xr->stale_eye_warp_enabled=stale_eye_warp_knob;game_xr->stale_eye_parallax_enabled=stale_eye_parallax_knob;game_xr->stale_near_range=stale_near_range;game_xr->locate_periods=legacy_locate_horizon?1:2;game_xr->gpu_queue_limit=!legacy_gpu_queue;game_xr->steady_pacing=!legacy_pacing;game_xr->pacer_miss_lock=pacer_miss_lock;game_xr->median_horizon=!legacy_display_horizon;
                             game_xr->performance_mode(alternate_on() && game_xr->renderer_live()!=0);
+                            game_xr->afw_status(d2vr::afw::runtime().problem());
                             { // PSVR2 adaptive triggers, per hand: gameplay with the panel closed and the session focused
                                 std::string slot1_equip;unsigned weapon_bits{};
                                 {std::lock_guard<std::mutex> l(hand_state_mutex);slot1_equip.assign(left_equip_name,strnlen(left_equip_name,sizeof(left_equip_name)));weapon_bits=hand_weapon_bits;}
@@ -15873,7 +15977,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 }
                                 const bool play=gameplay && game_xr->state==XR_SESSION_STATE_FOCUSED && game_xr->controller_input.active && !game_xr->settings_open();
                                 wchar_t exe[MAX_PATH]{};static const auto game_dir=(GetModuleFileNameW(nullptr,exe,MAX_PATH),std::filesystem::path(exe).parent_path());
-                                static bool psvr2_log_set=false;if(!psvr2_log_set) {psvr2_log_set=true;d2vr::psvr2::runtime().log_to(output_directory.always()/L"psvr2.log");}
+                                static bool psvr2_log_set=false;if(!psvr2_log_set) {psvr2_log_set=true;d2vr::psvr2::runtime().log_to(output_directory.always()/L"psvr2.log");
+                                    afw_log_path=output_directory.always()/L"afw.log";d2vr::afw::runtime().log_to(&afw_log_line);}
                                 d2vr::psvr2::runtime().update(game_xr->xr_runtime_name,game_xr->xr_system_name,play,items,
                                     {game_xr->controller_input.left_trigger,game_xr->controller_input.right_trigger},game_dir);
                             }
@@ -16357,7 +16462,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"native_cached_output_size\":[" << cached_dimensions[0] << ',' << cached_dimensions[1] << ']'
                                      << ",\"cached_output_reapplies\":" << cached_output_reapplies.load()
                                      << ",\"cached_output_deferred\":" << cached_output_deferred.load()
-                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
+                                     << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"compile_census\":" << compile_census_json() << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << (async_present_requested?",\"async_present\":"+d2vr::AsyncPresent::instance().json()+",\"game_side_hooked\":"+(game_side_hooked.load()?std::string("true"):std::string("false")):std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                                      << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                                      << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier
@@ -19306,7 +19411,19 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             {std::ifstream knob(root/L"build"/L"alt-motion-probe");unsigned n{},k{},s{};
              if(knob>>n>>k>>s && n>=1 && n<=50 && k>=2 && k<=64 && s>=1 && s<=600) {alt_motion_bursts=n;alt_motion_size=k;alt_motion_interval_s=s;}}
             layer_pose_sync_state=fs::exists(root/L"build"/L"no-layer-pose-sync")?0:1;layer_pose_synced=0;layer_pose_sync_fallbacks=0; // paired / perf-mono layer-pose sync (2026-10-22); the knob restores the Setup-time record
-            d2vr::psvr2::runtime().enabled=!fs::exists(root/L"build"/L"no-psvr2-triggers"); // PSVR2 left adaptive trigger (SteamVR + PS VR2 only)
+            if(fs::exists(root/L"build"/L"afw")) renderer_preference=2;
+            { // build/afw-tune: "<key> <value>" lines (mv, jitter, threshold, gap, reset), the same keys as the `afw tune` command
+                std::ifstream tune(root/L"build"/L"afw-tune");std::string k;double x{};auto& t=d2vr::afw::tuning();
+                while(tune>>k>>x) {
+                    if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="jitter") t.jitter_scale=static_cast<float>(std::clamp(x,-2.,2.));
+                    else if(k=="threshold") t.ignore_motion_threshold=static_cast<float>(std::clamp(x,0.,64.));else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));
+                    else if(k=="reset") t.reset_on_gap=x!=0;else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));
+                    else if(k=="debug") t.debug=x!=0;else if(k=="mask") t.mask=x!=0;else if(k=="stale") t.stale=static_cast<float>(std::clamp(x,.002,.2));else if(k=="fg") t.fg_depth=static_cast<float>(std::clamp(x,.1,3.));
+                    else if(k=="body") t.body_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="nearmiss") t.near_miss=static_cast<float>(std::clamp(x,0.,32.));
+                    if(k=="ownhands") t.own_hands=static_cast<float>(std::clamp(x,0.,1.));else if(k=="edgehands") t.edge_hands=x!=0;else if(k=="heldhands") t.held_hands=x!=0;else if(k=="stillshade") t.still_shade=x!=0;else if(k=="stillmm") t.still_mm=static_cast<float>(std::clamp(x,0.,50.));else if(k=="stilldeg") t.still_deg=static_cast<float>(std::clamp(x,0.,30.));else if(k=="rigdepth") {t.rig_depth=static_cast<float>(std::clamp(x,.1,50.));t.rig_depth_manual=true;}else if(k=="near") t.near_range=static_cast<float>(std::clamp(x,0.,1.));else if(k=="helddepth") t.held_depth=static_cast<float>(std::clamp(x,.1,50.));
+                }
+            }
+            d2vr::psvr2::runtime().enabled=!fs::exists(root/L"build"/L"no-psvr2-triggers"); // PSVR2 left adaptive trigger (SteamVR + PS VR2 only) // knob: AFW renderer (development runs without saved settings)
             // v1412 (2026-11-19 sim: an alternate-capable session renders Native through the mono-view path, both eyes unshared - no
             // shadow share, no paired skips - 13.4 ms against 9.5 ms paired): Native starts paired again, as before the merge. A session
             // starts alternate-capable (every renderer live) only when it is asked for: build/alternate-eye (the launcher's performance
@@ -19317,9 +19434,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             // One frame generation at a time (user 2026-11-20: "when spacewarp is enabled in launcher then other framegens are ignored ...
             // Only one framegen is active"): with build/spacewarp a session never starts alternate-capable, so performance mode (built-in
             // warp or AFW) cannot replace spacewarp, from the saved renderer, a knob or the VR menu. The launcher keeps the runtime's off.
-            spacewarp_holds_native=spacewarp_knob && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"));
+            // Indurhra's fork: the user's chosen AFW renderer (saved Renderer 2) wins over spacewarp. The session starts alternate-capable as
+            // usual and spacewarp sits this session out (spacewarp_enabled needs !alternate_on()), so one frame generation still runs at a time.
+            spacewarp_yields_to_afw=spacewarp_knob && renderer_preference==2;
+            if(spacewarp_yields_to_afw) note_recoverable("AFW is the chosen renderer: spacewarp stays off this session (one frame generation at a time)");
+            spacewarp_holds_native=spacewarp_knob && !spacewarp_yields_to_afw && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"));
             if(spacewarp_holds_native) note_recoverable("spacewarp is on: performance mode stays off (one frame generation at a time)");
-            if(!spacewarp_knob && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"))) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites); the VR menu's Renderer row asks for it too
+            if((!spacewarp_knob || spacewarp_yields_to_afw) && (performance_knob || renderer_preference>=1 || fs::exists(root/L"build"/L"renderer-live"))) { // plan F task 1: alternate-eye rides on the mono-view path (same prerequisites); the VR menu's Renderer row asks for it too
                 if(xr_requested && head_requested && paired_requested && eye_boundary_requested && native_eye_capture_requested && !single_eye_requested) {alt_eye_state=1;mono_view_state=1;}
                 else {alt_eye_state=2;note_recoverable("alternate-eye needs head-tracked paired XR with native eye capture; staying paired");}
             }
@@ -19391,6 +19512,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             if(target!=hook_target || !read_self(reinterpret_cast<std::uintptr_t>(target),current.data(),current.size()) || current!=disabled_target_bytes)
                 throw std::runtime_error("Present code changed since the prior diagnostic; restart the game");
         }
+        if(fs::exists(root/L"build"/L"compile-census")) install_compile_census(); // diagnostic: who compiles shaders during play
         d2vr::BodylessMotionGuard::install(image_base,&read_self);   // v1296/v1297: no motion switch on a bodyless physics system (crash 0xcaf005)
         if(controller_requested) native_pad_focus.install(image_base,&read_self);
         if(paired_requested) {
@@ -19733,6 +19855,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             if(d2vr::diag::on() && (!synchronized_log)){synchronized_observer.stop();throw std::runtime_error("Cannot open synchronized observer log");}
         }
     read_self_profiling=fs::exists(root/L"build"/L"read-self-profile");
+    d2vr::region_cache_stats().on=fs::exists(root/L"build"/L"region-cache-stats"); // diagnostic: region-cache miss causes
         {std::ifstream knob(root/L"build"/L"sim-eye-size");uint32_t w{},h{};if(knob>>w>>h && w>=320 && h>=320 && w<=4096 && h<=4096) {d2vr::simxr::recommended_size[0]=w;d2vr::simxr::recommended_size[1]=h;}}
         {std::ifstream knob(root/L"build"/L"sim-fov");float f[4]{};if(knob>>f[0]>>f[1]>>f[2]>>f[3] && f[0]<0 && f[1]>0 && f[2]>0 && f[3]<0) std::copy(f,f+4,d2vr::simxr::optical_fov);}
         if(full_body_requested) {std::ifstream knob(root/L"build"/L"full-body");double back=.08,head=.02;knob>>back>>head;full_body.tune(back,head);
@@ -19909,6 +20032,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             dlss_provider_found=provider.has_value();dlss_provider_source=provider?(provider->source==d2vr::DlssProvider::Source::mod_home?1:2):0;
             fsr_taa.dlss_provider_directory=provider?provider->directory.wstring():std::wstring{};
             fsr_taa.dlss_cache_directory=(output.always()/L"ngx").wstring(); // functional (NGX needs a writable folder), logging off unless diagnostics
+            d2vr::ngx_log_path()=d2vr::diag::on()?(output.always()/L"ngx"/L"ngx-log.txt").wstring():std::wstring{}; // NGX's own verbose log (diagnostics only)
             dlss_provider_utf8.clear();
             if(provider) {
                 const auto wide=(provider->directory/L"nvngx_dlss.dll").wstring();
@@ -20591,7 +20715,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                << ",\"cached_output_written\":" << (cached_output_written?"true":"false")
                << ",\"cached_output_restored\":" << (cached_output_restored.load()?"true":"false")
                << ",\"requested_native_output\":[" << requested_output_size.width << ',' << requested_output_size.height << ']'
-               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
+               << ",\"canted_views\":" << (cant_requested?"true":"false") << ",\"engine_cvars\":" << std::quoted(engine_cvars_applied) << ",\"compile_census\":" << compile_census_json() << ",\"region_cache\":" << region_cache_json() << ",\"draw_census\":" << (census_on.load(std::memory_order_relaxed)?"true":"false") << ",\"draws_by_phase\":" << draw_phase_json() << ",\"rt_binds\":" << rt_bind_calls.load(std::memory_order_relaxed) << ",\"rt_bind_repeats\":" << rt_bind_repeats.load(std::memory_order_relaxed) << ",\"ps_state\":" << ps_state.json() << ",\"ecl_replay\":" << ecl_replay_json()
                                      << ",\"visibility_stamp\":" << d2vr::VisibilityStamp::json() << ",\"fovea\":" << d2vr::fovea::json() << (nvidia_vrs_requested?",\"nvidia_vrs\":"+d2vr::NvVrs::instance().json():std::string{}) << (async_present_requested?",\"async_present\":"+d2vr::AsyncPresent::instance().json()+",\"game_side_hooked\":"+(game_side_hooked.load()?std::string("true"):std::string("false")):std::string{}) << ",\"elision_ab\":" << elision_ab_json() << ",\"state_census_wide\":" << wide_state.json() << ",\"mip_bias\":{\"enabled\":" << (mip_bias_enabled?"true":"false") << ",\"bias\":" << d2vr::SamplerLodBias::bias() << ",\"swaps\":" << d2vr::SamplerLodBias::swaps.load() << ",\"failures\":" << d2vr::SamplerLodBias::failures.load() << ",\"samplers\":" << d2vr::SamplerLodBias::cached() << "}" << ",\"optical_density_requested\":" << (optical_density_requested?"true":"false")
                << ",\"optical_density_request_applied\":" << (optical_density_applied?"true":"false")
                << ",\"resolution_multiplier_requested\":" << requested_resolution_multiplier

@@ -4,7 +4,6 @@
 #define XR_NO_PROTOTYPES
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
-#include <d3d11_4.h>  // ID3D11Multithread (v1443: no longer arrives through the removed afw_puredark.hpp)
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include <functional>
@@ -16,6 +15,7 @@
 #include "stale_eye_warp.hpp"
 #include "spacewarp_math.hpp"
 #include "warp_play_space.hpp"
+#include "afw_vsh.hpp"
 #include "vr_menu_imgui.hpp"
 #include "context_state.hpp"
 #include "mod_gpu_timer.hpp"
@@ -111,7 +111,7 @@ class GameXr {
     std::optional<NativeAvatarMeasurements> avatar_measurements_;
     bool settings_enabled_{};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> settings_texture_;
-    struct AfwCapture {Microsoft::WRL::ComPtr<ID3D11Texture2D> rebuilt,prev;std::uint64_t frame{};UINT eye{};bool pending{};int index{};} afw_capture_;
+    struct AfwCapture {Microsoft::WRL::ComPtr<ID3D11Texture2D> rebuilt,prev,fresh,fresh_depth,fresh_rig;std::uint64_t frame{};UINT eye{};bool pending{};int index{};} afw_capture_;
     void afw_capture_save_(ID3D11Texture2D* texture,const std::wstring& name) {
         Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);
         D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
@@ -120,7 +120,8 @@ class GameXr {
         context_->CopyResource(staging.Get(),texture);
         if(FAILED(context_->Map(staging.Get(),0,D3D11_MAP_READ,0,&m))) return;
         std::ofstream out(afw_capture_dir+L"\\"+name+L".rgba",std::ios::binary|std::ios::trunc);
-        for(UINT y=0;y<d.Height;++y) out.write(static_cast<const char*>(m.pData)+static_cast<std::size_t>(y)*m.RowPitch,static_cast<std::streamsize>(d.Width)*4);
+        const std::streamsize bpp=(d.Format>=DXGI_FORMAT_R8_TYPELESS && d.Format<=DXGI_FORMAT_A8_UNORM)?1:4; // R8 masks; RGBA8 images and R32 depth
+        for(UINT y=0;y<d.Height;++y) out.write(static_cast<const char*>(m.pData)+static_cast<std::size_t>(y)*m.RowPitch,static_cast<std::streamsize>(d.Width)*bpp);
         context_->Unmap(staging.Get(),0);
         std::ofstream meta(afw_capture_dir+L"\\"+name+L".json",std::ios::trunc);meta<<"{\"width\":"<<d.Width<<",\"height\":"<<d.Height<<",\"format\":"<<d.Format<<"}"<<std::endl;
     }
@@ -695,6 +696,8 @@ public:
     std::string stale_warp_error; // v1197: the first 300 characters of the exception that turned the warp off (exception text, HRESULT, shader log)
     const Afw2Pass* afw2_pass() const noexcept {return stale_warp_ && stale_warp_->afw2?stale_warp_->afw2.get():nullptr;} // v1197: read-only (stage_ms)
 private:
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>,2> afw_motion_{},afw_out_{}; // AFW: fresh-eye motion copy; rebuilt eye images
+    std::array<std::array<float,2>,2> afw_motion_jitter_{};std::array<std::uint64_t,2> afw_motion_frame_{};
     bool stale_warp_failed_{};
     // v796: the game camera of each eye's image shown by a Present (and of each kept image), each eye's target game camera and kept depth
     // handed over for the Present in the *_frame_ stamps, and the parallax of each eye's last warp (the reticle follows it).
@@ -2620,10 +2623,14 @@ public:
         if(eye<2) {stale_depth_[eye]=depth;stale_depth_width_[eye]=width;stale_depth_height_[eye]=height;stale_depth_frame_[eye]=frame;}
     }
     // AFW renderer: the fresh eye's motion vectors (same render rectangle as its depth) and raster jitter, for this Present.
+    void afw_eye_motion(UINT eye,ID3D11Texture2D* motion,float jitter_x,float jitter_y,std::uint64_t frame) noexcept { // AFW: the fresh eye's motion copy (unused by the VR Stereo Hub rebuild, which works from depth and poses)
+        if(eye<2) {afw_motion_[eye]=motion;afw_motion_jitter_[eye]={jitter_x,jitter_y};afw_motion_frame_[eye]=frame;}
+    }
     std::string xr_runtime_name,xr_system_name; // OpenXR runtime and headset names (PSVR2 triggers need SteamVR + PlayStation VR2)
     // AFW capture (like the Dishonored 1 AFW sheet): each rebuilt held eye next to the SAME eye's next native image (one alternation later),
     // saved as afw-capture-NN-{rebuilt,native}.rgba (+ .json) in afw_capture_dir. Command `afw capture N`; diagnostics only (CPU readback).
     std::wstring afw_capture_dir;std::atomic<int> afw_capture_requested{0};std::uint64_t afw_captures_saved{};
+    std::uint64_t afw_rebuilds{};      // held eyes submitted from the AFW backend
     bool imgui_menu_enabled{true};     // VR settings panel drawn with Dear ImGui (vr_menu_imgui.hpp)
     std::uint64_t imgui_menu_frames{},imgui_hold_opens{},imgui_undrawable_closes{};
     bool last_layer_submitted{},last_menu_layer{};
@@ -2642,13 +2649,15 @@ public:
     void performance_mode(bool value) noexcept {settings_.performance_mode(value);}
     // Renderer row: the saved choice and the renderer this session started with (alternate eye on = 1 or 2).
     // Renderer row: the saved choice, and whether this session can alternate (then every renderer switches live on Apply).
-    void renderer_setting(int saved,bool capable) noexcept {settings_.set_renderer(saved);settings_.renderer_capable(capable);renderer_live_=capable?std::min(saved,1):0;  // v1443: a saved AFW (2) is the built-in warp
-}
+    void renderer_setting(int saved,bool capable) noexcept {settings_.set_renderer(saved);settings_.renderer_capable(capable);renderer_live_=capable?saved:0;
+        afw::runtime().requested=renderer_live_==2;}
     void renderer_spacewarp_hold(bool v) noexcept {settings_.spacewarp_hold(v);}  // the VR menu says why performance mode did not start
+    void renderer_spacewarp_yield(bool v) noexcept {settings_.spacewarp_yield(v);} // AFW won over spacewarp this session
     std::atomic<int> renderer_live_{0}; // what renders now: 0 both eyes every frame, 1 alternate + built-in warp, 2 alternate + AFW
     int renderer_live() const noexcept {return renderer_live_.load();}
     void open_vr_menu() noexcept {if(imgui_menu_enabled) combined_open_pending_=true;} // `vrmenu` test command (the temple gesture's page 1)
     int renderer_setting() const noexcept {return settings_.renderer();}
+    void afw_status(std::string s) {settings_.afw_status(std::move(s));}
     void effective_temporal_aa(int mode) noexcept {settings_.effective_temporal_aa(mode);}
     void dlss_available(bool value) noexcept {settings_.dlss_available(value);} // offers the DLAA/DLSS Quality rows (NVIDIA GPU + user's nvngx_dlss.dll)
     // Latest completed HUD window surface (or null to hide it); set each frame by the producer.
@@ -3020,7 +3029,7 @@ public:
         if(afw_capture_.pending && eye==afw_capture_.eye && alternate_frame>afw_capture_.frame) { // AFW capture: this eye's next native frame
             if(alternate_frame-afw_capture_.frame<=2) {
                 wchar_t n[64];swprintf_s(n,L"afw-capture-%02d",afw_capture_.index);
-                afw_capture_save_(afw_capture_.rebuilt.Get(),std::wstring(n)+L"-rebuilt");afw_capture_save_(alt_kept_[eye].Get(),std::wstring(n)+L"-native");afw_capture_save_(afw_capture_.prev.Get(),std::wstring(n)+L"-held");
+                afw_capture_save_(afw_capture_.rebuilt.Get(),std::wstring(n)+L"-rebuilt");afw_capture_save_(alt_kept_[eye].Get(),std::wstring(n)+L"-native");afw_capture_save_(afw_capture_.prev.Get(),std::wstring(n)+L"-held");if(afw_capture_.fresh) afw_capture_save_(afw_capture_.fresh.Get(),std::wstring(n)+L"-fresh");if(afw_capture_.fresh_depth) afw_capture_save_(afw_capture_.fresh_depth.Get(),std::wstring(n)+L"-freshdepth");if(afw_capture_.fresh_rig) afw_capture_save_(afw_capture_.fresh_rig.Get(),std::wstring(n)+L"-freshrig");
                 ++afw_capture_.index;++afw_captures_saved;--afw_capture_requested;
             }
             afw_capture_.pending=false;
@@ -3028,6 +3037,12 @@ public:
         alt_processing_[eye]=transfer_processing_[eye];
         record={rendered_views_[eye],alternate_frame,pose_epoch(),true,rendered_display_times_[eye],rendered_locate_cpu_times_[eye]};
         kept_cameras_[eye]=rendered_cameras_[eye];kept_camera_valid_[eye]=rendered_camera_frame_[eye]==alternate_frame; // v796
+        // AFW: this fresh eye's image, depth and game camera (with the other eye's camera at this Setup: where it is rebuilt).
+        if(afw::runtime().requested.load() && kept_camera_valid_[eye] && stale_target_camera_frame_[1-eye]==alternate_frame && stale_depth_frame_[eye]==alternate_frame && stale_depth_[eye])
+            afw::runtime().capture(context_.Get(),static_cast<int>(eye),alternate_frame,alt_kept_[eye].Get(),rendered_cameras_[eye],stale_target_cameras_[1-eye],
+                stale_depth_[eye].Get(),stale_depth_width_[eye],stale_depth_height_[eye],
+                stale_rig_live_[eye] && stale_rig_frame_[eye]==alternate_frame?stale_rig_[eye].Get():nullptr,stale_rig_width_[eye],stale_rig_height_[eye],
+                {std::tan(rendered_views_[eye].fov.angleLeft),std::tan(rendered_views_[eye].fov.angleRight),std::tan(rendered_views_[eye].fov.angleUp),std::tan(rendered_views_[eye].fov.angleDown)});
         kept_play_[eye]=rendered_play_[eye];kept_play_[eye].valid=kept_play_[eye].valid && kept_camera_valid_[eye]; // v1184
     }
     // ---- spacewarp (see spacewarp_enabled) ----
@@ -4089,7 +4104,7 @@ public:
             // Includes squeeze: holding the calibration pose must not open the native weapon selector.
             if(changes.consume) {controller_input={};settings_consumed=true;}
             if(changes.test_unlock) test_unlock_requested=true;
-            if(changes.renderer) {renderer_live_=settings_.renderer_capable()?std::min(*changes.renderer,1):0;} // Apply: live
+            if(changes.renderer) {renderer_live_=settings_.renderer_capable()?*changes.renderer:0;afw::runtime().requested=renderer_live_.load()==2;} // Apply: live
             publish_palm_preview(); // the fit page opened, was nudged, confirmed or left
         }
         // Notes (2) get no pointer: pointer input switches the game to keyboard glyphs ("Esc Close") and a note has nothing to click.
@@ -4285,7 +4300,41 @@ public:
                             }
                             if(!stale_layers_[eye]) ++stale_eye_parallax_misses;
                         }
-                        {   // v1443: the PureDark AFW renderer is gone; the built-in warp rebuilds every held eye
+                        // AFW (alternate frame warping, afw_vsh.hpp: VR Stereo Hub's open held-eye rebuild): this eye rebuilt from the fresh eye
+                        // captured this present and its own last image. Any refusal leaves the built-in warp below for this frame.
+                        ID3D11Texture2D* afw_image=nullptr;
+                        if(afw::runtime().requested.load() && !afw::runtime().hard_failed() && fresh_now) {
+                            D3D11_TEXTURE2D_DESC want{};alt_kept_[fresh_eye]->GetDesc(&want);
+                            if(afw_out_[eye]) {D3D11_TEXTURE2D_DESC have{};afw_out_[eye]->GetDesc(&have);if(have.Width!=want.Width || have.Height!=want.Height || have.Format!=want.Format) afw_out_[eye].Reset();}
+                            if(!afw_out_[eye]) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);want.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;device->CreateTexture2D(&want,nullptr,&afw_out_[eye]);}
+                            ModGpuScope afw_scope(context_.Get(),ModSpan::aa_sharpen);
+                            {static bool fov_logged=false;if(!fov_logged && dvr::log::sink()) {fov_logged=true;char line[300];const auto& ff=alt_records_[fresh_eye].view.fov;
+                             std::snprintf(line,sizeof line,"d2 geometry: held eye %u target fov L %.4f R %.4f U %.4f D %.4f; fresh eye %u rendered fov L %.4f R %.4f U %.4f D %.4f",eye,to.fov.angleLeft,to.fov.angleRight,to.fov.angleUp,to.fov.angleDown,fresh_eye,ff.angleLeft,ff.angleRight,ff.angleUp,ff.angleDown);
+                             dvr::log::sink()(line);}}
+                            if(afw_out_[eye] && afw::runtime().rebuild(context_.Get(),static_cast<int>(eye),static_cast<int>(fresh_eye),alternate_frame,afw_out_[eye].Get(),
+                                   want.Width,want.Height,std::tan(to.fov.angleRight),std::tan(to.fov.angleUp)))
+                                afw_image=afw_out_[eye].Get();
+                        }
+                        if(afw_image) {
+                            stale_layers_[eye].reset(); // the reticle follows the rotation-only mapping
+                            processed=afw_image;++afw_rebuilds;
+                            if(afw_capture_requested.load()>0 && !afw_capture_.pending && !afw_capture_dir.empty()) { // keep it until this eye renders natively
+                                D3D11_TEXTURE2D_DESC d{};afw_image->GetDesc(&d);d.BindFlags=0;
+                                if(!afw_capture_.rebuilt) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);device->CreateTexture2D(&d,nullptr,&afw_capture_.rebuilt);}
+                                if(!afw_capture_.prev) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);D3D11_TEXTURE2D_DESC k{};alt_kept_[eye]->GetDesc(&k);k.BindFlags=0;device->CreateTexture2D(&k,nullptr,&afw_capture_.prev);}
+                                if(afw_capture_.rebuilt && afw_capture_.prev) {context_->CopyResource(afw_capture_.rebuilt.Get(),afw_image);context_->CopyResource(afw_capture_.prev.Get(),alt_kept_[eye].Get());
+                                    if(!afw_capture_.fresh) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);D3D11_TEXTURE2D_DESC k{};alt_kept_[fresh_eye]->GetDesc(&k);k.BindFlags=0;device->CreateTexture2D(&k,nullptr,&afw_capture_.fresh);}
+                                    if(afw_capture_.fresh) context_->CopyResource(afw_capture_.fresh.Get(),alt_kept_[fresh_eye].Get());
+                                    auto keep=[&](ID3D11Texture2D* src,Microsoft::WRL::ComPtr<ID3D11Texture2D>& dst){ // diagnostics: the fresh eye's depth and rig mask
+                                        if(!src) {dst.Reset();return;}D3D11_TEXTURE2D_DESC k{};src->GetDesc(&k);k.BindFlags=0;k.Usage=D3D11_USAGE_DEFAULT;k.CPUAccessFlags=0;k.MiscFlags=0;
+                                        D3D11_TEXTURE2D_DESC have{};if(dst) dst->GetDesc(&have);
+                                        if(!dst || have.Width!=k.Width || have.Height!=k.Height || have.Format!=k.Format) {dst.Reset();Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);device->CreateTexture2D(&k,nullptr,&dst);}
+                                        if(dst) context_->CopyResource(dst.Get(),src);};
+                                    keep(stale_depth_frame_[fresh_eye]==alternate_frame?stale_depth_[fresh_eye].Get():nullptr,afw_capture_.fresh_depth);
+                                    keep(stale_rig_frame_[fresh_eye]==alternate_frame?stale_rig_[fresh_eye].Get():nullptr,afw_capture_.fresh_rig);afw_capture_.frame=alternate_frame;afw_capture_.eye=eye;afw_capture_.pending=true;}
+                            }
+                            stale_warped_frame_[eye]=alternate_frame;stale_back_[eye]=*back;
+                        } else {
                         const auto parallax_before=stale_warp_->parallax_passes;
                         const StaleDepth kept_depth{stale_depth_[eye].Get(),stale_depth_width_[eye],stale_depth_height_[eye]};
                         const StaleDepth fresh_depth{fresh_now?stale_depth_[fresh_eye].Get():nullptr,stale_depth_width_[fresh_eye],stale_depth_height_[fresh_eye]};

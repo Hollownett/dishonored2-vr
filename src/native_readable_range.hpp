@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 
 namespace d2vr {
 // Discovery slots contain scalars as well as pointers. Check every region before
@@ -47,52 +48,88 @@ inline bool native_region_readable(const MEMORY_BASIC_INFORMATION& r) noexcept {
 //   - readable regions are trusted 2.5-3.5 s (was 0.8-1.2 s) and unreadable ones 200 ms (was 50 ms). SEH in read_self_raw still
 //     covers an unmap inside the TTL and native_readable_range_forget drops a verdict that faulted, from the slots and the list.
 inline constexpr std::uint64_t native_region_readable_ttl_ms=2500,native_region_readable_stagger_ms=1000,native_region_unreadable_ttl_ms=200;
+// v1457+ours: Hollow's v1394 recent-region list and TTLs, with a 4-way set-associative table (1024 sets of four, the same memory as
+// 2048 direct slots). Indurhra's v1300 profile (sim, AFW, idle) found the direct table's misses were 91% "the slot holds ANOTHER
+// still-valid region" (two live regions under one 64 KB-block index); the recent list answers misses inside big regions, the ways
+// answer the aliasing. Keys, TTLs, readability rules and forget-on-fault are Hollow's.
 struct NativeRegionCache {
     struct Entry {std::uintptr_t begin{},end{};std::uint64_t until{};bool exec{},readable{};};
-    static constexpr std::size_t slots=2048,recent_count=32;
-    Entry entries[slots]{};
+    static constexpr std::size_t sets=1024,ways=4,recent_count=32;
+    Entry entries[sets*ways]{};
+    unsigned char next_victim[sets]{};
     Entry recent[recent_count]{};unsigned recent_next{};
     std::uint64_t queries{},recent_hits{}; // status/lab counters (per thread)
-    static std::size_t slot(std::uintptr_t a) noexcept {return static_cast<std::size_t>(a>>16)&(slots-1);}
+    static std::size_t slot(std::uintptr_t a) noexcept {return static_cast<std::size_t>(a>>16)&(sets-1);}
     static bool holds(const Entry& e,std::uintptr_t a,std::size_t n,std::uint64_t now) noexcept {
         return a>=e.begin && a<e.end && now<e.until && (!e.readable || n<=e.end-a);
     }
+    // The way of a's set to (re)use for region base b: the same region, else an expired or empty way, else the round-robin victim.
+    Entry& way_for(std::uintptr_t a,std::uintptr_t b,std::uint64_t now) noexcept {
+        const auto s=slot(a);Entry* set=entries+s*ways;
+        for(std::size_t i=0;i<ways;++i) if(set[i].until && set[i].begin==b) return set[i];
+        for(std::size_t i=0;i<ways;++i) if(now>=set[i].until) return set[i];
+        const auto w=next_victim[s]%ways;next_victim[s]=static_cast<unsigned char>(w+1);return set[w];
+    }
     // The entry holding `a`: unreadable whatever n is, readable when the n bytes stay inside its region.
     const Entry* find(std::uintptr_t a,std::size_t n,std::uint64_t now) noexcept {
-        auto& e=entries[slot(a)];
-        if(holds(e,a,n,now)) return &e;
-        for(const auto& r:recent) if(r.readable && holds(r,a,n,now)) {e=r;++recent_hits;return &e;}
+        Entry* set=entries+slot(a)*ways;
+        for(std::size_t w=0;w<ways;++w) if(holds(set[w],a,n,now)) return set+w;
+        for(const auto& r:recent) if(r.readable && holds(r,a,n,now)) {Entry& e=way_for(a,r.begin,now);e=r;++recent_hits;return &e;}
         return nullptr;
     }
-    // `a` is the queried address: the region is filed under that address's block, and a readable region in the recent list.
+    // `a` is the queried address: the region is filed under that address's set, and a readable big region in the recent list.
     void add(const MEMORY_BASIC_INFORMATION& r,std::uint64_t now,std::uintptr_t a) noexcept {
         const auto b=reinterpret_cast<std::uintptr_t>(r.BaseAddress);const bool readable=native_region_readable(r);
         const Entry e{b,b+r.RegionSize,now+(readable?native_region_readable_ttl_ms+((a>>16)*37)%native_region_readable_stagger_ms:native_region_unreadable_ttl_ms),
             r.State==MEM_COMMIT && (r.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0,readable};
-        entries[slot(a)]=e;
+        way_for(a,b,now)=e;
         if(readable && r.RegionSize>(std::size_t{1}<<16)) {
             for(auto& old:recent) if(old.begin==e.begin) {old=e;return;}
             recent[recent_next++%recent_count]=e;
         }
     }
+    // Drops every way of a's set, and every recent region, that holds a (a guarded read faulted there).
     void forget(std::uintptr_t a) noexcept {
-        entries[slot(a)]={};
+        Entry* set=entries+slot(a)*ways;
+        for(std::size_t w=0;w<ways;++w) if(a>=set[w].begin && a<set[w].end) set[w]={};
         for(auto& r:recent) if(a>=r.begin && a<r.end) r={};
     }
 };
 inline NativeRegionCache& native_region_cache() noexcept {thread_local NativeRegionCache cache;return cache;}
+// Diagnostic (knob build/region-cache-stats): why lookups miss. Off: one relaxed load per lookup.
+struct RegionCacheStats {
+    std::atomic<bool> on{};
+    std::atomic<std::uint64_t> lookups{},hit_readable{},hit_unreadable{},miss_empty{},miss_expired{},miss_other_region{},miss_past_end{},queries{},query_unreadable{};
+};
+inline RegionCacheStats& region_cache_stats() noexcept {static RegionCacheStats s;return s;}
 inline bool native_readable_range_cached(std::uintptr_t address,std::size_t size,std::uint64_t now_ms) noexcept {
     constexpr std::uintptr_t highest=0x00007fffffffffffULL;
     if(address<0x10000 || !size || address>highest || size-1>highest-address) return false;
     auto& cache=native_region_cache();
-    if(const auto* e=cache.find(address,size,now_ms)) return e->readable;
+    if(const auto* e=cache.find(address,size,now_ms)) {
+        if(auto& st=region_cache_stats();st.on.load(std::memory_order_relaxed)) {st.lookups.fetch_add(1,std::memory_order_relaxed);(e->readable?st.hit_readable:st.hit_unreadable).fetch_add(1,std::memory_order_relaxed);}
+        return e->readable;
+    }
+    if(auto& st=region_cache_stats();st.on.load(std::memory_order_relaxed)) {
+        st.lookups.fetch_add(1,std::memory_order_relaxed);
+        const auto* set=cache.entries+NativeRegionCache::slot(address)*NativeRegionCache::ways;bool live=false,expired=false,past=false;
+        for(std::size_t w=0;w<NativeRegionCache::ways;++w) {
+            if(!set[w].until) continue;
+            if(now_ms>=set[w].until) expired=true;else if(address>=set[w].begin && address<set[w].end) past=true;else live=true;
+        }
+        (past?st.miss_past_end:live?st.miss_other_region:expired?st.miss_expired:st.miss_empty).fetch_add(1,std::memory_order_relaxed);
+    }
     for(auto at=address,end=address+size;at<end;) {
         MEMORY_BASIC_INFORMATION region{};++cache.queries;
+        if(auto& st=region_cache_stats();st.on.load(std::memory_order_relaxed)) st.queries.fetch_add(1,std::memory_order_relaxed);
         if(VirtualQuery(reinterpret_cast<const void*>(at),&region,sizeof region)!=sizeof region) return false;
         const auto base=reinterpret_cast<std::uintptr_t>(region.BaseAddress);
         if(region.RegionSize>highest-base || base+region.RegionSize<=at) return false;
         cache.add(region,now_ms,at);
-        if(!native_region_readable(region)) return false;
+        if(!native_region_readable(region)) {
+            if(auto& st=region_cache_stats();st.on.load(std::memory_order_relaxed)) st.query_unreadable.fetch_add(1,std::memory_order_relaxed);
+            return false;
+        }
         at=base+region.RegionSize;
     }
     return true;
