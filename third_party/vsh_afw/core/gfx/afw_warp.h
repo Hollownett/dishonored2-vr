@@ -38,8 +38,17 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct ID3D10Blob;
 
 namespace dvr::afw {
+
+// Dishonored 2 VR: a D3DCompile-compatible compiler used instead of d3dcompiler_47's own (the mod's disk shader cache), and
+// a warm-up that compiles every shader once through it with no device, off the render thread (the first rebuild then loads
+// bytecode: under Wine the compile stalled the first AFW frame ~2 s). Null = d3dcompiler_47's D3DCompile, as VSH had it.
+typedef long (__stdcall *CompileFn)(const void*, size_t, const char*, const void*, void*, const char*, const char*, unsigned, unsigned,
+                                    ID3D10Blob**, ID3D10Blob**);
+void set_compiler(CompileFn fn);
+void warm_shaders();
 
 struct Pose { float q[4]; float p[3]; };   // OpenXR convention, LOCAL space, metres; q = x y z w
 // Where an image came from, for the diagnostics: its pose record, that record's camera writer, when the

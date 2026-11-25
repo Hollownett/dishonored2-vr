@@ -24,6 +24,7 @@ namespace {
 
 typedef HRESULT (WINAPI *PFN_D3DCompile)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR,
                                          LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+std::atomic<CompileFn> g_compileFn{nullptr};   // Dishonored 2 VR: set_compiler (the mod's shader cache)
 
 // Three passes per rebuild.
 //
@@ -617,8 +618,11 @@ bool compile_one(PFN_D3DCompile compile, const char* entry, const char* target, 
 bool init(ID3D11Device* dev) {
     if (g_ready) return true;
     if (g_failed || !dev) return false;
-    HMODULE compiler = LoadLibraryA("d3dcompiler_47.dll");
-    PFN_D3DCompile compile = compiler ? (PFN_D3DCompile)GetProcAddress(compiler, "D3DCompile") : nullptr;
+    PFN_D3DCompile compile = g_compileFn.load();   // Dishonored 2 VR: the mod's shader cache when set
+    if (!compile) {
+        HMODULE compiler = LoadLibraryA("d3dcompiler_47.dll");
+        compile = compiler ? (PFN_D3DCompile)GetProcAddress(compiler, "D3DCompile") : nullptr;
+    }
     if (!compile) { g_failed = true; DVR_ERROR("afw/warp: d3dcompiler_47.dll missing - the held eye stays rotation-only"); return false; }
     ID3DBlob *vsb = nullptr, *vmb = nullptr, *psb = nullptr, *pmb = nullptr, *pdb = nullptr, *pdm = nullptr, *pxd = nullptr, *pdk = nullptr;
     if (!compile_one(compile, "vsmain", "vs_4_0", &vsb) || !compile_one(compile, "vsmesh", "vs_4_0", &vmb) ||
@@ -1101,6 +1105,14 @@ void sync_epoch() {
 }
 
 } // namespace
+
+void set_compiler(CompileFn fn) { g_compileFn.store(fn); }
+void warm_shaders() {
+    const CompileFn fn = g_compileFn.load();
+    if (!fn) return;
+    for (const char* e : {"vsmain", "vsmesh"}) { ID3DBlob* b = nullptr; if (compile_one(fn, e, "vs_4_0", &b)) rel(b); }
+    for (const char* e : {"psmain", "psmesh", "psdepth", "psdepthm", "psxrdepth", "psdepthk"}) { ID3DBlob* b = nullptr; if (compile_one(fn, e, "ps_4_0", &b)) rel(b); }
+}
 
 void set_enabled(bool on, const char* who) {
     g_epoch.fetch_add(1);   // the records stop meaning anything either way

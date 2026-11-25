@@ -25,6 +25,7 @@
 #include "../third_party/vsh_afw/core/gfx/afw_warp.h"
 #include "../third_party/vsh_afw/core/gfx/depth_probe.h"
 #include "../third_party/vsh_afw/core/util/log.h"
+#include "shader_cache.hpp"
 #include "stale_eye_warp.hpp"
 
 namespace d2vr {
@@ -54,6 +55,31 @@ struct Tuning {
     std::atomic<int> max_frame_gap{1},halo{2};
 };
 inline Tuning& tuning() {static Tuning t;return t;}
+
+// The fresh eye's depth conversion (R32 reverse-Z device depth -> linear metres, player-model classes, foreground mask).
+inline const std::string& depth_shader_source() {static const std::string text=R"(
+Texture2D<float> depth:register(t0);Texture2D<float> rig:register(t1);RWTexture2D<float4> outDepth:register(u0);RWTexture2D<unorm float> outMask:register(u1);
+cbuffer P:register(b0){float m10,m11,size_x,size_y,rig_scale,has_rig,near_range,held_scale;float4 tans;float4 pts[4];};
+float gripMiss(float3 p){float m=1e9;[unroll] for(int i=0;i<4;++i) if(pts[i].w>0.5) m=min(m,length(p-pts[i].xyz));return m;}
+[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){if(id.x>=(uint)size_x || id.y>=(uint)size_y)return;
+ float d=depth.Load(int3(id.xy,0));bool body=has_rig>0.5 && rig.Load(int3(id.xy,0))>0.5,held=!body && near_range>0.0 && d>near_range,player=body || held;
+ float2 uv=(float2(id.xy)+0.5)/float2(size_x,size_y);float3 ray=float3(lerp(tans.x,tans.y,uv.x),lerp(tans.z,tans.w,uv.y),1.0);
+ if(body && near_range>0.0 && d>1e-7 && pts[0].w>0.5) {float za=m11/(d/rig_scale+m10),zb=m11/(d/held_scale+m10);if(gripMiss(ray*zb)<gripMiss(ray*za)) {body=false;held=true;}}
+ if(body) d/=rig_scale;else if(held) d/=held_scale;float lin=d>1e-7?m11/(d+m10):1000.0;outDepth[id.xy]=float4(0,0,0,min(lin,1000.0));outMask[id.xy]=player?1.0:0.0;})";return text;}
+// D3DCompile-compatible, through the mod's disk shader cache (shader_cache.hpp): VSH's shaders and the depth pass load bytecode
+// after the first session instead of compiling on the render thread at the first rebuild (~2 s under Wine, sim 2026-11-25).
+inline long __stdcall cached_compile(const void* source,size_t size,const char* name,const void* defines,void* include,const char* entry,
+                                     const char* target,unsigned flags,unsigned flags2,ID3D10Blob** out,ID3D10Blob** errors) {
+    if(defines || include || flags2) return D3DCompile(source,size,name,static_cast<const D3D_SHADER_MACRO*>(defines),static_cast<ID3DInclude*>(include),entry,target,flags,flags2,out,errors);
+    try {return shader_cache::compile(std::string(static_cast<const char*>(source),size),"D2VR AFW",entry,target,flags,out,errors);} catch(...) {return E_FAIL;}
+}
+// Off the render thread, during the menus (dxgi_probe.cpp's warm thread, with the built-in warp's and spacewarp's): fill the cache.
+inline void warm_cache() noexcept {
+    try {
+        dvr::afw::set_compiler(&cached_compile);dvr::afw::warm_shaders();
+        Microsoft::WRL::ComPtr<ID3DBlob> blob,error;(void)shader_cache::compile(depth_shader_source(),"D2VR AFW depth","main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,&blob,&error);
+    } catch(...) {}
+}
 
 // OpenXR-style pose of a game camera: x right (= -left), y up, z back (= -forward); position in metres.
 inline dvr::afw::Pose pose_of(const WorldTrackedPose& w) {
@@ -193,6 +219,7 @@ private:
         if(!configured_) {
             configured_=true;
             dvr::afw::set_world_scale(1.f);                  // depth is handed over in metres: 1 world unit per metre
+            dvr::afw::set_compiler(&cached_compile);         // the mod's shader cache (also set by warm_cache)
             dvr::afw::set_enabled(true,"d2vr");dvr::afw::set_stereo(true,"d2vr");dvr::afw::set_matrices(false,"d2vr"); // poses carry walking/turning
             dvr::afw::set_fg(false,"d2vr");                  // D2's hands are drawn with the world's projection (no separate weapon FOV)
             dvr::afw::set_clean(false,"d2vr");               // no separate pre-UI image is captured
@@ -215,17 +242,9 @@ private:
     bool convert_depth(ID3D11Device* device,ID3D11DeviceContext* c,ID3D11Texture2D* depth,UINT w,UINT h,double m10,double m11,ID3D11ShaderResourceView* rig,float rig_scale,float near_range,float held_scale,const float* tans,const float* points) {
         if(!(m11>0) || !std::isfinite(m10)) return false;
         if(!shader_) {
-            static const char code[]=R"(
-Texture2D<float> depth:register(t0);Texture2D<float> rig:register(t1);RWTexture2D<float4> outDepth:register(u0);RWTexture2D<unorm float> outMask:register(u1);
-cbuffer P:register(b0){float m10,m11,size_x,size_y,rig_scale,has_rig,near_range,held_scale;float4 tans;float4 pts[4];};
-float gripMiss(float3 p){float m=1e9;[unroll] for(int i=0;i<4;++i) if(pts[i].w>0.5) m=min(m,length(p-pts[i].xyz));return m;}
-[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){if(id.x>=(uint)size_x || id.y>=(uint)size_y)return;
- float d=depth.Load(int3(id.xy,0));bool body=has_rig>0.5 && rig.Load(int3(id.xy,0))>0.5,held=!body && near_range>0.0 && d>near_range,player=body || held;
- float2 uv=(float2(id.xy)+0.5)/float2(size_x,size_y);float3 ray=float3(lerp(tans.x,tans.y,uv.x),lerp(tans.z,tans.w,uv.y),1.0);
- if(body && near_range>0.0 && d>1e-7 && pts[0].w>0.5) {float za=m11/(d/rig_scale+m10),zb=m11/(d/held_scale+m10);if(gripMiss(ray*zb)<gripMiss(ray*za)) {body=false;held=true;}}
- if(body) d/=rig_scale;else if(held) d/=held_scale;float lin=d>1e-7?m11/(d+m10):1000.0;outDepth[id.xy]=float4(0,0,0,min(lin,1000.0));outMask[id.xy]=player?1.0:0.0;})";
+            const std::string& code=depth_shader_source();
             ComPtr<ID3DBlob> blob,error;
-            if(FAILED(D3DCompile(code,sizeof(code)-1,nullptr,nullptr,nullptr,"main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&blob,&error)) ||
+            if(FAILED(shader_cache::compile(code,"D2VR AFW depth","main","cs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,&blob,&error)) ||
                FAILED(device->CreateComputeShader(blob->GetBufferPointer(),blob->GetBufferSize(),nullptr,&shader_))) {hard_failed_=true;++fallbacks;return false;}
             D3D11_BUFFER_DESC b{};b.ByteWidth=112;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
             if(FAILED(device->CreateBuffer(&b,nullptr,&params_))) {hard_failed_=true;++fallbacks;return false;}

@@ -19393,7 +19393,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
                     static std::once_flag warm;
                     std::call_once(warm,[&] {
                         d2vr::shader_cache::dir()=(root/L"shader-cache").wstring();
-                        try {std::thread([] {SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);d2vr::StaleEyeWarp::warm_cache();d2vr::SpacewarpPass::warm_cache();}).detach();} catch(...) {}
+                        try {std::thread([] {SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);d2vr::StaleEyeWarp::warm_cache();d2vr::SpacewarpPass::warm_cache();d2vr::afw::warm_cache();}).detach();} catch(...) {}
                     });
                 }
                 spacewarp_no_thread_knob=fs::exists(root/L"build"/L"spacewarp-no-thread");

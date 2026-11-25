@@ -76,8 +76,14 @@ def expand(line, version, out):
     return [t.replace("\\", "/") for t in s.split()[1:]]   # drop the "cl" word
 
 
+STALE_SOURCES = {"build/vsh/afw_warp.obj": ["third_party/vsh_afw/core/gfx/afw_warp.cpp", "third_party/vsh_afw/core/gfx/afw_warp.h"]}
+
+
 def ensure_objs():
-    missing = [o for o in NEEDED_OBJS if not (ROOT / o).exists()]
+    def stale(o):   # an object whose own source changed (the AFW library is edited here; MinHook/ImGui are vendored as-is)
+        obj = ROOT / o
+        return obj.exists() and any((ROOT / src).stat().st_mtime > obj.stat().st_mtime for src in STALE_SOURCES.get(o, []))
+    missing = [o for o in NEEDED_OBJS if not (ROOT / o).exists() or stale(o)]
     if not missing:
         return
     print("build_doto: building MinHook/ImGui/AFW objects (missing: %s)" % ", ".join(missing), flush=True)
