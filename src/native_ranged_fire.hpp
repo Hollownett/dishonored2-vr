@@ -693,9 +693,23 @@ public:
         const auto items=rig::list(read,inventory+0x38,4096);if(!items) return 0;
         for(std::uint32_t i=0;i<items->packed_count;++i) {
             const auto rec=rig::value<Rec>(read,items->data+i*0x38ull);
-            if(rec && rec->decl==ammo_decl) return std::max(rec->count,0);
+            if(rec && rec->decl==ammo_decl) return infinite_ammo(read,inventory)>0?std::max(rec->count,99):std::max(rec->count,0);
         }
         return 0;
+    }
+    // Test (sim, 2026-11-25): the inventory's own infinite-ammo field (the remove-item 0x614750 / DOTO 0x66a0a0 skips the removal when [inventory+0x168] > 0;
+    // the function is byte-identical in both games). Reads 0 when unreadable.
+    template<class Read> static int infinite_ammo(Read& read,std::uintptr_t inventory) {return rig::value<std::int32_t>(read,inventory+0x168).value_or(0);}
+    static void write_infinite(std::uintptr_t inventory,int want) noexcept {
+        __try {auto* field=reinterpret_cast<volatile std::int32_t*>(inventory+0x168);infinite_old_=*field;*field=want;infinite_new_=*field;infinite_done_=true;}
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    // "d2vr ammo infinite on|off": the game thread sets or clears the field at its next look; the reply carries the old and new value. Any thread.
+    static std::string test_infinite(bool on) {
+        infinite_done_=false;infinite_request_=on?1:0;
+        for(int i=0;i<40 && !infinite_done_.load();++i) Sleep(50);
+        if(!infinite_done_.load()) return "ammo infinite: no answer (no player inventory yet?)";
+        return std::string("ammo infinite ")+(on?"on":"off")+": inventory+0x168 "+std::to_string(infinite_old_.load())+" -> "+std::to_string(infinite_new_.load());
     }
 
     // The real native calls (RVAs verified by verify()).
@@ -903,6 +917,9 @@ private:
         if constexpr(game_traits::ranged_player_weapon_is_voltaic) for(unsigned side=0;side<2;++side) if(const int bi=bolt_request_[side].exchange(-1);bi>=0) apply_bolt(base,read,side,bi);
         for(unsigned k=0;k<2;++k) {   // v1279: the native instance keeps its own ammo (wheel_pick sets it); only an empty own type lets the game switch
             Why why{};const auto l=locate(base,read,static_cast<Shot::Kind>(k),why);if(!l) continue;
+            if(infinite_request_.load()>=0) if(const int want=infinite_request_.exchange(-1);want>=0) {   // test: the inventory's infinite-ammo field
+                write_infinite(l->inventory,want);
+            }
             if(const int sh=slot1_hand_.load();(sh==0 || sh==1) && rig::value<std::uintptr_t>(read,l->inventory+0x70)==l->record)
                 native_seen_[static_cast<unsigned>(sh)]={static_cast<int>(k),l->ammo,now};   // v1372: the native this hand draws, with its bolt now
             if(seen_comp_[k]!=l->comp) {
@@ -956,6 +973,7 @@ private:
     struct OwnAmmo {std::uintptr_t comp{},entry{};std::uint64_t used{};};
     static std::array<OwnAmmo,16> own_;inline static std::uint64_t own_tick_{};
     inline static std::atomic<std::uint64_t> native_follows_{};inline static std::array<std::atomic<int>,3> bolts_{{-1,-1,-1}};
+    inline static std::atomic<int> infinite_request_{-1},infinite_old_{0},infinite_new_{0};inline static std::atomic<bool> infinite_done_{false};
     inline static std::array<std::atomic<int>,2> bolt_request_{{-1,-1}};inline static std::mutex bolt_names_m_;inline static std::array<std::string,3> bolt_names_;   // v145764
     inline static std::atomic<bool> forget_owners_{};   // v1284
     // v1372: per hand (game thread) the copy it showed at the last look, the native it last drew (weapon, that weapon's ammo entry, when), and
@@ -1112,7 +1130,7 @@ private:
         if(!voltaic && muzzle_flash.load() && n.flash && !n.flash(base,l.comp,gun,origin,axis)) {fault();clean=false;}
         const int pool_after=pool_count(read,l.inventory,l.ammo_decl);
         pool_after_=pool_after;mag_after_=rig::value<std::int32_t>(read,l.comp+0xa0).value_or(-1);
-        if(spent) {++spent_;if(pool_after!=l.pool-1) ++ammo_mismatch_;}
+        if(spent) {++spent_;if(pool_after!=l.pool-1 && infinite_ammo(read,l.inventory)<=0) ++ammo_mismatch_;}
         finish_shot(s,l,now,hand,flags);
         ++fired_;if(l.unstarted) ++unstarted_shots_;if(clean) consecutive_faults_=0;
         if(tracks_.size()>=8) tracks_.erase(tracks_.begin());

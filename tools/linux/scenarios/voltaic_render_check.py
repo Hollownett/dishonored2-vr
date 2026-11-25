@@ -41,6 +41,7 @@ def build(lead_ms):
         t += _lib.FRAME_MS
 
     console("d2vr voltaic both")
+    console("d2vr ammo infinite on")   # 2026-11-25: the inventory's own infinite-ammo field, so every copy shot is not refused no_ammo
     console("d2vr voltaic bolts")
     seg({"move_x": 0.0}, 4000)
     console("d2vr spacewarp capture 2")

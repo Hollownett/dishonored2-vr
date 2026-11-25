@@ -7398,8 +7398,10 @@ static std::string run_test_command(const std::string& line) {
         if(!std::isfinite(radius) || radius<=0 || radius>10) return "usage: grab left|right [radius_m 0..10] [name substring]";
         native_grab.fixture_grab(static_cast<unsigned>(h),radius,name);return "grab requested (result follows)";}
     if(verb=="ammo") { // test (sim, v1097): ammo left|right <index>: the hand's real copy selects that ammo type (NativeRangedFire::test_ammo)
-        std::string hand;int index=-1;in>>hand>>index;const int h=hand=="left"?0:hand=="right"?1:-1;
-        if(h<0 || index<0 || index>8) return "usage: ammo left|right <index 0..8>";
+        std::string hand;int index=-1;in>>hand;
+        if(hand=="infinite") {std::string on;in>>on;if(on!="on" && on!="off") return "usage: ammo infinite on|off";return d2vr::NativeRangedFire::test_infinite(on=="on");}   // 2026-11-25: the inventory's own infinite-ammo field (+0x168, same offset in both games)
+        in>>index;const int h=hand=="left"?0:hand=="right"?1:-1;
+        if(h<0 || index<0 || index>8) return "usage: ammo left|right <index 0..8> | ammo infinite on|off";
         d2vr::NativeRangedFire::test_ammo(static_cast<unsigned>(h),index);return "ammo requested";}
     if(verb=="realcopy") { // EXPERIMENT v1095: realcopy pistol|crossbow|report|remove (NativeWeaponHands::real_copy; realcopy-report.txt)
         std::string what;in>>what;static constexpr const char* known[]{"pistol","crossbow","report","remove"};
