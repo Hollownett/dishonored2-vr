@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "shader_cache.hpp"
 
 namespace d2vr {
 // v1187: a texel moves by its own vector from this object motion (render px over the eye's two ticks): entity vectors are exact since
@@ -63,6 +64,8 @@ class Afw2Pass {
     Ptr<ID3D11Device> device_;Ptr<ID3D11DeviceContext> context_;
     enum Stage {motion,repair,splat,origins,crack,fill,fresh_splat,scatter,scatter_write,decide,fill_steps,stages};
     std::array<Ptr<ID3D11ComputeShader>,stages> cs_{};
+    static const std::string& shader_source();
+    static const char* const* compute_entries() noexcept;
     Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_;
     Ptr<ID3D11Buffer> constants_;Ptr<ID3D11SamplerState> sampler_;
     Ptr<ID3D11RasterizerState> raster_;Ptr<ID3D11DepthStencilState> depth_;
@@ -73,6 +76,7 @@ class Afw2Pass {
     Buffer motion_tiles_{},motion_flags_{},scatter_tiles_{};Ptr<ID3D11Buffer> motion_args_,scatter_args_;   // (plan 3.2b: Motion's tile list, per tile listed or not, Repair's and Origins' groups)
     UINT gw_{},gh_{},fw_{},fh_{};
 public:
+    static void warm_cache() noexcept;   // fill the shader cache off the render thread (dxgi_probe.cpp's warm thread)
     static constexpr int profile_stages=10;
 private:
     struct Probe {Ptr<ID3D11Query> disjoint;std::array<Ptr<ID3D11Query>,profile_stages+1> ts;Ptr<ID3D11Buffer> stats;bool waiting{};};
@@ -220,9 +224,18 @@ public:
                          ID3D11ShaderResourceView* kept_rig,ID3D11ShaderResourceView* fresh_rig,bool rig_target=false);
 };
 
-inline Afw2Pass::Afw2Pass(ID3D11Device* device):device_(device) {
-    device_->GetImmediateContext(&context_);
-    const std::string source=R"HLSL(
+inline const char* const* Afw2Pass::compute_entries() noexcept {
+    static const char* const e[stages]{"Motion","Repair","Splat","Origins","Crack","Fill","FreshSplat","Scatter","ScatterWrite","Decide","FillSteps"};return e;}
+// 2026-11-25: through the shader cache, filled on the warm thread during the menus (as the built-in warp's own shaders since v1428).
+// Compiled here in the constructor, the 13 shaders stalled the game ~7 s (Wine) the first time a session used the built-in warp
+// after starting on AFW or native stereo.
+inline void Afw2Pass::warm_cache() noexcept {
+    const auto one=[](const char* entry,const char* profile) noexcept {
+        try {Ptr<ID3DBlob> b,e;(void)shader_cache::compile(shader_source(),"D2VR AFW2",entry,profile,D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3,&b,&e);} catch(...) {}};
+    for(int s=0;s<stages;++s) one(compute_entries()[s],"cs_5_0");
+    one("ResolveVS","vs_5_0");one("ResolvePS","ps_5_0");
+}
+inline const std::string& Afw2Pass::shader_source() {static const std::string text=R"HLSL(
 cbuffer Afw : register(b0) {
     float4 keptFov; float4 targetFov; float4 freshFov;   // tan left, right, up, down
     float4 grid;                                          // kept depth = target grid (w, h, 1/w, 1/h)
@@ -1163,14 +1176,18 @@ float4 ResolvePS(Vertex v) : SV_TARGET {
     if(!(how&kRaw)) q=clamp(q,0.5*display.zw,validRect.xy-2*display.zw);
     return RigSource((how&kHow)==kClean?Clean(q,ahead):Smooth(keptColour,q),code);
 }
-)HLSL";
+)HLSL";return text;}
+
+inline Afw2Pass::Afw2Pass(ID3D11Device* device):device_(device) {
+    device_->GetImmediateContext(&context_);
+    const std::string& source=shader_source();
     const auto compile=[&](const char* entry,const char* profile) {
         Ptr<ID3DBlob> binary,errors;
-        if(FAILED(D3DCompile(source.data(),source.size(),"D2VR AFW2",nullptr,nullptr,entry,profile,D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&binary,&errors)))
+        if(FAILED(shader_cache::compile(source,"D2VR AFW2",entry,profile,D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3,&binary,&errors)))
             throw std::runtime_error(std::string("AFW2 shader ")+entry+": "+(errors?std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()):"compile failed"));
         return binary;
     };
-    const char* entries[stages]{"Motion","Repair","Splat","Origins","Crack","Fill","FreshSplat","Scatter","ScatterWrite","Decide","FillSteps"};
+    const char* const* entries=compute_entries();
     for(int s=0;s<stages;++s) {const auto b=compile(entries[s],"cs_5_0");checked(device_->CreateComputeShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&cs_[s]),"compute shader");}
     {const auto b=compile("ResolveVS","vs_5_0");checked(device_->CreateVertexShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&vs_),"vertex shader");}
     {const auto b=compile("ResolvePS","ps_5_0");checked(device_->CreatePixelShader(b->GetBufferPointer(),b->GetBufferSize(),nullptr,&ps_),"pixel shader");}
