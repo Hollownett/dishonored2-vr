@@ -18,10 +18,10 @@ turns the change off if it feels wrong (`%LOCALAPPDATA%\DishonoredVR-DOTO\build\
 | 3 | Foresight: trigger to leave the body, walk, trigger to return | Spirit moves with your locomotion; a short fade when you snap back | `no-teleport-fade` |
 | 4 | Semblance: choke a guard from behind, pull the power trigger while choking | The face is taken (the trigger works even with that hand in a fist) | — |
 | 5 | Void Strike (once owned): sword charge (trigger held still, or the fist-by-the-ear pose), release | The strike commits as a Void Strike (the game needs a 0.5 s hold; the VR charge now holds the attack that long) | — |
-| 6 | Hook Mine in the hand: hold the trigger ~0.5 s | The mine switches lethal / non-lethal (it changes colour); one tick when the hold starts, a double tick at release; nothing is thrown | `no-mine-mode-hold` |
+| 6 | Hook Mine in the hand: hold the trigger 0.3 s or longer | The mine switches lethal / non-lethal: a tick when it switches, a double tick when you let go, nothing is thrown. The mine in your hand does not change colour; check the mode where the game shows it (HUD / a placed mine). | `no-mine-mode-hold` |
 | 7 | Hook Mine: a short trigger press | It is thrown/placed as before | — |
 | 8 | Hook Mine: throw it with the hand (open the grip while swinging) | It flies along the throw and sticks where it lands (engine placement); a slow open still just drops it | `no-mine-throw-stick` |
-| 9 | Voltaic Gun equipped, look at the left forearm | The gun is on the left forearm (it was not drawn in the default state before) | — |
+| 9 | Voltaic Gun equipped, look at the left forearm, then fire it (grip + trigger) | The gun is on the left forearm (it was not drawn in the default state before) and stays there while it fires (it used to jump up near the ceiling for a moment) | `no-voltaic-native-place` (the firing fix only) |
 | 10 | Both forearms with a gun (wheel each hand to the gun); pick a different bolt with the right hand's wheel | Each forearm fires its own bolt; the left keeps its own | — |
 | 11 | Sword in the right hand with a right forearm gun | No ring/crosshair for the right gun while the sword is held; block with the sword works | `no-sword-hand-reticle` (crosshair rule only) |
 
