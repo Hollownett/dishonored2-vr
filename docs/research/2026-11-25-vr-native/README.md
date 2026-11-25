@@ -22,10 +22,14 @@ What is left is mostly **reliability**, **feedback** (haptics, audio, diegetic s
 
 ## Tier 1: highest impact, small to medium effort, mostly checkable in the Linux sims
 
+**Already resolved, dropped from the list:**
+- Item 1, frame-rate stability (C: GitHub #2 ran at 36 fps on an RTX 5080; A G12).
+- Item 2, both eyes showing one frame during climbs and takedowns at low fps (GitHub #2; A G13).
+
+The automatic spacewarp covers both (user, 2026-11-25). The other items keep their numbers so the appendices still match.
+
 | # | Improvement | Why (evidence) | How in this mod | Effort / risk | Sim-checkable? |
 |---|---|---|---|---|---|
-| 1 | **Frame-rate stability first: an automatic preset and a low-fps warning** | Players' #1 issue (C: GitHub #2 at 36 fps on an RTX 5080 with 200% resolution). Meta: consistency matters more than anything (B 8.8). User: "it should start right away" (A G12) | The launcher picks the resolution, shadows and upscaler from the GPU and the headset. A small wrist or toast warning in VR appears when frames are paired or under the refresh rate for more than N seconds, with a one-tap "lower resolution". Then the cheapest items of `docs/PERF-PLAN-90HZ-2026-11-19.md` phase 2: shadow cvars, stencil mask, an active static shadow cache | S (preset, warning) / M-L (phase 2) | The warning and preset: yes (the sim reports frame timing). The perf gains need GPU numbers |
-| 2 | **Stereo guard for scripted animations at low fps** (GitHub #2) | Both eyes showed the same frame during climbs and takedowns. This was closed by lowering settings, not by a fix (A G13) | Detect repeated eye pairs while the camera is authored, and switch to spacewarp or performance mode for that stretch, or fade | M / medium | Partly: the sim can force a low fps cap and count paired frames |
 | 3 | **Grabs that work the first time: bodies and shoulder carry** | The user's most repeated stealth complaint: "the shoulder carry still needed 2-3 tries" (v1390), "grip can't pick them up" (v1145). Reviews call fumbly grabs the top immersion breaker (B 6.4, C: Thief VR, Nexus) | Grip alone on any limb or torso grabs. A torso hold raised to the shoulder hands off in one squeeze. Keep the prompt stable while a body is targeted | M / medium (iterated before) | Yes: the corpse_* scenarios and test commands to put Billie or Corvo next to a body |
 | 4 | **Weapon wheel picks what you point at** | A known issue in 3 releases (v1393, v1445, v1457); user: "I turn my hand to the right and the indicator stays on the left" (v775) | Select by the hand ray's sector at release, with hysteresis. Never commit a sector the pointer left more than X ms ago. Log pointed versus committed | M / medium | Yes: the scripted wheel and the native wheel state |
 | 5 | **A haptic vocabulary** | Meta: short, tightly synced, a small vocabulary, optional (B 9.1). Audit: no pulse when you are hit, when a block takes a blow, on a power cast, or scaled by weapon recoil (A G18) | One table of named pulses with a priority (hit taken > block impact > cast > fire > UI tick) and per-hand routing: hit taken (both, strong), block impact (sword hand), power cast or commit (power hand), recoil per weapon, low health heartbeat (wrist), Dark Vision and Heart pulses | S / low | Counters yes, feel no |
@@ -76,10 +80,11 @@ Everything DOTO, all Possession movement, and the D2 comfort items marked "not y
 
 ## Suggested order
 
-1. Items 1, 2: performance preset, low-fps warning, stereo guard.
-2. Items 3, 4, 7: the three interaction reliability bugs.
-3. Items 5, 6: haptic vocabulary, seated and left-handed mode, gesture fallbacks.
-4. Items 8 to 14: powers as hand verbs (Foresight tagging and Far Reach lock-pull first).
-5. Items 15 to 19: diegetic state, UI toggles, cutscene hands.
+Items 1 and 2 are resolved by the automatic spacewarp.
 
-All of 1 to 7 can be built and checked with the Linux lab: scenarios, test commands, state traces.
+1. Items 3, 4, 7: the three interaction reliability bugs.
+2. Items 5, 6: haptic vocabulary, seated and left-handed mode, gesture fallbacks.
+3. Items 8 to 14: powers as hand verbs (Foresight tagging and Far Reach lock-pull first).
+4. Items 15 to 19: diegetic state, UI toggles, cutscene hands.
+
+All of 3 to 7 can be built and checked with the Linux lab: scenarios, test commands, state traces.
