@@ -127,7 +127,7 @@ int main() {
         require(d2vr::NativePowerObserver::status_json().find("\"void_strike\":")!=std::string::npos,"void strike status key");
         d2vr::NativePowerObserver::publish(s);
         const auto js=d2vr::NativePowerObserver::status_json();
-        require(js.find("\"void_strike\":{\"found\":true,\"owned\":true,\"commit_s\":0.75,\"mana\":40,\"hold_s\":0.25,\"presses\":0,\"last_press_ms\":0}")!=std::string::npos,"void strike status values");
+        require(js.find("\"void_strike\":{\"found\":true,\"owned\":true,\"commit_s\":0.75,\"mana\":40,\"hold_s\":0.25,\"presses\":0,\"last_press_ms\":0,\"commits\":0}")!=std::string::npos,"void strike status values");
         d2vr::NativePowerObserver::note_void_strike_press(860);d2vr::NativePowerObserver::note_void_strike_press(900);
         require(d2vr::NativePowerObserver::status_json().find("\"presses\":2,\"last_press_ms\":900")!=std::string::npos,"press counter");
         s=d2vr::read_powers(r,base,v,machine);   // trait off (vtable 0): never read

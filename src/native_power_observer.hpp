@@ -48,11 +48,12 @@ struct PowerSnapshot {
     int theeye_state{-1};                 // +0x19c, -1 absent
     float theeye_body[3]{};float theeye_body_yaw{};
     bool mimic_present{},mimic_armed{};   // +0x120 byte
+    int mimic_state{-1};                  // arkCpntMimic +0x4c: 2 = disguised
     std::uint32_t states{};               // power_state_bit::*, active flags
     std::uint32_t states_known{};         // bits whose state read succeeded (the id exists in the pool)
     // DOTO Void Strike (R6): the Slash player state (pool id 39). owned = slash+0xdb (set when a slash starts), commit_s = decl+0xa0 (float
     // seconds the hold time slash+0x38 must reach), mana = decl+0xf0 (int, -1 unknown), hold_s = slash+0x38 (float seconds, accumulates per frame)
-    bool voidstrike_found{},voidstrike_owned{};
+    bool voidstrike_found{},voidstrike_owned{},voidstrike_committed{};
     float voidstrike_commit_s{},slash_hold_s{};
     int voidstrike_mana{-1};
     std::array<std::uint64_t,2> active_ids{};   // 2026-11-25: every active player state id 0..127 (diagnostics: which states run in a possession / a mimic choke)
@@ -100,6 +101,14 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
     if(machine && vt.slash_vtable) if(const auto slash=native_player_state_object(read,base,machine,39,vt.slash_vtable)) {
         out.voidstrike_found=true;
         out.voidstrike_owned=value<std::uint8_t>(read,slash+0xdb).value_or(0)==1;
+        // 2026-11-25 (sim void_strike): slash+0xdb is only written when a slash starts, so the first charged strike of a session read "not
+        // owned" and pressed 340 ms (no commit). The attribute itself, as the slash start reads it (0x8d56b6), says it before any slash.
+        if constexpr(game_traits::void_strike_attr_index!=0) if(!out.voidstrike_owned) if(const auto attrs=value<std::uintptr_t>(read,machine+0x330);attrs && pointer(*attrs))
+            if(const auto idx=value<std::int32_t>(read,*attrs+game_traits::void_strike_attr_index);idx && *idx>=0 && *idx<=4096)
+                if(const auto entries=value<std::uintptr_t>(read,*attrs+game_traits::attribute_entries);entries && pointer(*entries))
+                    if(const auto v=value<float>(read,*entries+static_cast<std::uintptr_t>(*idx)*game_traits::attribute_stride+game_traits::attribute_value);v && std::isfinite(*v) && *v>0.f)
+                        out.voidstrike_owned=true;
+        out.voidstrike_committed=value<std::uint8_t>(read,slash+0xda).value_or(0)==1;   // 0x8d6ab0: the held time passed decl+0xa0 (a Void Strike, not a heavy slash)
         const auto hold=value<float>(read,slash+0x38);
         out.slash_hold_s=hold && power_observer_detail::plausible(*hold)?*hold:0.f;
         if(const auto decl=value<std::uintptr_t>(read,slash+0x18); decl && pointer(*decl)) {
@@ -138,6 +147,8 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
         } else if(kind==PowerKind::semblance) {
             out.mimic_present=true;
             out.mimic_armed=value<std::uint8_t>(read,at+0x120).value_or(0)==1;
+            // 2026-11-25: the disguise itself: the power's arkCpntMimic (+0xb8, init 0x3b5650) state +0x4c (2 = mimicking: 0x3b6240 drains while it is)
+            if(const auto mc=value<std::uintptr_t>(read,at+0xb8);mc && pointer(*mc)) out.mimic_state=value<std::int32_t>(read,*mc+0x4c).value_or(-1);
         }
     };
     if(const auto components=list(read,*player+0x268,4096); components && components->packed_count) {
@@ -201,6 +212,9 @@ public:
         if(s.found_player && snapshot().found_player && s.hook_mines!=snapshot().hook_mines) note(2,static_cast<std::uint32_t>(s.hook_mines));
         if(s.found_player && snapshot().found_player && s.hook_mine_mode!=snapshot().hook_mine_mode) note(3,static_cast<std::uint32_t>(s.hook_mine_mode));
         if(s.found_player && snapshot().found_player && s.theeye_state!=snapshot().theeye_state) note(4,static_cast<std::uint32_t>(s.theeye_state));
+        if(s.mimic_state==2) mimic_ms_.fetch_add(50,std::memory_order_relaxed);   // the observer reads every ~50 ms
+        if(s.mimic_state!=snapshot().mimic_state && s.found_player && snapshot().found_player) note(7,static_cast<std::uint32_t>(s.mimic_state));   // kind 7: the disguise state changed
+        if(s.voidstrike_committed && !snapshot().voidstrike_committed) {void_commits_.fetch_add(1,std::memory_order_relaxed);note(6,1);}   // kind 6: a Void Strike committed
         if(s.found_player && snapshot().found_player) for(unsigned w=0;w<2;++w) if(const auto d=s.active_ids[w]^snapshot().active_ids[w]) for(unsigned b=0;b<64;++b) if(d>>b&1u)
             note(5,(w*64+b)|((s.active_ids[w]>>b&1u)?0x1000u:0u));   // any player state on (id | 0x1000) / off (id)
         if(s.swapper_aiming && s.swapper_has_target) {   // where the Displace marker sits while aiming (compare with native-left-aim.csv at that tick)
@@ -221,7 +235,7 @@ public:
          <<",\"aiming\":"<<(s.swapper_aiming?"true":"false")<<",\"mode\":"<<static_cast<unsigned>(s.swapper_mode)
          <<",\"has_target\":"<<(s.swapper_has_target?"true":"false")<<",\"target\":["<<s.swapper_target[0]<<","<<s.swapper_target[1]<<","<<s.swapper_target[2]
          <<"]},\"theeye\":{\"state\":"<<s.theeye_state<<",\"body\":["<<s.theeye_body[0]<<","<<s.theeye_body[1]<<","<<s.theeye_body[2]
-         <<"],\"yaw\":"<<s.theeye_body_yaw<<"},\"mimic\":{\"present\":"<<(s.mimic_present?"true":"false")<<",\"armed\":"<<(s.mimic_armed?"true":"false")
+         <<"],\"yaw\":"<<s.theeye_body_yaw<<"},\"mimic\":{\"present\":"<<(s.mimic_present?"true":"false")<<",\"armed\":"<<(s.mimic_armed?"true":"false")<<",\"state\":"<<s.mimic_state<<",\"disguised_ms\":"<<mimic_ms_.load()
          <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines<<",\"hook_mine_mode\":"<<s.hook_mine_mode<<",\"hook_mine_pending\":"<<s.hook_mine_pending
          <<",\"state_entries\":{\"choke\":"<<edges_[0].load()<<",\"use_power\":"<<edges_[1].load()<<",\"change_weapon\":"<<edges_[2].load()
          <<",\"swapper\":"<<edges_[3].load()<<",\"cancel_void_strike\":"<<edges_[4].load()<<",\"mimicking\":"<<edges_[5].load()
@@ -231,7 +245,7 @@ public:
             <<",\"last\":["<<aim_target_[0]<<','<<aim_target_[1]<<','<<aim_target_[2]<<','<<aim_target_[3]<<"]}";return a.str();}()
          <<",\"void_strike\":{\"found\":"<<(s.voidstrike_found?"true":"false")<<",\"owned\":"<<(s.voidstrike_owned?"true":"false")
          <<",\"commit_s\":"<<s.voidstrike_commit_s<<",\"mana\":"<<s.voidstrike_mana<<",\"hold_s\":"<<s.slash_hold_s
-         <<",\"presses\":"<<void_presses_.load()<<",\"last_press_ms\":"<<void_last_ms_.load()<<"}}";
+         <<",\"presses\":"<<void_presses_.load()<<",\"last_press_ms\":"<<void_last_ms_.load()<<",\"commits\":"<<void_commits_.load()<<"}}";
         return o.str();
     }
 private:
@@ -253,7 +267,7 @@ private:
     inline static std::atomic<std::uint64_t> reads_{},failures_{};
     inline static std::array<std::atomic<std::uint64_t>,8> edges_{};
     inline static std::array<double,4> aim_target_{};inline static std::uint64_t aim_target_samples_{};   // under mutex(): [tick, x, y, z]
-    inline static std::atomic<std::uint64_t> void_presses_{};
+    inline static std::atomic<std::uint64_t> void_presses_{},void_commits_{},mimic_ms_{};
     inline static std::atomic<int> void_last_ms_{};
 };
 } // namespace d2vr

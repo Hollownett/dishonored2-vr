@@ -182,6 +182,11 @@ public:
         }
         head_directed_stick(input.move_x,input.move_y,head_follow_.relative_yaw(now));
     }
+    // The player camera this hook last verified (guarded reads, any thread): its mode / target mode and Shadow Walk flag.
+    std::optional<NativePlayerCamera> camera_snapshot() const {
+        const auto c=camera_.load(std::memory_order_acquire);if(!c || !base_) return {};
+        try {return native_player_camera(read_,base_,c);} catch(...) {return {};}
+    }
     // Control thread, every gameplay frame: the observer's possession bit (player state 26 in D2) with the gate's exit hold.
     void possession(bool bit,UINT64 now) {
         const bool on=possession_gate_.update(bit,now);

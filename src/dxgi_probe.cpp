@@ -465,7 +465,8 @@ static d2vr::NativeShotAim native_shot_aim;static bool native_shot_aim_installed
 static d2vr::NativeBlinkAim native_blink_aim;static bool native_blink_aim_installed=false;
 // GitHub issue #6: the grip cancels a held power aim (power_cancel.hpp, native_power_cancel.hpp). Knob build/no-power-grip-cancel turns it off.
 static d2vr::NativePowerCancel native_power_cancel;static bool native_power_cancel_installed=false,power_grip_cancel_enabled=true;
-static d2vr::PowerCancelLatch power_cancel_latch;static std::atomic<UINT64> power_grip_cancels{},power_aim_exempt_frames{},choke_power_trigger_frames{};static std::array<std::atomic<UINT64>,4> choke_lt{};static std::atomic<unsigned> choke_lt_kills{};static std::array<std::atomic<UINT64>,2> offer_lt{};static std::atomic<unsigned> offer_lt_kills{};static std::atomic<unsigned> offer_lt_kinds{},offer_lt_free{},gun_hand_free_bits{};   // GripIntent kinds (bits: left | right<<8), why the gun hand was not free   // DOTO: power trigger pulled while a choke is offered, LT sent; gates
+static d2vr::PowerCancelLatch power_cancel_latch;static std::atomic<UINT64> power_grip_cancels{},power_aim_exempt_frames{},choke_power_trigger_frames{};static std::array<std::atomic<UINT64>,4> choke_lt{};static std::atomic<unsigned> choke_lt_kills{};static std::atomic<UINT64> possession_host_camera_frames{};   // D2: frames the camera was a possessed host's (mode 7, no Shadow Walk)
+static std::array<std::atomic<UINT64>,2> offer_lt{};static std::atomic<unsigned> offer_lt_kills{};static std::atomic<unsigned> offer_lt_kinds{},offer_lt_free{},gun_hand_free_bits{};   // GripIntent kinds (bits: left | right<<8), why the gun hand was not free   // DOTO: power trigger pulled while a choke is offered, LT sent; gates
 static std::array<std::atomic<UINT64>,3> native_chord_lt{};static std::atomic<unsigned> native_chord_lt_kills{};   // engine Voltaic chord frames, LT not sent, RT sent; gates   // choke frames, power trigger pulled, LT sent, RT sent; gates (lt_kill bits)
 // Task 12 teleport fade (build/no-teleport-fade): edges from the power observer (control thread), alpha read by the render thread. A teleport also
 // resets the vertical anchor smoother (teleport_reset_request) and starts a new hand clamp epoch (teleport_epoch) so the hands never streak.
@@ -7474,8 +7475,11 @@ static std::string run_test_command(const std::string& line) {
     if(verb=="guard") { // test (sim, 2026-11-25: Semblance / choke in any save): "guard list": the nearest living NPCs (guards first); "guard behind [metres] [index]":
         // the player put (setviewpos through the engine console, as the D2 guard probe) that far behind the nearest one (or entry <index> of the list),
         // facing his back, where an unaware NPC offers his choke. The name is read at entity+0x20 (D2) or +0x28 (DOTO: idEntity fields 0x20..0x2b0 moved +8)
-        std::string what;double back=.7;int pick=0;in>>what;if(!(in>>back)) back=.7;if(!(in>>pick)) pick=0;
-        if(what!="list" && what!="behind") return "usage: guard list | guard behind [metres 0.3..3] [index]";
+        // "guard list <name part>" / "guard behind <m> <name part>": only the NPCs whose name holds that text (e.g. "rat"), nearest first
+        std::string what,third,filter;double back=.7;int pick=0;in>>what;
+        if(what=="list") {in>>filter;} else {if(!(in>>back)) back=.7;in.clear();if(in>>third) {try {std::size_t used{};pick=std::stoi(third,&used);if(used!=third.size()) filter=third;} catch(...) {filter=third;}}}
+        for(auto& c:filter) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if(what!="list" && what!="behind") return "usage: guard list [name part] | guard behind [metres 0.3..3] [index | name part]";
         back=std::clamp(back,.3,3.);
         std::uintptr_t game{},player{};std::array<float,3> me{};
         if(!read_self(image_base+0x39a5290,&game,8) || !game || !read_self(game+0x3130b0,&player,8) || !player || !read_self(player+0x300,me.data(),12)) return "guard: not in a game";
@@ -7495,6 +7499,7 @@ static std::string run_test_command(const std::string& line) {
             h.name=text_at(npc+name_first);if(h.name.empty()) h.name=text_at(npc+name_second);
             std::string low=h.name;for(auto& c:low) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             h.guard=low.find("guard")!=std::string::npos || low.find("soldier")!=std::string::npos || low.find("officer")!=std::string::npos;
+            if(!filter.empty()) {if(low.find(filter)==std::string::npos) continue;h.guard=false;}   // a filter: nearest first
             hits.push_back(h);
         }
         std::sort(hits.begin(),hits.end(),[](const Hit& a,const Hit& b) {return a.guard!=b.guard?a.guard:a.d<b.d;});
@@ -15565,7 +15570,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                           left_barrel_model=d2vr::is_barrel_equip_name(n)?left_gun_model.load():0;} // isolate barrel routing from holster/draw tracking
                                          // v145727: the slot-1 weapon hangs on the forearm (DOTO's Voltaic Gun): no gun grip, no hip draw, the hand stays free
                                          {std::array<std::uintptr_t,2> ents{};weapon_models(&ents);voltaic_native_ent.store(ents[0],std::memory_order_relaxed);   // v145744
-                                          left_forearm_gun=(!body_carry || left_kept) && state->slots[0] && ((ents[0] && weapon_bind_joint(ents[0],0,0)!=59u) ||
+                                          // 2026-11-25 (sim semblance_choke, power-trigger-trace.csv): never a power. Semblance's equipment entity is not bound at the hand
+                                          // joint either, so it counted as a forearm gun and its trigger became the gun chord (LT 0 for a trigger alone): the power
+                                          // trigger could not take a face, grip + trigger cast it instead
+                                          left_forearm_gun=(!body_carry || left_kept) && state->slots[0] && !d2vr::is_power_equip_name(n) && ((ents[0] && weapon_bind_joint(ents[0],0,0)!=59u) ||
                                               (d2vr::game_traits::ranged_player_weapon_is_voltaic && d2vr::is_voltaic_equip_name(n)));}   // v145799: or its pose name (a bind read before the arm skeleton resolves)
                                          left_gadget=(!body_carry || left_kept) && state->slots[0] && !d2vr::NativeGadgetDrop::left_spent.load(std::memory_order_relaxed) && (d2vr::is_gadget_equip_name(n) || d2vr::is_gadget_equip_name(item_decl_name(state->slots[0]))); // pose "Grenade"; decls regular/sticky_grenade, stun_mine, springrazor
                                          left_power=!power_native_fingers && (!body_carry || left_kept) && state->slots[0] && !left_gadget && !left_gun_model && d2vr::is_power_equip_name(n);
@@ -16412,7 +16420,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                      << ",\"shot_aim\":{\"installed\":" << native_shot_aim_installed << ",\"calls\":" << native_shot_aim.calls()
                                      << ",\"routed\":" << native_shot_aim.routed() << ",\"rejected\":" << native_shot_aim.rejected() << ",\"last_reason\":" << native_shot_aim.last_reason() << '}'
                                      << ",\"blink_aim\":" << native_blink_aim.status_json() << ",\"power_cancel\":" << native_power_cancel.status_json() << ",\"power_grip\":{\"enabled\":" << (power_grip_cancel_enabled?"true":"false") << ",\"cancels\":" << power_grip_cancels.load() << ",\"aim_exempt_frames\":" << power_aim_exempt_frames.load() << ",\"aim_held\":" << (power_cancel_latch.aim_held()?"true":"false") << ",\"choke_power_trigger_frames\":" << choke_power_trigger_frames.load() << ",\"choke_lt\":[" << choke_lt[0].load() << ',' << choke_lt[1].load() << ',' << choke_lt[2].load() << ',' << choke_lt[3].load() << ',' << choke_lt_kills.load() << "],\"offer_lt\":[" << offer_lt[0].load() << ',' << offer_lt[1].load() << ',' << offer_lt_kills.load() << ',' << offer_lt_kinds.load() << ',' << offer_lt_free.load() << "]}" << ",\"powers\":" << d2vr::NativePowerObserver::status_json() << ",\"guard_target\":" << [&]{const auto npc=last_guard_target.load();unsigned char st{};
-                                         return std::string("{\"set\":")+(npc?"true":"false")+",\"state\":"+std::to_string(npc && read_self(npc+0xd1,&st,1)?static_cast<int>(st):-1)+"}";}() << ",\"void_strike_test\":" << d2vr::VoidStrikeTest::json() << ",\"possession\":" << native_turning.possession_json() << ",\"teleport_fade\":{\"enabled\":" << (teleport_fade_enabled?"true":"false") << ",\"fades\":" << [&]{std::lock_guard<std::mutex> l(teleport_fade_mutex);return teleport_fade.fades();}() << ",\"last_ms\":" << teleport_fade_last_ms.load() << ",\"alpha_now\":" << teleport_fade_alpha_now.load() << "}"
+                                         return std::string("{\"set\":")+(npc?"true":"false")+",\"state\":"+std::to_string(npc && read_self(npc+0xd1,&st,1)?static_cast<int>(st):-1)+"}";}() << ",\"void_strike_test\":" << d2vr::VoidStrikeTest::json() << ",\"possession\":" << native_turning.possession_json() << ",\"possession_host_camera_frames\":" << possession_host_camera_frames.load() << ",\"teleport_fade\":{\"enabled\":" << (teleport_fade_enabled?"true":"false") << ",\"fades\":" << [&]{std::lock_guard<std::mutex> l(teleport_fade_mutex);return teleport_fade.fades();}() << ",\"last_ms\":" << teleport_fade_last_ms.load() << ",\"alpha_now\":" << teleport_fade_alpha_now.load() << "}"
                                      << ",\"native_left_aim\":{\"requested\":" << native_left_aim_requested << ",\"calls\":" << native_left_aim.calls()
                                      << ",\"candidates\":" << native_left_aim.candidates() << ",\"applied\":" << native_left_aim.applied()
                                      << ",\"rejected\":" << native_left_aim.rejected() << ",\"overlaps\":" << native_left_aim.overlap()
@@ -17319,7 +17327,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                     npc_offers[h].kind==d2vr::NativeInteractionAim::NpcOfferKind::talk?d2vr::NpcAction::talk:
                                     npc_offers[h].kind==d2vr::NativeInteractionAim::NpcOfferKind::loot?d2vr::NpcAction::loot:
                                     npc_offers[h].kind==d2vr::NativeInteractionAim::NpcOfferKind::carry && native_grab.is_corpse_entity(npc_offers[h].owner)?d2vr::NpcAction::carry:d2vr::NpcAction::none;};   // v1141 (user feedback 2026-11-11: "grabbing an enemy and a lying body are different controls"): the trigger loots a body, the grip grabs it
-                                const auto npc_holds=[&](unsigned h) {return extra_owns[h] || (h==rh?(gun_owns || hip_draw_reserved || left_gadget.load()):sword_owns);};
+                                // 2026-11-25 (sim semblance_choke): Semblance's own target is an NPC (behind him unaware, or his body), so its hand's trigger is the
+                                // power's, as a weapon hand's is its weapon's: with it in the hand, Talk / Pickpocket / Loot / Carry go to the other hand's trigger
+                                // (a body's Loot claim took the face-from-body press, power-trigger-trace.csv kills 128).
+                                const bool semblance_hand=d2vr::game_traits::power_mimic_vtable!=0 && left_power_item.load(std::memory_order_relaxed) &&
+                                    []{std::lock_guard<std::mutex> l(hand_state_mutex);return std::string_view(left_equip_name)=="Mimic";}();
+                                const auto npc_holds=[&](unsigned h) {return extra_owns[h] || (h==rh?(gun_owns || hip_draw_reserved || left_gadget.load() || semblance_hand):sword_owns);};
                                 std::array<bool,2> npc_owns{};
                                 for(unsigned h=0;h<2;++h) {
                                     npc_owns[h]=npc_trigger_enabled && !npc_holds(h) && (talk_targets[h] || pickpocket_targets[h] || (npc_offers[h] && npc_action(h)!=d2vr::NpcAction::none));
@@ -18334,7 +18347,15 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                 if(game_xr->guide_stick_blocked()) {input.turn_x=input.turn_y=0;input.right_click=false;input.dpad={};}
                                 const double vignette_raw_turn=input.turn_x; // the turn claim below clears turn_x
                                 if(native_turning_requested) {
-                                    native_turning.possession(logic==2 && possession_view_move_enabled && (d2vr::NativePowerObserver::latest().states&d2vr::power_state_bit::possession)!=0,GetTickCount64());   // Task 15b
+                                    // 2026-11-25 (sim possession_view_move): player state 26 is only EnterPossessedHost, the ~0.5 s fly-in (camera mode 12). The
+                                    // possession itself ran 20 s under camera mode 7/7 (MODE_CAMERA_SHADOW_WALK) with no Shadow Walk, which the mod took for an
+                                    // authored view: the host walked along its own heading. Possession = state 26, or the camera in mode 7 while it is not
+                                    // Emily's Shadow Walk and the player owns Possession.
+                                    {const auto snap=d2vr::NativePowerObserver::latest();bool host_camera=false;
+                                     if(d2vr::game_traits::state_possession!=0xffffffffu && logic==2 && (snap.present_mask>>static_cast<unsigned>(d2vr::PowerKind::possession)&1u))
+                                         if(const auto cam=native_turning.camera_snapshot()) host_camera=(cam->target_mode==7 || cam->mode==7) && !cam->shadow_walk;
+                                     possession_host_camera_frames.fetch_add(host_camera?1:0,std::memory_order_relaxed);
+                                     native_turning.possession(logic==2 && possession_view_move_enabled && ((snap.states&d2vr::power_state_bit::possession)!=0 || host_camera),GetTickCount64());}   // Task 15b
                                     native_turning.publish(input,logic==2 && !input.menu_modifier && !game_xr->guide_stick_blocked(),GetTickCount64(),game_xr->pose_epoch());
                                     native_turning.orient_movement(input,logic==2,GetTickCount64());
                                     if(native_turning.failed() && !native_turning_failure_noted) {native_turning_failure_noted=true;note_recoverable("Native VR turning repeatedly mismatched its feedback; turning disabled");}

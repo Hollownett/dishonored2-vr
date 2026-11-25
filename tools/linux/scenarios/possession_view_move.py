@@ -35,12 +35,15 @@ def build(lead_ms):
     out = _lib.lead_in(lead_ms)
     t = lead_ms
 
-    def head(yaw):
-        return [0.0, HEAD_Y, 0.0, *[round(v, 6) for v in _idle.head_quaternion(yaw, 0.0)]]
+    def head(yaw, pitch=0.0):
+        return [0.0, HEAD_Y, 0.0, *[round(v, 6) for v in _idle.head_quaternion(yaw, pitch)]]
 
-    def seg(inp, ms, yaw=0.0):
+    def seg(inp, ms, yaw=0.0, pitch=0.0):
         nonlocal t
-        out.append({"start_ms": t, "end_ms": t + ms, "input": dict(inp), "head_pitch_degrees": 0, "head_pose": head(yaw)})
+        s = {"start_ms": t, "end_ms": t + ms, "input": dict(inp), "head_pitch_degrees": 0, "head_pose": head(yaw, pitch)}
+        if pitch:
+            s["hand_pitch_degrees"] = pitch   # both hands aim down with the head (the host is on the floor)
+        out.append(s)
         t += ms
 
     def console(line):
@@ -50,16 +53,27 @@ def build(lead_ms):
 
     # 2026-11-25: no lab save owns Possession: the game's own purchase (AddPower, `d2vr give power possession`; the sim runner restores the
     # saves afterwards), then Corvo is put 3 m behind the nearest guard, facing his back (`d2vr guard behind 3`), god mode against alerts.
-    console("god")
+    console("ark_god_player 1")           # engine cvars (console): god and buddha set, not toggled (the session ended on a death screen twice)
+    console("ark_buddha_player 1")
+    console("gp_manaEnable 0")            # Possession costs far more mana than the save's Corvo had: a full aim reached the game and never
+    console("gp_powerCooldownEnable 0")   # started UsePower (run 20261125T143946); the one possession came after a minute of regeneration
     console("d2vr give power possession")
     seg({"move_x": 0.0}, 1000)
     console("d2vr give status")
     console("d2vr equip possession")
     seg({"move_x": 0.0}, 3000)            # the equip (run 20261125T131404: an aim 3 s after the give never started UsePower)
-    console("d2vr guard behind 2.5")
-    seg({"move_x": 0.0}, 1500)
+    # runs 2026-11-25: the guard took no host (a 0.8 s aim cast with no target; he patrols away); a 0.3 s tap possessed a RAT 14 m away
+    # (camera 12 fly-in, then mode 7 for 20 s). The host here is the nearest rat, 2.5 m ahead on the floor, aimed at 35 deg down.
+    # (no NPC named "rat" exists in the save: the low host of that run was probably a fish). The nearest guard again, closer, a level aim
+    # held 1 s (run 20261125T132936: a 0.8 s aim did start UsePower and cast).
+    # Run 20261125T131404's sequence, the one that possessed (its final tap took a creature ~14 m ahead): 3 m behind the guard, an aim
+    # held 1.5 s, the two walks, then the 0.3 s tap. Later variants (closer, shorter, held 1 s, mana off) reached the game but started no
+    # UsePower. The tap is moved up front below only once the host is known; this run records which player states a possession keeps.
+    console("d2vr guard behind 3.0")
+    seg({"move_x": 0.0}, 1000)
+    console("d2vr guard list def")        # the nearest NPCs of any kind from here
     console("d2vr spacewarp capture 2")
-    seg({"left_trigger": 1.0}, 300)       # a tap at the host (runs 2026-11-25: a 0.3 s tap possessed, 0.8 / 1.5 s holds took no host)
+    seg({"left_trigger": 1.0}, 1500)      # aim at him, release = cast
     seg({"move_x": 0.0}, 4000)            # released = cast; fly-in and possession start
     console("d2vr spacewarp capture 2")
     console("d2vr guard list")            # the host's position before A (the possessed guard)
@@ -71,7 +85,13 @@ def build(lead_ms):
     seg({"move_y": 1.0}, 2000, -YAW_DEG)  # B
     console("d2vr guard list")            # after B
     seg({"move_x": 0.0}, 1000, 0.0)
-    seg({"move_x": 0.0}, 4300)            # the possession ends by itself (a re-cast here possessed a second host in run 20261125T131404)
+    seg({"left_trigger": 1.0}, 300)       # the tap that possessed in run 20261125T131404
+    seg({"move_x": 0.0}, 2000)
+    console("d2vr spacewarp capture 2")
+    seg({"move_x": 0.0}, 1000, YAW_DEG)   # in the host: head 60 deg left, walk (the fix under test)
+    seg({"move_y": 1.0}, 2000, YAW_DEG)
+    seg({"move_x": 0.0}, 1000, -YAW_DEG)
+    seg({"move_y": 1.0}, 2000, -YAW_DEG)
     seg({"move_x": 0.0}, 1000, YAW_DEG)   # control run, outside possession
     seg({"move_y": 1.0}, 2000, YAW_DEG)
     out.append({"start_ms": t, "end_ms": lead_ms + TOTAL_MS, "input": {"move_x": 0.0}, "head_pitch_degrees": 0, "head_pose": head(0.0)})

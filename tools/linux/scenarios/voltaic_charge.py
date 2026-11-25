@@ -62,13 +62,15 @@ def build(lead_ms):
     console("d2vr ammo infinite on")
     console("d2vr voltaic charge on")
     seg({"move_x": 0.0}, 2500)                                   # probe_charge runs once a second
-    console("d2vr voltaic chargestate")
-    shot("right", 400)
-    shot("right", 2600, 2200)
-    shot("right", 4600)
+    console("d2vr ammo infinite on")                             # again: run 20261125T140711's first request got no answer, and the
+    console("d2vr voltaic chargestate")                          # save's few charges ran out after the right gun's shots (the engine
+    # gun then sat in fire phase 6 with no charge timer: fire-state-trace.csv); the engine gun's shots come first now
     shot("left", 400)
     shot("left", 2600, 2200)
     shot("left", 4600)
+    shot("right", 400)
+    shot("right", 2600, 2200)
+    shot("right", 4600)
     console("d2vr voltaic charge off")
     seg({"move_x": 0.0}, 1500)
     console("d2vr voltaic chargestate")

@@ -22,6 +22,7 @@ TOTAL_MS = 52000
 NECK = [0.0, 0.25, -0.15]     # the right hand raised to his neck, 0.6 m ahead (offset from the simulated default hand)
 REST = [0.0, 0.0, 0.0]
 LOW = [0.0, -0.3, -0.2]       # both hands toward the body on the floor
+MANA_LINE = "gp_manaEnable 0"   # set to "echo mana on" to keep the save's own mana rules
 
 
 def build(lead_ms):
@@ -40,6 +41,8 @@ def build(lead_ms):
         t += _lib.FRAME_MS
 
     console("god")
+    console(MANA_LINE)              # run 20261125T144443: the disguise went on (mimic +0x4c = 2) at the end of the face take and off 66 ms
+                                    # later; a mana check (gp_manaEnable 0 for this run) tells whether the save had the energy to keep it
     console("d2vr voltaic none")   # the mod remembers the forearm guns across sessions: a pinned left gun owns the left trigger (its chord), as
                                    # in play until that hand's wheel picks a power (the test equip below bypasses the wheel)
     console("d2vr guard list")
@@ -50,8 +53,9 @@ def build(lead_ms):
     console("d2vr guard behind 0.6 0")
     seg({"move_x": 0.0}, 400, REST, -10)
     console("d2vr spacewarp capture 2")
-    seg({"left_trigger": 1.0}, 1200, REST, -10)        # Semblance (95 is held by LT; its choke duration is 0: the animation sets the length)
-    seg({"move_x": 0.0}, 1500, REST, -10)
+    seg({"left_trigger": 1.0}, 4000, REST, -10)        # Semblance, HELD (95 is held by LT like a choke button: run 20261125T143332 let go at
+                                                         # 1.2 s, inside the grab-in, and the face was not taken; 95 runs ~3.8 s)
+    seg({"move_x": 0.0}, 500, REST, -10)
     console("d2vr spacewarp capture 2")
     seg({"move_x": 0.0}, 2500)
     console("d2vr spacewarp capture 2")                  # disguised (Mimicking 96)
