@@ -41,6 +41,7 @@ def build(lead_ms):
         t += _lib.FRAME_MS
 
     console("d2vr voltaic both")
+    seg({"move_x": 0.0}, 3000)            # the inventory is ready a moment after the load
     console("d2vr ammo infinite on")   # 2026-11-25: the inventory's own infinite-ammo field, so every copy shot is not refused no_ammo
     console("d2vr voltaic bolts")
     seg({"move_x": 0.0}, 4000)
@@ -74,6 +75,8 @@ def build(lead_ms):
     seg({"left_grip": 1.0}, 1400)
     console("d2vr spacewarp capture 3")
     seg({"left_grip": 1.0, "left_trigger": 1.0}, 400)
-    seg({"move_x": 0.0}, 2000)
+    seg({"move_x": 0.0}, 600)
+    console("d2vr spacewarp capture 2")   # after the left shot: is the gun back on the forearm?
+    seg({"move_x": 0.0}, 1400)
     out.append({"start_ms": t, "end_ms": lead_ms + TOTAL_MS, "head_pitch_degrees": 0, "input": {"move_x": 0.0}})
     return out

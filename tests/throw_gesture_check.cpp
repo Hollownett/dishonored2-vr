@@ -109,33 +109,40 @@ int main() {
             o=g.update(true,false,0,1,t+=11,3.0);expect(!o.drop && !o.throw_place && o.native_trigger,"grip opening inside the tap: no drop, no second placement");
         }
     }
-    {   // Task 6 (DOTO Hook Mine): holding the trigger >= 450 ms with a mine in hand is the game's own mode switch (a native LT hold), a short press
-        // still places/throws, and one press does ONE action. The trait/flag off (mode_capable=false) is today's behaviour exactly.
+    {   // Task 6 (DOTO Hook Mine; flat game, R7: ACTION_POWER_WEAPON down -> ChangeWeaponState, released before its 0.3 s hold -> the throw,
+        // held 0.3 s -> lethal <-> non-lethal and the button is consumed). With a mine in hand the game's LT FOLLOWS the trigger from the press,
+        // so the game itself tells a tap (throw) from a hold (switch); mode_hold marks the game's 300 ms point for haptics/status.
         const auto hold=[](d2vr::GadgetGrip& g,std::uint64_t& t,bool grenade,bool mode) {d2vr::GadgetGrip::Out o{};for(int i=0;i<3;++i) o=g.update(true,grenade,1,0,t+=11,0,mode);return o;};
-        {   // tap_still_throws
+        {   // tap_still_throws: a 121 ms press is a 121 ms native LT (the game throws at its release); no mode hold, no switch
             d2vr::GadgetGrip g;std::uint64_t t=0;hold(g,t,false,true);
-            bool any_mode=false,any_native=false,switched=false;
-            for(int i=0;i<11;++i) {const auto o=g.update(true,false,1,1,t+=11,0,true);any_mode=any_mode||o.mode_hold;any_native=any_native||o.native_trigger;}   // 121 ms down
-            expect(!any_mode,"tap: no mode hold while the press is short");
-            auto o=g.update(true,false,1,0,t+=11,0,true);any_native=o.native_trigger;switched=o.mode_switched;
-            expect(any_native && !o.mode_hold && !switched && !o.drop,"tap: released under 450 ms -> the native tap (place/throw), no mode switch");
-            for(int i=0;i<20;++i) o=g.update(true,false,1,0,t+=11,0,true);
-            expect(!o.native_trigger,"tap: a short tap, not a hold");
+            bool any_mode=false,all_native=true;
+            for(int i=0;i<11;++i) {const auto o=g.update(true,false,1,1,t+=11,0,true);any_mode=any_mode||o.mode_hold;all_native=all_native&&o.native_trigger;}
+            expect(all_native && !any_mode,"tap: LT follows the press from its first frame, no mode hold");
+            auto o=g.update(true,false,1,0,t+=11,0,true);
+            expect(!o.native_trigger && !o.mode_hold && !o.mode_switched && !o.drop && !o.throw_place,"tap: released under 300 ms -> LT released (the game throws), no switch");
         }
-        {   // long_hold_switches
+        {   // tap_minimum_hold: a one-frame flick still reaches the game as a short press (>= 80 ms), never as a mode hold
             d2vr::GadgetGrip g;std::uint64_t t=0;hold(g,t,false,true);
-            d2vr::GadgetGrip::Out o{};std::uint64_t down=t+11;bool early=false,late=true,any_switched=false;
+            auto o=g.update(true,false,1,1,t+=11,0,true);expect(o.native_trigger,"flick: pressed");
+            o=g.update(true,false,1,0,t+=11,0,true);expect(o.native_trigger && !o.mode_hold,"flick: held to the 80 ms minimum");
+            for(int i=0;i<8;++i) o=g.update(true,false,1,0,t+=11,0,true);
+            expect(!o.native_trigger && !o.mode_switched,"flick: released after the minimum");
+        }
+        {   // long_hold_switches: LT held the whole time; mode_hold from 300 ms; the release is the switched edge (the game consumed the button: no throw)
+            d2vr::GadgetGrip g;std::uint64_t t=0;hold(g,t,false,true);
+            d2vr::GadgetGrip::Out o{};std::uint64_t down=t+11;bool native_all=true,early=false,late=true,bad=false;
             for(int i=0;i<82;++i) {o=g.update(true,false,1,1,t+=11,0,true);   // ~900 ms
-                if(t-down<440) early=early||o.mode_hold||o.native_trigger;
-                if(t-down>=460) late=late&&o.mode_hold&&o.native_trigger;
-                any_switched=any_switched||o.mode_switched||o.drop||o.throw_place;}
-            expect(!early,"long hold: nothing is sent before 450 ms (a tap would only come at the release)");
-            expect(late && !any_switched,"long hold: from 450 ms the game's LT is held (mode_hold), no tap, throw or drop");
+                native_all=native_all&&o.native_trigger;
+                if(t-down<290) early=early||o.mode_hold;
+                if(t-down>=310) late=late&&o.mode_hold;
+                bad=bad||o.mode_switched||o.drop||o.throw_place;}
+            expect(native_all,"long hold: the game's LT is held from the press");
+            expect(!early && late && !bad,"long hold: mode_hold from the game's 300 ms point, no throw or drop");
             o=g.update(true,false,1,0,t+=11,0,true);
-            expect(o.mode_switched && !o.mode_hold && !o.native_trigger && !o.drop && !o.throw_place,"long hold: the release ends the hold with the switched edge and NO tap");
+            expect(o.mode_switched && !o.mode_hold && !o.native_trigger && !o.drop && !o.throw_place,"long hold: the release is the switched edge, no tap");
             for(int i=0;i<20;++i) {o=g.update(true,false,1,0,t+=11,0,true);expect(!o.mode_switched && !o.native_trigger && !o.mode_hold,"long hold: nothing after the release");}
         }
-        {   // long_hold_then_open_does_not_throw: one action only
+        {   // long_hold_then_open_does_not_throw: the grip opening mid-hold releases LT and does nothing else (no mod throw, no drop)
             d2vr::GadgetGrip g;std::uint64_t t=0;hold(g,t,false,true);
             d2vr::GadgetGrip::Out o{};for(int i=0;i<50;++i) o=g.update(true,false,1,1,t+=11,0,true);
             expect(o.mode_hold && o.native_trigger,"mode hold running");
@@ -144,6 +151,12 @@ int main() {
             bool bad=false;for(int i=0;i<30;++i) {o=g.update(true,false,0,1,t+=11,3.0,true);bad=bad||o.throw_place||o.drop||o.native_trigger||o.mode_hold;}
             o=g.update(true,false,0,0,t+=11,3.0,true);bad=bad||o.throw_place||o.drop||o.native_trigger||o.mode_hold;
             expect(!bad,"... and nothing after, even with the trigger still down or released");
+        }
+        {   // short_press_then_open: grip opened while a short press is down: LT released (the game's own throw), never a second mod throw/drop
+            d2vr::GadgetGrip g;std::uint64_t t=0;hold(g,t,false,true);
+            d2vr::GadgetGrip::Out o{};for(int i=0;i<10;++i) o=g.update(true,false,1,1,t+=11,0,true);
+            o=g.update(true,false,0,1,t+=11,3.0,true);
+            expect(!o.native_trigger && !o.throw_place && !o.drop,"short press + grip open: one action (the game's release throw)");
         }
         {   // mode_switch_off_trait_unchanged: the same inputs with mode_capable=false equal the default-argument (old) outputs
             d2vr::GadgetGrip a,b;std::uint64_t t=0;bool same=true;

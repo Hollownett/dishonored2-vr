@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -34,9 +35,10 @@ inline constexpr std::uint32_t choke=1u<<0,use_power=1u<<1,change_weapon=1u<<2,s
 struct PowerSnapshot {
     bool found_player{};
     int power_count{};
-    std::uint32_t present_mask{};
-    int hook_mines{-1};
-    int hook_mine_mode{-1};               // DOTO: the Hook Mine lethal/non-lethal setting ([[game+owner]+states]+index), -1 unknown                   // DOTO: Hook Mines in the inventory (the HookMineEquipment record's count, +0x20), -1 none         // bit PowerKind: the powers the player owns (player list or inventory)
+    std::uint32_t present_mask{};         // bit PowerKind: the powers the player owns (player list or inventory)
+    int hook_mines{-1};                   // DOTO: Hook Mines in the inventory (the HookMineEquipment record's count, +0x20), -1 none
+    int hook_mine_mode{-1};               // DOTO: the Hook Mine's mode, its WeaponStates current index: 0 non-lethal, 1 lethal, -1 unknown
+    int hook_mine_pending{-1};            // its pending index while a switch runs, else -1
     std::uint32_t aiming_kind{};          // PowerKind of the first power whose aim byte (+0xa4) is set
     bool aim_active{},cast_flag{};        // any power: +0xa4, +0xa5
     bool swapper_present{},swapper_aiming{};
@@ -86,11 +88,6 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
     const auto player=value<std::uintptr_t>(read,*game+0x3130b0);
     if(!player || !typed(read,base,*player,0x1c5e428)) return out;
     out.found_player=true;
-    if constexpr(game_traits::hook_mine_mode_owner!=0) {
-        const auto owner=value<std::uintptr_t>(read,*game+game_traits::hook_mine_mode_owner);
-        const auto states=owner && pointer(*owner)?value<std::uintptr_t>(read,*owner+game_traits::hook_mine_mode_states):std::nullopt;
-        if(states && pointer(*states)) out.hook_mine_mode=value<std::int32_t>(read,*states+game_traits::hook_mine_mode_index).value_or(-1);
-    }
     if(machine) for(unsigned bit=0;bit<vt.state_ids.size();++bit) {
         if(vt.state_ids[bit]==0xffffffffu) continue;
         const auto active=native_player_state(read,base,machine,vt.state_ids[bit],0);
@@ -152,8 +149,15 @@ template<class Read> PowerSnapshot read_powers(Read& read,std::uintptr_t base,co
         if(const auto entries=list(read,*inventory+0x38,4096)) for(unsigned i=0;i<entries->packed_count && i<1024;++i)
             if(const auto comp=value<std::uintptr_t>(read,entries->data+i*0x38ull+0x10); comp && *comp) {
                 examine(*comp);
-                if(vt.hook_mine_vtable && pointer(*comp) && value<std::uintptr_t>(read,*comp).value_or(0)==base+vt.hook_mine_vtable)
+                if(vt.hook_mine_vtable && pointer(*comp) && value<std::uintptr_t>(read,*comp).value_or(0)==base+vt.hook_mine_vtable) {
                     out.hook_mines=value<std::int32_t>(read,entries->data+i*0x38ull+0x20).value_or(-1);
+                    // its lethal/non-lethal mode: the mine weapon entity's WeaponStates current index (0 non-lethal, 1 lethal), R7
+                    if constexpr(game_traits::weapon_states_vtable!=0) if(const auto ent=value<std::uintptr_t>(read,*comp+0x10); ent && pointer(*ent))
+                        if(const auto cl=list(read,*ent+game_traits::entity_components_offset,256)) for(unsigned k=0;k<cl->packed_count && k<256;++k)
+                            if(const auto c=value<std::uintptr_t>(read,cl->data+k*8ull); c && pointer(*c) && value<std::uintptr_t>(read,*c).value_or(0)==base+game_traits::weapon_states_vtable) {
+                                out.hook_mine_mode=value<std::int32_t>(read,*c+game_traits::weapon_state_current).value_or(-1);
+                                out.hook_mine_pending=value<std::int32_t>(read,*c+game_traits::weapon_state_pending).value_or(-1);break;}
+                }
             }
     return out;
 }
@@ -166,6 +170,9 @@ public:
         if(s.found_player && snapshot().found_player && s.hook_mines!=snapshot().hook_mines) note(2,static_cast<std::uint32_t>(s.hook_mines));
         if(s.found_player && snapshot().found_player && s.hook_mine_mode!=snapshot().hook_mine_mode) note(3,static_cast<std::uint32_t>(s.hook_mine_mode));
         if(s.found_player && snapshot().found_player && s.theeye_state!=snapshot().theeye_state) note(4,static_cast<std::uint32_t>(s.theeye_state));
+        if(s.swapper_aiming && s.swapper_has_target) {   // where the Displace marker sits while aiming (compare with native-left-aim.csv at that tick)
+            aim_target_={static_cast<double>(GetTickCount64()),s.swapper_target[0],s.swapper_target[1],s.swapper_target[2]};++aim_target_samples_;
+        }
         snapshot()=s;reads_.fetch_add(1,std::memory_order_relaxed);
         if(!s.found_player) failures_.fetch_add(1,std::memory_order_relaxed);
     }
@@ -182,10 +189,12 @@ public:
          <<",\"has_target\":"<<(s.swapper_has_target?"true":"false")<<",\"target\":["<<s.swapper_target[0]<<","<<s.swapper_target[1]<<","<<s.swapper_target[2]
          <<"]},\"theeye\":{\"state\":"<<s.theeye_state<<",\"body\":["<<s.theeye_body[0]<<","<<s.theeye_body[1]<<","<<s.theeye_body[2]
          <<"],\"yaw\":"<<s.theeye_body_yaw<<"},\"mimic\":{\"present\":"<<(s.mimic_present?"true":"false")<<",\"armed\":"<<(s.mimic_armed?"true":"false")
-         <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines<<",\"hook_mine_mode\":"<<s.hook_mine_mode
+         <<"},\"states\":"<<s.states<<",\"states_known\":"<<s.states_known<<",\"hook_mines\":"<<s.hook_mines<<",\"hook_mine_mode\":"<<s.hook_mine_mode<<",\"hook_mine_pending\":"<<s.hook_mine_pending
          <<",\"state_entries\":{\"choke\":"<<edges_[0].load()<<",\"use_power\":"<<edges_[1].load()<<",\"change_weapon\":"<<edges_[2].load()
          <<",\"swapper\":"<<edges_[3].load()<<",\"cancel_void_strike\":"<<edges_[4].load()<<",\"mimicking\":"<<edges_[5].load()
          <<",\"use_mimic\":"<<edges_[6].load()<<",\"possession\":"<<edges_[7].load()<<"},\"events\":"<<events_json()
+         <<",\"swapper_aim\":"<<[]{std::lock_guard<std::mutex> l(mutex());std::ostringstream a;a<<std::setprecision(10)<<"{\"samples\":"<<aim_target_samples_
+            <<",\"last\":["<<aim_target_[0]<<','<<aim_target_[1]<<','<<aim_target_[2]<<','<<aim_target_[3]<<"]}";return a.str();}()
          <<",\"void_strike\":{\"found\":"<<(s.voidstrike_found?"true":"false")<<",\"owned\":"<<(s.voidstrike_owned?"true":"false")
          <<",\"commit_s\":"<<s.voidstrike_commit_s<<",\"mana\":"<<s.voidstrike_mana<<",\"hold_s\":"<<s.slash_hold_s
          <<",\"presses\":"<<void_presses_.load()<<",\"last_press_ms\":"<<void_last_ms_.load()<<"}}";
@@ -208,6 +217,7 @@ private:
     static PowerSnapshot& snapshot() {static PowerSnapshot s;return s;}
     inline static std::atomic<std::uint64_t> reads_{},failures_{};
     inline static std::array<std::atomic<std::uint64_t>,8> edges_{};
+    inline static std::array<double,4> aim_target_{};inline static std::uint64_t aim_target_samples_{};   // under mutex(): [tick, x, y, z]
     inline static std::atomic<std::uint64_t> void_presses_{};
     inline static std::atomic<int> void_last_ms_{};
 };

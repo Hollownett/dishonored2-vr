@@ -51,11 +51,13 @@ public:
     // Task 7 (user: "mine throw should attach mine, like in the flat game"): a mine let go unarmed while the hand moves faster than mine_throw_min_mps
     // is not dropped (the mod's own loot-pickup flight never attaches): throw_place starts the native placement tap (the probe aims it along the throw).
     static constexpr double mine_throw_min_mps=1.5;
-    // Task 6 (DOTO Hook Mine, user: hold the use button to switch lethal / non-lethal, tap to throw): with mode_capable a mine's trigger press waits
-    // mode_hold_ms. Released before: the tap (at the release, as the flat game throws on it). Still down: mode_hold = the game's LT held (native_trigger
-    // too) until the release, then mode_switched and NO tap/throw/drop for that press. The grip opening in a mode hold lets go of LT and does nothing else.
+    // Task 6 (DOTO Hook Mine, user: hold the use button to switch lethal / non-lethal, tap to throw). The flat game (R7, controller decl
+    // m_statesMapping): ACTION_POWER_WEAPON down enters ChangeWeaponState; released before its hold time (decl+0x90 = 0.3 s) the state ends and the
+    // release throws (PLACE_WEAPON_AFAR); held 0.3 s the mode flips and the button is consumed (no throw). So with mode_capable a mine's trigger is
+    // passed through: the game's LT follows the trigger from the press (at least 80 ms, so a flick registers) and the game decides. mode_hold marks the
+    // game's switch point (mode_hold_ms, for haptics/status), mode_switched the release after it. The grip opening releases LT and does nothing else.
     struct Out {bool native_trigger{},drop{},held{},armed{},throw_place{},mode_hold{},mode_switched{};};
-    Out update(bool gadget,bool grenade,float grip,float trigger,std::uint64_t now_ms,double hand_speed_mps=0,bool mode_capable=false,std::uint64_t mode_hold_ms=450) noexcept {
+    Out update(bool gadget,bool grenade,float grip,float trigger,std::uint64_t now_ms,double hand_speed_mps=0,bool mode_capable=false,std::uint64_t mode_hold_ms=300) noexcept {
         Out o{};
         if(!gadget) {held_=armed_=trig_down_=present_=mode_pending_=mode_hold_=false;tap_until_=0;return o;}
         const bool was=held_;held_=grip>=(held_?.35f:.55f);
@@ -66,16 +68,14 @@ public:
             if(was && !held_) {o.drop=!armed_;armed_=false;}
         } else {
             if(!mode_capable) mode_pending_=mode_hold_=false;
-            if(mode_pending_) {
-                if(!trig) {mode_pending_=false;tap_until_=now_ms+150;}                              // short press: the tap, now
-                else if(now_ms-mode_since_>=mode_hold_ms) {mode_pending_=false;mode_hold_=true;}   // long press: the mode switch
-                else if(was && !held_) mode_pending_=false;                                          // opened before the hold: the old throw/drop below
-            }
-            if(mode_hold_) {
-                if(was && !held_) mode_hold_=false;                // the user let go mid-switch: LT released, nothing else
-                else if(!trig) {mode_hold_=false;o.mode_switched=true;}
-                else {o.mode_hold=true;o.native_trigger=true;}
-                o.held=held_;o.armed=armed_;return o;
+            if(mode_pending_) {   // the press, passed through (mode_pending_ = LT down for the game)
+                const auto age=now_ms-mode_since_;
+                if(was && !held_) {mode_pending_=mode_hold_=false;o.held=held_;o.armed=armed_;return o;}   // the grip opened: LT released, the game's own release
+                if(!trig && age>=80) {                                                                     // released (after the 80 ms minimum)
+                    mode_pending_=false;o.mode_switched=mode_hold_;mode_hold_=false;o.held=held_;o.armed=armed_;return o;
+                }
+                if(trig && age>=mode_hold_ms) mode_hold_=true;                                             // the game's switch point
+                o.native_trigger=true;o.mode_hold=mode_hold_;o.held=held_;o.armed=armed_;return o;
             }
             if(was && !held_ && now_ms>=tap_until_) {
                 if(hand_speed_mps>mine_throw_min_mps) {o.throw_place=true;tap_until_=now_ms+150;} else o.drop=true;

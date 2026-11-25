@@ -50,12 +50,13 @@ inline constexpr std::uintptr_t voltaic_comp_vtable = 0x1c45768, voltaic_decl_vt
 // DOTO ids >= 74 are +1 vs D2). 0xffffffff = no such state in this game.
 inline constexpr std::uintptr_t power_swapper_vtable = 0x1c44a18, power_theeye_vtable = 0x1c451a8, power_mimic_vtable = 0x1c44518;
 inline constexpr std::uintptr_t hook_mine_equipment_vtable = 0x1c43928;   // arkCpntHookMineEquipment (R4 P2, RTTI)
-// The Hook Mine's lethal/non-lethal setting (HookMineEquipment vslots 0x3b1b40/0x3b1b60: [[game+0x1e8968]+0x778]+0xc, an int; game-wide,
-// not per mine). The observer reads it; 0 = no such setting in this game.
-inline constexpr std::uintptr_t hook_mine_mode_owner = 0x1e8968, hook_mine_mode_states = 0x778, hook_mine_mode_index = 0xc;
+// The Hook Mine's lethal/non-lethal mode (R7, docs/doto-research/2026-11-25-R7-hook-mine-lethal.md): the mine weapon entity's arkCpntWeaponStates
+// (vtable below, found in the entity's component list at +0x270) m_currentStateIndex +0x20: 0 "non_lethal" (start), 1 "lethal"; +0x24 the pending
+// index (-1 except while a switch runs). 0 = no such setting in this game.
+inline constexpr std::uintptr_t weapon_states_vtable = 0x1c45e18, entity_components_offset = 0x270, weapon_state_current = 0x20, weapon_state_pending = 0x24;
 inline constexpr bool gadget_mode_switch = true;   // a held Hook Mine has lethal/non-lethal modes: the use button held switches them (GadgetGrip mode hold)
 inline constexpr std::uintptr_t slash_state_vtable = 0x1d0b978;   // arkPlayerStateSlash (R6 void strike; pool id 39)
-inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_change_weapon = 73, state_swapper = 93, state_cancel_void_strike = 94,
+inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_change_weapon = 74, state_swapper = 93, state_cancel_void_strike = 94,
     state_mimicking = 96, state_use_mimic = 102, state_possession = 0xffffffffu;
 // v145741 (live, lab9: the inventory's GaussGun record 0x40138 -> its component's +0x10 owner): the Voltaic Gun's entity is a plain
 // idEntity (vtable 0x1d0dd88), not the weapon entity class the crossbow uses; owner +0xb4 is the player, id +0xb0 matches.
@@ -93,7 +94,7 @@ inline constexpr bool bind_any_arm_joint = false;   // D2: hand attachment 59 (a
 inline constexpr std::uintptr_t voltaic_comp_vtable = 0, voltaic_decl_vtable = 0;
 inline constexpr std::uintptr_t power_swapper_vtable = 0, power_theeye_vtable = 0, power_mimic_vtable = 0;
 inline constexpr std::uintptr_t hook_mine_equipment_vtable = 0;
-inline constexpr std::uintptr_t hook_mine_mode_owner = 0, hook_mine_mode_states = 0, hook_mine_mode_index = 0;
+inline constexpr std::uintptr_t weapon_states_vtable = 0, entity_components_offset = 0, weapon_state_current = 0, weapon_state_pending = 0;
 inline constexpr bool gadget_mode_switch = false;  // D2's stun mine / spring razor have no modes
 inline constexpr std::uintptr_t slash_state_vtable = 0;
 inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_change_weapon = 0xffffffffu, state_swapper = 0xffffffffu,
