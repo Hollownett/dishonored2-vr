@@ -27,7 +27,8 @@ import run_build_cmd as harness  # noqa: E402
 
 CMD = ROOT / "tools" / "doto" / "build-doto.cmd"
 NEEDED_OBJS = [f"build/md/{n}.obj" for n in ("buffer", "hook", "trampoline", "hde64")] + \
-              [f"build/imgui/{n}.obj" for n in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets", "imgui_impl_dx11")]
+              [f"build/imgui/{n}.obj" for n in ("imgui", "imgui_draw", "imgui_tables", "imgui_widgets", "imgui_impl_dx11")] + \
+              ["build/vsh/afw_warp.obj"]   # VR Stereo Hub AFW (third_party/vsh_afw), build-msvc.cmd's own step
 
 
 def default_python():
@@ -79,8 +80,8 @@ def ensure_objs():
     missing = [o for o in NEEDED_OBJS if not (ROOT / o).exists()]
     if not missing:
         return
-    print("build_doto: building MinHook/ImGui objects (missing: %s)" % ", ".join(missing), flush=True)
-    subprocess.run([sys.executable, str(HERE / "run_build_cmd.py"), "--only", r"^cc (buffer|imgui)"], cwd=ROOT, check=True)
+    print("build_doto: building MinHook/ImGui/AFW objects (missing: %s)" % ", ".join(missing), flush=True)
+    subprocess.run([sys.executable, str(HERE / "run_build_cmd.py"), "--only", r"^cc (buffer|imgui|afw_warp)"], cwd=ROOT, check=True)
     still = [o for o in NEEDED_OBJS if not (ROOT / o).exists()]
     if still:
         raise SystemExit("build_doto: objects still missing: " + ", ".join(still))
