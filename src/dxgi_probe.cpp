@@ -5995,6 +5995,17 @@ static std::string voltaic_arm_events() {std::string s;for(unsigned i=0;i<voltai
 // [copy shots asked, queued, refused, native chord frames, ArmSet pins, forearm feeds, model frame writes, copy aims]
 static std::array<std::atomic<std::uint64_t>,8> voltaic_stats{};
 static std::array<std::atomic<std::uint64_t>,2> voltaic_feed_why{};
+// v145773 (sim 2026-11-25 voltaic_render_check v145771, captures 13/14/15: while the LEFT forearm's engine Voltaic Gun fired, the forearm went bare
+// and a gun hung near the ceiling; the right forearm's copy, written from the drawn forearm every render by publish_voltaic_copy, stayed put):
+// publish_voltaic_native places the engine's gun the same way while the left forearm carries it (see there). build/no-voltaic-native-place: off.
+static bool voltaic_native_place=true;
+static std::atomic<bool> voltaic_native_chord_now{};   // control thread: the pinned gun's fire chord (left grip + trigger, the engine's LT) is down
+// [renders carried, frames written, no-ops, engine pose kept, hidden (flags bit 0), bind joint not the forearm helper, engine frame > 3 cm off the
+//  drawn forearm, no model, no drawn forearm image, tag read from the bind]
+static std::array<std::atomic<std::uint64_t>,10> voltaic_native_place_n{};
+static std::atomic<int> voltaic_native_last_joint{-2},voltaic_native_off_joint{-2};   // the last bind joint read; the last one that was not the helper
+static std::atomic<std::uint32_t> voltaic_native_shots{},voltaic_native_rows{};        // chord windows seen; trace rows written (diagnostics)
+static std::atomic<float> voltaic_native_gap_max_mm{};                                 // the largest engine-vs-drawn origin gap seen in a chord window
 // v145739 (user, DOTO headset v145738: the game crashed right after a save load, twice, Dishonored_DO.exe+0x8e506c = GetComponent 0x8e5050
 // reading [entity+0x290] of an invalid entity): the right-forearm copy is the gun's full entity def (cpntweapongaussgun and friends) spawned
 // with no owner, the first build in which it actually spawned. v145740 spawns it with the player as owner; v145743: on unless build/no-voltaic-copy.
@@ -6013,7 +6024,12 @@ static std::string voltaic_json() {
         "],\"native_hide\":["+std::to_string(d2vr::NativeWeaponHands::forearm_native_hides.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_shows.load())+','+
         std::to_string(d2vr::NativeWeaponHands::forearm_native_failed.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_forced.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_native_unforced.load())+"],\"stats\":[";
     for(unsigned i=0;i<voltaic_stats.size();++i) s+=(i?",":"")+std::to_string(voltaic_stats[i].load(std::memory_order_relaxed));
-    s+="],\"copy_entity\":[";
+    s+="],\"native_place\":{\"on\":"+std::string(voltaic_native_place?"true":"false")+",\"n\":[";   // v145773
+    for(unsigned i=0;i<voltaic_native_place_n.size();++i) s+=(i?",":"")+std::to_string(voltaic_native_place_n[i].load(std::memory_order_relaxed));
+    s+="],\"joint\":"+std::to_string(voltaic_native_last_joint.load())+",\"off_joint\":"+std::to_string(voltaic_native_off_joint.load())+
+        ",\"shots\":"+std::to_string(voltaic_native_shots.load())+",\"rows\":"+std::to_string(voltaic_native_rows.load())+
+        ",\"gap_max_mm\":"+std::to_string(static_cast<int>(voltaic_native_gap_max_mm.load()))+"}";
+    s+=",\"copy_entity\":[";
     s+=std::to_string(d2vr::NativeWeaponHands::forearm_spawned.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_placed.load())+','+
         std::to_string(d2vr::NativeWeaponHands::forearm_hidden.load())+','+std::to_string(d2vr::NativeWeaponHands::forearm_presented.load())+','+
         std::to_string(d2vr::NativeWeaponHands::held_failed.load())+"],\"anchors\":["+std::to_string(d2vr::NativeWeaponHands::forearm_anchors.load())+','+
@@ -6156,6 +6172,109 @@ static void publish_voltaic_copy() noexcept {
                 if(write_self(model+0x1860,want.data(),sizeof want)) voltaic_stats[6].fetch_add(1,std::memory_order_relaxed);
             } catch(...) {}
         }
+    }
+}
+// v145773 (sim 2026-11-25 voltaic_render_check on v145771: frame 13 the engine's Voltaic Gun on the left forearm, frame 14 (fire chord down) the
+// forearm bare, frame 15 the gun near the ceiling; the right forearm's copy stayed on its forearm through its own shots). The engine places its
+// gun from its bind (entity bind component: joint u16 +0x3d0, tag +0x3d4/+0x3e0) through the arm-joint reads NativeAttachmentPose substitutes
+// with the tracked palette, so at rest it sits on the drawn left_lower_armhelper2. Its shot (Gauss fire 0x3c1d70) plays the gun's fire
+// animation, during which the gun is composed from a pose the mod does not track (another bind joint/tag, or an arm read the attachment hook
+// passes through), and the draw-time weapon placement that maps bind joints to the drawn arm (weapon_bind_joint) is off by default
+// (ObjectMotion::weapon_wanted, build/weapon-draw-place): nothing put the gun back on the drawn forearm. The copy never showed it because
+// publish_voltaic_copy writes its model frame from the drawn forearm at every render.
+// The engine's gun now gets the same: at the eye-0 Begin of a render the image skin draws, while the left forearm carries it in gameplay
+// (pinned), its model frame (+0x1860) := drawn left forearm helper * the engine's own tag (read from its bind while it hangs on the helper,
+// identity before the first read, the left copy's offset), whenever the engine frame is not that already: the bind joint is not the helper,
+// the fire chord is down or released less than 1.5 s ago, or the engine frame is more than 3 cm off. At rest on the helper the engine's frame
+// stays (no behaviour change). The engine rewrites the frame at its next tick; nothing accumulates. Its hidden state is the engine's (not
+// touched here). build/no-voltaic-native-place: off (the trace and counters still run).
+// Diagnostics (build/diagnostics): a ring of rows per render while the gun is carried; each chord window (300 ms before the chord, the chord,
+// 1.5 s after) is appended to artifacts/voltaic-native-trace.csv when it closes (32 windows at most). Status dual_wield.voltaic.native_place.
+static void publish_voltaic_native() noexcept {
+    if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) {
+        static constexpr UINT64 window_ms=1500,preroll_ms=300;static constexpr double far_m=.03;
+        struct Row {UINT64 tick{},frame{};int joint{-2},helper{-1},master_arm{-1};unsigned flags{256},chord{},carried{},placed{},why{};float e[3]{},h[3]{},p[3]{};float gap_mm{-1.f};};
+        enum Why : unsigned {written,noop,engine_kept,hidden,no_model,no_image,knob_off,bad_frame,not_carried};
+        static std::array<Row,384> ring{};static std::uint64_t ring_n{};   // render thread only (eye-0 Begin)
+        static UINT64 window_from{},window_until{};static bool window_open{},chord_was{},carried_latch{};static unsigned dumps{};
+        static d2vr::weapon_draw::Mat tag=d2vr::weapon_draw::identity();
+        const UINT64 now=GetTickCount64();
+        const bool chord=voltaic_native_chord_now.load(std::memory_order_relaxed);
+        if(chord && !chord_was) {window_from=now;voltaic_native_shots.fetch_add(1,std::memory_order_relaxed);}
+        chord_was=chord;if(chord) window_until=now+window_ms;
+        const bool in_window=window_from && now<=window_until;
+        const auto dump=[&]() {   // the closed window's rows, oldest first
+            if(!d2vr::diag::on() || dumps>=32) return;
+            try {
+                const bool first=dumps++==0;
+                std::ofstream out(output_directory/L"voltaic-native-trace.csv",first?std::ios::trunc:std::ios::app);if(!out) return;
+                if(first) out<<"shot,t_ms,frame,chord,carried,flags,hidden,joint,helper,master_arm,engine_x,engine_y,engine_z,helper_x,helper_y,helper_z,placed_x,placed_y,placed_z,gap_mm,placed,why\n";
+                out<<std::fixed<<std::setprecision(4);
+                const std::uint64_t n=std::min<std::uint64_t>(ring_n,ring.size());
+                for(std::uint64_t k=ring_n-n;k<ring_n;++k) {
+                    const Row& r=ring[k%ring.size()];if(r.tick+preroll_ms<window_from) continue;
+                    out<<voltaic_native_shots.load()<<','<<static_cast<long long>(r.tick)-static_cast<long long>(window_from)<<','<<r.frame<<','<<r.chord<<','<<r.carried<<','
+                       <<r.flags<<','<<(r.flags<256?(r.flags&1u):2u)<<','<<r.joint<<','<<r.helper<<','<<r.master_arm;
+                    for(const float v:r.e) out<<','<<v;
+                    for(const float v:r.h) out<<','<<v;
+                    for(const float v:r.p) out<<','<<v;
+                    out<<','<<r.gap_mm<<','<<r.placed<<','<<r.why<<'\n';
+                    voltaic_native_rows.fetch_add(1,std::memory_order_relaxed);
+                }
+            } catch(...) {}
+        };
+        if(window_open && !in_window) {window_open=false;dump();}
+        if(in_window) window_open=true;
+        Row r{};r.tick=now;r.frame=frames.load();r.chord=chord?1u:0u;
+        const auto record=[&](unsigned why) {r.why=why;if(d2vr::diag::on()) ring[(ring_n++)%ring.size()]=r;};
+        try {
+            if(game_logic_mask()!=2) {carried_latch=false;return;}
+            // carried: the pinned left forearm carries the engine's gun; through a chord window the carry at its start holds (the shot must not lose it)
+            const bool carried_now=voltaic_pinned() && (voltaic_arms_now.load(std::memory_order_relaxed)&1u) && !voltaic_copy_at[0].load(std::memory_order_relaxed);
+            if(!in_window) carried_latch=carried_now;
+            const bool carried=carried_now || (in_window && carried_latch);
+            r.carried=(carried_now?1u:0u)|(carried?2u:0u);
+            if(!carried) {if(in_window) record(not_carried);return;}
+            voltaic_native_place_n[0].fetch_add(1,std::memory_order_relaxed);
+            std::array<std::uintptr_t,2> ents{};const auto models=weapon_models(&ents);
+            const std::uintptr_t gun=ents[0],model=models[0];
+            if(!gun || !model || gun!=voltaic_native_ent.load(std::memory_order_relaxed)) {voltaic_native_place_n[7].fetch_add(1,std::memory_order_relaxed);record(no_model);return;}
+            std::uint8_t flags{};if(read_self(gun+d2vr::game_traits::entity_flags_offset,&flags,1)) r.flags=flags;
+            // its bind (as weapon_bind_joint / engine_bind_of read it, at the game's own bind offset)
+            std::uintptr_t comp{},master{},master_model{};std::uint16_t joint{0xffff};float o[3]{},q[4]{};
+            const bool bind_ok=read_self(gun+d2vr::game_traits::entity_bind_offset,&comp,sizeof comp) && comp && read_self(comp+0x3d0,&joint,sizeof joint) &&
+                read_self(comp+0x3d4,o,sizeof o) && read_self(comp+0x3e0,q,sizeof q);
+            r.joint=bind_ok?(joint==0xffff?-1:static_cast<int>(joint)):-2;voltaic_native_last_joint.store(r.joint,std::memory_order_relaxed);
+            if(bind_ok && read_self(comp+0x3c8,&master,sizeof master) && master && read_self(master+d2vr::game_traits::entity_model_offset,&master_model,sizeof master_model))
+                r.master_arm=master_model && master_model==image_skin_slots[0].model.load(std::memory_order_relaxed)?1:0;
+            const int helper=forearm_helper_index(0);r.helper=helper;
+            const bool on_helper=bind_ok && helper>=0 && joint==static_cast<std::uint16_t>(helper);
+            if(!on_helper) {voltaic_native_place_n[5].fetch_add(1,std::memory_order_relaxed);voltaic_native_off_joint.store(r.joint,std::memory_order_relaxed);}
+            else {   // the engine's own tag on the helper (identity on the left arm), kept for the frames it hangs elsewhere
+                const float unit[3]{1.f,1.f,1.f};d2vr::weapon_draw::Mat g{};
+                if(d2vr::weapon_draw::engine_bind_g(q,o,unit,nullptr,g)) {tag=g;voltaic_native_place_n[9].fetch_add(1,std::memory_order_relaxed);}
+            }
+            std::array<float,15> cur{},want{};
+            if(!read_self(model+0x1860,cur.data(),sizeof cur)) {voltaic_native_place_n[7].fetch_add(1,std::memory_order_relaxed);record(no_model);return;}
+            for(unsigned i=0;i<3;++i) r.e[i]=cur[i];
+            const auto x=helper>=0?full_body.image_world(0,static_cast<unsigned>(helper),frames.load()):std::nullopt;
+            if(!x) {voltaic_native_place_n[8].fetch_add(1,std::memory_order_relaxed);record(no_image);return;}
+            r.h[0]=static_cast<float>(x->p.x);r.h[1]=static_cast<float>(x->p.y);r.h[2]=static_cast<float>(x->p.z);
+            const auto b=d2vr::weapon_draw::mul(weapon_mat(*x),tag);
+            if(!d2vr::HeldEnginePose::frame_from_pose(b.data(),want.data())) {record(bad_frame);return;}
+            for(unsigned i=12;i<15;++i) want[i]=cur[i];   // the model's own scales
+            for(unsigned i=0;i<3;++i) r.p[i]=want[i];
+            const double gap=d2vr::HeldEnginePose::origin_gap(cur.data(),want.data());
+            r.gap_mm=std::isfinite(gap)?static_cast<float>(gap*1000.):-1.f;
+            if(in_window && r.gap_mm>voltaic_native_gap_max_mm.load(std::memory_order_relaxed)) voltaic_native_gap_max_mm.store(r.gap_mm,std::memory_order_relaxed);
+            const bool off_far=!(gap<=far_m);if(off_far) voltaic_native_place_n[6].fetch_add(1,std::memory_order_relaxed);
+            if(r.flags<256 && (r.flags&1u)) {voltaic_native_place_n[4].fetch_add(1,std::memory_order_relaxed);record(hidden);return;}   // hidden: drawn by nobody, nothing to place
+            if(!voltaic_native_place) {record(knob_off);return;}
+            if(on_helper && !in_window && !off_far) {voltaic_native_place_n[3].fetch_add(1,std::memory_order_relaxed);record(engine_kept);return;}
+            if(d2vr::HeldEnginePose::frame_gap(cur.data(),want.data())<d2vr::HeldEnginePose::write_eps) {voltaic_native_place_n[2].fetch_add(1,std::memory_order_relaxed);record(noop);return;}
+            if(write_self(model+0x1860,want.data(),sizeof want)) {r.placed=1;voltaic_native_place_n[1].fetch_add(1,std::memory_order_relaxed);record(written);}
+            else record(bad_frame);
+        } catch(...) {}
     }
 }
 static bool npc_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};return e && read_self(e,&vt,8) && vt==image_base+0x1c5e108;} // arkNPC
@@ -8032,6 +8151,7 @@ void observe_eye_begin(void* view) noexcept {
         if(eye==0 && image_skin_enabled && full_body_requested && tracked_arms_requested) {full_body.begin_image(frames.load());   // v861: the image this render draws
             publish_weapon_draw(address);   // v930: its held weapons, placed at their draws
             publish_voltaic_copy();   // v145799 (DOTO dual wield): the right forearm's Voltaic copy, from this render's forearm
+            publish_voltaic_native();   // v145773 (DOTO): the left forearm's engine gun, from this render's forearm while its frame is not there (its shot)
             if(weapon_place_enabled) place_weapons();
             if(d2vr::frame_order::on.load(std::memory_order_relaxed)) {const auto l=full_body.image_joint(0,59),r=full_body.image_joint(1,59);   // frame-order trace: its attachment joints
                 d2vr::frame_order::note('I',static_cast<std::uint8_t>((l?1:0)|(r?2:0)),{l?l->x:0,l?l->y:0,l?l->z:0,r?r->x:0,r?r->y:0,r?r->z:0});}}
@@ -17256,6 +17376,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                         if(voltaic_pin_now && voltaic_fire>0.f) voltaic_stats[3].fetch_add(1,std::memory_order_relaxed);
                                     }
                                 }
+                                voltaic_native_chord_now.store(voltaic_pin_now && voltaic_fire>0.f,std::memory_order_relaxed);   // v145773 (publish_voltaic_native's chord window)
                                 // v145745: a forearm copy's grip + trigger is that copy's shot (fired below through NativeRangedFire), never the native trigger
                                 // of its hand (a power in the engine's slot, the sword's block). Task 8 (R3 G-c4): not while that hand's grip holds its weapon: the sword hand's trigger IS the block
                                 if constexpr(d2vr::game_traits::ranged_player_weapon_is_voltaic) if(logic==2) for(unsigned s=0;s<2;++s)
@@ -19829,7 +19950,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
             throw std::runtime_error("Passive native assassination receipt could not initialize safely");
         weapon_collision_enabled=!fs::exists(root/L"build"/L"no-weapon-collision");contact_damage_enabled=!fs::exists(root/L"build"/L"no-contact-damage");hand_feel_enabled=!fs::exists(root/L"build"/L"no-hand-feel");hand_weapon_contact_enabled=!fs::exists(root/L"build"/L"no-hand-weapon-contact");native_grab.set_two_hand(!fs::exists(root/L"build"/L"no-two-hand"));d2vr::NativeInteractionAim::stealth_enabled_=!fs::exists(root/L"build"/L"no-stealth-contact");
         {std::ifstream knob(root/L"build"/L"stealth-speed");std::string text;if(knob) std::getline(knob,text);d2vr::NativeInteractionAim::stealth_speed_=d2vr::stealth_speed_from_knob(text);}impact_fx_enabled=!fs::exists(root/L"build"/L"no-impact-fx");hand_contact_enabled=!fs::exists(root/L"build"/L"no-hand-contact");weapon_body_enabled=!fs::exists(root/L"build"/L"no-weapon-body");weapon_body_rigid=!fs::exists(root/L"build"/L"weapon-body-ride");
-        slash_speed_factor=fs::exists(root/L"build"/L"no-slash-speed")?1.f:1.7f;voltaic_copy_knob=!fs::exists(root/L"build"/L"no-voltaic-copy");   // v145743: on by default (labs 8-11: spawned with the player as owner, transient, save loads clean; lab11 3 shots)takedown_range_enabled=!fs::exists(root/L"build"/L"no-takedown-range");
+        slash_speed_factor=fs::exists(root/L"build"/L"no-slash-speed")?1.f:1.7f;voltaic_copy_knob=!fs::exists(root/L"build"/L"no-voltaic-copy");takedown_range_enabled=!fs::exists(root/L"build"/L"no-takedown-range");   // v145743: the Voltaic copy on by default (labs 8-11: spawned with the player as owner, transient, save loads clean; lab11 3 shots). 2026-11-25: takedown_range_enabled had slipped into this comment in 516c1f3 (the takedown range was off since v145743)
+        voltaic_native_place=!fs::exists(root/L"build"/L"no-voltaic-native-place");   // v145773: the left forearm's engine Voltaic Gun placed from the drawn forearm (publish_voltaic_native)
         {std::ifstream knob(root/L"build"/L"takedown-range-scale");std::string text;if(knob) std::getline(knob,text);
          takedown_range_scale=takedown_range_enabled?d2vr::takedown_range_scale_from_knob(text):1.f;}
         native_interaction_aim.takedown_range_scale(takedown_range_scale.load());

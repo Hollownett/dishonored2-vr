@@ -63,6 +63,7 @@ inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_cha
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0x1d0dd88;
 // v145744: idEntity spawn id and its flags byte (bit 0 hidden, bit 1 not presented), for new code that must not depend on a port rule
 inline constexpr std::uintptr_t entity_id_offset = 0xb0, entity_flags_offset = 0xd8;
+inline constexpr std::uintptr_t entity_model_offset = 0xf8;   // v145773: the entity's render model (offsets.json entity map 0xf0 -> 0xf8)
 inline constexpr std::uintptr_t entity_bind_offset = 0x368;   // v145747: the entity's arkCpntReferenceFrame (D2 +0x358; combat-port.md 8.2)
 // v145745: the Gauss charge (static RE, release 0x8d0bc0 / fire 0x3c1d70 / rebuild 0x68cf80): overcharged byte (charged = voltaic_configure_from),
 // the component flags byte and its charged-mode bit (the charge upgrade owned for the ammo in use)
@@ -101,6 +102,7 @@ inline constexpr std::uint32_t state_choke = 41, state_use_power = 63, state_cha
     state_cancel_void_strike = 0xffffffffu, state_mimicking = 0xffffffffu, state_use_mimic = 0xffffffffu, state_possession = 26;
 inline constexpr std::uintptr_t voltaic_entity_vtable = 0;
 inline constexpr std::uintptr_t entity_id_offset = 0xa8, entity_flags_offset = 0xd0;
+inline constexpr std::uintptr_t entity_model_offset = 0xf0;
 inline constexpr std::uintptr_t entity_bind_offset = 0x358;
 inline constexpr std::uintptr_t voltaic_shot_overcharged = 0, voltaic_charge_flags = 0; inline constexpr unsigned voltaic_charge_bit = 0;
 inline constexpr bool displaced_sword_stows = false;
