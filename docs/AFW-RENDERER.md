@@ -1,8 +1,7 @@
-> **Removed in v1443 (2026-11-20, user request).** The PureDark AFW renderer described below (`src/afw_puredark.hpp`, the VR menu's
-> AFW renderer choice, the launcher's "On with AFW" and its plugin picker, the `afw-renderer` feature) is gone: measured against the
-> mod's own built-in warp it was a tie in image quality and 0.1-0.4 ms dearer (v1414, `docs/afw-compare/`), and it needed the player's
-> own copy of a closed-source plugin. Performance mode is Off / On with the built-in warp. A saved renderer 2 reads as 1. The ImGui VR
-> menu and the PSVR2 triggers from the same port stay. `afw capture N` still captures the built-in warp.
+> **Back since PR #7 (merged 2026-11-25), as an open rebuild.** v1443 removed PureDark's closed-plugin AFW. Indurhra's PR #7 brings AFW
+> back as VR Stereo Hub's open-source held-eye rebuild, compiled into the mod (no plugin). Spacewarp still comes first: with Spacewarp on
+> (the launcher default) every session renders native stereo. Performance mode (launcher Settings, or the VR menu's Renderer row) offers
+> **Off / On (built-in warp) / On (AFW)**. The PureDark-era sections below are kept for history.
 
 # AFW renderer, PSVR2 triggers and the ImGui VR menu
 
@@ -22,14 +21,64 @@ Row 13 of page 1, **Renderer**, has three choices (saved in `build\vr-settings.c
 
 Choose with the stick, then press **A** (or point at the green **A: APPLY** chip): every switch is live, no restart. Sessions start
 alternate-capable, and Native simply renders both eyes every frame (as menus already did). If alternate eye could not start (its
-prerequisites failed) the row shows **unavailable** for Alternate/AFW. `build
-ative-classic` restores upstream's paired-only start for
+prerequisites failed) the row shows **unavailable** for Alternate/AFW. `build\native-classic` restores upstream's paired-only start for
 Native. Any AFW refusal falls back to the built-in warp for that frame; a hard failure (plugin missing, ABI mismatch, eye-size change)
 falls back for the session, and the description plate shows the reason.
 
-Requirements: none beyond alternate eye. AFW is VR Stereo Hub's open-source held-eye rebuild from their Dishonored 1 VR mod
+Requirements:
+- **Spacewarp off** (launcher Settings). Spacewarp is the default and wins: one frame generation at a time, so with it on, sessions stay
+  in native stereo and the Renderer help says so.
+- An **FSR or DLSS anti-aliasing mode**. AFW reads the fresh eye's depth copy that these modes keep. Without one, every rebuild is
+  refused and the built-in warp draws the held eye.
+
+AFW is VR Stereo Hub's open-source held-eye rebuild from their Dishonored 1 VR mod
 (`third_party/vsh_afw`, zlib license, modified; credited in `THIRD_PARTY_NOTICES.md`), compiled into the mod DLL. The closed PureDark
 plugin is no longer used.
+
+## Integration fixes (2026-11-25, on top of PR #7)
+
+- **Each eye's own FOV.** VSH projected every image with one symmetric pair, tan(right) and tan(up). The shader now takes each image's
+  own tangents (left, right, up, down): `tnH` for the held eye's last image and its target, `tnF` for the fresh eye (`afw_warp.cpp`
+  `rayA`/`toA`; `warp_held(..., tanHeld, tanFresh)`). With the launcher's settings this changes nothing: every eye renders a symmetric
+  frustum that encloses the headset's own FOV. The sim confirmed this with the Quest 3 FOV via `build\sim-fov`: rendered L/R +-0.942,
+  U/D +-0.960, AFW 7,314 rebuilds, 0 refused. It matters only in sessions without that symmetric frustum (asymmetric renders).
+- **No stale held image after a pause.** VSH's records had no age limit and were only reset once, at start. A capture gap of more than 4
+  alternate frames (AFW switched off and on, a menu, a load, paired frames) now drops them (`set_enabled` epoch). The next rebuild uses
+  the fresh eye alone until the held eye renders again. Counter: status `alternate_eye.afw.resets`.
+- **GPU timing.** The rebuild has its own span `afw_rebuild` and the fresh-eye capture `afw_capture`; the PR timed the rebuild as
+  `aa_sharpen`, the sharpen pass's span (`native-gpu-timing` knob, status `gpu_passes.mod_gpu_ms_p50`).
+- **Spacewarp first.** The PR's "AFW wins over Spacewarp" commit (b63b9ca) is undone, as above.
+- **No pause on the first switch.** AFW compiled its shaders on the render thread at its first rebuild: a ~2 s pause (Wine).
+  The built-in warp's AFW2 pass compiled 13 shaders the first time a session used it: a 7 s pause when switching from AFW. Both
+  now load from the mod's shader cache (`shader-cache\`), filled on the menu-time warm thread (`afw::warm_cache`,
+  `Afw2Pass::warm_cache`). Sims with live switching, starting on AFW: D2 8,383 and DOTO 10,171 one-eye frames, no pause, 0 refused.
+- **Smaller fixes.** The status text reads "off" once AFW is switched off. `afw tune` lists this backend's keys. The compile-census
+  module name buffer was too small. The NGX log uses `_wfopen_s` (clang `-Werror`). The sampler skips forwarded exports again.
+
+## Measured (2026-11-25, Linux simulator; no headset)
+
+Same-frame A/B: on every capture the review build ran both warps on the same inputs and scored each against that eye's next real frame.
+Five runs of 140 frame sets each, 640x640 eyes, FSR 3 Native. `tools/linux/scenarios/afw_ab.py` and `afw_ab_pistol.py` were the
+scenarios. Error in the parts of the image that moved (luma 0-255, lower is better):
+
+| Motion | AFW | Built-in warp | No warp |
+|---|---|---|---|
+| Head sway | 14.5 | 15.1 | 21.3 |
+| Both arms sweeping, pistol held, slow | 22.0 | 25.3 | 32.0 |
+| Both arms sweeping, pistol held, fast | 24.7 | 27.8 | 34.5 |
+| Head flick | 8.8 | 8.7 | 11.2 |
+| Walking | 14.4 | 15.0 | 15.4 |
+
+- **Moving arms.** The built-in warp breaks a moving sleeve into see-through dots, about 5x more stray dots than AFW. AFW keeps the arm
+  solid but leaves blocky light wedges at the trailing edge.
+- **Head flicks:** a tie.
+- **Walking:** both warps put the hands where the game does not draw them during the walk bob. Around the hands this is worse than
+  showing the old frame unchanged.
+- **Image detail.** AFW is about 10% softer than the real frame in head motion. The built-in warp adds about 5-10% speckle.
+- **GPU** (laptop RTX, sim size): AFW 0.55 ms rebuild + 0.08 ms capture, built-in warp 1.14 ms. Either alternate-eye mode took about
+  7.7 ms per frame, native stereo 9.5 ms.
+- **Depth.** With `world-hand-depth` on (the default) the arms and a held pistol render at world depth: no pixel was nearer than 0.12 m.
+  So `rigdepth` auto is 1 and the x5/x9 player-model path is off. That path is only for sessions where world depth is not active.
 
 ## How AFW is wired
 
@@ -54,7 +103,9 @@ player-depth path (`build\world-hand-depth`) has verifiably set the models to wo
 ## Tuning
 
 Console (`artifacts\vr-command.txt`): `afw status`, `afw on|off`, `afw capture N`, `afw tune <key> <value>` (also one `key value` per
-line in `build\afw-tune`):
+line in `build\afw-tune`). `renderer 0|1|2` switches the live renderer the way the VR menu's Apply does (native, built-in warp, AFW;
+not saved), for sims (`tools/linux/scenarios/renderer_switch.py`). `afw status` and the status file (`alternate_eye.afw`) report
+rebuilt / refused / fallbacks / resets, the depth factors in use (`rigdepth`, `near`) and the last problem:
 
 | Key | Default | Meaning |
 |---|---|---|

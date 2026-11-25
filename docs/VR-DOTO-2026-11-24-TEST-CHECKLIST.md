@@ -33,6 +33,17 @@ turns the change off if it feels wrong (`%LOCALAPPDATA%\DishonoredVR-DOTO\build\
 |---|---|---|---|
 | 12 | Possess a creature or a person; turn your head and push the stick, for the WHOLE possession (not only the first second) | The host moves where you look; the right stick turns the host. 2026-11-25: the first version only acted during the 0.5 s fly-in (player state 26); it now follows the possessed host's camera (mode 7) until you leave. Not yet seen in a simulated possession (scripted aims at a patrolling guard cast without a host): please test this one first | `no-possession-view-move` |
 
+## Both games: performance mode, built-in warp against AFW (PR #7)
+
+Spacewarp must be off (launcher Settings), with an FSR or DLSS anti-aliasing mode.
+
+| # | Do | Expect | Off switch |
+|---|---|---|---|
+| 13 | Launcher: Performance mode **On (AFW)**, Launch VR, play: look around, swing the sword, hold a gun | The VR menu's Renderer row shows AFW; the status reads "AFW active". Arms and weapons stay solid when they move (the built-in warp shows see-through dots there). The image may look a little softer | VR menu Renderer row, or Performance mode Off |
+| 14 | VR menu Renderer row: switch between Alternate eye (built-in warp) and AFW, and Apply, several times | Each switch takes effect at once, with no restart and no pause (shaders are prepared during the menus; say if the first switch still pauses) | — |
+| 15 | Both warps: walk, turn your head fast, flick your hands | Which warp feels better, and where each one doubles or smears (one eye is rebuilt every other frame) | — |
+| 16 | Launcher: Spacewarp On with Performance mode set to AFW, Save | The launcher turns Performance mode off; in VR the Renderer help says Spacewarp is on, so only Native stereo runs | — |
+
 ## Known limits (not fixed in this branch)
 
 - Shots from a right-forearm copy with a bolt the save has no charges of are refused (`no_ammo`), as the game does.
