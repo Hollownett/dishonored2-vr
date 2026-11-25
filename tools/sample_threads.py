@@ -99,7 +99,7 @@ def export_table(path):
     opt_size = struct.unpack_from('<H', data, pe_off + 20)[0]
     opt = pe_off + 24
     dd = opt + (112 if struct.unpack_from('<H', data, opt)[0] == 0x20b else 96)
-    exp_rva = struct.unpack_from('<I', data, dd)[0]
+    exp_rva, exp_size = struct.unpack_from('<II', data, dd)
     secs = [struct.unpack_from('<IIII', data, opt + opt_size + i * 40 + 8) for i in range(nsec)]  # vsize, va, rawsize, rawptr
     def off(rva):
         for vs, va, rs, rp in secs:
@@ -115,7 +115,10 @@ def export_table(path):
     for i in range(nnames):
         o = off(struct.unpack_from('<I', data, off(names) + 4 * i)[0])
         ordinal = struct.unpack_from('<H', data, off(ords) + 2 * i)[0]
-        result.append((struct.unpack_from('<I', data, off(funcs) + 4 * ordinal)[0], data[o:data.index(b'\0', o)].decode('ascii', 'replace')))
+        func = struct.unpack_from('<I', data, off(funcs) + 4 * ordinal)[0]
+        if exp_rva <= func < exp_rva + exp_size:
+            continue  # a forwarder ("NTDLL.RtlFoo"): a string inside the export directory, not code
+        result.append((func, data[o:data.index(b'\0', o)].decode('ascii', 'replace')))
     return sorted(result)
 
 

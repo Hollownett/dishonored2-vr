@@ -86,6 +86,11 @@ const char* kSrc =
     "    float4 mY0, mY1, mY2;\n"        // MSW: the extrapolated body turn, as a rotation of the camera-relative point (UE world axes)
     "    float4 prm8;\n"                 // run 15: fresh clean bound, held clean bound, UI difference threshold (0..1)
     "    float4 prm9;\n"                 // run 22: edge hands on, the edge band (uv from each side), near the held hands; w: the target view is typed sRGB
+    // Dishonored 2 VR (2026-11-25): each image's own field of view as tangents (left, right, up, down; left and down negative).
+    // Headset eyes are asymmetric and mirrored, so one symmetric tanH/tanV put the rebuilt eye off by degrees. tnH: the held eye
+    // (its last image and the target), tnF: the fresh eye. The foreground projection (prm5, D1) keeps its symmetric tangents.
+    "    float4 tnH;\n"
+    "    float4 tnF;\n"
     "};\n"
     "cbuffer M : register(b1) {\n"
     "    float4 mp;\n"                   // source (0 fresh, 1 held), grid step (source texels), source w, h
@@ -111,8 +116,14 @@ const char* kSrc =
     "float3 toTT(float3 L, float2 tn) { float zt = -L.z; if (!(zt > 1e-5)) return float3(9, 9, -1);\n"
     "    return float3(L.x / (zt * tn.x), L.y / (zt * tn.y), zt / prm.z); }\n"
     "float3 toT(float3 L) { return toTT(L, prm.xy); }\n"
-    "float3 mapF(float2 s, float z) { float2 tn = tanFor(z); z = abs(z);\n"
-    "    return toTT(mr(d0, d1, d2, mr(f0, f1, f2, viewDirT(s, tn) * (z * prm.z)) + fp.xyz - dp.xyz), tn); }\n"
+    "bool fgP(float z) { return prm5.x > 0.0 && isFg(z); }\n"
+    "float3 rayA(float2 uv, float4 t) { return float3(lerp(t.x, t.y, uv.x), lerp(t.z, t.w, uv.y), -1.0); }\n"
+    "float3 toA(float3 L, float4 t) { float zt = -L.z; if (!(zt > 1e-5)) return float3(9, 9, -1); float2 q = L.xy / zt;\n"
+    "    return float3(2.0 * (q.x - t.x) / (t.y - t.x) - 1.0, 1.0 - 2.0 * (t.z - q.y) / (t.z - t.w), zt / prm.z); }\n"
+    "float3 rayX(float2 uv, float z, float4 t) { return fgP(z) ? viewDirT(uv, prm5.xy) : rayA(uv, t); }\n"
+    "float3 toX(float3 L, float z, float4 t) { return fgP(z) ? toTT(L, prm5.xy) : toA(L, t); }\n"
+    "float3 mapF(float2 s, float z) { float zs = z; z = abs(z);\n"
+    "    return toX(mr(d0, d1, d2, mr(f0, f1, f2, rayX(s, zs, tnF) * (z * prm.z)) + fp.xyz - dp.xyz), zs, tnH); }\n"
     // MSW: a foreground point moves rigidly with the nearer controller's grip (from the image's pose to the slot's).
     "float3 handMove(float3 W) {\n"
     "    float da = hOa.w > 0.5 ? dot(W - hOa.xyz, W - hOa.xyz) : 1e9, db = hOb.w > 0.5 ? dot(W - hOb.xyz, W - hOb.xyz) : 1e9;\n"
@@ -123,11 +134,11 @@ const char* kSrc =
     "    float3 r = W - hOb.xyz; return float3(dot(hRb0.xyz, r), dot(hRb1.xyz, r), dot(hRb2.xyz, r)) + hNb.xyz;\n"
     "}\n"
     "float3 mapHx(float2 s, float z, bool world) {\n"
-    "    float2 tn = tanFor(z); bool fgp = isFg(z); z = abs(z);\n"
-    "    float3 W = mr(s0, s1, s2, viewDirT(s, tn) * (z * prm.z)) + sp.xyz;\n"
+    "    float zs = z; bool fgp = isFg(z); z = abs(z);\n"
+    "    float3 W = mr(s0, s1, s2, rayX(s, zs, tnH) * (z * prm.z)) + sp.xyz;\n"
     "    if (prm7.x > 0.5 && fgp) W = handMove(W);\n"
     "    else if (world && !(prm7.z > 0.5 && fgp)) W = mr(y0, y1, y2, W - yc.xyz) + yc.xyz;\n"
-    "    return toTT(mr(d0, d1, d2, W - dp.xyz), tn);\n"
+    "    return toX(mr(d0, d1, d2, W - dp.xyz), zs, tnH);\n"
     "}\n"
     "float3 mapH(float2 s, float z) {\n"
     "    if (prm2.w > 0.0 && !isFg(z)) {\n"
@@ -247,9 +258,9 @@ const char* kSrc =
     "    if (st && tp && prm9.x > 0.5 && (t.x < prm9.y || t.x > 1.0 - prm9.y || nearHeldFg)) {\n"
     "        float zb, eb; float2 sb = solveHb(t, zb, eb);\n"
     "        if (eb < tol && (prm6.z > 0.5 ? zH(sb) < 0.0 : zb < body)) {\n"
-    "            float2 tn = tanFor(zH(sb));\n"
-    "            float3 Wt = mc(d0, d1, d2, viewDirT(t, tn) * (zb * prm.z)) + dp.xyz;\n"
-    "            float3 m = toTT(mc(f0, f1, f2, Wt - fp.xyz), tn);\n"
+    "            float zq = zH(sb);\n"
+    "            float3 Wt = mc(d0, d1, d2, rayX(t, zq, tnH) * (zb * prm.z)) + dp.xyz;\n"
+    "            float3 m = toX(mc(f0, f1, f2, Wt - fp.xyz), zq, tnF);\n"
     "            float2 uf = ndcUV(m.xy);\n"
     "            bool outside = !(m.z > 0.0 && all(uf > 0.0) && all(uf < 1.0));\n"
     "            bool hidden = !outside && prm9.z > 0.5 && aF(uf) < m.z * (1.0 - prm3.w) - 0.005;\n"
@@ -260,9 +271,9 @@ const char* kSrc =
     // The stale test: the held point, carried to this instant as static, seen from the fresh eye.
     "        bool stale = false;\n"
     "        if (eH < prm5.w) {\n"
-    "            float2 tn = tanFor(zH(sH));\n"
-    "            float3 Wt = mc(d0, d1, d2, viewDirT(t, tn) * (tH * prm.z)) + dp.xyz;\n"
-    "            float3 m = toTT(mc(f0, f1, f2, Wt - fp.xyz), tn);\n"
+    "            float zq = zH(sH);\n"
+    "            float3 Wt = mc(d0, d1, d2, rayX(t, zq, tnH) * (tH * prm.z)) + dp.xyz;\n"
+    "            float3 m = toX(mc(f0, f1, f2, Wt - fp.xyz), zq, tnF);\n"
     "            float2 uf = ndcUV(m.xy);\n"
     // The NEAREST fresh depth around the projected point, 1-2 depth texels along the baseline and 1 across:
     // at a silhouette the projection lands a texel past the edge and the fresh eye sees the sky there, which
@@ -629,7 +640,7 @@ bool init(ID3D11Device* dev) {
     if (SUCCEEDED(hr)) hr = dev->CreatePixelShader(pdk->GetBufferPointer(), pdk->GetBufferSize(), nullptr, &g_psDepthK);
     rel(vsb); rel(vmb); rel(psb); rel(pmb); rel(pdb); rel(pdm); rel(pxd); rel(pdk);
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = 46 * 16;   // s f d y (4 each), prm prm2 prm3, hI0..2 hC, tA tB tW, mD, prm4, prm5, prm6, the hands (10), prm7, mY (3), prm8, prm9
+    bd.ByteWidth = 48 * 16;   // s f d y (4 each), prm prm2 prm3, hI0..2 hC, tA tB tW, mD, prm4, prm5, prm6, the hands (10), prm7, mY (3), prm8, prm9, tnH, tnF
     bd.Usage = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     if (SUCCEEDED(hr)) { step = "constants"; hr = dev->CreateBuffer(&bd, nullptr, &g_cb); }
@@ -1452,7 +1463,8 @@ bool ensure_zout(ID3D11Device* dev, uint32_t w, uint32_t h) {
 }
 
 bool warp_held(ID3D11Device* dev, ID3D11DeviceContext* ctx, int held, int fresh, uint32_t freshSerial,
-               ID3D11Texture2D* dst, uint32_t w, uint32_t h, float tanH, float tanV, Pose* outPose, const char** why) {
+               ID3D11Texture2D* dst, uint32_t w, uint32_t h, float tanH, float tanV, Pose* outPose, const char** why,
+               const float* tanHeld, const float* tanFresh) {
     beat();
     if (why) *why = nullptr;
     if (!g_on.load()) { if (why) *why = "off"; return false; }
@@ -1495,8 +1507,9 @@ bool warp_held(ID3D11Device* dev, ID3D11DeviceContext* ctx, int held, int fresh,
         float hI[3][4]; float hC[4]; float tA[4], tB[4], tW[4]; float mD[4]; float prm4[4]; float prm5[4]; float prm6[4];
         float hand[2][5][4]; float prm7[4]; float mY[3][4];
         float prm8[4]; float prm9[4];
+        float tnH[4]; float tnF[4];   // per-eye FOV tangents (left, right, up, down)
     } cb;
-    static_assert(sizeof(CB) == 46 * 16, "afw cbuffer layout");
+    static_assert(sizeof(CB) == 48 * 16, "afw cbuffer layout");
     memset(&cb, 0, sizeof(cb));
     const Pose& hp = haveH ? src.pose : fr.pose;
     rows(hp, cb.s, false);
@@ -1513,6 +1526,10 @@ bool warp_held(ID3D11Device* dev, ID3D11DeviceContext* ctx, int held, int fresh,
     for (int k = 0; k < 3; ++k) cb.yc[k] = 0.5f * (fr.targets[0].p[k] + fr.targets[1].p[k]);
     const float body = g_bodyDepth.load();
     cb.prm[0] = tanH; cb.prm[1] = tanV;
+    {   // per-eye tangents (left, right, up, down); without them the symmetric pair
+        const float sym[4] = {-tanH, tanH, tanV, -tanV};
+        for (int i = 0; i < 4; ++i) { cb.tnH[i] = tanHeld ? tanHeld[i] : sym[i]; cb.tnF[i] = tanFresh ? tanFresh[i] : sym[i]; }
+    }
     g_lastClaimDeg = 2.0f * atanf(tanH) * 57.29578f;
     cb.prm[2] = dvr::clarity::depth_scale() / g_worldScale.load();
     cb.prm[3] = body;
@@ -1886,8 +1903,9 @@ bool synth_eye(ID3D11Device* dev, ID3D11DeviceContext* ctx, int eye, ID3D11Textu
         float hI[3][4]; float hC[4]; float tA[4], tB[4], tW[4]; float mD[4]; float prm4[4]; float prm5[4]; float prm6[4];
         float hand[2][5][4]; float prm7[4]; float mY[3][4];
         float prm8[4]; float prm9[4];   // run 15/22: zero here - the synthesized slot keeps its own composed image, no edge hands
+        float tnH[4]; float tnF[4];   // symmetric here (tanH, tanV)
     } cb;
-    static_assert(sizeof(CB) == 46 * 16, "afw cbuffer layout");
+    static_assert(sizeof(CB) == 48 * 16, "afw cbuffer layout");
     memset(&cb, 0, sizeof(cb));
     rows(own.pose, cb.s, false);
     cb.sp[0] = own.pose.p[0]; cb.sp[1] = own.pose.p[1]; cb.sp[2] = own.pose.p[2];
@@ -1906,6 +1924,7 @@ bool synth_eye(ID3D11Device* dev, ID3D11DeviceContext* ctx, int eye, ID3D11Textu
     }
     cb.prm7[2] = 1.0f;   // the foreground ignores the world yaw
     cb.prm[0] = tanH; cb.prm[1] = tanV;
+    cb.tnH[0] = cb.tnF[0] = -tanH; cb.tnH[1] = cb.tnF[1] = tanH; cb.tnH[2] = cb.tnF[2] = tanV; cb.tnH[3] = cb.tnF[3] = -tanV;
     cb.prm[2] = dvr::clarity::depth_scale() / g_worldScale.load();
     cb.prm[3] = g_bodyDepth.load();
     const float depthTexel = own.dw ? fmaxf(1.0f, (float)w / (float)own.dw) : 1.0f;

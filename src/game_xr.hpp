@@ -2649,6 +2649,8 @@ public:
     void performance_mode(bool value) noexcept {settings_.performance_mode(value);}
     // Renderer row: the saved choice and the renderer this session started with (alternate eye on = 1 or 2).
     // Renderer row: the saved choice, and whether this session can alternate (then every renderer switches live on Apply).
+    // Test command `renderer 0|1|2` (sims): what the VR menu's Apply does to the live renderer, without the menu or saving it.
+    bool renderer_switch_test(int r) noexcept {if(r<0 || r>2 || (r && !settings_.renderer_capable())) return false;renderer_live_=r;afw::runtime().requested=r==2;return true;}
     void renderer_setting(int saved,bool capable) noexcept {settings_.set_renderer(saved);settings_.renderer_capable(capable);renderer_live_=capable?saved:0;
         afw::runtime().requested=renderer_live_==2;}
     void renderer_spacewarp_hold(bool v) noexcept {settings_.spacewarp_hold(v);}  // the VR menu says why performance mode did not start
@@ -3038,7 +3040,7 @@ public:
         kept_cameras_[eye]=rendered_cameras_[eye];kept_camera_valid_[eye]=rendered_camera_frame_[eye]==alternate_frame; // v796
         // AFW: this fresh eye's image, depth and game camera (with the other eye's camera at this Setup: where it is rebuilt).
         if(afw::runtime().requested.load() && kept_camera_valid_[eye] && stale_target_camera_frame_[1-eye]==alternate_frame && stale_depth_frame_[eye]==alternate_frame && stale_depth_[eye])
-            afw::runtime().capture(context_.Get(),static_cast<int>(eye),alternate_frame,alt_kept_[eye].Get(),rendered_cameras_[eye],stale_target_cameras_[1-eye],
+            if(ModGpuScope afw_capture_scope(context_.Get(),ModSpan::afw_capture);true) afw::runtime().capture(context_.Get(),static_cast<int>(eye),alternate_frame,alt_kept_[eye].Get(),rendered_cameras_[eye],stale_target_cameras_[1-eye],
                 stale_depth_[eye].Get(),stale_depth_width_[eye],stale_depth_height_[eye],
                 stale_rig_live_[eye] && stale_rig_frame_[eye]==alternate_frame?stale_rig_[eye].Get():nullptr,stale_rig_width_[eye],stale_rig_height_[eye],
                 {std::tan(rendered_views_[eye].fov.angleLeft),std::tan(rendered_views_[eye].fov.angleRight),std::tan(rendered_views_[eye].fov.angleUp),std::tan(rendered_views_[eye].fov.angleDown)});
@@ -4306,12 +4308,13 @@ public:
                             D3D11_TEXTURE2D_DESC want{};alt_kept_[fresh_eye]->GetDesc(&want);
                             if(afw_out_[eye]) {D3D11_TEXTURE2D_DESC have{};afw_out_[eye]->GetDesc(&have);if(have.Width!=want.Width || have.Height!=want.Height || have.Format!=want.Format) afw_out_[eye].Reset();}
                             if(!afw_out_[eye]) {Microsoft::WRL::ComPtr<ID3D11Device> device;context_->GetDevice(&device);want.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;device->CreateTexture2D(&want,nullptr,&afw_out_[eye]);}
-                            ModGpuScope afw_scope(context_.Get(),ModSpan::aa_sharpen);
+                            ModGpuScope afw_scope(context_.Get(),ModSpan::afw_rebuild); // its own span (the PR timed it as aa_sharpen, the sharpen pass's)
                             {static bool fov_logged=false;if(!fov_logged && dvr::log::sink()) {fov_logged=true;char line[300];const auto& ff=alt_records_[fresh_eye].view.fov;
                              std::snprintf(line,sizeof line,"d2 geometry: held eye %u target fov L %.4f R %.4f U %.4f D %.4f; fresh eye %u rendered fov L %.4f R %.4f U %.4f D %.4f",eye,to.fov.angleLeft,to.fov.angleRight,to.fov.angleUp,to.fov.angleDown,fresh_eye,ff.angleLeft,ff.angleRight,ff.angleUp,ff.angleDown);
                              dvr::log::sink()(line);}}
+                            const auto tans=[](const XrFovf& f) {return std::array<float,4>{std::tan(f.angleLeft),std::tan(f.angleRight),std::tan(f.angleUp),std::tan(f.angleDown)};};
                             if(afw_out_[eye] && afw::runtime().rebuild(context_.Get(),static_cast<int>(eye),static_cast<int>(fresh_eye),alternate_frame,afw_out_[eye].Get(),
-                                   want.Width,want.Height,std::tan(to.fov.angleRight),std::tan(to.fov.angleUp)))
+                                   want.Width,want.Height,tans(to.fov),tans(alt_records_[fresh_eye].view.fov)))
                                 afw_image=afw_out_[eye].Get();
                         }
                         if(afw_image) {

@@ -40,10 +40,10 @@ inline const char* phase_name(unsigned p) noexcept {static const char* const n[p
 // The mod's own GPU work, timed with timestamp pairs (mod_gpu_timer.hpp). Reported as mod_gpu_ms_p50.
 // v1191: stale_warp (the stale-eye warp call, old path or AFW v2), rig_target (the rig target's copy-out and clears), eye_motion (the motion
 // pass) run inside other spans (FSR's, the layer submit) and are not added to the mod total (mod_span_summed).
-enum class ModSpan : unsigned {fsr_eye0=0,fsr_eye1,aa_sharpen,eye_copy,eye_overlay,layer_overlays,eye_capture,stale_warp,rig_target,eye_motion};
-constexpr unsigned mod_span_count=10,mod_span_summed=7;
+enum class ModSpan : unsigned {fsr_eye0=0,fsr_eye1,aa_sharpen,eye_copy,eye_overlay,layer_overlays,eye_capture,stale_warp,rig_target,eye_motion,afw_rebuild,afw_capture}; // AFW (afw_vsh.hpp): the held-eye rebuild, the fresh-eye capture
+constexpr unsigned mod_span_count=12,mod_span_summed=7;
 inline const char* mod_span_name(unsigned i) noexcept {
-    static const char* const n[mod_span_count]{"fsr_eye0","fsr_eye1","aa_sharpen","eye_copy","eye_overlay","layer_overlays","eye_capture","stale_warp","rig_target","eye_motion"};
+    static const char* const n[mod_span_count]{"fsr_eye0","fsr_eye1","aa_sharpen","eye_copy","eye_overlay","layer_overlays","eye_capture","stale_warp","rig_target","eye_motion","afw_rebuild","afw_capture"};
     return n[i<mod_span_count?i:0];
 }
 struct PhaseGpu {double ms[phase_count]{};unsigned lists[phase_count]{};bool valid{};}; // one timer frame, summed per phase

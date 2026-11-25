@@ -4291,19 +4291,19 @@ static std::array<CompileCensusSlot,64> compile_census;static std::atomic<std::u
 static bool compile_census_installed{};
 static void compile_census_note(const char* api,const char* entry,std::uintptr_t caller) noexcept {
     compile_census_total.fetch_add(1,std::memory_order_relaxed);
-    HMODULE module{};wchar_t path[MAX_PATH]{};const wchar_t* base=L"?";
-    if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(caller),&module)) {
-        GetModuleFileNameW(module,path,MAX_PATH);const wchar_t* slash=std::wcsrchr(path,L'\\');base=slash?slash+1:path;
+    HMODULE caller_module{};wchar_t path[MAX_PATH]{};const wchar_t* file_name=L"?";
+    if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(caller),&caller_module)) {
+        GetModuleFileNameW(caller_module,path,MAX_PATH);const wchar_t* slash=std::wcsrchr(path,L'\\');file_name=slash?slash+1:path;
     }
     char key[48]{};
-    {char m[24]{};WideCharToMultiByte(CP_UTF8,0,base,-1,m,sizeof m,nullptr,nullptr);
+    {char m[64]{};if(!WideCharToMultiByte(CP_UTF8,0,file_name,-1,m,static_cast<int>(sizeof m)-1,nullptr,nullptr)) {m[0]='?';m[1]=0;}m[sizeof m-1]=0; // module names run past 24 chars
      _snprintf_s(key,_TRUNCATE,"%s:%s@%s",api,entry?entry:"",m);}
     for(auto& slot:compile_census) {
         int st=slot.state.load(std::memory_order_acquire);
         if(st==0) {
             int expected=0;
             if(slot.state.compare_exchange_strong(expected,1)) {
-                std::memcpy(slot.key,key,sizeof key);wcsncpy_s(slot.module,base,_TRUNCATE);
+                std::memcpy(slot.key,key,sizeof key);wcsncpy_s(slot.module,file_name,_TRUNCATE);
                 slot.caller_rva=module?caller-reinterpret_cast<std::uintptr_t>(module):caller;
                 slot.calls.fetch_add(1,std::memory_order_relaxed);slot.state.store(2,std::memory_order_release);return;
             }
@@ -4336,6 +4336,8 @@ template<class Fn> static void compile_census_hook_export(HMODULE compiler,const
     if(!target || MH_CreateHook(target,detour,reinterpret_cast<void**>(&original))!=MH_OK) {original=nullptr;return;}
     if(MH_EnableHook(target)!=MH_OK) {MH_RemoveHook(target);original=nullptr;}
 }
+// Hooks the d3dcompiler_47.dll the mod loads (its own shaders and anything else using that module). The game compiles through its
+// own d3dcompiler_47_64.dll, which this does not hook, so the engine's load-time compiles are not in the census.
 static void install_compile_census() noexcept {
     if(compile_census_installed) return;
     const HMODULE compiler=LoadLibraryW(L"d3dcompiler_47.dll");
@@ -7812,17 +7814,23 @@ static std::string run_test_command(const std::string& line) {
         else if(v=="overlays") {std::string m;in>>m;if(m=="on" || m=="off") spacewarp_baked_overlays_knob=m=="off";}  // v1432 A/B: spacewarp overlays on|off
         return game_xr?game_xr->pacer_status_json():std::string("no XR session");
     }
-    if(verb=="afw") { // AFW renderer: afw [on|off|status] | afw tune <threshold|jitter|gap|reset> <value>
+    if(verb=="renderer") { // test (sims, 2026-11-25): switch the live renderer like the VR menu's Apply: 0 native stereo, 1 built-in warp, 2 AFW
+        int r=-1;in>>r;if(r<0 || r>2) return "usage: renderer 0|1|2";
+        if(!game_xr) return "renderer: no XR session";
+        return game_xr->renderer_switch_test(r)?"renderer live "+std::to_string(game_xr->renderer_live()):std::string("renderer: alternate eye is not available this session");}
+    if(verb=="afw") { // AFW renderer: afw [on|off|status|capture N] | afw tune <key> <value> (docs/AFW-RENDERER.md "Tuning")
         std::string v;in>>v;auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();
         if(v=="on") rt.requested=renderer_running!=0;else if(v=="off") rt.requested=false;
         else if(v=="capture") {int n=6;in>>n;if(game_xr) game_xr->afw_capture_requested=std::clamp(n,1,32);}
         else if(v=="tune") {std::string k;double x{};in>>k>>x;
             if(k=="mask") t.mask=x!=0;else if(k=="stale") t.stale=static_cast<float>(std::clamp(x,.002,.2));else if(k=="fg") t.fg_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="body") t.body_depth=static_cast<float>(std::clamp(x,.1,3.));else if(k=="nearmiss") t.near_miss=static_cast<float>(std::clamp(x,0.,32.));else if(k=="debug") t.debug=x!=0;else if(k=="ownhands") t.own_hands=static_cast<float>(std::clamp(x,0.,1.));else if(k=="edgehands") t.edge_hands=x!=0;else if(k=="heldhands") t.held_hands=x!=0;else if(k=="stillshade") t.still_shade=x!=0;else if(k=="stillmm") t.still_mm=static_cast<float>(std::clamp(x,0.,50.));else if(k=="stilldeg") t.still_deg=static_cast<float>(std::clamp(x,0.,30.));else if(k=="rigdepth") {t.rig_depth=static_cast<float>(std::clamp(x,.1,50.));t.rig_depth_manual=true;}else if(k=="near") t.near_range=static_cast<float>(std::clamp(x,0.,1.));else if(k=="helddepth") t.held_depth=static_cast<float>(std::clamp(x,.1,50.));else
             if(k=="threshold") t.ignore_motion_threshold=static_cast<float>(std::clamp(x,0.,64.));else if(k=="jitter") t.jitter_scale=static_cast<float>(std::clamp(x,-2.,2.));
-            else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));else if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));else if(k=="reset") t.reset_on_gap=x!=0;else return "afw tune: threshold|jitter|gap|reset|mv <value>";}
+            else if(k=="gap") t.max_frame_gap=static_cast<int>(std::clamp(x,1.,8.));else if(k=="mv") t.motion_scale=static_cast<float>(std::clamp(x,-4.,4.));else if(k=="halo") t.halo=static_cast<int>(std::clamp(x,0.,4.));else if(k=="reset") t.reset_on_gap=x!=0; // PureDark-era keys: still parsed, unused
+            else return "afw tune: mask|rigdepth|helddepth|near|stale|nearmiss|fg|body|stillmm|stilldeg|ownhands|edgehands|heldhands|stillshade|debug <value>";}
         std::ostringstream o;o<<"afw requested "<<rt.requested.load()<<" running "<<renderer_running<<" rebuilt "<<rt.rebuilt.load()<<" refused "<<rt.refused.load()
-            <<" fallbacks "<<rt.fallbacks.load()<<" busy "<<rt.busy()<<" threshold "<<t.ignore_motion_threshold.load()<<" jitter "<<t.jitter_scale.load()
-            <<" captures "<<(game_xr?game_xr->afw_captures_saved:0)<<" gap "<<t.max_frame_gap.load()<<" mv "<<t.motion_scale.load()<<" reset "<<t.reset_on_gap.load()<<" | "<<rt.problem();
+            <<" fallbacks "<<rt.fallbacks.load()<<" resets "<<rt.resets.load()<<" captures "<<(game_xr?game_xr->afw_captures_saved:0)<<" mask "<<t.mask.load()
+            <<" rigdepth "<<t.rig_depth.load()<<(t.rig_depth_manual.load()?" (pinned)":"")<<" helddepth "<<t.held_depth.load()<<" near "<<t.near_range.load()
+            <<" stale "<<t.stale.load()<<" | "<<rt.problem();
         return o.str();
     }
     if(verb=="eyeburst") {unsigned n=12;in>>n;n=std::clamp(n,2u,24u);alt_band_request=n;return "eyeburst "+std::to_string(n)+" presents (alternate-eye gameplay only)";}
@@ -13546,7 +13554,7 @@ std::string feedback_status_json() {    std::ostringstream out;
                << ",\"parity_flip\":" << (d2vr::alternate_parity_flip.load()?"true":"false") << ",\"band_bursts\":" << alt_band_bursts
                << ",\"stale_warp\":" << (stale_eye_warp_knob?"true":"false") << ",\"stale_warps\":" << (game_xr?game_xr->stale_eye_warps:0) << [&]{auto& rt=d2vr::afw::runtime();auto& t=d2vr::afw::tuning();std::string pr=rt.problem();for(auto& ch:pr) if(ch=='"'||ch==92||static_cast<unsigned char>(ch)<32) ch='?';
                    std::ostringstream o;o<<",\"renderer_live\":"<<(game_xr?game_xr->renderer_live():-1)<<",\"afw\":{\"requested\":"<<(rt.requested.load()?"true":"false")<<",\"rebuilt\":"<<rt.rebuilt.load()<<",\"masked\":"<<rt.masked.load()<<",\"captured\":"<<rt.captured.load()<<",\"submitted\":"<<(game_xr?game_xr->afw_rebuilds:0)
-                    <<",\"refused\":"<<rt.refused.load()<<",\"fallbacks\":"<<rt.fallbacks.load()<<",\"busy\":"<<rt.busy()<<",\"mv\":"<<t.motion_scale.load()<<",\"jitter\":"<<t.jitter_scale.load()
+                    <<",\"refused\":"<<rt.refused.load()<<",\"fallbacks\":"<<rt.fallbacks.load()<<",\"resets\":"<<rt.resets.load()<<",\"rigdepth\":"<<t.rig_depth.load()<<",\"near\":"<<t.near_range.load()<<",\"busy\":"<<rt.busy()<<",\"mv\":"<<t.motion_scale.load()<<",\"jitter\":"<<t.jitter_scale.load()
                     <<",\"halo\":"<<t.halo.load()<<",\"threshold\":"<<t.ignore_motion_threshold.load()<<",\"problem\":\""<<pr<<"\"}";return o.str();}() << ",\"uncanted_eyes\":" << (game_xr?game_xr->uncanted_eyes:0) << ",\"hand_fit\":[" << (game_xr?game_xr->hand_fits():0) << ',' << (game_xr?game_xr->hand_fit_corrections():0) << ']'
                << ",\"stale_warp_failures\":" << (game_xr?game_xr->stale_eye_warp_failures:0)
                << ",\"stale_parallax\":" << (stale_eye_parallax_knob?"true":"false") << ",\"stale_parallax_warps\":" << (game_xr?game_xr->stale_parallax_passes():0)

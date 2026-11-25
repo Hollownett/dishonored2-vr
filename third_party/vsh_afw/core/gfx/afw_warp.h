@@ -134,11 +134,13 @@ void note_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx, int eye, ID3D11Te
 // RENDER thread, before the frame's layer is built: rebuild the held eye into `dst` (that eye's
 // acquired swapchain image, w x h). `fresh` is the eye captured this present and `freshSerial` the
 // grab serial the capture delivered this present (a record from an earlier present is refused);
-// tanH/V the symmetric fov the layer claims. True = drawn; `outPose` is the pose to submit it with.
+// tanH/V the symmetric fov the layer claims; tanHeld/tanFresh (optional, Dishonored 2 VR): the held and the fresh eye's own
+// tangents (left, right, up, down), for asymmetric headset eyes. True = drawn; `outPose` is the pose to submit it with.
 // False (with the reason) = nothing drawn: the caller keeps the rotation-only path.
 bool warp_held(ID3D11Device* dev, ID3D11DeviceContext* ctx, int held, int fresh, uint32_t freshSerial,
                ID3D11Texture2D* dst, uint32_t w, uint32_t h, float tanH, float tanV, Pose* outPose,
-               const char** why);
+               const char** why,
+               const float* tanHeld = nullptr, const float* tanFresh = nullptr);
 
 // Is there a fresh image in the other eye to rebuild `held` from (the held eye's own image is
 // optional)? Checked BEFORE the caller acquires the held swapchain image, so an acquired image is

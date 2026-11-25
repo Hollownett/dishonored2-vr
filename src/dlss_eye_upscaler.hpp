@@ -66,7 +66,8 @@ inline std::mutex& ngx_log_mutex() { static std::mutex m; return m; }
 inline void NVSDK_CONV ngx_log_callback(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature) {
     if (!message || ngx_log_path().empty()) return;
     std::lock_guard<std::mutex> lock(ngx_log_mutex());
-    if (FILE* f = _wfopen(ngx_log_path().c_str(), L"a")) { std::fputs(message, f); const auto n = std::strlen(message); if (!n || message[n - 1] != '\n') std::fputc('\n', f); std::fclose(f); }
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, ngx_log_path().c_str(), L"a") == 0 && f) { std::fputs(message, f); const auto n = std::strlen(message); if (!n || message[n - 1] != '\n') std::fputc('\n', f); std::fclose(f); }
 }
 #ifdef __clang__
 #pragma clang diagnostic pop

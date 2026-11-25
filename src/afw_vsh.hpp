@@ -88,7 +88,8 @@ public:
     std::atomic<std::uint64_t> rebuilt{},refused{},fallbacks{},captured{},masked{};
     bool hard_failed() const noexcept {return hard_failed_;}
     std::uint64_t busy() const noexcept {return 0;}
-    std::string problem() const {std::lock_guard<std::mutex> l(mutex_);return problem_;}
+    std::string problem() const {if(!requested.load()) return "off";std::lock_guard<std::mutex> l(mutex_);return problem_;} // not a stale "AFW active" once switched off
+    std::atomic<std::uint64_t> resets{};   // held records dropped: AFW (re)started or the captures had a gap (menus, loads, paired frames)
     void log_to(void (*sink)(const char*)) noexcept {dvr::log::sink()=sink;}
     // Render thread, when the fresh eye is kept: its image, game camera, the other eye's camera at this Setup (the pose the held
     // eye is rebuilt at), and its R32 device depth (render rectangle depth_w x depth_h at the top left).
@@ -96,6 +97,11 @@ public:
                  ID3D11Texture2D* depth,UINT depth_w,UINT depth_h,ID3D11Texture2D* rig=nullptr,UINT rig_w=0,UINT rig_h=0,std::array<float,4> tans={-1.f,1.f,1.f,-1.f}) {
         if(!requested.load() || hard_failed_ || !c || !image || !depth || !depth_w || !depth_h || eye<0 || eye>1) return;
         apply_tuning();
+        // Each alternate frame captures one fresh eye. A gap (AFW switched off and on, a menu, a load, paired frames) or a frame counter
+        // that went back means both held images may be from another moment or another scene: VSH's records are dropped (its epoch), so
+        // the next rebuild uses the fresh eye alone until this eye renders again (review 2026-11-25: warp_held has no age limit).
+        if(!last_capture_frame_ || frame<=last_capture_frame_ || frame-last_capture_frame_>max_capture_gap) {dvr::afw::set_enabled(true,"d2vr");++resets;}
+        last_capture_frame_=frame;
         ComPtr<ID3D11Device> device;c->GetDevice(&device);
         // The rig mask (R8: 252..255 = the player's rig or a held weapon/prop, 0 = not) of this same render, at the depth's size.
         ID3D11ShaderResourceView* rig_srv=rig && rig_w==depth_w && rig_h==depth_h?rig_view(device.Get(),rig):nullptr;
@@ -135,17 +141,24 @@ public:
         ++captured;
     }
     // Render thread, for the held eye: rebuild it into dst (w x h, render-target capable). False: the built-in warp draws this frame.
-    bool rebuild(ID3D11DeviceContext* c,int held,int fresh,std::uint64_t frame,ID3D11Texture2D* dst,UINT w,UINT h,float tan_h,float tan_v) {
+    // held_tans / fresh_tans: each eye's own FOV tangents (left, right, up, down). Headset eyes are asymmetric and mirrored, so the
+    // held image, the target and the fresh image each project with their own (review 2026-11-25: one symmetric pair, tan(right) and
+    // tan(up), misplaced the rebuilt eye on asymmetric FOVs; the simulator's symmetric FOV hid it).
+    bool rebuild(ID3D11DeviceContext* c,int held,int fresh,std::uint64_t frame,ID3D11Texture2D* dst,UINT w,UINT h,
+                 const std::array<float,4>& held_tans,const std::array<float,4>& fresh_tans) {
         if(!requested.load() || hard_failed_ || !c || !dst) return false;
+        for(const auto* t:{&held_tans,&fresh_tans}) if(!((*t)[1]>(*t)[0]+1e-3f && (*t)[2]>(*t)[3]+1e-3f)) {++refused;set_problem("refused: bad field of view");return false;}
         ComPtr<ID3D11Device> device;c->GetDevice(&device);
         dvr::afw::Pose out{};const char* why="";
-        if(!dvr::afw::warp_held(device.Get(),c,held,fresh,static_cast<std::uint32_t>(frame),dst,w,h,tan_h,tan_v,&out,&why)) {
+        const float tan_h=.5f*(held_tans[1]-held_tans[0]),tan_v=.5f*(held_tans[2]-held_tans[3]); // the symmetric pair VSH logs and checks with
+        if(!dvr::afw::warp_held(device.Get(),c,held,fresh,static_cast<std::uint32_t>(frame),dst,w,h,tan_h,tan_v,&out,&why,held_tans.data(),fresh_tans.data())) {
             ++refused;set_problem(std::string("refused: ")+(why && *why?why:"no reason"));return false;
         }
         ++rebuilt;set_problem("AFW active");return true;
     }
 private:
-    bool hard_failed_{};mutable std::mutex mutex_;std::string problem_{"off"};
+    static constexpr std::uint64_t max_capture_gap=4;   // alternate frames; 1 is the normal step
+    bool hard_failed_{};mutable std::mutex mutex_;std::string problem_{"off"};std::uint64_t last_capture_frame_{};
     ComPtr<ID3D11ComputeShader> shader_;ComPtr<ID3D11Buffer> params_;ComPtr<ID3D11Texture2D> depth_tex_;
     ComPtr<ID3D11ShaderResourceView> depth_srv_;ComPtr<ID3D11UnorderedAccessView> depth_uav_;UINT depth_w_{},depth_h_{};
     ComPtr<ID3D11Texture2D> mask_tex_;ComPtr<ID3D11ShaderResourceView> mask_srv_;ComPtr<ID3D11UnorderedAccessView> mask_uav_; // R8: 1 = the player's arms, body, held things
