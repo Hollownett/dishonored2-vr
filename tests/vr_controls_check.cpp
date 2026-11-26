@@ -792,6 +792,16 @@ std::printf("PASS: X wheel open/close/cancel/no-reopen/late-press, "
         assert(!r.update(head,fwd,up,front,{0.f,0.f},true,210).consume[0]);
         assert(!r.update(head,fwd,up,temple,{1.f,0.f},false,300).journal);            // not in gameplay
     }
+    { // TempleReach also_in: a caller-computed zone counts like the sphere (entered, journal pulse, consumed until release).
+        d2vr::TempleReach r;const std::array<double,3> head{0,1.7,0},fwd{0,0,-1},up{0,1,0};
+        std::array<std::optional<std::array<double,3>>,2> front{std::array<double,3>{-.2,1.2,-.4},std::array<double,3>{.2,1.2,-.4}};
+        assert(!r.update(head,fwd,up,front,{1.f,0.f},true,0,{false,false}).in[0]);
+        const auto e=r.update(head,fwd,up,front,{0.f,0.f},true,10,{true,false});assert(e.in[0] && e.entered==0 && !e.in[1]);
+        const auto j=r.update(head,fwd,up,front,{1.f,0.f},true,20,{true,false});assert(j.journal && j.consume[0] && j.held);
+        assert(r.update(head,fwd,up,front,{1.f,0.f},true,40,{false,false}).consume[0]);  // left the zone: still consumed
+        assert(!r.update(head,fwd,up,front,{0.f,0.f},true,300,{false,false}).consume[0]);
+        assert(!r.update(head,fwd,up,front,{1.f,0.f},false,310,{true,false}).in[0]);    // not in gameplay: the gate still applies
+    }
     { // Full-grip sword: draw at the shoulder, hold, drop elsewhere, pick up, sheathe at the shoulder, auto-sheathe, recall.
         using A=d2vr::SwordGrip::Action;d2vr::SwordGrip s;d2vr::SwordGrip::In in{};in.gameplay=true;
         auto step=[&](std::uint64_t t){in.now=t;return s.update(in);};

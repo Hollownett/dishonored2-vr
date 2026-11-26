@@ -518,7 +518,7 @@ public:
     explicit TempleReach(double left=.09,double up=.02,double forward=0,double radius=.13,unsigned mask=3) noexcept : l_(left),u_(up),f_(forward),r_(radius),mask_(mask) {}
     struct Out {bool journal{},held{};int entered{-1};std::array<bool,2> consume{},in{};};
     // head: eye centre; forward/up: head axes (any length).
-    Out update(const V& head,const V& forward,const V& up,const std::array<std::optional<V>,2>& hands,const std::array<float,2>& grip,bool gameplay,std::uint64_t now) noexcept {
+    Out update(const V& head,const V& forward,const V& up,const std::array<std::optional<V>,2>& hands,const std::array<float,2>& grip,bool gameplay,std::uint64_t now,const std::array<bool,2>& also_in={}) noexcept {
         Out out{};
         const auto unit=[](V v){const double l=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);return l>1e-6?V{v[0]/l,v[1]/l,v[2]/l}:V{};};
         const V f=unit(forward),u=unit(up);
@@ -526,8 +526,11 @@ public:
         const V temple{head[0]+left[0]*l_+u[0]*u_+f[0]*f_,head[1]+left[1]*l_+u[1]*u_+f[1]*f_,head[2]+left[2]*l_+u[2]*u_+f[2]*f_};
         for(int i=0;i<2;++i) {
             bool in=false;
-            if(gameplay && hands[i] && (mask_>>i&1u)) {const V d{(*hands[i])[0]-temple[0],(*hands[i])[1]-temple[1],(*hands[i])[2]-temple[2]};
-                in=std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2])<(in_[i]?r_+.03:r_);}
+            if(gameplay && (mask_>>i&1u)) {
+                if(hands[i]) {const V d{(*hands[i])[0]-temple[0],(*hands[i])[1]-temple[1],(*hands[i])[2]-temple[2]};
+                    in=std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2])<(in_[i]?r_+.03:r_);}
+                in=in || also_in[i];   // also_in: another zone the caller computed (e.g. the chest-relative shoulder) counts as the same place
+            }
             if(in && !in_[i]) out.entered=i;
             in_[i]=in;out.in[i]=in;
             const bool pressed=grip[i]>=(down_[i]?.4f:.6f);
