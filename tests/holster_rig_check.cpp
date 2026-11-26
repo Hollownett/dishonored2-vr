@@ -25,7 +25,7 @@ int main(){
         assert(near3(*r.centre(P::pouch_right,f),Vec3{1.14,1.91,1}));
         assert(near3(*r.centre(P::shoulder_left,f),Vec3{.98,2.17,1.57}));
         assert(near3(*r.centre(P::shoulder_right,f),Vec3{.98,1.83,1.57}));
-        assert(near3(*r.centre(P::heart_pocket,f),Vec3{1.12,2.07,1.38}));   // not mirrored: body's left
+        assert(near3(*r.centre(P::heart_pocket,f),Vec3{1.12,2.07,1.34}));   // not mirrored: body's left
         assert(!r.centre(P::none,f));
     }
     { // head_fallback
@@ -33,7 +33,7 @@ int main(){
         assert(near3(*r.centre(P::hip_left,h),Vec3{1,2.20,1.08}));
         assert(near3(*r.centre(P::hip_right,h),Vec3{1,1.80,1.08}));
         assert(near3(*r.centre(P::pouch_right,h),Vec3{1.14,1.91,1.08}));
-        assert(near3(*r.centre(P::heart_pocket,h),Vec3{1.12,2.07,1.38}));
+        assert(near3(*r.centre(P::heart_pocket,h),Vec3{1.12,2.07,1.34}));
         assert(!r.centre(P::shoulder_left,h) && !r.centre(P::shoulder_right,h));
         assert(!r.centre(P::hip_left,BodyFrames{}));
     }

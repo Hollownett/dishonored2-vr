@@ -29,6 +29,7 @@ inline constexpr const char* sword_copy_def = "models/campaign/dlc01/bank/midnig
 // The grenade Throw frame keeps the launch point 0x20 bytes past the velocity the mod's setter hook receives (D2). DOTO's Throw keeps
 // it 0x10 bytes before (native_grenade_throw.hpp): the hand-throw rewrite stays off until that frame is confirmed.
 inline constexpr bool grenade_spawn_follows_velocity = false;
+inline constexpr bool has_heart = false;   // 2026-11-26: DOTO has no Heart (native_gadget_drop.hpp): the body holsters' Heart pocket is off
 // The slash perform entry's stolen prologue (native_slash_scene_rate.hpp): DOTO 0x8d7ed0 = mov rax,rsp (3); push rsi (1);
 // sub rsp,0x90 (7) = 11 bytes, so MinHook copies 11. Its unwind info: prolog 11, 3 slots: UWOP_ALLOC_LARGE 0x90/8 at 11,
 // UWOP_PUSH_NONVOL rsi at 4.
@@ -88,6 +89,7 @@ inline constexpr bool billie_avatar = false;
 inline constexpr unsigned note_hand_first_character = 0, note_hand_character_end = 2;   // Corvo (0), Emily (1)
 inline constexpr const char* sword_copy_def = "models/campaign/dunwall/midnightassets/sword_player_midnight.def";
 inline constexpr bool grenade_spawn_follows_velocity = true;
+inline constexpr bool has_heart = true;    // the Heart (heart.inventoryitem): the body holsters' chest pocket (holster_rig.hpp)
 // D2 0x86cbf0: mov rax,rsp (3); push rsi (1); sub rsp,0x60 (4) = 8 bytes; UWOP_ALLOC_SMALL 0x60 at 8, UWOP_PUSH_NONVOL rsi at 4.
 inline constexpr double player_blade_length = 0.65;   // Corvo/Emily's sword (its bbox)
 inline constexpr bool sword_copy_spawns_hidden = false;

@@ -883,6 +883,11 @@ public:
         std::lock_guard<std::mutex> lock(m_);hip_req_=request;
     }
     inline static std::atomic<std::uint64_t> hip_frames{},visibility_skips{};
+    // 2026-11-26 (user: "the weapon in the holster steady in movement"): the hip copy's place in the body model frame (player+0xf0 -> +0x1860, the
+    // frame the engine draws the body with), each time it is placed. While the body moves it should not change: its frame-to-frame step (mm) is the
+    // copy's jitter against the body (max, sum, count over steps where the body moved 1 mm..0.5 m).
+    inline static std::atomic<double> hip_jitter_max_mm{},hip_jitter_sum_mm{};inline static std::atomic<std::uint64_t> hip_jitter_n{};
+    inline static std::array<Vec3,2> hip_local_last_{},hip_body_last_{};inline static std::array<bool,2> hip_local_have_{};   // per hip copy (pistol, crossbow)
 private:
     static Hip hip_req_; // defined after the class: clang-cl needs Hip's member initializers complete
     inline static std::array<std::uintptr_t,2> hip_ent_{};inline static std::array<std::uint32_t,2> hip_id_{};
@@ -989,6 +994,23 @@ private:
                 }
                 const auto current=hip_entity_current(base,read,k);if(!current || !*current)continue;
                 teleport<Read>(base,hip_ent_[k],h.pos,h.axis);++hip_frames;
+                try {
+                    if(const auto pl=player(base,read)) if(const auto model=rig::value<std::uintptr_t>(read,pl+0xf0); model && *model) {
+                        std::array<float,15> raw{};
+                        if(read(*model+0x1860,raw.data(),sizeof raw)) {
+                            const rig::ModelFrame m(raw);
+                            const auto local=m.model_point({h.pos[0],h.pos[1],h.pos[2]});
+                            if(hip_local_have_[k]) {
+                                const double body_step=length(m.origin-hip_body_last_[k]);
+                                if(body_step>.001 && body_step<.5) {
+                                    const double jitter=length(local-hip_local_last_[k])*m.scale[0]*1000;
+                                    ++hip_jitter_n;hip_jitter_sum_mm.store(hip_jitter_sum_mm.load()+jitter);if(jitter>hip_jitter_max_mm.load()) hip_jitter_max_mm.store(jitter);
+                                }
+                            }
+                            hip_local_last_[k]=local;hip_body_last_[k]=m.origin;hip_local_have_[k]=true;
+                        }
+                    }
+                } catch(...) {hip_local_have_[k]=false;}
             }
             else if(hip_shown_[k] && visible(base,read,hip_ent_[k],false))hip_shown_[k]=false;
         }

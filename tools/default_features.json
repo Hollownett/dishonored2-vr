@@ -99,6 +99,54 @@
    "default": true
   },
   {
+   "id": "arm-collision",
+   "file": "no-arm-collision",
+   "kind": "disable",
+   "label": "Arm collision",
+   "help": "Your forearms and upper arms do not pass through walls, doors or tables: the elbow bends around what is there (your hand stays on the controller).",
+   "default": true
+  },
+  {
+   "id": "forearm-contact",
+   "file": "no-forearm-contact",
+   "kind": "disable",
+   "label": "Arms block the other hand",
+   "help": "A weapon or your other hand cannot pass through your forearm; crossing your arms stays free.",
+   "default": true
+  },
+  {
+   "id": "gadget-stow",
+   "file": "no-gadget-stow",
+   "kind": "disable",
+   "label": "Put grenades and mines back",
+   "help": "Let go of a grenade or mine at your belt (or any holster) slowly to put it back into the inventory. Elsewhere it drops as before.",
+   "default": true
+  },
+  {
+   "id": "holster-draw",
+   "file": "no-holster-draw",
+   "kind": "disable",
+   "label": "Take items from the belt",
+   "help": "Squeeze at the front of your belt and pull out to take the last grenade or mine again; at your left chest, the Heart (Dishonored 2).",
+   "default": true
+  },
+  {
+   "id": "heart-pocket",
+   "file": "no-heart-pocket",
+   "kind": "disable",
+   "label": "Heart chest pocket",
+   "help": "Put the Heart away at your left chest (the hip still works) and take it out there. Dishonored 2 only.",
+   "default": true
+  },
+  {
+   "id": "body-shoulder-zone",
+   "file": "legacy-shoulder-zone",
+   "kind": "disable",
+   "label": "Shoulder holster follows the body",
+   "help": "The sword over your shoulder is found on your body, also while you look down or turn your head. Off: only the old spot behind the head.",
+   "default": true
+  },
+  {
    "id": "impact-fx",
    "file": "no-impact-fx",
    "kind": "disable",

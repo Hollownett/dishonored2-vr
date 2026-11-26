@@ -962,7 +962,7 @@ private:
                         const auto cast=[&](const NativeCastExclusion* exclusion) {
                             const auto result=NativeWorldTrace::sphere_query_checked(self->base_,self->read_,reinterpret_cast<NativeWorldTrace::Cast>(self->base_+NativeWorldTrace::cast_rva),
                                 reinterpret_cast<NativeWorldTrace::Construct>(self->base_+NativeWorldTrace::sphere_ctor_rva),*world,seg.from,seg.to,seg.radius,
-                                slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,exclusion,clamp_slot(slot) || slot==1);
+                                slot==hand_body_free_slot?kHandBodyFreeLayers:kWorldOccluderLayers,kWorldOccluderRequired,nullptr,false,exclusion,clamp_slot(slot) || slot==1 || slot==arm_forearm_slot || slot==arm_upper_slot);
                             if(!result.complete)segments[side][slot].valid=false;
                             return result.hit;   // the clamp's slots are ranked by body class; v1301: the blade's slot 1 reads it too (WeaponCollision: a dynamic body is no plane)
                         };
@@ -1183,7 +1183,8 @@ private:
     // (hand_clamp.hpp; with slot 0 at most 4 a hand, timed together as clamp_cast_us_, C14). 14: the hand body's free probe (final review P3-1,
     // knob build/hand-body only: posted only while a create or a snap may need it), cast with kHandBodyFreeLayers (WORLD_LOW 0 included).
     // 15: the crosshair's 30 m aim-ray cast (producer_crosshair; the reticle distance, G4). 16: the dual-wield copy gun's ring reticle cast (v1387).
-    inline static constexpr unsigned weapon_slots=17;
+    // 17-18 (2026-11-26, arm_collision.hpp): the natural arm's forearm and upper-arm sweeps (producer_clamp, body class read).
+    inline static constexpr unsigned weapon_slots=19;
     inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_,weapon_answer_segments_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
     inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};inline static std::array<std::array<std::uint8_t,weapon_slots>,2> weapon_producer_{};
 public:
@@ -1193,6 +1194,7 @@ public:
     static constexpr unsigned tip_slot=11,wall_tip_slot=12,exclude_slot=13;   // the hand clamp's (slot 0 is its palm)
     static constexpr unsigned crosshair_slot=15,copy_crosshair_slot=16;
     static constexpr unsigned hand_body_free_slot=14;   // the hand body's create / snap free probe (P3-1)
+    static constexpr unsigned arm_forearm_slot=17,arm_upper_slot=18;   // the arm collision's casts (arm_collision.hpp)
     static constexpr bool clamp_slot(unsigned slot) {return slot==0 || slot==tip_slot || slot==wall_tip_slot || slot==exclude_slot;}
     inline static std::atomic<std::uint64_t> weapon_casts_{},weapon_cast_ticks_{},weapon_cast_count_{}; // QPC ticks and number of sphere casts run on the game thread
     // The hand clamp's casts (slots 0, 11-13, both hands) in the last game-thread scope: cost (us) and count; serial: one more per scope.

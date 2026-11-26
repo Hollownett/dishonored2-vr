@@ -25,7 +25,7 @@ namespace holster_detail {
 inline std::array<PlaceSpec,static_cast<std::size_t>(HolsterPlace::count)> default_places() {
     std::array<PlaceSpec,static_cast<std::size_t>(HolsterPlace::count)> p{};
     const PlaceSpec shoulder{1,{-.02,.17,.17},.16,.03,true},hip{0,{0,.21,-.05},.17,0,true},pouch{0,{.14,.09,0},.13,.03,true},
-        pocket{1,{.12,.07,-.02},.13,.03,false};
+        pocket{1,{.12,.07,-.06},.13,.03,false};   // 2026-11-26 review: 4 cm lower, clear of the left shoulder holster
     p[static_cast<std::size_t>(HolsterPlace::shoulder_left)]=shoulder;p[static_cast<std::size_t>(HolsterPlace::shoulder_right)]=shoulder;
     p[static_cast<std::size_t>(HolsterPlace::hip_left)]=hip;p[static_cast<std::size_t>(HolsterPlace::hip_right)]=hip;
     p[static_cast<std::size_t>(HolsterPlace::pouch_left)]=pouch;p[static_cast<std::size_t>(HolsterPlace::pouch_right)]=pouch;
@@ -91,7 +91,7 @@ public:
         switch(p) {
             case HolsterPlace::hip_left: case HolsterPlace::hip_right: fwd=0;sd=.20;z=-.62;break;
             case HolsterPlace::pouch_left: case HolsterPlace::pouch_right: fwd=.14;sd=.09;z=-.62;break;
-            case HolsterPlace::heart_pocket: fwd=.12;sd=.07;z=-.32;break;
+            case HolsterPlace::heart_pocket: fwd=.12;sd=.07;z=-.36;break;
             default: return std::nullopt;
         }
         const Vec3 left=cross(up,f.head_forward);
