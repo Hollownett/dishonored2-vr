@@ -6,6 +6,7 @@
 // transforms for the 20 body joints and both 69-joint arms (scaled skeleton);
 // export multiplies rotations by `scale` for skinning. No game calls or writes.
 #include "arm_body.hpp"
+#include "arm_collision.hpp"
 #include "hand_reach.hpp"
 #include "sword_blade_axis.hpp"
 #include <algorithm>
@@ -138,6 +139,11 @@ struct Calibration {
     double torso_scale=1; // verified native chest-surface transverse fit
     double arm_reach[2]{}; // independent shoulder-to-attachment reach; 0 uses hand_span
 };
+// One arm's collision planes for the solver (world, the solve space): the elbow turns about the shoulder-wrist axis to clear them.
+// enabled: run the follower (it eases back to 0 with no planes); shadow: compute and report the swivel but draw the natural arm.
+struct ArmCollisionInput {
+    ArmPlane planes[ArmCollision::max_planes]{};std::size_t count{};bool enabled{},shadow{};ArmCollisionConfig config{};
+};
 struct Inputs {
     Xf eye;                   // camera_jnt world pose (looks along +X, +Z up)
     Xf hand[2];               // target world pose of left/right hand_attachment_jnt
@@ -175,6 +181,7 @@ struct Inputs {
     double dt=1/90.;
     Xf raw_hand[2]{};
     bool raw_hand_valid[2]{};
+    ArmCollisionInput arm_collision[2]{};
 };
 struct Output {
     std::vector<Xf> body,arm[2];Xf arm_frame[2];
@@ -194,6 +201,7 @@ struct Output {
     double thumb_applied[2][3]{}; // degrees each thumb joint was turned by this solve (what finger_local applied of the contact's turn)
     std::vector<Xf> raw_arm[2];
     bool raw_hand_reached[2]{};
+    double swivel[2]{},swivel_residual[2]{};bool swivel_constrained[2]{};   // rad, m: the elbow swivel the arm collision asked for (drawn unless shadow)
 };
 // One arm's reach as its last visible solve saw it, in solve space (hand_reach.hpp ArmReach before the world mapping):
 // the shoulder after the clavicle shrug, the unstretched arm length la+lb, and the wrist target in the hand_attachment
@@ -203,6 +211,7 @@ struct ArmReachState {Vec3 shoulder{};double full{};Xf hand_to_wrist{};bool vali
 class BodySolver {
     struct ArmState {
         Vec3 pole{};
+        double swivel{},swivel_residual{};bool swivel_constrained{};
         double roll{},hold_steady{},thumb_applied[3]{},reverse_weight{};
         Xf hold{},hold_prev{};
         Vec3 wrap{}; // wrap centre of the native curled fingers in the attachment's parent frame, followed like hold
@@ -363,7 +372,7 @@ public:
     void reset_hold(int i) {arm_state_[i].has_hold=false;}
     void reset() {
         chest_={};feet_valid_=false;has_eye_=false;walk_=0;walk_on_=false;velocity_={};last_native_={};
-        for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;arm_state_[i].hold_key=0;arm_state_[i].reach={};}
+        for(int i=0;i<2;++i) {foot_[i]={};arm_state_[i].has_pole=false;arm_state_[i].swivel=0;arm_state_[i].swivel_residual=0;arm_state_[i].swivel_constrained=false;arm_state_[i].has_roll=false;dragged_[i]=false;arm_state_[i].has_hold=false;arm_state_[i].socket_token=0;arm_state_[i].hold_key=0;arm_state_[i].reach={};}
         for(auto& p:progress_) p=0;
         for(auto& p:path_) p.clear();
     }
@@ -603,6 +612,7 @@ public:
                     out.blade_axis_gap_deg[i]=arm_state_[i].has_hold?d2vr::blade_axis_gap_deg(rotated(at.q,{1,0,0}),d2vr::sword_blade_axis(hand_pose,in.reverse_grip[i])):0.;
                 }out.sneak_flip[i]=arm_state_[i].sneak_flip;
             }
+            out.swivel[i]=arm_state_[i].swivel;out.swivel_residual[i]=arm_state_[i].swivel_residual;out.swivel_constrained[i]=arm_state_[i].swivel_constrained;
             out.finger_mode[i]=arm_state_[i].finger_mode;
             out.has_hold[i]=arm_state_[i].has_hold;out.hold_starts[i]=arm_state_[i].hold_starts;out.hold_native_deg[i]=arm_state_[i].hold_native_deg;out.hold_native_m[i]=arm_state_[i].hold_native_m;for(int s2=0;s2<3;++s2) out.thumb_applied[i][s2]=arm_state_[i].thumb_applied[s2];
             const auto& na=native && source->arm[i].size()==out.arm[i].size()?source->arm[i]:std::vector<Xf>{};
@@ -622,7 +632,8 @@ public:
             }
             if(in.raw_hand_valid[i] && in.hand_valid[i] && in.hand_empty[i] && !in.native_socket_token[i] && valid_pose(in.raw_hand[i]) &&
                in.own.arm[i]==0 && weight(2+i)==0 && weight(4+i)==0)try {
-                auto candidate=in;candidate.hand[i]=in.raw_hand[i];
+                auto candidate=in;candidate.hand[i]=in.raw_hand[i];candidate.arm_collision[i]=ArmCollisionInput{};   // raw-hand solves ignore collision
+                candidate_state.swivel=0;candidate_state.swivel_residual=0;candidate_state.swivel_constrained=false;   // and start from no swivel, not last frame's
                 out.raw_arm[i]=pose_arm(i,chest,chest_delta,candidate,dt,out.raw_hand_reached[i],candidate_state);
             } catch(...) {out.raw_arm[i].clear();out.raw_hand_reached[i]=false;}
             out.phase[i]=foot_[i].t;out.swing_from[i]=foot_[i].from;out.swing_to[i]=foot_[i].to;
@@ -1055,6 +1066,7 @@ private:
         Vec3 pole=rig::boneworks_elbow_pole(length(reach)>1e-4?reach:fwd,fwd,outward,up,la+lb,dot(palm,up),
                                             state.has_pole?&state.pole:nullptr,dt);
         state.pole=pole;state.has_pole=true;
+        Vec3 drawn_pole=pole;
         // Soft IK (hand_reach.hpp soft_reach): near full reach the elbow straightens along an exponential instead of
         // popping; the hand stays exact through a bone stretch of at most 6%, beyond which it stops short along the reach
         // (max_exact_reach is where that starts). Elbow straightness is continuous in d; past the cap the arm shape is kept.
@@ -1062,9 +1074,30 @@ private:
         const auto soft=soft_reach(d,la+lb);
         const double extension=soft.extension,target_distance=soft.target_distance;
         const auto toward=d>1e-9?shoulder+reach*(target_distance/d):wrist_target.p;
-        const auto solved=solve_arm(shoulder,toward,pole,la*extension,lb*extension);
+        auto solved=solve_arm(shoulder,toward,pole,la*extension,lb*extension);
+        {   // Arm collision: turn the natural elbow about the shoulder-wrist axis (the pole is turned for the draw only, never stored)
+            const auto& ac=in.arm_collision[i];
+            if(ac.enabled) {
+                const std::size_t n=std::min(ac.count,ArmCollision::max_planes);
+                const auto r=solve_swivel(shoulder,solved.wrist,solved.elbow,outward,ac.planes,n,ac.config,state.swivel);
+                const double violation=swivel_violation(shoulder,solved.wrist,swivel_elbow(shoulder,solved.wrist,solved.elbow,state.swivel),ac.planes,n,ac.config.skin);
+                state.swivel=follow_swivel(state.swivel,r.theta,violation,dt,ac.config);
+                state.swivel_residual=r.residual;state.swivel_constrained=r.constrained;
+            } else {
+                state.swivel=follow_swivel(state.swivel,0,0,dt,ArmCollisionConfig{});
+                state.swivel_residual=0;state.swivel_constrained=false;
+            }
+            if(!ac.shadow && std::fabs(state.swivel)>1e-12) {
+                const auto axis=toward-shoulder;
+                if(length(axis)>1e-9) {
+                    const auto turned=rotated(axis_angle(axis,state.swivel),pole);
+                    solved=solve_arm(shoulder,toward,turned,la*extension,lb*extension);
+                    drawn_pole=turned;
+                }
+            }
+        }
         reached=length(solved.wrist-wrist_target.p)<1e-5;
-        const auto hinge=hinge_of(shoulder,solved.elbow,solved.wrist,pole);
+        const auto hinge=hinge_of(shoulder,solved.elbow,solved.wrist,drawn_pole);
         // Bind hinge: T-pose arm flexes forward, so the elbow points back (-X).
         const auto bind_dir=unit(w[wrist_[i]].p-w[upper_[i]].p);
         const auto bind_hinge=unit(cross(rotated(chest_delta,{-1,0,0}),bind_dir));

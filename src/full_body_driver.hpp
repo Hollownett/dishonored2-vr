@@ -161,6 +161,8 @@ struct Tracking {
     // v861: the world yaw of the tracking space this publication was mapped with (the calibrated forward), and where it sits (the camera anchor):
     // a change between solves is a rig turn (stick, snap, fold), which turns the solver's memory with it (BodySolver::turn_rig).
     double rig_yaw{};Vec3 rig_pivot{};bool rig_valid{};
+    // Arm collision planes per arm (world, the same frame as grip; arm_collision.hpp): the solver swivels the elbow to clear them.
+    body::ArmCollisionInput arm_collision[2]{};
 };
 
 enum class ArmGate {ready,no_solution,stale_revision,stale_age};
@@ -191,6 +193,9 @@ struct Diagnostic {
     // drew the body, else the engine's own (the mod's solve declined: the game's animation is drawn)
     Vec3 leg[2][4]{};bool legs_valid{},legs_solved{};  // v1439: hip, knee, ankle, toe (the toe: 0.16 m ahead of the ankle, 0.06 m below, in the foot's bind frame)
     Vec3 pelvis_forward{},pelvis_left{};
+    Xf chest{};Vec3 chest_forward{},chest_left{};   // center_spine03_jnt of the last body upload (world); forward/left levelled (z=0, unit): the body holsters' frame
+    // The drawn arm of the last arm upload (world): shoulder, drawn elbow, the elbow before the swivel, and the swivel the solver applied (rad) and its residual (m).
+    Vec3 shoulder[2]{},elbow[2]{},natural_elbow[2]{};double swivel[2]{},swivel_residual[2]{};bool arm_joints_valid[2]{};
     Vec3 plant[2]{},swing_from[2]{},swing_to[2]{};double phase[2]{},owned[4]{},palm_residual[2]{};
     ArmGate arm_gate[2]{ArmGate::no_solution,ArmGate::no_solution};
     // v1104: per hand, the held item's component type and where its authored grip clip came from (0 none, 1 captured live this
@@ -360,7 +365,7 @@ public:
         heading_at_publish_=t.camera_heading;have_heading_at_publish_=t.camera_heading_valid && std::isfinite(t.camera_heading);
         if(anchor && !legacy_root_carry_) {root_at_publish_=*anchor;have_root_at_publish_=true;follow_at_publish_=t.head_follow;}
         else {root_at_publish_=root_last_;have_root_at_publish_=have_root_last_;follow_at_publish_=follow_last_;}
-        track_=t;own_=own;have_track_=true;++revision_;diag_.body_valid=false;diag_.arm_valid[0]=diag_.arm_valid[1]=false;published_=std::chrono::steady_clock::now();
+        track_=t;own_=own;have_track_=true;++revision_;diag_.body_valid=false;diag_.arm_valid[0]=diag_.arm_valid[1]=false;diag_.arm_joints_valid[0]=diag_.arm_joints_valid[1]=false;published_=std::chrono::steady_clock::now();
         if(!(track_.seconds>0)) track_.seconds=std::chrono::duration<double>(published_.time_since_epoch()).count();
     }
     void legacy_root_carry(bool on) {std::lock_guard<std::mutex> lock(mutex_);legacy_root_carry_=on;}   // build/legacy-arm-root-carry
@@ -569,6 +574,17 @@ public:
         const auto pelvis_heading=body::mul(diag_.pelvis.q,body::conj(sk.bind[pelvis_index].q));
         diag_.pelvis_forward=rotated(pelvis_heading,{1,0,0});
         diag_.pelvis_left=rotated(pelvis_heading,{0,1,0});
+        {   // the chest frame for body holsters: the spine03 joint and its heading levelled
+            const auto chest_index=sk.find("center_spine03_jnt");
+            diag_.chest=to_world(conv,to_xf(out[chest_index]));
+            const auto heading=body::mul(diag_.chest.q,body::conj(sk.bind[chest_index].q));
+            auto forward=rotated(heading,{1,0,0});forward.z=0;
+            const double fl=length(forward);
+            if(fl>1e-9) {
+                forward=forward*(1/fl);
+                diag_.chest_forward=forward;diag_.chest_left={-forward.y,forward.x,0};
+            } else {diag_.chest_forward={1,0,0};diag_.chest_left={0,1,0};}
+        }
         for(unsigned i=0;i<2;++i) diag_.feet[i]=to_world(conv,to_xf(out[sk.find(i?"right_ankle_jnt":"left_ankle_jnt")]));
         legs_from_([&](std::size_t j) {return to_world(conv,to_xf(out[j]));},true);  // v1438: the solved legs, as drawn
         return out;
@@ -596,14 +612,14 @@ public:
                 if(track_.source_tick && aged(track_.source_tick)) note_stale_(1,static_cast<double>(callback_tick-track_.source_tick));
             }
             if(why) {
-                diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;diag_.arm_gate[side]=ArmGate::stale_age;
+                diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;diag_.arm_joints_valid[side]=false;diag_.arm_gate[side]=ArmGate::stale_age;
                 arm_why_[side]=why;return {};
             }
         }
         auto& n=native_.arm[side];n.resize(69);
         for(unsigned j=0;j<69;++j) n[j]=to_xf(native[j]);
         have_native_arm_[side]=true;
-        diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;
+        diag_.arm_callback[side]=++diag_.callback_serial;diag_.arm_valid[side]=false;diag_.arm_joints_valid[side]=false;
         // Native arms usually arrive first; solve this publication from the retained body pose.
         (void)solve_locked(frame_key);
         const double published_age=std::chrono::duration<double>(std::chrono::steady_clock::now()-published_).count();
@@ -623,6 +639,13 @@ public:
         if(have_root_solved_ && have_root_last_) {diag_.root_turn=body::twist_angle(body::mul(root_last_.q,body::conj(root_solved_.q)),{0,0,1});diag_.follow_delta=body::wrap_pi(follow_last_-follow_solved_);}
         const auto& sk=solver_.skeleton(1+side);const std::string prefix=side?"right":"left";
         diag_.wrist[side]=to_world(conv,to_xf(out[sk.find(prefix+"_wrist_jnt")]));
+        {
+            diag_.shoulder[side]=to_world(conv,to_xf(out[sk.find(prefix+"_arm_jnt")])).p;
+            diag_.elbow[side]=to_world(conv,to_xf(out[sk.find(prefix+"_elbow_jnt")])).p;
+            diag_.swivel[side]=out_.swivel[side];diag_.swivel_residual[side]=out_.swivel_residual[side];
+            diag_.natural_elbow[side]=swivel_elbow(diag_.shoulder[side],diag_.wrist[side].p,diag_.elbow[side],-out_.swivel[side]);
+            diag_.arm_joints_valid[side]=true;
+        }
         std::array<Transform,4> knuckles{};const char* fingers[]={"index","medium","ring","pinky"};
         for(unsigned j=0;j<4;++j) knuckles[j]=out[sk.find(prefix+"_"+fingers[j]+"_02_jnt")];
         diag_.palm[side]=to_world(conv,to_xf(rig::hand_bind_grip(out[sk.find(prefix+"_wrist_jnt")],knuckles)));
@@ -925,11 +948,12 @@ private:
         diag_.substeps=std::max(1u,static_cast<unsigned>(std::ceil(dt/(1/30.))));
         diag_.consumed_dt=dt;diag_.substep_dt=dt/diag_.substeps;
         // v861: a rig turn since the last solve turns the solver's memory (and the substeps' start) with the camera, about the camera anchor.
+        bool rig_turned=false;
         Xf from_eye=solved_eye_,from_hand[2]{hand_target(0,solved_track_.grip[0]),hand_target(1,solved_track_.grip[1])};
         if(previous && !diag_.gap_reset && !legacy_body_turn_ && track_.rig_valid && solved_track_.rig_valid && track_.epoch==solved_track_.epoch) {
             const double turn=body::wrap_pi(track_.rig_yaw-solved_track_.rig_yaw);
             if(std::abs(turn)>1e-7 && std::abs(turn)<3.1) {
-                solver_.turn_rig(turn,track_.rig_pivot);++rig_turns_;
+                solver_.turn_rig(turn,track_.rig_pivot);++rig_turns_;rig_turned=true;
                 const auto q=body::rot_z(turn);const Xf r{q,track_.rig_pivot-rotated(q,track_.rig_pivot)};
                 from_eye=body::mul(r,from_eye);for(auto& h:from_hand) h=body::mul(r,h);
             }
@@ -1008,6 +1032,7 @@ private:
             const auto interpolate=[](const Xf& a,const Xf& b,double t) {return Xf{body::nlerp(a.q,b.q,t),a.p+(b.p-a.p)*t};};
             for(unsigned step=1;step<=diag_.substeps;++step) {
                 in=target;in.dt=diag_.substep_dt;
+                for(unsigned i=0;i<2;++i) {in.arm_collision[i]=track_.arm_collision[i];if(rig_turned) in.arm_collision[i].count=0;}   // planes are in the world the rig just left
                 if(previous && !diag_.gap_reset) {
                     const double t=static_cast<double>(step)/diag_.substeps;
                     in.eye=interpolate(from_eye,target.eye,t);

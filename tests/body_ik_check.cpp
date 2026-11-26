@@ -4,6 +4,7 @@
 #include "player_rig_fixture.hpp"
 #include "player_clip_fixture.hpp"
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <fstream>
@@ -738,6 +739,77 @@ static int run(int argc,char** argv) {
         for(int a=-120;a<=120;a+=10) {roll=forearm_roll(roll,has,a*deg);has=true;expect(std::abs(roll-a*deg)<1e-9,"forearm roll follows a smooth sweep");}
         roll=forearm_roll(roll,true,170*deg);roll=forearm_roll(roll,true,-170*deg);   // across +-180: held at the limit, not flipped to the other side
         expect(std::abs(roll-2.3)<1e-12,"forearm roll holds the near limit across +-180");
+    }
+    {   // Arm collision: the elbow swivels about the shoulder-wrist axis to clear planes (arm_collision.hpp)
+        const auto make=[&]() {return BodySolver(body,left,right,{eye_height,span});};
+        const auto base_in=[&]() {
+            Inputs in;in.dt=1/90.;in.eye={eye_rotation(0,0),{0,0,eye_height}};
+            in.hand[0]={{},{.10,.22,1.20}};in.hand[1]={{},{.10,-.22,1.20}};
+            return in;
+        };
+        const auto joints=[&](BodySolver& s,const Output& o,int side) {
+            const auto& sk=s.skeleton(1+side);const std::string pre=side?"right":"left";
+            return std::array<Vec3,3>{o.arm[side][sk.find(pre+"_arm_jnt")].p,o.arm[side][sk.find(pre+"_elbow_jnt")].p,o.arm[side][sk.find(pre+"_wrist_jnt")].p};
+        };
+        const auto settle=[&](BodySolver& s,Inputs in,int n) {Output o;for(int k=0;k<n;++k) o=s.solve(in);return o;};
+        auto reference=make();auto ref_out=settle(reference,base_in(),30);
+        const auto nat=joints(reference,ref_out,1);
+        // swivel_moves_only_the_elbow: a plane just under the natural elbow
+        {
+            auto s=make();(void)settle(s,base_in(),30);
+            auto in=base_in();in.arm_collision[1].enabled=true;in.arm_collision[1].count=1;
+            ArmPlane pl;pl.point={nat[1].x,nat[1].y,nat[1].z-.03};pl.normal={0,0,1};pl.radius=.055;pl.last_hit=0;
+            in.arm_collision[1].planes[0]=pl;
+            Output o;for(int k=0;k<10;++k) o=s.solve(in);
+            const auto j=joints(s,o,1);
+            std::cerr<<"swivel "<<o.swivel[1]<<" residual "<<o.swivel_residual[1]<<" elbow z "<<j[1].z<<" nat "<<nat[1].z<<"\n";
+            expect(length(j[0]-nat[0])<1e-6,"swivel leaves the shoulder alone");
+            expect(length(j[2]-nat[2])<1e-6,"swivel leaves the wrist alone");
+            expect(dot(j[1]-pl.point,pl.normal)>=pl.radius+in.arm_collision[1].config.skin-1e-6,"swivelled elbow clears the plane by radius+skin");
+            expect(o.swivel_constrained[1] && std::fabs(o.swivel[1])>1e-3,"the swivel is reported");
+            expect(o.swivel[0]==0 && !o.swivel_constrained[0],"the other arm is untouched");
+        }
+        // shadow_reports_only
+        {
+            auto s=make();(void)settle(s,base_in(),30);
+            auto in=base_in();in.arm_collision[1].enabled=true;in.arm_collision[1].shadow=true;in.arm_collision[1].count=1;
+            ArmPlane pl;pl.point={nat[1].x,nat[1].y,nat[1].z-.03};pl.normal={0,0,1};pl.radius=.055;pl.last_hit=0;
+            in.arm_collision[1].planes[0]=pl;
+            Output o;for(int k=0;k<10;++k) o=s.solve(in);
+            auto plain=make();(void)settle(plain,base_in(),30);auto pout=settle(plain,base_in(),10);
+            const auto a=joints(s,o,1),b=joints(plain,pout,1);
+            expect(length(a[1]-b[1])<1e-12 && length(a[2]-b[2])<1e-12,"shadow draws the natural elbow");
+            expect(std::fabs(o.swivel[1])>1e-3,"shadow still reports the swivel");
+        }
+        // raw_arm_ignores_swivel
+        {
+            const auto raw_in=[&]() {auto in=base_in();in.hand_empty[1]=true;in.raw_hand_valid[1]=true;in.raw_hand[1]={{},{.12,-.20,1.18}};return in;};
+            auto s=make();(void)settle(s,raw_in(),30);
+            auto in=raw_in();in.arm_collision[1].enabled=true;in.arm_collision[1].count=1;
+            ArmPlane pl;pl.point={nat[1].x,nat[1].y,nat[1].z-.03};pl.normal={0,0,1};pl.radius=.055;pl.last_hit=0;
+            in.arm_collision[1].planes[0]=pl;
+            Output o;for(int k=0;k<6;++k) o=s.solve(in);
+            expect(std::fabs(o.swivel[1])>1e-3,"raw case: the drawn arm has a swivel");
+            auto plain=make();(void)settle(plain,raw_in(),30);Output p;for(int k=0;k<6;++k) p=plain.solve(raw_in());
+            expect(o.raw_arm[1].size()==p.raw_arm[1].size() && !o.raw_arm[1].empty(),"raw arm solved");
+            double worst=0;
+            for(std::size_t j=0;j<o.raw_arm[1].size()&&j<p.raw_arm[1].size();++j) worst=std::max(worst,length(o.raw_arm[1][j].p-p.raw_arm[1][j].p));
+            expect(worst<1e-9,"raw arm ignores the swivel (equals a solver that never had planes)");
+        }
+        // no_planes_identical
+        {
+            auto s=make();(void)settle(s,base_in(),30);
+            auto in=base_in();in.arm_collision[0].enabled=in.arm_collision[1].enabled=true;
+            auto plain=make();(void)settle(plain,base_in(),30);
+            for(int k=0;k<5;++k) {
+                const auto o=s.solve(in);const auto p=plain.solve(base_in());
+                for(int side=0;side<2;++side) {
+                    const auto a=joints(s,o,side),b=joints(plain,p,side);
+                    expect(std::memcmp(a.data(),b.data(),sizeof(a))==0,"enabled with no planes is bit-identical to disabled");
+                    expect(o.swivel[side]==0 && !o.swivel_constrained[side],"no planes, no swivel");
+                }
+            }
+        }
     }
     json+="]}";
     if(argc>1) {

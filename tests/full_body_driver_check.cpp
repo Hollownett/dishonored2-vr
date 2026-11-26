@@ -100,6 +100,41 @@ int main() {
         const auto grip=mapped.palm_source[0].grip;
         assert(length(cache.frame(grip,1491).position-grip.position)==0);
     }
+    {   // publishes_arm_joints / publishes_chest_frame
+        Driver d;d.tune(0,1);
+        for(unsigned side=0;side<2;++side)(void)d.arm(side,native_arm[side],identity);
+        d.note_root(identity);
+        auto t=tracking;t.tick=2000;t.source_tick=1990;t.seconds=2.;t.tracking_revision=1;t.tracked_hands=3;
+        d.publish(t,{});assert(d.body(native_body,identity,91));
+        for(unsigned side=0;side<2;++side) assert(d.arm_frozen(side,native_arm[side],identity,2000,91));
+        const auto dg=d.diagnostic();
+        for(unsigned side=0;side<2;++side) {
+            assert(dg.arm_joints_valid[side]);
+            assert(finite(dg.shoulder[side]) && finite(dg.elbow[side]) && finite(dg.natural_elbow[side]));
+            assert(length(dg.natural_elbow[side]-dg.elbow[side])<1e-9);
+            assert(length(dg.elbow[side]-dg.shoulder[side])>.1 && length(dg.wrist[side].p-dg.elbow[side])>.1);
+            assert(dg.swivel[side]==0);
+        }
+        assert(finite(dg.chest.p) && finite(dg.chest_forward) && finite(dg.chest_left));
+        assert(std::abs(length(dg.chest_forward)-1)<1e-9 && std::abs(length(dg.chest_left)-1)<1e-9);
+        assert(std::abs(dg.chest_forward.z)<1e-12 && std::abs(dg.chest_left.z)<1e-12 && std::abs(dot(dg.chest_forward,dg.chest_left))<1e-9);
+        assert(length(dg.chest.p-dg.pelvis.p)>.05);
+        // the arm collision input reaches the solver: a plane under the elbow swivels it, and the natural elbow stays put
+        auto t2=t;t2.tick=2010;t2.source_tick=2000;t2.seconds=2.1;t2.tracking_revision=2;
+        for(unsigned side=0;side<2;++side) {
+            auto& ac=t2.arm_collision[side];ac.enabled=true;ac.count=1;
+            ArmPlane pl;pl.point={dg.elbow[side].x,dg.elbow[side].y,dg.elbow[side].z-.03};pl.normal={0,0,1};pl.radius=.055;pl.last_hit=2.1;
+            ac.planes[0]=pl;
+        }
+        d.publish(t2,{});assert(d.body(native_body,identity,92));
+        for(unsigned side=0;side<2;++side) assert(d.arm_frozen(side,native_arm[side],identity,2010,92));
+        const auto dg2=d.diagnostic();
+        for(unsigned side=0;side<2;++side) {
+            assert(std::abs(dg2.swivel[side])>1e-3);
+            assert(length(dg2.natural_elbow[side]-dg.natural_elbow[side])<1e-4);
+            assert(length(dg2.elbow[side]-dg2.natural_elbow[side])>1e-3);
+        }
+    }
     // Arm-first callbacks solve the newest publication from the retained native body.
     tracking.tick=1000;driver.publish(stamp(tracking),{});
     assert(driver.arm(0,native_arm[0],identity));
