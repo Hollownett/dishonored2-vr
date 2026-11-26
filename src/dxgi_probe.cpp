@@ -6389,7 +6389,7 @@ static bool npc_entity(std::uintptr_t e) noexcept {std::uintptr_t vt{};return e 
 // Knobs: build/no-arm-collision (off), build/arm-collision-shadow (computed and reported, nothing drawn differently: the A/B lever).
 static d2vr::ArmCollision arm_collision;static bool arm_collision_enabled=true,arm_collision_shadow=false,forearm_contact_enabled=true;
 struct ArmCollisionPost {std::uint64_t id[2]{};d2vr::ArmGeometry geometry{};};
-static std::array<std::array<ArmCollisionPost,4>,2> arm_collision_posts{};static std::array<unsigned,2> arm_collision_next{};
+static std::array<std::array<ArmCollisionPost,16>,2> arm_collision_posts{};static std::array<unsigned,2> arm_collision_next{};   // final review M7: 16 posts (8 frames), answers stay matchable when the game thread runs much slower
 static std::array<std::array<std::uint64_t,2>,2> arm_collision_folded{};static std::uint64_t arm_collision_ids{0x41524d00000000ull};
 static std::array<bool,2> arm_collision_active{};
 struct ArmCollisionStatus {std::atomic<std::uint64_t> frames{},suspended{},posts{},answers{},solid{},other{},overlaps{},engaged{},infeasible{};
@@ -6404,7 +6404,7 @@ static bool finger_put_out_enabled=true,finger_slab_legacy=false;   // finger_sl
 // 6 rad/s; the contact pose closes with tau .03), G5 the fingers at a surface probed first, G6 the fingertip slabs on the palm's plane. Knobs
 // build/legacy-finger-timing, legacy-finger-probe-order, legacy-finger-plane restore each. finger_near_bits: per hand, the fingers whose drawn tip was
 // within 3 cm of a probe shape last frame (the probe priority).
-static bool finger_timing_on=true,finger_probe_order_on=true,finger_plane_on=true;static std::array<unsigned,2> finger_near_bits{};
+static bool finger_timing_on=true,finger_probe_order_on=true,finger_plane_on=true,finger_surface_rules_on=true;static std::array<unsigned,2> finger_near_bits{};   // finger_surface_rules_on: G3/G4/G7 (build/legacy-finger-surface)
 static std::array<std::atomic<UINT64>,2> finger_priority_casts{};
 static std::array<std::atomic<std::uint64_t>,2> finger_put_outs{};   // 2026-11-26 G1: fingers set out of a probe shape after the spring
 static std::string arm_collision_json() {
@@ -6597,6 +6597,9 @@ static std::atomic<std::uintptr_t> left_gun_model{},left_barrel_model{}; // cont
 static d2vr::HolsterConfig holster_config{};static d2vr::HolsterRig holster_rig;static bool gadget_stow_enabled=true,holster_draw_enabled=true,heart_pocket_enabled=true,legacy_shoulder_zone=false;
 static d2vr::BodyFrames holster_frames{};static UINT64 holster_frames_tick{};
 static std::array<d2vr::HolsterRig::InPlace,2> holster_in{};static std::array<d2vr::HeldKind,2> holster_held{};static std::array<bool,2> holster_shoulder_in{};
+// dsh review: a load or a death reload (where the hand clamp forgets: game logic 0 or bit 15) bumps this; the holster code drops the belt's memory
+// (the last gadget: a save loaded from before it has none), its places' state and any pull in progress the next time it runs.
+static std::atomic<UINT64> holster_forget_epoch{};
 static std::array<d2vr::HolsterPlace,2> holster_was{};static std::atomic<const char*> holster_pouch_key{};   // the last gadget a hand held: what a pouch gives (equip keys are string literals)
 static std::atomic<std::uint64_t> holster_valid_frames{},holster_enters{},holster_armed{},holster_draws{},holster_cancelled{},holster_empty{},holster_stows_gadget{},
     holster_stows_heart{},holster_shoulder_union{},holster_draw_failed{};
@@ -6625,6 +6628,7 @@ static bool holster_is_draw_place(d2vr::HolsterPlace p) noexcept {using P=d2vr::
 // Once per frame (controls thread), before the sheath and the gadget / Heart blocks: the body frames, each hand's held item, its place.
 static void holster_frame_update(bool gameplay) {
     const auto now=GetTickCount64();
+    {static UINT64 seen{};if(const auto e=holster_forget_epoch.load(std::memory_order_relaxed);e!=seen) {seen=e;holster_rig=d2vr::HolsterRig{holster_config};holster_was={};holster_pouch_key.store(nullptr);}}
     {std::lock_guard<std::mutex> lock(hand_state_mutex);
      if(holster_body_tick) {const auto keep_head=holster_frames;holster_frames=holster_body_frames;holster_frames.head=keep_head.head;holster_frames.head_forward=keep_head.head_forward;
          holster_frames_tick=holster_body_tick;}}
@@ -10424,7 +10428,7 @@ static void arm_collision_frame(d2vr::fullbody::Tracking& t,unsigned hands_mask,
                 if(h.initial_overlap) ++st.overlaps;else if(solid) ++st.solid;else ++st.other;
                 hits[part]=d2vr::ArmHit{h.point,h.normal,h.initial_overlap,h.normal_valid,solid};
             }
-            arm_collision.observe(side,post->geometry,hits,now_s);
+            arm_collision.observe(side,post->geometry,hits,now_s,1u<<part);   // dsh review: this answer's cast only (stats.casts counted both per call)
         }
         // this frame's casts of the natural arm
         const d2vr::ArmGeometry g{j.shoulder,j.natural,j.wrist,true};
@@ -10485,7 +10489,7 @@ void prepare_head_view(void* view) noexcept {
         }
         // G2: an open exact-32 cutscene renders its view here too (render only: every side effect below stays on raw logic 2 / render_world_scene())
         if(!render_scene_frame()) {native_audio_listener.clear();native_left_aim.clear();native_shot_aim.clear();native_crosshair.clear();native_weapon_attachment.clear();head_body_anchor.clear();cutscene_hands_live=false;
-            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();d2vr::weapon_draw::Binder::forget();d2vr::NativeRangedFire::forget_owners();for(auto& k:held_mesh_key) k.store(0,std::memory_order_relaxed);d2vr::ObjectMotion::forget_mirrors();}   // v1284 (4.4): no instance's bolt across a load // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
+            if(d2vr::clamp_forgets_on(game_logic_mask())) {forget_hand_clamp();holster_forget_epoch.fetch_add(1,std::memory_order_relaxed);d2vr::weapon_draw::Binder::forget();d2vr::NativeRangedFire::forget_owners();for(auto& k:held_mesh_key) k.store(0,std::memory_order_relaxed);d2vr::ObjectMotion::forget_mirrors();}   // v1284 (4.4): no instance's bolt across a load // a load or death reload: no planes or hands from before it (N6); v1277 no remembered weapon G (pointers are reused)
             return;}
         // Ruling 15: the cutscene state is read ONCE per displayed frame (the mask can flip between reads); every decision below uses it
         static UINT64 cutscene_frame_of=~0ull;static bool cutscene_frame_latched{};
@@ -12009,11 +12013,14 @@ void prepare_head_view(void* view) noexcept {
                     unsigned hwc_armed{};{std::lock_guard<std::mutex> hand_lock(hand_state_mutex);hwc_armed=hand_loadout_bits(hand_weapon_bits);}
                     d2vr::HwcSide hs[2]{};
                     // 2026-11-26: each arm's forearm (last frame's drawn elbow to wrist) is solid for the other hand and its weapon (no forearm pair: arms cross freely)
-                    const auto hwc_diag=forearm_contact_enabled?std::optional<d2vr::fullbody::Diagnostic>(full_body.diagnostic()):std::nullopt;
+                    // final review I1: the joints latched by arm_collision_frame (fresh 100 ms), not the diagnostic's flag, which every publication clears
+                    // until the next arm upload (a frame between the two dropped the forearm and its contact for a frame: a 1-2 cm on/off flicker)
+                    const auto hwc_now=GetTickCount64();
                     for(unsigned side=0;side<2;++side) {
                         const auto& gp=hands.grips[side];auto& h=hs[side];h.tracked=true;
-                        if(hwc_diag && hwc_diag->arm_joints_valid[side] && d2vr::finite(hwc_diag->elbow[side]) && d2vr::finite(hwc_diag->wrist[side].p) &&
-                           d2vr::length(hwc_diag->wrist[side].p-gp.position)<.25) {h.has_forearm=true;h.forearm={hwc_diag->wrist[side].p,hwc_diag->elbow[side],.045};}
+                        const auto& fj=arm_joints_latched[side];
+                        if(forearm_contact_enabled && fj.tick && hwc_now>=fj.tick && hwc_now-fj.tick<=100 && d2vr::finite(fj.elbow) && d2vr::finite(fj.wrist) &&
+                           d2vr::length(fj.wrist-gp.position)<.25) {h.has_forearm=true;h.forearm={fj.wrist,fj.elbow,.045};}
                         const auto v=hdt>1e-4 && hdt<.1?(gp.position-hwc_last[side])*(1./hdt):d2vr::Vec3{};hwc_last[side]=gp.position;
                         h.part[0]={gp.position,gp.position,.045};h.vel[0]=v;h.vel[1]=v;
                         const bool sword_here=side==sword_arm_now() && ((hwc_armed>>side)&1u) && !native_grab.holding(side);
@@ -12390,7 +12397,7 @@ void prepare_head_view(void* view) noexcept {
                             const double open_lag=!ease_opening?0.:d2vr::rig::finger_open_lag(*geometry,free_hand && finger_ik[side].speed>=.3f?.015:.005);
                             const unsigned budget=free_hand?d2vr::rig::finger_free_budget(finger_ik[side].speed,finger_free_solve_budget):finger_solve_budget;
                             {contact=d2vr::rig::finger_contact(*geometry,palm,shapes.data(),count,fdt,finger_ik[side],legacy_finger_ease?(held_hand?d2vr::rig::held_curl:1.f):reach,budget,&wants,ease_opening,open_lag,free_hand,
-                                finger_timing_on?d2vr::rig::finger_ik_close_tau:d2vr::rig::finger_ik_tau);}   // G8: the port's quick close
+                                finger_timing_on?d2vr::rig::finger_ik_close_tau:d2vr::rig::finger_ik_tau,finger_surface_rules_on);}   // G8: the port's quick close; G3/G4/G7 unless legacy-finger-surface
                             {unsigned blocked_bits=0,hyper_bits=0;for(unsigned f=0;f<5;++f) {blocked_bits|=contact.blocked[f]?1u<<f:0u;hyper_bits|=contact.hyperextended[f]?1u<<f:0u;finger_stuck[side][f]=contact.stuck_frames[f];}
                              finger_blocked_bits[side]=blocked_bits;finger_hyper_bits[side]=hyper_bits;}
                             finger_ease_active[side]=blending || ease_opening;
@@ -13796,7 +13803,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"multiple\":" << query_outcomes[3] << ",\"rejected\":" << query_outcomes[4] << "}}"
         << ",\"native_art_movies\":{\"patched\":" << d2vr::native_art_movie_patched.load() << ",\"rejected\":" << d2vr::native_art_movie_rejected.load() << '}'
         << ",\"perf_governor\":{\"active\":" << (perf_governor_active?"true":"false") << ",\"scale\":" << perf_governor.scale() << ",\"changes\":" << perf_governor.changes << ",\"cpu_bound_holds\":" << perf_governor.cpu_bound_holds << "}" << ",\"performance_mode_advice\":{\"state\":\"" << d2vr::perf_mode_advice_name(perf_mode_advisor.advice) << "\",\"over_share\":" << perf_mode_advisor.last_over << ",\"gpu_share\":" << perf_mode_advisor.last_gpu_share << ",\"decisions\":" << perf_mode_advisor.decisions << ",\"gpu_windows\":" << perf_mode_advisor.gpu_windows << ",\"cpu_windows\":" << perf_mode_advisor.cpu_windows << "}" << ",\"finger_ik\":{\"frames\":" << finger_ik_frames.load() << ",\"avg_us\":" << (finger_ik_frames.load()?finger_ik_ns.load()/1000.0/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"max_us\":" << finger_ik_max_ns.load()/1000.0 << ",\"avg_shapes\":" << (finger_ik_frames.load()?static_cast<double>(finger_ik_shapes.load())/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"posts\":" << finger_probe_posts.load() << ",\"hits\":" << finger_probe_hits.load() << ",\"props\":" << finger_collider_props.load() << ",\"slabs\":" << finger_collider_slabs.load() << ",\"touch\":[" << held_touch_along_dbg.load() << ',' << held_touch_roll_dbg.load() << ',' << held_touches.load() << ',' << held_touch_defaults.load() << ']' << ",\"hold\":[" << held_snap.cylinder_set_frames << ',' << held_snap.gate_fail_frames << ',' << held_cylinder_errors.load() << ',' << held_snap.gate_distance << ',' << finger_thin_holds.load() << ',' << finger_box_holds.load() << ',' << finger_flat_holds.load() << ',' << finger_surface_holds.load() << ']' << ",\"solve_us\":[" << (finger_solve_calls.load()?finger_solve_ns.load()/1000.0/static_cast<double>(finger_solve_calls.load()):0.0) << ',' << finger_solve_max_ns.load()/1000.0 << "],\"geo_max_us\":" << finger_geo_max_ns.load()/1000.0 << ",\"ease_active\":[" << (finger_ease_active[0].load()?1:0) << ',' << (finger_ease_active[1].load()?1:0) << "]" << ",\"probe_hits_world\":" << finger_probe_hits_world.load() << ",\"probe_hits_thin\":" << finger_probe_hits_thin.load() << ",\"thin_props\":" << finger_collider_thin.load() << ",\"probe_casts\":" << finger_probe_casts << ",\"surface\":" << (finger_surface?"true":"false") << [&]{std::ostringstream o;const auto bits=[&](const char* key,const std::array<std::atomic<unsigned>,2>& v) {o<<",\""<<key<<"\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<((v[h].load()>>f)&1u);o<<']';}o<<']';};
-                   bits("blocked",finger_blocked_bits);bits("hyperextended",finger_hyper_bits);o<<",\"tip_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<n<<','<<tip_pen_over[h].load()<<','<<tip_pen_max_slow_um[h].load()/1000.<<','<<tip_pen_max_fast_um[h].load()/1000.<<','<<(n?static_cast<double>(tip_pen_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_um[h].load()/1000.<<','<<tip_pen_palm_um[h].load()/1000.<<','<<tip_pen_blocked[h].load()<<','<<tip_pen_hyper[h].load()<<']';}o<<']';o<<",\"round2\":{\"timing\":"<<(finger_timing_on?"true":"false")<<",\"probe_order\":"<<(finger_probe_order_on?"true":"false")<<",\"plane\":"<<(finger_plane_on?"true":"false")<<",\"priority_casts\":["<<finger_priority_casts[0].load()<<','<<finger_priority_casts[1].load()<<"]}";o<<",\"steady\":[";for(unsigned h=0;h<2;++h) {const auto n=finger_steady_n[h].load();o<<(h?",[":"[")<<n<<','<<finger_steady_max_um[h].load()/1000.<<','<<(n?static_cast<double>(finger_steady_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<finger_open_frames[h].load()<<','<<finger_blocked_flips[h].load()<<']';}o<<']';o<<",\"stuck_frames\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<finger_stuck[h][f].load();o<<']';}o<<']';return o.str();}() << ",\"profile\":[" << profile_casts.load() << ',' << profile_hits.load() << ',' << profile_entries.load() << ']'
+                   bits("blocked",finger_blocked_bits);bits("hyperextended",finger_hyper_bits);o<<",\"tip_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<n<<','<<tip_pen_over[h].load()<<','<<tip_pen_max_slow_um[h].load()/1000.<<','<<tip_pen_max_fast_um[h].load()/1000.<<','<<(n?static_cast<double>(tip_pen_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_um[h].load()/1000.<<','<<tip_pen_palm_um[h].load()/1000.<<','<<tip_pen_blocked[h].load()<<','<<tip_pen_hyper[h].load()<<']';}o<<']';o<<",\"round2\":{\"surface_rules\":"<<(finger_surface_rules_on?"true":"false")<<",\"timing\":"<<(finger_timing_on?"true":"false")<<",\"probe_order\":"<<(finger_probe_order_on?"true":"false")<<",\"plane\":"<<(finger_plane_on?"true":"false")<<",\"priority_casts\":["<<finger_priority_casts[0].load()<<','<<finger_priority_casts[1].load()<<"]}";o<<",\"steady\":[";for(unsigned h=0;h<2;++h) {const auto n=finger_steady_n[h].load();o<<(h?",[":"[")<<n<<','<<finger_steady_max_um[h].load()/1000.<<','<<(n?static_cast<double>(finger_steady_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<finger_open_frames[h].load()<<','<<finger_blocked_flips[h].load()<<']';}o<<']';o<<",\"stuck_frames\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<finger_stuck[h][f].load();o<<']';}o<<']';return o.str();}() << ",\"profile\":[" << profile_casts.load() << ',' << profile_hits.load() << ',' << profile_entries.load() << ']'
         << ",\"route\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<(finger_route_hold[i].load()?1:0)<<','<<finger_route_pub[i][0].load()<<','<<finger_route_pub[i][1].load()<<','<<finger_route_pub[i][2].load()<<','<<finger_route_pub[i][3].load()<<']';}return o.str();}() << ']'
         << ",\"bend\":{\"planned\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<planned_bend[i][0].load()<<','<<planned_bend[i][1].load()<<','<<planned_bend[i][2].load()<<','<<planned_bend[i][3].load()<<']';}o<<']';return o.str();}()
         << ",\"drawn\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<drawn_bend[i][0].load()<<','<<drawn_bend[i][1].load()<<','<<drawn_bend[i][2].load()<<','<<drawn_bend[i][3].load()<<']';}o<<']';return o.str();}()
@@ -17533,6 +17540,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                             // and the item is equipped by its inventory name (gadget_restore_item below). Nothing to give: an "empty" double tick.
                                             if(holster_draw_enabled) {
                                                 static std::array<UINT64,2> empty_tick_at{},check_until{};static std::array<bool,2> check_heart{};
+                                                {static UINT64 seen{};if(const auto e=holster_forget_epoch.load(std::memory_order_relaxed);e!=seen) {seen=e;empty_tick_at={};check_until={};check_heart={};}}   // a load: no pull carries over
                                                 const auto now_d=GetTickCount64();
                                                 if(empty_tick_at[h] && now_d>=empty_tick_at[h]) {empty_tick_at[h]=0;game_xr->pulse(h,.15f,.012f);}
                                                 if(check_until[h] && now_d>=check_until[h]) {   // the equip landed? a pouch whose gadget ran out forgets it
@@ -17559,7 +17567,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                     const auto cfx=arm_set.catch_gadget(h,now_d,left_aim_equip_revision.load(std::memory_order_acquire));
                                                     if(key && !cfx.refused) {
                                                         arms_apply(cfx,"pouch_draw");arms_publish();gadget_claim_tick=now_d;gadget_restore_item=key;gadget_restore_at=now_d;
-                                                        check_until[h]=now_d+800;check_heart[h]=heart_draw;++holster_draws;game_xr->pulse(h,.55f,.025f);
+                                                        check_until[h]=now_d+1500;check_heart[h]=heart_draw;++holster_draws;game_xr->pulse(h,.55f,.025f);
                                                         dual_wield_event("\"ev\":\"pouch_draw\",\"hand\":"+std::to_string(h)+",\"place\":\""+holster_place_name(dout.place)+"\",\"key\":\""+key+"\"");
                                                     } else {++holster_draw_failed;dual_wield_event("\"ev\":\"pouch_draw_refused\",\"hand\":"+std::to_string(h)+",\"key\":"+std::to_string(key?1:0));}
                                                 }
@@ -20575,7 +20583,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // 2026-11-26: arm collision, forearm contact, body holsters (spec docs/superpowers/specs/2026-11-26-arm-weapon-collisions-holsters-design.md)
         arm_collision_enabled=!fs::exists(root/L"build"/L"no-arm-collision");arm_collision_shadow=fs::exists(root/L"build"/L"arm-collision-shadow");
         forearm_contact_enabled=!fs::exists(root/L"build"/L"no-forearm-contact");finger_put_out_enabled=!fs::exists(root/L"build"/L"no-finger-put-out");finger_slab_legacy=fs::exists(root/L"build"/L"legacy-finger-slab");
-        finger_timing_on=!fs::exists(root/L"build"/L"legacy-finger-timing");finger_probe_order_on=!fs::exists(root/L"build"/L"legacy-finger-probe-order");finger_plane_on=!fs::exists(root/L"build"/L"legacy-finger-plane");d2vr::NativeWeaponHands::hip_carry_on_.store(!fs::exists(root/L"build"/L"legacy-hip-place"));arm_collision=d2vr::ArmCollision{};arm_collision_posts={};arm_collision_folded={};arm_collision_active={};
+        finger_timing_on=!fs::exists(root/L"build"/L"legacy-finger-timing");finger_probe_order_on=!fs::exists(root/L"build"/L"legacy-finger-probe-order");finger_plane_on=!fs::exists(root/L"build"/L"legacy-finger-plane");finger_surface_rules_on=!fs::exists(root/L"build"/L"legacy-finger-surface");d2vr::NativeWeaponHands::hip_carry_on_.store(!fs::exists(root/L"build"/L"legacy-hip-place"));arm_collision=d2vr::ArmCollision{};arm_collision_posts={};arm_collision_folded={};arm_collision_active={};
         gadget_stow_enabled=!fs::exists(root/L"build"/L"no-gadget-stow");holster_draw_enabled=!fs::exists(root/L"build"/L"no-holster-draw");
         heart_pocket_enabled=d2vr::game_traits::has_heart && !fs::exists(root/L"build"/L"no-heart-pocket");legacy_shoulder_zone=fs::exists(root/L"build"/L"legacy-shoulder-zone");
         {   d2vr::HolsterConfig cfg{};
