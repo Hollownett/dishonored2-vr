@@ -1,5 +1,7 @@
 #include "../src/finger_probe_cache.hpp"
 #include <cassert>
+#include <cmath>
+#include <cstring>
 #include <iostream>
 namespace r=d2vr::rig;
 namespace {
@@ -68,6 +70,37 @@ int main() {
         c.probed(0,table(),t+14);assert(live(c,t+14)==1);
         // a fingertip slot keeps its two-miss rule
         r::FingerProbeCache d;d.probed(4,table(),1000);d.probed(4,std::nullopt,1014);d.probed(4,std::nullopt,1028);assert(live(d,1028)==0);
+    }
+    {   // finger_probe_priority (G5)
+        unsigned hits[5]{};
+        for(unsigned fr=0;fr<10;++fr) ++hits[r::pick_probe_finger(0b00110,fr,0,1)];
+        assert(hits[1]+hits[2]>=7);for(unsigned f=0;f<5;++f) assert(hits[f]>=1);
+        for(unsigned casts:{1u,2u}) for(unsigned fr=0;fr<100;++fr) for(unsigned k=0;k<casts;++k) assert(r::pick_probe_finger(0,fr,k,casts)==(fr*casts+k)%5);
+        for(unsigned bits:{0u,0x20u,0xe0u}) assert(r::pick_probe_finger(bits,7,0,1)==7%5);
+        unsigned seen[5]{};
+        for(unsigned fr=0;fr<10;++fr) for(unsigned k=0;k<2;++k) ++seen[r::pick_probe_finger(0b10000,fr,k,2)];
+        for(unsigned f=0;f<5;++f) assert(seen[f]>=1);
+    }
+    {   // finger_slab_on_palm_plane (G6)
+        const double d=3.14159265358979323846/180;
+        const auto slab=[&](double x,double tilt_deg,double above,double half) { // face on z=above at x, tilted about y
+            const d2vr::Vec3 n{std::sin(tilt_deg*d),0,std::cos(tilt_deg*d)};
+            auto h=r::slab_shape({x,0,above},n,half);return h;};
+        const auto run=[&](r::HeldShape tip,bool surface,bool palm_live,r::HeldShape& got) {
+            r::FingerProbeCache c;c.probed(0,slab(0,0,0,.07),1000,true);c.probed(1,tip,1000,surface);
+            const std::uint64_t now=palm_live?1000:1000+400;
+            if(!palm_live) c.probed(1,tip,now,surface); // the tip stays live, the palm expired
+            std::array<r::HeldShape,8> out{};const unsigned n=c.shapes_on_palm_plane(now,out);assert(n==(palm_live?2u:1u));got=out[n-1];};
+        for(double tilt:{1.5,2.5}) {
+            const auto in=slab(.08,tilt,.003,.05);r::HeldShape got{};run(in,true,true,got);
+            assert(dot(got.frame.basis[2],d2vr::Vec3{0,0,1})>1-1e-9);
+            const d2vr::Vec3 face=got.frame.position+got.frame.basis[2]*got.half.z;
+            assert(std::abs(face.z)<1e-6 && std::abs(face.x-(.08-.003*0))<.01);
+            assert(got.half.x==.05 && got.half.y==.05 && got.half.z==in.half.z);
+        }
+        for(const auto& in:{slab(.08,10,.003,.05),slab(.08,1.5,.008,.05)}) {r::HeldShape got{};run(in,true,true,got);assert(std::memcmp(&got,&in,sizeof got)==0);}
+        {const auto in=slab(.08,1.5,.003,.05);r::HeldShape got{};run(in,false,true,got);assert(std::memcmp(&got,&in,sizeof got)==0);}
+        {const auto in=slab(.08,1.5,.003,.05);r::HeldShape got{};run(in,true,false,got);assert(std::memcmp(&got,&in,sizeof got)==0);}
     }
     std::cout<<"finger_probe_cache_check passed"<<std::endl;
     return 0;

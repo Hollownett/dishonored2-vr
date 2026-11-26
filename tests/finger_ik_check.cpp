@@ -3,6 +3,7 @@
 #include "../src/hand_bind.hpp"
 #include <cassert>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <limits>
 namespace r=d2vr::rig;
@@ -1479,6 +1480,55 @@ int main() {
         r::FingerPoseFilter off{};(void)off.step(zero,1/90.,0);assert(off.step(one,1/90.,0)[0][0]==1);
         r::FingerPoseFilter held{};(void)held.step(zero,1/90.);assert(held.step(one,0)[0][0]==0); // no time, no move
     }
+    {   // finger_pose_filter_close_fast (G8)
+        std::array<std::array<float,3>,5> zero{},half{};half[2][1]=.5f;
+        const auto run=[&](bool in,double& t90,double& peak,double& worst_over) {
+            r::FingerPoseFilter f{};(void)f.step(in?zero:half,1/90.,r::finger_pose_open_time,r::finger_pose_close_time,r::finger_pose_max_rate);
+            t90=-1;peak=0;worst_over=0;double t=0;
+            for(unsigned i=0;i<90;++i) {
+                const float v=f.step(in?half:zero,1/90.,r::finger_pose_open_time,r::finger_pose_close_time,r::finger_pose_max_rate)[2][1];t+=1/90.;
+                peak=std::max(peak,static_cast<double>(std::abs(f.speed[2][1])));
+                worst_over=std::max(worst_over,in?v-.5:-static_cast<double>(v));
+                if(t90<0 && (in?v>=.45f:v<=.05f)) t90=t;
+            }
+        };
+        double t_in,p_in,o_in,t_out,p_out,o_out;run(true,t_in,p_in,o_in);run(false,t_out,p_out,o_out);
+        std::cerr<<"close_fast: into 90% at "<<t_in<<" s, out at "<<t_out<<" s, peak speed "<<p_in<<" / "<<p_out<<" rad/s"<<std::endl;
+        {   // out of a bend the 6 rad/s cap is never reached: the capped trajectory equals the uncapped one (the cap must not change the spring)
+            r::FingerPoseFilter a{},b{};(void)a.step(half,1/90.,r::finger_pose_open_time,r::finger_pose_close_time,r::finger_pose_max_rate);(void)b.step(half,1/90.,r::finger_pose_open_time,r::finger_pose_close_time,0);
+            for(unsigned i=0;i<90;++i) {
+                const float x=a.step(zero,1/90.,r::finger_pose_open_time,r::finger_pose_close_time,r::finger_pose_max_rate)[2][1],y=b.step(zero,1/90.,r::finger_pose_open_time,r::finger_pose_close_time,0)[2][1];
+                assert(std::abs(x-y)<=1e-6 && std::abs(a.speed[2][1])<6);
+            }
+        }
+        {   // the thumb's sign: 0 -> +.5 is into a bend (close_time), 0 -> -.3 is out (open_time)
+            std::array<std::array<float,3>,5> zero2{},pos{},neg{};pos[0][1]=.5f;neg[0][1]=-.3f;
+            r::FingerPoseFilter c{},o{};(void)c.step(zero2,1/90.);(void)o.step(zero2,1/90.);
+            const float vc=c.step(pos,1/90.,.07,.035)[0][1],vo=o.step(neg,1/90.,.07,.035)[0][1];
+            r::FingerPoseFilter c2{},o2{};(void)c2.step(zero2,1/90.);(void)o2.step(zero2,1/90.);
+            assert(vc==c2.step(pos,1/90.,.035)[0][1] && vo==o2.step(neg,1/90.,.07)[0][1]);
+        }
+        assert(t_in>0 && t_in<=.12+1e-9);assert(t_out<0 || t_out>.12);assert(p_in<=6+1e-6 && p_out<=6+1e-6);assert(o_in<=1e-6 && o_out<=1e-6);
+    }
+    {   // finger_pose_filter_defaults_identical (G8): close_time 0 and max_rate 0 are the old symmetric spring, bit for bit
+        r::FingerPoseFilter f{};std::array<std::array<float,3>,5> oldturn{},oldspeed{},target{};
+        unsigned seed=12345;const auto rnd=[&] {seed=seed*1664525u+1013904223u;return static_cast<float>((seed>>8)&0xffff)/65535.f*2-.5f;};
+        bool first=true;
+        for(unsigned i=0;i<200;++i) {
+            for(auto& a:target) for(auto& v:a) v=rnd();
+            const double dt=1/72.;
+            const auto& got=f.step(target,dt);
+            if(first) {oldturn=target;oldspeed={};first=false;}
+            else {
+                const double omega=2/r::finger_pose_smooth_time,x=omega*dt,e=1/(1+x+.48*x*x+.235*x*x*x);
+                for(unsigned a=0;a<5;++a) for(unsigned j=0;j<3;++j) {
+                    const double change=oldturn[a][j]-target[a][j],temp=(oldspeed[a][j]+omega*change)*dt;
+                    oldspeed[a][j]=static_cast<float>((oldspeed[a][j]-omega*temp)*e);oldturn[a][j]=static_cast<float>(target[a][j]+(change+temp)*e);
+                }
+            }
+            assert(std::memcmp(&got,&oldturn,sizeof oldturn)==0 && std::memcmp(&f.speed,&oldspeed,sizeof oldspeed)==0);
+        }
+    }
     // Task 11: fingers on tables, walls and edges (fingers-gap G1-G4, G7).
     for(bool right:{false,true}) {
         const auto h=real_hand(right);const auto& g=h.geometry;const Vec3 up=r::palm_normal(h.palm,g);
@@ -1630,6 +1680,25 @@ int main() {
             }
             if(report_task11) std::cerr<<side<<"buried hysteresis: largest min_curl step "<<worst<<", mode flips "<<flips<<std::endl;
             assert(worst<.05 && flips<=2);
+        }
+        {   // finger_contact_close_tau (G8): close_tau is used only by the closing branch
+            const std::array<float,5> fist{1,1,1,1,1};const double dt=1/60.;
+            const auto close_run=[&](double tau) { // a hand held open by a wall, the wall gone: the pose closes onto nothing toward the free target
+                const auto slab=r::slab_shape(h.palm.position+up*.01,up*-1.);
+                r::FingerIkState st{};for(unsigned i=0;i<4;++i) (void)r::finger_contact(g,h.palm,&slab,1,dt,st,1.f,r::finger_solve_all,&fist,true,r::finger_open_lag(g,.005),true,tau);
+                r::FingerCurls c{};for(unsigned i=0;i<3;++i) c=r::finger_contact(g,h.palm,nullptr,0,dt,st,1.f,r::finger_solve_all,&fist,false,0,false,tau);
+                return c;};
+            const auto slow=close_run(r::finger_ik_tau),quick=close_run(r::finger_ik_close_tau);
+            double remain_slow=0,remain_quick=0;for(unsigned f=1;f<5;++f) for(unsigned j=0;j<3;++j) {remain_slow+=std::abs(slow.pose[f][j]-r::finger_angles(f,1.)[j]);remain_quick+=std::abs(quick.pose[f][j]-r::finger_angles(f,1.)[j]);}
+            std::cerr<<side<<"close_tau: remaining "<<remain_slow<<" (default) vs "<<remain_quick<<" (.03)"<<std::endl;
+            assert(remain_quick<remain_slow);
+            const auto open_run=[&](double tau) { // a shape arriving over a closed free hand: the opening path
+                const auto slab=r::slab_shape(h.palm.position+up*.01,up*-1.);
+                r::FingerIkState st{};for(unsigned i=0;i<4;++i) (void)r::finger_contact(g,h.palm,nullptr,0,dt,st,1.f,r::finger_solve_all,&fist,false,0,false,tau);
+                r::FingerCurls c{};for(unsigned i=0;i<3;++i) c=r::finger_contact(g,h.palm,&slab,1,dt,st,1.f,r::finger_solve_all,&fist,true,r::finger_open_lag(g,.005),true,tau);
+                return c;};
+            const auto a=open_run(r::finger_ik_tau),b=open_run(r::finger_ik_close_tau);
+            assert(std::memcmp(&a.pose,&b.pose,sizeof a.pose)==0);
         }
     }
     std::cout<<"finger_ik_check passed"<<std::endl;

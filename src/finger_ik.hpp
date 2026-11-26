@@ -111,6 +111,7 @@ struct FingerIkState {
     unsigned thumb_waited{};                 // calls the thumb has waited for a turn behind the fingers
     std::array<float,5> min_curl{};std::array<bool,5> blocked{},hyperextended{};std::array<unsigned,5> stuck{}; // G5, as FingerCurls has them (min_curl smoothed)
 };
+inline constexpr double finger_ik_close_tau=.03; // G8 (the reference mod's quick close): the tau the contact pose closes with when the controller asks for it
 inline constexpr double finger_ik_tau=.06; // s: fingers settle onto a shape in ~3 tau; opening (a shape arriving) is immediate unless eased (finger_contact ease_opening)
 // A hand lying on a surface (research recommendation 10): the palm skin within resting_gap_far of one and slower than resting_speed_fast
 // raises the four fingers' wanted curl toward resting_curl (a contact still caps it). Full strength inside resting_gap_near / resting_speed_slow.
@@ -605,10 +606,11 @@ inline float memo_reach_key(float reach) noexcept {return std::round(reach/memo_
 // where its march left it, closes across the palm to the least curl that is out (min_curl), or fully (blocked). Off for a hold: a wrap closes around
 // what it holds.
 inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPose& palm,const HeldShape* shapes,unsigned count,double dt,FingerIkState& state,float reach=1.f,
-    unsigned budget=finger_solve_all,const std::array<float,5>* wanted=nullptr,bool ease_opening=false,double max_open_lag_rad=0,bool stop_extended=false) {
+    unsigned budget=finger_solve_all,const std::array<float,5>* wanted=nullptr,bool ease_opening=false,double max_open_lag_rad=0,bool stop_extended=false,double close_tau=finger_ik_tau) {
     require_hand(hand);require_frame(palm,"Invalid finger palm frame",true);
     if(!std::isfinite(dt) || dt<0 || dt>1) throw std::invalid_argument("Invalid finger contact step");
     if(!std::isfinite(max_open_lag_rad) || max_open_lag_rad<0) throw std::invalid_argument("Invalid finger opening lag");
+    if(!(close_tau>0) || !std::isfinite(close_tau)) throw std::invalid_argument("Invalid finger closing time");
     if(count>max_contact_shapes || (count && !shapes)) throw std::invalid_argument("Invalid finger contact set");
     for(unsigned i=0;i<count;++i) require_shape(shapes[i]);
     auto pose_target=free_curls(reach);
@@ -954,9 +956,11 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
     if(stop_extended && rest_weight>resting_open_weight) {state.open_last=rest_weight;state.open_hold=static_cast<float>(finger_open_hold_s);open_target=rest_weight;}
     else if(!stop_extended) {state.open=0;state.open_hold=0;state.open_last=0;} // a hold wraps what it holds: the open share ends at once
     else {state.open_hold=static_cast<float>(std::max(0.,state.open_hold-dt));if(state.open_hold>0) open_target=state.open_last;}
+    const double kc=dt>0?1-std::exp(-dt/close_tau):0; // G8: the closing branch of follow only (target >= current); close_tau = finger_ik_tau is k
     const auto follow=[&](float& c,float t) {
         if(!state.valid) {c=t;return;}
-        if(t>=c || !ease_opening) {c=std::min(t,static_cast<float>(c+(t-c)*k));return;}
+        if(t>=c) {c=std::min(t,static_cast<float>(c+(t-c)*kc));return;}
+        if(!ease_opening) {c=std::min(t,static_cast<float>(c+(t-c)*k));return;}
         c=static_cast<float>(std::max(static_cast<double>(t),std::min(c+(t-c)*k,t+max_open_lag_rad))); // eased opening, bounded lag
     };
     const auto ease=[&](float& c,float t) {c=state.valid?static_cast<float>(c+(t-c)*k):t;};
@@ -1002,15 +1006,34 @@ inline std::array<float,5> grip_curls(const FingerCurls& contact,float squeeze,f
 // games (user, headset v693: fingers on things jumped from pose to pose). Whatever the solve does between two frames (a contact arriving, the
 // memo, the fingers taking turns, the thumb rule) is never a jump. smooth_time 0: the solved pose verbatim.
 inline constexpr double finger_pose_smooth_time=.07;
+// G8 (the reference mod: critically damped, tau .035 s into a bend, .07 s out, max 6 rad/s): step's close_time and max_rate. SIGN RULE: every joint's turn
+// is positive toward flexion (finger_limit_degrees are positive and finger_angles/finger_turn_at/finger_curl_at grow with the curl; the thumb's open pose,
+// finger_open_degrees, is NEGATIVE: opening is toward negative, closing across the palm toward positive; a finger's hyperextension is negative too). So a
+// joint moves INTO a bend exactly when target > current turn, for every finger and joint, and out of it when target < turn.
+inline constexpr double finger_pose_close_time=.035,finger_pose_open_time=.07,finger_pose_max_rate=6.;
 struct FingerPoseFilter {
     std::array<std::array<float,3>,5> turn{},speed{};bool valid{};
-    const std::array<std::array<float,3>,5>& step(const std::array<std::array<float,3>,5>& target,double dt,double smooth_time=finger_pose_smooth_time) {
+    // close_time>0: a joint moving into a bend (target > turn, the sign rule above) uses close_time instead of smooth_time. max_rate>0: the joint's speed is
+    // clamped to +-max_rate (rad/s), its turn advanced by the clamped speed and never past the target. Both 0: the symmetric spring, bit-identical.
+    const std::array<std::array<float,3>,5>& step(const std::array<std::array<float,3>,5>& target,double dt,double smooth_time=finger_pose_smooth_time,double close_time=0,double max_rate=0) {
         if(!valid || !(smooth_time>0) || !std::isfinite(dt)) {turn=target;speed={};valid=true;return turn;}
         if(dt<=0) return turn;
-        const double omega=2/smooth_time,x=omega*dt,e=1/(1+x+.48*x*x+.235*x*x*x);
         for(unsigned f=0;f<5;++f) for(unsigned j=0;j<3;++j) {
+            const double st=close_time>0 && target[f][j]>turn[f][j]?close_time:smooth_time;
+            const double omega=2/st,x=omega*dt,e=1/(1+x+.48*x*x+.235*x*x*x);
             const double change=turn[f][j]-target[f][j],temp=(speed[f][j]+omega*change)*dt;
-            speed[f][j]=static_cast<float>((speed[f][j]-omega*temp)*e);turn[f][j]=static_cast<float>(target[f][j]+(change+temp)*e);
+            double nspeed=(speed[f][j]-omega*temp)*e,nturn=target[f][j]+(change+temp)*e;
+            if(max_rate>0) {
+                // The spring's own step and end speed stand unless the rate cap truly engages (|step| > max_rate*dt: then the step is the cap and the speed its
+                // average); a step that would pass the target stops on it with no speed left.
+                const double from=turn[f][j],reach=max_rate*dt,tg=target[f][j];
+                double d=nturn-from;
+                if(std::abs(d)>reach) {d=d>0?reach:-reach;nspeed=d/dt;}
+                else nspeed=std::clamp(nspeed,-max_rate,max_rate);
+                nturn=from+d;
+                if((from<=tg && nturn>tg) || (from>=tg && nturn<tg)) {nturn=tg;nspeed=0;}
+            }
+            speed[f][j]=static_cast<float>(nspeed);turn[f][j]=static_cast<float>(nturn);
         }
         return turn;
     }
