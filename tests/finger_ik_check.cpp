@@ -94,6 +94,7 @@ std::array<double,3> final_angles(const Hand& h,unsigned f,const std::array<floa
 double flexion_share(const std::array<double,3>& angles) {
     return (angles[0]+angles[1]+angles[2])/((90+110+80)*deg);
 }
+constexpr bool report_task11=false;
 template<class F> bool rejects(F&& f) {try {f();} catch(const std::invalid_argument&) {return true;} return false;}
 } // namespace
 int main() {
@@ -1477,6 +1478,159 @@ int main() {
         assert(last>.98f);
         r::FingerPoseFilter off{};(void)off.step(zero,1/90.,0);assert(off.step(one,1/90.,0)[0][0]==1);
         r::FingerPoseFilter held{};(void)held.step(zero,1/90.);assert(held.step(one,0)[0][0]==0); // no time, no move
+    }
+    // Task 11: fingers on tables, walls and edges (fingers-gap G1-G4, G7).
+    for(bool right:{false,true}) {
+        const auto h=real_hand(right);const auto& g=h.geometry;const Vec3 up=r::palm_normal(h.palm,g);
+        const std::string side=right?"right ":"left ";
+        // The drawn finger's skin clearance to a shape at one of its points (tip_pen's measure: shape_distance minus the thickness).
+        const auto point_gap=[&](const r::HeldShape& s,unsigned f,const std::array<float,3>& turn,unsigned k) {
+            const auto p=r::finger_points(g.finger[f],{turn[0],turn[1],turn[2]});return r::shape_distance(s,world_of(h,p[k]))-g.thickness[f];};
+        const std::array<float,5> grasp{1,1,1,1,1};
+        // The direction along the fingers in the palm's plane (world), and the point `along` metres from the palm's centre that way: slab centres for the edge cases.
+        const Vec3 fingers_dir=[&] {const Vec3 w=world_of(h,r::finger_points(g.finger[2],{0,0,0})[3])-world_of(h,g.finger[2].pivot);return d2vr::unit(w-up*d2vr::dot(w,up));}();
+        const auto along_of=[&](Vec3 p) {return d2vr::dot(p-h.palm.position,fingers_dir);};
+        {   // finger_pose_filter_put_out_check: a hand 3 cm over a table, its fingers closed onto it and the spring settled there; the hand drops on the table (0 gap)
+            // and the spring is one smooth time on its way to the pose the table now stops
+            const auto over=r::slab_shape(h.palm.position+up*(r::held_palm_depth+.03),up*-1.);
+            const auto table=r::slab_shape(h.palm.position+up*r::held_palm_depth,up*-1.);
+            const auto solve=[&](const r::HeldShape& slab) {
+                r::FingerIkState st{};const auto c=r::finger_contact(g,h.palm,&slab,1,1/72.,st,1.f,r::finger_solve_all,&grasp,true,r::finger_open_lag(g,.005),true);
+                return r::finger_turns(g,c,grasp);};
+            const auto fist=solve(over),stopped=solve(table);
+            r::FingerPoseFilter filter{};(void)filter.step(fist,1/72.);for(unsigned i=0;i<20;++i) (void)filter.step(fist,1/72.);
+            const auto sprung=filter.step(stopped,.07);
+            const auto before=sprung;
+            double deepest=0;for(unsigned f=0;f<5;++f) deepest=std::min(deepest,point_gap(table,f,before[f],3));
+            assert(deepest<-.01); // the spring alone sinks fingertips more than a centimetre into the table
+            r::FingerPoseFilter plain=filter; // (bit-identical copy: the filter without a put-out)
+            const unsigned put=filter.put_out(g,h.palm,&table,1,stopped);
+            assert(put>=1);
+            for(unsigned f=0;f<5;++f) {
+                // every tip (and PIP, DIP) is out to 2 mm, or as deep as the solved pose itself rests (the thumb's contact lies up to 6 mm in a shape)
+                const double allowed=std::min(-.002,std::min({point_gap(table,f,stopped[f],1),point_gap(table,f,stopped[f],2),point_gap(table,f,stopped[f],3)}));
+                for(unsigned k=1;k<4;++k) assert(point_gap(table,f,filter.turn[f],k)>=allowed-1e-6);
+                assert(point_gap(table,f,filter.turn[f],3)>=std::min(-.002,point_gap(table,f,stopped[f],3))-1e-6);
+                if(point_gap(table,f,before[f],3)>=-.002 && point_gap(table,f,before[f],2)>=-.002 && point_gap(table,f,before[f],1)>=-.002) assert(std::memcmp(&filter.turn[f],&before[f],sizeof before[f])==0); // a finger that was out is untouched
+                else for(unsigned j=0;j<3;++j) assert(filter.speed[f][j]==0); // a finger put out stops
+            }
+            if(report_task11) std::cerr<<side<<"put_out: "<<put<<" fingers, deepest tip before "<<deepest*1000<<" mm"<<std::endl;
+            // no shapes: nothing changes, bit for bit; a zero mask or an unprimed filter likewise
+            r::FingerPoseFilter none=plain;assert(none.put_out(g,h.palm,nullptr,0,stopped)==0 && std::memcmp(&none.turn,&plain.turn,sizeof plain.turn)==0 && std::memcmp(&none.speed,&plain.speed,sizeof plain.speed)==0);
+            r::FingerPoseFilter masked=plain;assert(masked.put_out(g,h.palm,&table,1,stopped,0)==0 && std::memcmp(&masked.turn,&plain.turn,sizeof plain.turn)==0);
+            r::FingerPoseFilter fresh{};assert(fresh.put_out(g,h.palm,&table,1,stopped)==0);
+            // a mask puts out only its fingers
+            r::FingerPoseFilter one=plain;const unsigned only=one.put_out(g,h.palm,&table,1,stopped,1u<<2);
+            for(unsigned f=0;f<5;++f) if(f!=2) assert(std::memcmp(&one.turn[f],&plain.turn[f],sizeof plain.turn[f])==0);
+            assert(only<=1);
+            // a target that is itself deep (a contact pose resting in) is the limit: nothing is pushed past it
+            const auto deep=r::slab_shape(h.palm.position+up*(r::held_palm_depth-.02),up*-1.);
+            r::FingerPoseFilter nudged=plain;(void)nudged.put_out(g,h.palm,&deep,1,stopped);
+            for(unsigned f=0;f<5;++f) for(unsigned k=1;k<4;++k) assert(point_gap(deep,f,nudged.turn[f],k)>=std::min(-.002,std::min({point_gap(deep,f,stopped[f],1),point_gap(deep,f,stopped[f],2),point_gap(deep,f,stopped[f],3)}))-1e-6);
+        }
+        {   // finger_slab_edge_check: the palm over a small slab (a table's corner, half 5 cm, centred 6 cm behind the palm's centre along the fingers, so its far edge
+            // lies 1 cm behind it): the long fingertips are 8 cm or more past that edge and the finger roots 3-4 cm; they droop over the edge to their free want
+            // (a curl of at least relaxed_share); the same setup on the old 24 cm plane keeps them low (the phantom table under them). The cap a finger's
+            // curl takes is its least closed joint's, so a finger with ANY phalanx over the slab stays low: the fingers must be wholly past the edge.
+            const double behind=-.06,edge=behind+r::finger_slab_half_tip; // the far edge's distance from the palm's centre along the fingers
+            const Vec3 centre=h.palm.position+fingers_dir*behind;
+            for(unsigned f=1;f<5;++f) assert(along_of(world_of(h,r::finger_points(g.finger[f],{0,0,0})[3]))>=edge+.08-1e-9 && along_of(world_of(h,g.finger[f].pivot))>edge+.02);
+            const auto curls_on=[&](double half) {
+                const auto slab=r::slab_shape(centre+up*(r::held_palm_depth+.01),up*-1.,half);
+                r::FingerIkState st{};return r::finger_contact(g,h.palm,&slab,1,0,st);};
+            const auto small=curls_on(r::finger_slab_half_tip),plane=curls_on(.12);
+            for(unsigned f=1;f<5;++f) {
+                assert(small.finger[f]>=r::relaxed_share-1e-6f); // drooped
+                assert(plane.finger[f]<=.4f);                     // the old plane holds them low (a proximal phalanx on it stops the knuckle)
+            }
+            assert(r::finger_slab_half_tip==.05 && r::finger_slab_half_palm==.07);
+            if(report_task11) {std::cerr<<side<<"slab edge: half .05 curls";for(unsigned f=1;f<5;++f) std::cerr<<" "<<small.finger[f];std::cerr<<"; half .12";for(unsigned f=1;f<5;++f) std::cerr<<" "<<plane.finger[f];std::cerr<<std::endl;}
+        }
+        {   // finger_palm_wall_open_check: a fist-wanting hand (wants .9) with its palm 1.5 cm over a surface: the four long fingers open first and lie on it
+            // (drawn at the resting curl, nothing of them in the surface); the palm leaves it and they close again within 0.3 s after the 150 ms hold
+            const auto slab=r::slab_shape(h.palm.position+up*(r::held_palm_depth+.015),up*-1.);
+            const std::array<float,5> wants{0,.9f,.9f,.9f,.9f};
+            const double dt=1/72.;r::FingerIkState st{};r::FingerCurls c{};
+            const auto step=[&](const r::HeldShape* shape) {c=r::finger_contact(g,h.palm,shape,shape?1u:0u,dt,st,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true);return r::grip_curls(c,wants);};
+            std::array<float,5> drawn{};for(unsigned i=0;i<20;++i) drawn=step(&slab);
+            const auto turns=r::finger_turns(g,c,wants);
+            for(unsigned f=1;f<5;++f) {
+                assert(drawn[f]<=r::resting_curl+.05f);
+                assert(point_gap(slab,f,turns[f],3)>=-.004);
+            }
+            assert(std::abs(c.open-r::resting_open_share)<1e-5f);
+            if(report_task11) {std::cerr<<side<<"palm on wall: open "<<c.open<<", drawn curls";for(unsigned f=1;f<5;++f) std::cerr<<" "<<drawn[f];std::cerr<<", tip gaps mm";for(unsigned f=1;f<5;++f) std::cerr<<" "<<point_gap(slab,f,turns[f],3)*1000;std::cerr<<std::endl;}
+            // the wall goes: still open for the 150 ms hold (every finger low at 0.1 s), closed again (>= .8 of the wanted .9) by 0.3 s
+            double t=0;std::array<float,5> now=drawn;
+            for(;t<.1-1e-9;t+=dt) now=step(nullptr);
+            for(unsigned f=1;f<5;++f) assert(now[f]<=r::resting_curl+.05f);
+            for(;t<.3-1e-9;t+=dt) now=step(nullptr);
+            for(unsigned f=1;f<5;++f) assert(now[f]>=.8f);
+            if(report_task11) {std::cerr<<side<<"palm left the wall: curls at 0.3 s";for(unsigned f=1;f<5;++f) std::cerr<<" "<<now[f];std::cerr<<std::endl;}
+            // where no surface caps the fingers (the palm on a small slab, the fingers past its edge, 3 cm behind the palm's centre) the wants alone close them: the palm on it opens them to the resting curl
+            {
+                const Vec3 centre=h.palm.position+fingers_dir*-.03;
+                const auto corner=r::slab_shape(centre+up*(r::held_palm_depth+.015),up*-1.,r::finger_slab_half_tip);
+                r::FingerIkState cs{};r::FingerCurls cc{};for(unsigned i=0;i<20;++i) cc=r::finger_contact(g,h.palm,&corner,1,dt,cs,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true);
+                const auto lying=r::grip_curls(cc,wants);
+                auto closed=cc;closed.open=0;const auto fisted=r::grip_curls(closed,wants); // (what the wants did before)
+                unsigned freed=0;
+                for(unsigned f=1;f<5;++f) {
+                    assert(lying[f]<=r::resting_curl+.05f && lying[f]>=std::min(r::resting_curl,cc.finger[f])-1e-6f);
+                    if(cc.finger[f]>r::resting_curl+.02f) {assert(fisted[f]>lying[f]+.01f);++freed;} // a finger the surface does not cap closes on its want: the open palm lowers it
+                }
+                assert(freed>=3);
+                if(report_task11) {std::cerr<<side<<"palm on a corner: drawn curls";for(unsigned f=1;f<5;++f) std::cerr<<" "<<lying[f]<<" (was "<<fisted[f]<<")";std::cerr<<std::endl;}
+            }
+            {   // finger_open_clears_on_hold: the free hand's open share ends the call a hold starts (picking something up off a table or wall)
+                r::FingerIkState hs{};r::FingerCurls hc{};
+                for(unsigned i=0;i<5;++i) hc=r::finger_contact(g,h.palm,&slab,1,dt,hs,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true);
+                assert(hc.open>.3f);
+                const auto holding=r::finger_contact(g,h.palm,&slab,1,dt,hs,1.f,r::finger_solve_all,&wants,false,0,false);
+                assert(holding.open==0.f);
+                auto plain=holding;plain.open=0;
+                assert(r::grip_curls(holding,wants)==r::grip_curls(plain,wants));
+                for(unsigned f=1;f<5;++f) assert(r::grip_curls(holding,wants)[f]==std::min(std::max({.9f,holding.resting,holding.min_curl[f]}),holding.finger[f]));
+            }
+            // a slow palm on nothing (rest weight 0), and a hold (stop_extended off), keep their wants whole
+            r::FingerIkState free_st{};const auto free_c=r::finger_contact(g,h.palm,nullptr,0,dt,free_st,1.f,r::finger_solve_all,&wants,true,0,true);
+            assert(free_c.open==0.f && r::grip_curls(free_c,wants)[1]==.9f);
+            r::FingerIkState held_st{};const auto held_c=r::finger_contact(g,h.palm,&slab,1,dt,held_st,1.f,r::finger_solve_all,&wants);
+            assert(held_c.open==0.f);
+        }
+        {   // finger_thumb_on_edge_check: a small slab (half 4 cm) under the palm's centre, the palm on it: the thumb, buried where its march leaves it, is searched
+            // from its open pose and stays out beside the slab (its CMC within 10 degrees of the open pose, the tip out of the slab to the thumb tolerance), where
+            // it used to close across the palm from the march's pose
+            const auto slab=r::slab_shape(h.palm.position+up*r::held_palm_depth,up*-1.,.04);
+            const std::array<float,5> wants{.3f,0,0,0,0};
+            r::FingerIkState st{};const auto c=r::finger_contact(g,h.palm,&slab,1,0,st,1.f,r::finger_solve_all,&wants,false,0,true);
+            const auto angles=r::finger_drawn_pose(g,c,wants);const auto turns=r::finger_turns(g,c,wants);
+            const double open_cmc=r::finger_open_angles(0)[0];
+            if(report_task11) std::cerr<<side<<"thumb on an edge: CMC "<<angles[0][0]/deg<<" deg (open "<<open_cmc/deg<<"), tip gap "<<point_gap(slab,0,turns[0],3)*1000<<" mm, min_curl "<<c.min_curl[0]<<", rest open "<<c.open<<std::endl;
+            assert(point_gap(slab,0,turns[0],3)>=-r::thumb_shape_tolerance);
+            assert(angles[0][0]<=open_cmc+10*deg);
+        }
+        {   // finger_buried_hysteresis_check: a table whose face oscillates +-1.2 mm about the middle finger's straight skin at 36 Hz (2 s at 72 frames a second, so every frame is an extreme: arm noise
+            // while walking): the finger neither flips between bending, lifting and free nor jumps in its least curl
+            const unsigned f=2;const double dt=1/72.;
+            const auto skin_at=[&](double height) { // the straight finger's arc clearance to a table whose face lies `height` along the palm normal
+                const auto slab=r::slab_shape(h.palm.position+up*height,up*-1.);
+                return r::finger_clearance(g.finger[f],g.thickness[f],r::finger_turns_of(g.finger[f],{0,0,0}),[&](Vec3 p) {return world_of(h,p);},[&](Vec3 w) {return r::shape_distance(slab,w);},r::arc_all,4,-1e300,0,2,1);};
+            double lo=-.1,hi=.1;for(unsigned i=0;i<40;++i) {const double m=(lo+hi)*.5;if(skin_at(m)<0) lo=m;else hi=m;}
+            const double face=(lo+hi)*.5;assert(std::abs(skin_at(face))<1e-6);
+            const std::array<float,5> open{0,0,0,0,0};
+            r::FingerIkState st{};float last_min=0;unsigned last_mode=0,flips=0;double worst=0;bool first=true;
+            for(unsigned i=0;i<144;++i) {
+                const double height=face+.0012*std::cos(2*3.14159265358979323846*36*i*dt);
+                const auto slab=r::slab_shape(h.palm.position+up*height,up*-1.);
+                const auto c=r::finger_contact(g,h.palm,&slab,1,dt,st,1.f,r::finger_solve_all,&open,true,r::finger_open_lag(g,.005),true);
+                const unsigned mode=c.hyperextended[f]?2u:c.min_curl[f]>.01f?1u:0u;
+                if(!first) {worst=std::max(worst,static_cast<double>(std::abs(c.min_curl[f]-last_min)));if(mode!=last_mode) ++flips;}
+                first=false;last_min=c.min_curl[f];last_mode=mode;
+            }
+            if(report_task11) std::cerr<<side<<"buried hysteresis: largest min_curl step "<<worst<<", mode flips "<<flips<<std::endl;
+            assert(worst<.05 && flips<=2);
+        }
     }
     std::cout<<"finger_ik_check passed"<<std::endl;
     return 0;
