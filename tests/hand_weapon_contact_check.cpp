@@ -6,6 +6,7 @@ static const HwcCapsule away{{9,9,9},{9,9,9},.045};
 static HwcSide blade(Vec3 a,Vec3 b,Vec3 v={}) {HwcSide s;s.tracked=true;s.has_weapon=true;s.weapon_is_blade=true;
     s.part[0]=away;s.part[0].a.x=s.part[0].b.x=9+a.x*7+a.y*13;s.part[1]={a,b,.02};s.vel[0]=v;s.vel[1]=v;return s;}
 static HwcSide hand(Vec3 p,double r=.045) {HwcSide s;s.tracked=true;s.part[0]={p,p,r};return s;}
+static HwcSide forearmed(Vec3 fa,Vec3 fb,Vec3 p) {HwcSide s=hand(p);s.has_forearm=true;s.forearm={fa,fb,.045};return s;}
 static bool near(double a,double b,double e=1e-6){return std::fabs(a-b)<e;}
 int main(){
     HandWeaponContact c;
@@ -55,5 +56,22 @@ int main(){
     {c.reset();HwcSide G=blade({0,0,0},{0,0,.36});G.weapon_is_blade=false;G.part[1].radius=.035;
      HwcSide gh[2]={G,hand({.06,0,.2})};auto q=c.update(gh,.01);assert(q.contact && q.correction[1].x>0 && q.event && !q.event->clash);
      c.reset();HwcSide S=blade({.04,-.3,.2},{.04,.3,.2},{-3,0,0});HwcSide gs[2]={G,S};q=c.update(gs,.01);assert(q.contact && q.event && !q.event->clash);}
+    // a blade crossing the other side's forearm: only the blade side moves, by the overlap (capped at 5 cm)
+    {c.reset();HwcSide fa0=forearmed({-.3,0,0},{.3,0,0},{9,9,9});HwcSide bf[2]={fa0,blade({0,-.3,.035},{0,.3,.035})};
+     r=c.update(bf,.01);assert(r.contact&&r.forearm&&near(r.depth,.03));
+     assert(near(length(r.correction[1]),.03)&&near(r.correction[1].z,.03)&&near(length(r.correction[0]),0));
+     auto q=c.update(bf,.01);assert(q.forearm&&near(q.correction[1].z,.03)&&near(length(q.correction[0]),0));   // hysteresis holds it
+     c.reset();HwcSide deepf[2]={forearmed({-.3,0,0},{.3,0,0},{9,9,9}),blade({0,-.3,.01},{0,.3,.01})};
+     r=c.update(deepf,.01);assert(r.forearm&&near(r.depth,.055)&&near(length(r.correction[1]),.05)&&near(length(r.correction[0]),0));}
+    // a hand inside the other side's forearm: only the hand side moves
+    {c.reset();HwcSide hf[2]={hand({0,0,.06}),forearmed({-.3,0,0},{.3,0,0},{9,9,9})};
+     r=c.update(hf,.01);assert(r.contact&&r.forearm&&near(r.depth,.03)&&near(r.correction[0].z,.03)&&near(length(r.correction[1]),0));}
+    // two forearms overlapping, hands far: no contact (no forearm-vs-forearm pair)
+    {c.reset();HwcSide ff[2]={forearmed({-.3,0,0},{.3,0,0},{9,9,9}),forearmed({0,-.3,0},{0,.3,0},{-9,-9,-9})};
+     r=c.update(ff,.01);assert(!r.contact&&!r.forearm&&near(length(r.correction[0]),0)&&near(length(r.correction[1]),0));}
+    // deepest pair wins: hand-hand overlap 1 cm vs blade-forearm overlap 3 cm -> the forearm pair is resolved
+    {c.reset();HwcSide dw[2]={forearmed({-.3,0,.5},{.3,0,.5},{0,0,0}),blade({0,-.3,.535},{0,.3,.535})};
+     dw[1].part[0]={{.08,0,0},{.08,0,0},.045};
+     r=c.update(dw,.01);assert(r.forearm&&near(r.depth,.03)&&near(length(r.correction[0]),0)&&near(length(r.correction[1]),.03));}
     std::puts("PASS");
 }

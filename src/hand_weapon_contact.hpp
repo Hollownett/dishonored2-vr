@@ -1,6 +1,7 @@
 #pragma once
 // Hand/weapon vs hand/weapon contact (dual wield, blade vs other hand, gun vs sword, hand vs hand). Pure maths, no engine queries.
-// Each side = up to 2 capsules in world space: [0] the hand/fist, [1] the held weapon. Cost per update: 4 capsule pairs
+// Each side = up to 3 capsules in world space: [0] the hand/fist, [1] the held weapon, and the forearm (has_forearm), which
+// only the OTHER side's hand/weapon collide with. Cost per update: up to 8 capsule pairs
 // (segment-segment closest point, ~60 flops each), no allocation, noexcept. Only the deepest cross-side pair is resolved.
 // FEED UNCORRECTED POSES every frame (raw/clamped hands, not the previous output): the correction is a pure display offset,
 // so the hysteresis below holds a resting crossed pair steady instead of chasing its own output.
@@ -17,11 +18,14 @@ struct HwcSide {
     bool has_weapon{};
     bool weapon_is_blade{};         // sword/knife: eligible for a clash
     Vec3 vel[2]{};                  // m/s of each part
+    bool has_forearm{};             // the other side's hand/weapon must not pass through this forearm
+    HwcCapsule forearm{};           // taken as still (no velocity): a forearm pair moves only the hand/weapon side
 };
 struct HwcEvent { Vec3 point; Vec3 normal; double rel_speed{}; bool clash{}; };   // normal points side 0 -> side 1
 struct HwcResult {
     Vec3 correction[2]{};           // add to side 0 / side 1 hand (and its weapon); each <= max_correction
     bool contact{};
+    bool forearm{};                 // the resolved pair involved a forearm (the hand/weapon side takes the whole correction)
     double depth{};
     std::optional<HwcEvent> event;  // first frame of a contact only (re-armed after rearm_seconds)
 };
@@ -34,27 +38,30 @@ public:
         if(!finite_side(s[0]) || !finite_side(s[1]) || !std::isfinite(dt)) return out;   // NaN frame: ignored, state kept
         cooldown_=std::max(0.,cooldown_-std::max(0.,dt));
         if(!s[0].tracked || !s[1].tracked) {in_contact_=false;return out;}
-        double best=0;int bi=-1,bj=-1;Vec3 p0{},p1{};
-        const int n0=s[0].has_weapon?2:1,n1=s[1].has_weapon?2:1;
-        for(int i=0;i<n0;++i) for(int j=0;j<n1;++j) {
-            Vec3 c0,c1;closest(s[0].part[i],s[1].part[j],c0,c1);
-            const double pen=s[0].part[i].radius+s[1].part[j].radius-length(c1-c0);
-            if(pen>best) {best=pen;bi=i;bj=j;p0=c0;p1=c1;}
+        double best=0;int bi=-1,bj=-1;Vec3 p0{},p1{};HwcCapsule ca{},cb{};
+        // part index: 0 hand, 1 weapon, 2 forearm. Forearm-vs-forearm is not a pair; every other side-0 x side-1 combo is.
+        for(int i=0;i<3;++i) for(int j=0;j<3;++j) {
+            if((i==2&&j==2) || !has_part(s[0],i) || !has_part(s[1],j)) continue;
+            const HwcCapsule& A=part_of(s[0],i);const HwcCapsule& B=part_of(s[1],j);
+            Vec3 c0,c1;closest(A,B,c0,c1);
+            const double pen=A.radius+B.radius-length(c1-c0);
+            if(pen>best) {best=pen;bi=i;bj=j;p0=c0;p1=c1;ca=A;cb=B;}
         }
         if(bi<0) {in_contact_=false;return out;}
+        const bool fa=bi==2||bj==2;   // a forearm pair
         if(in_contact_ && std::fabs(best-last_depth_)<hysteresis) {   // resting: keep last correction
-            out.correction[0]=last_[0];out.correction[1]=last_[1];out.contact=true;out.depth=last_depth_;return out;
+            out.correction[0]=last_[0];out.correction[1]=last_[1];out.contact=true;out.forearm=last_forearm_;out.depth=last_depth_;return out;
         }
         Vec3 n=p1-p0;const double d=length(n);
-        n=d>1e-9?n*(1./d):fallback_normal(s[0].part[bi],s[1].part[bj]);
-        // The faster (swinging) side yields less; both still -> 50/50.
-        const double v0=length(s[0].vel[bi]),v1=length(s[1].vel[bj]);
-        const double w0=(v1+.5)/(v0+v1+1.);
+        n=d>1e-9?n*(1./d):fallback_normal(ca,cb);
+        // The faster (swinging) side yields less; both still -> 50/50. A forearm pair: the hand/weapon side takes all of it.
+        const double v0=length(vel_of(s[0],bi)),v1=length(vel_of(s[1],bj));
+        const double w0=bj==2?1.:bi==2?0.:(v1+.5)/(v0+v1+1.);
         out.correction[0]=cap(n*(-best*w0));out.correction[1]=cap(n*(best*(1.-w0)));
-        out.contact=true;out.depth=best;
-        last_[0]=out.correction[0];last_[1]=out.correction[1];last_depth_=best;
+        out.contact=true;out.forearm=fa;out.depth=best;
+        last_[0]=out.correction[0];last_[1]=out.correction[1];last_depth_=best;last_forearm_=fa;
         if(!in_contact_ && cooldown_<=0) {
-            const double rel=length(s[0].vel[bi]-s[1].vel[bj]);
+            const double rel=length(vel_of(s[0],bi)-vel_of(s[1],bj));
             out.event=HwcEvent{(p0+p1)*.5,n,rel,s[0].weapon_is_blade && s[1].weapon_is_blade && bi==1 && bj==1 && rel>=clash_speed};
             cooldown_=rearm_seconds;
         }
@@ -63,9 +70,13 @@ public:
     }
     void reset() noexcept {*this=HandWeaponContact{};}
 private:
-    bool in_contact_{};double cooldown_{},last_depth_{};Vec3 last_[2]{};
+    bool in_contact_{},last_forearm_{};double cooldown_{},last_depth_{};Vec3 last_[2]{};
+    static bool has_part(const HwcSide& s,int k) noexcept {return k==0||(k==1&&s.has_weapon)||(k==2&&s.has_forearm);}
+    static const HwcCapsule& part_of(const HwcSide& s,int k) noexcept {return k==2?s.forearm:s.part[k];}
+    static Vec3 vel_of(const HwcSide& s,int k) noexcept {return k==2?Vec3{}:s.vel[k];}
     static bool finite_side(const HwcSide& s) noexcept {
         for(int i=0;i<2;++i) if(!finite(s.part[i].a)||!finite(s.part[i].b)||!finite(s.vel[i])||!std::isfinite(s.part[i].radius)) return false;
+        if(s.has_forearm && (!finite(s.forearm.a)||!finite(s.forearm.b)||!std::isfinite(s.forearm.radius))) return false;
         return true;
     }
     static Vec3 cap(Vec3 v) noexcept {const double l=length(v);return l>max_correction?v*(max_correction/l):v;}
