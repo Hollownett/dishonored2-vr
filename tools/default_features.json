@@ -147,6 +147,54 @@
    "default": true
   },
   {
+   "id": "finger-put-out",
+   "file": "no-finger-put-out",
+   "kind": "disable",
+   "label": "Fingers never sink into surfaces",
+   "help": "A finger that the smoothing would push into a table or wall is set back on its surface at once (as the reference VR mod does).",
+   "default": true
+  },
+  {
+   "id": "finger-slab-evidence",
+   "file": "legacy-finger-slab",
+   "kind": "disable",
+   "label": "Fingers feel table edges",
+   "help": "A surface a finger touches is only as large as the hand felt it, so fingers curl over a table edge instead of resting on an invisible extension. Off: the old large planes.",
+   "default": true
+  },
+  {
+   "id": "finger-timing",
+   "file": "legacy-finger-timing",
+   "kind": "disable",
+   "label": "Quick natural fingers",
+   "help": "Fingers close onto a surface and around a squeeze quickly and open a little slower, at a natural top speed (as the reference VR mod's). Off: the older, slower finger timing.",
+   "default": true
+  },
+  {
+   "id": "finger-probe-order",
+   "file": "legacy-finger-probe-order",
+   "kind": "disable",
+   "label": "Fingers feel what they touch first",
+   "help": "The fingers resting on a wall or table look at the surface first, so they follow it closely as your hand slides. Off: every finger in turn.",
+   "default": true
+  },
+  {
+   "id": "finger-plane",
+   "file": "legacy-finger-plane",
+   "kind": "disable",
+   "label": "Fingers agree on the surface",
+   "help": "All the fingers on one flat surface rest on the same plane, so they lie level on a table or wall. Off: each finger's own plane.",
+   "default": true
+  },
+  {
+   "id": "hip-body-place",
+   "file": "legacy-hip-place",
+   "kind": "disable",
+   "label": "Holstered gun moves with the body",
+   "help": "The gun at your hip is placed where your body will be after the game's movement step (as the weapons in your hands are), so it stays steady while you walk, run and turn. Off: the old place, a frame behind.",
+   "default": true
+  },
+  {
    "id": "impact-fx",
    "file": "no-impact-fx",
    "kind": "disable",

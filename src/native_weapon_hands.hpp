@@ -131,6 +131,9 @@ struct GunCopyInfo {bool present{},flying{},native{},unequipping{},claimed{};uns
 // the WriteLog serial that identifies that note (0 when the note was dropped), so a fallback candidate built from CopyDraw is ordered
 // in the same serial space as the ring instead of the CopyDraw's own serial.
 using CopyDrawWrite=std::uint64_t (*)(unsigned side,std::uintptr_t entity,std::uint32_t id,const float* read15,unsigned kind) noexcept;
+// One placement of the holstered hip copy (NativeWeaponHands::hip_placed): where it was put and the root the player was expected at after that
+// frame's physics. At namespace scope: a nested struct with member initializers cannot size a static member inside the incomplete class.
+struct NativeHipPlaced {Vec3 position{};Vec3 root{};std::uint64_t serial{};bool root_valid{};};
 class NativeWeaponHands {
     friend struct NativeHipVisibilityFixture;
     friend struct NativeWeaponExchangeFixture;
@@ -877,17 +880,25 @@ public:
     // The holstered gun at the left hip (published by the render thread every frame): the player's own pistol or crossbow
     // model (Corvo's or Emily's cinematic copy), shown and moved with the body while the hip holds it.
     struct Hip {bool show{};unsigned kind{};int owner{-1};std::array<float,3> pos{};std::array<float,9> axis{};std::uint64_t tick{};
-        std::optional<NativeManualEquipRuntime::HipContext> context;}; // owner: 1 Emily, 0 Corvo
+        std::optional<NativeManualEquipRuntime::HipContext> context; // owner: 1 Emily, 0 Corvo
+        // 2026-11-26 (user: "the weapon in the holster steady in movement"): the player's root when this pose was computed (render thread). The
+        // game thread places the copy at Stage0, before the frame's physics moves the player: it carries the pose by the root's motion since and by
+        // the step and turn the physics is about to add (held_copy::root_step / yaw_step / carry, as the held copies since v776/v816).
+        std::array<float,3> root{};bool root_valid{};};
     static void hip(const Hip& value,NativeManualEquipRuntime& runtime=NativeManualEquipRuntime::process_owner()) {
         auto request=value;request.context=runtime.hip_context();
         std::lock_guard<std::mutex> lock(m_);hip_req_=request;
     }
     inline static std::atomic<std::uint64_t> hip_frames{},visibility_skips{};
-    // 2026-11-26 (user: "the weapon in the holster steady in movement"): the hip copy's place in the body model frame (player+0xf0 -> +0x1860, the
-    // frame the engine draws the body with), each time it is placed. While the body moves it should not change: its frame-to-frame step (mm) is the
-    // copy's jitter against the body (max, sum, count over steps where the body moved 1 mm..0.5 m).
-    inline static std::atomic<double> hip_jitter_max_mm{},hip_jitter_sum_mm{};inline static std::atomic<std::uint64_t> hip_jitter_n{};
-    inline static std::array<Vec3,2> hip_local_last_{},hip_body_last_{};inline static std::array<bool,2> hip_local_have_{};   // per hip copy (pistol, crossbow)
+    // 2026-11-26 (user: "the weapon in the holster steady in movement"): the hip copy is carried as the held copies are (v776/v816); its root
+    // history; where it was last placed (game thread) for the render thread's measure against the hip the body is drawn with (hip_offset_mm).
+    inline static std::optional<Vec3> hip_root_seen_{};inline static std::chrono::steady_clock::time_point hip_root_seen_at_{};inline static double hip_yaw_seen_{},hip_dt_seen_{};
+    inline static std::atomic<bool> hip_carry_on_{true};inline static std::atomic<std::uint64_t> hip_carried{};   // knob build/legacy-hip-place: the world pose as before
+    // The last placements, each with the root the player is expected at after that frame's physics (the root the body of the same game frame is
+    // drawn at): the render thread pairs a body upload with its placement by that root, not by time (the game thread runs a frame ahead of it).
+    using HipPlaced=NativeHipPlaced;
+    inline static std::array<HipPlaced,8> hip_ring_{};inline static std::uint64_t hip_ring_serial_{};   // under m_
+    static std::array<HipPlaced,8> hip_placed() {std::lock_guard<std::mutex> l(m_);return hip_ring_;}
 private:
     static Hip hip_req_; // defined after the class: clang-cl needs Hip's member initializers complete
     inline static std::array<std::uintptr_t,2> hip_ent_{};inline static std::array<std::uint32_t,2> hip_id_{};
@@ -927,6 +938,14 @@ private:
     }
     template<class Read> static void service_hip(std::uintptr_t base,Read& read,NativeManualEquipRuntime& runtime=NativeManualEquipRuntime::process_owner()) {
         Hip h{};{std::lock_guard<std::mutex> l(m_);h=hip_req_;}
+        std::optional<Vec3> hip_now_root;Vec3 hip_step{};double hip_turn{};
+        if(h.show && h.root_valid) {   // 2026-11-26: the player's root now (before this frame's physics) and the step and turn to expect (held_copy, v776/v779/v816)
+            double yaw{};hip_now_root=player_root(base,read,&yaw);const auto at=std::chrono::steady_clock::now();const double dt=step_dt(base,read);
+            if(hip_now_root) {if(hip_root_seen_) {const double gap=std::chrono::duration<double>(at-hip_root_seen_at_).count();
+                hip_step=held_copy::root_step(*hip_root_seen_,*hip_now_root,gap,hip_dt_seen_,dt);hip_turn=held_copy::yaw_step(hip_yaw_seen_,yaw,gap,hip_dt_seen_,dt);}
+                hip_root_seen_=hip_now_root;hip_yaw_seen_=yaw;hip_root_seen_at_=at;hip_dt_seen_=dt;}
+            else hip_root_seen_.reset();
+        } else hip_root_seen_.reset();
         if(hip_exchange_.blocked && h.context) {
             const bool same_lifetime=h.context->owner==hip_exchange_.draw.owner && h.context->xr_epoch==hip_exchange_.draw.xr_epoch;
             if(runtime.hip_empty_current(*h.context,same_lifetime?hip_exchange_.draw.generation:0)) {
@@ -993,24 +1012,21 @@ private:
                     continue;
                 }
                 const auto current=hip_entity_current(base,read,k);if(!current || !*current)continue;
-                teleport<Read>(base,hip_ent_[k],h.pos,h.axis);++hip_frames;
-                try {
-                    if(const auto pl=player(base,read)) if(const auto model=rig::value<std::uintptr_t>(read,pl+0xf0); model && *model) {
-                        std::array<float,15> raw{};
-                        if(read(*model+0x1860,raw.data(),sizeof raw)) {
-                            const rig::ModelFrame m(raw);
-                            const auto local=m.model_point({h.pos[0],h.pos[1],h.pos[2]});
-                            if(hip_local_have_[k]) {
-                                const double body_step=length(m.origin-hip_body_last_[k]);
-                                if(body_step>.001 && body_step<.5) {
-                                    const double jitter=length(local-hip_local_last_[k])*m.scale[0]*1000;
-                                    ++hip_jitter_n;hip_jitter_sum_mm.store(hip_jitter_sum_mm.load()+jitter);if(jitter>hip_jitter_max_mm.load()) hip_jitter_max_mm.store(jitter);
-                                }
-                            }
-                            hip_local_last_[k]=local;hip_body_last_[k]=m.origin;hip_local_have_[k]=true;
-                        }
+                auto place_pos=h.pos;auto place_axis=h.axis;
+                if(h.root_valid && hip_carry_on_.load(std::memory_order_relaxed) && hip_now_root) {   // where the hip will be drawn after this frame's physics
+                    const Vec3 drawn_root{h.root[0],h.root[1],h.root[2]};const auto moved=*hip_now_root-drawn_root;
+                    if(length(moved)<1.) {
+                        held_copy::Pose p{};p.position=Vec3{h.pos[0],h.pos[1],h.pos[2]}+moved;
+                        for(unsigned i=0;i<3;++i) p.basis[i]={h.axis[i*3],h.axis[i*3+1],h.axis[i*3+2]};
+                        p=held_copy::carry(p,*hip_now_root,hip_step,hip_turn);
+                        if(finite(p.position)) {place_pos={static_cast<float>(p.position.x),static_cast<float>(p.position.y),static_cast<float>(p.position.z)};
+                            for(unsigned i=0;i<3;++i) {place_axis[i*3]=static_cast<float>(p.basis[i].x);place_axis[i*3+1]=static_cast<float>(p.basis[i].y);place_axis[i*3+2]=static_cast<float>(p.basis[i].z);}
+                            ++hip_carried;}
                     }
-                } catch(...) {hip_local_have_[k]=false;}
+                }
+                teleport<Read>(base,hip_ent_[k],place_pos,place_axis);++hip_frames;
+                {std::lock_guard<std::mutex> l(m_);auto& e=hip_ring_[hip_ring_serial_%hip_ring_.size()];   // the render thread compares it with the hip drawn in its frame
+                    e.position={place_pos[0],place_pos[1],place_pos[2]};e.root_valid=hip_now_root.has_value();if(hip_now_root) e.root=*hip_now_root+hip_step;e.serial=++hip_ring_serial_;}
             }
             else if(hip_shown_[k] && visible(base,read,hip_ent_[k],false))hip_shown_[k]=false;
         }
