@@ -44,3 +44,45 @@ sword drawn at the shoulder and its blade held in him and pushed in again (knobs
 - Answer: **yes, living guards are surfaces** for the hand clamp and for the blade / barrel casts (`kWorldOccluderLayers` 0xc43e includes
   the characters' bodies). Spec 6.3: nothing to add; no NPC capsules are needed. The arm collision deliberately ignores NPC hits
   (`npc_entity`), as the reference mod's forearms meet the world only: an arm around a guard (a choke, a carry) must not be pushed by him.
+
+## Arm collision in the sims (2026-11-26, DOTO v145788-v145791, D2 v1486-v1489)
+
+- **No false contact in ordinary poses.** `arm_wall` (a wall 0.38 m to the right of the eye) and `arm_corner` (an inside corner): about
+  5,000 arm casts a side, 0 hits. The trace (`artifacts/arm-collision.csv`) shows why: the player's capsule keeps the shoulder >= 0.27-0.39 m
+  from any wall and the natural elbow (the Boneworks pole points mostly down) stayed >= 0.11 m (wall) / 0.20 m (corner) off; the hand clamp
+  held the wrist 4.6 cm off the wall. Nothing to resolve, nothing moved.
+- **Real contact: leaning toward the wall** (`arm_lean`, the game's lean from a sideways head offset; the body follows the camera):
+
+| run | natural elbow in the wall (frames, max mm) | drawn elbow in the wall (frames > 1 mm, max mm) | swivel max | step max |
+|---|---|---|---|---|
+| DOTO, shadow (computed, not applied) | 122, 143.5 | 150, 105.9 | (101 deg computed) | - |
+| DOTO, on | 175, 100.8 | **5**, 58.1 (the first frames of a contact) | 96 deg | 14.7 deg/frame |
+| D2, on | 121, 121.9 | **14**, 104.7 | 75 deg | 16.6 deg/frame |
+
+  Captures (`sw-capture-00/02-real`, shadow vs on): the forearm and its Voltaic Gun move off the wall plane. Initial-overlap casts (the
+  upper arm starting inside the wall while leaning: 203 / 661) are ignored, as designed (the shoulder itself is in the wall: nothing an elbow can fix).
+
+Clean A/B after the shadow fix (v145793, the shadow mode now publishes the drawn elbow as the natural one): shadow 142 frames in the
+wall (106 mm); on: natural 209 frames (102 mm), drawn 7 frames (59 mm): 97% of the contact frames kept out.
+
+## Other proofs (2026-11-26, v145790-v145793 / v1488-v1491)
+
+- **Forearm contact** (`forearm_block`, DOTO): the right hand down through the left forearm held across the chest: 305 contact frames,
+  the largest correction 77 mm; with `no-forearm-contact` 0 (the hand passes through).
+- **Fingers on a wall** (`palm_wall`, DOTO, right hand palm-first, pressed 5 cm past the surface, slides, a strafe along the wall):
+
+| build / knobs | frames over the limit | deepest slow / fast (mm) | thumb (mm) | mean tip step (mm) | flag flips |
+|---|---|---|---|---|---|
+| v145785 (before the finger work) | 22 | 18.5 / 27.8 | 28.3 | - | (hyper 2) |
+| round 1 (round 2 knobs off) | 1 | 3.2 / 16.5 | 26.6 | 1.41 | 4 |
+| round 2, put-out off | 51 | 24.2 / 23.1 | 30.9 | 1.88 | 0 |
+| round 2 without G8 | 3 | 8.5 / 20.5 | 20.0 | 1.34 | 0 |
+| round 2 (default) | 1-2 | 7.0-8.9 / 10.4-12.1 | 23.8-26.1 | 2.21-2.23 | 0 |
+| round 2, surface rules off | 1 | 4.0 / 20.6 | 24.3 | 2.53 | 0 |
+
+  The palm never rested on the wall in DOTO (G3 open frames 0: the hand clamp holds the palm off; Billie's wrist gun?); in D2 it did
+  (41 frames). The thumb inside the wall is older than this work (v145785: 28 mm).
+- **Holstered gun** (`holster_walk`, D2, walking / sprinting / strafing / turning): its placement against the hip of the body drawn in
+  the same frame (paired by the expected root): mean 3.4 mm carried vs 10.5 mm legacy (1,635 / 1,761 frames); max 165 mm in both (a turn).
+- **Lab note:** `dual-wield-events.jsonl` accumulates across sessions (append mode, never cleared): filter it by the run's tick range;
+  `xr-live-status.json` is per run.

@@ -41,13 +41,16 @@ Features
 - **Real stereo 3D at your headset's resolution**, with the headset's own view mask, foveated upscaling and a frame pacer
   built for 90 Hz. Snap or smooth turning, a comfort vignette while moving, and physical crouch and lean.
 - **Your own hands.** Corvo's or Emily's hands and arms follow your controllers; the fingers close as you squeeze and
-  wrap around what you hold. Grab bottles, lanterns, bodies and loose props by their real shape, carry them, throw them.
+  wrap around what you hold. On a wall or a table they lie on it and stay out of it, quick and steady. Grab bottles, lanterns, bodies and loose props by their real shape, carry them, throw them.
 - **Motion combat.** Swing the sword to attack, hold it up to block, throw it and call it back. Charge a power strike.
   Take unaware guards down from behind, choke them out, or clamp a hand on their face and throw them down.
 - **Two weapons, one in each hand.** Each hand has its own wheel (X left, A right); pick the pistol or crossbow on both:
   a real second weapon with its own ammo, your upgrades, and the game's own fire, reload and empty animations and sounds.
-- **Body holsters and a wrist watch.** Sword over either shoulder, gun or crossbow at either hip. Turn the back of
-  your left wrist to your face for health, mana and ammo. Notes and maps open in your left palm.
+- **Body holsters and a wrist watch.** Sword over either shoulder, gun or crossbow at either hip, grenades and mines at
+  the front of your belt (let go there to put one back, squeeze and pull out to take it again), the Heart at your left
+  chest. Turn the back of your left wrist to your face for health, mana and ammo. Notes and maps open in your left palm.
+- **Solid arms.** Your elbows bend around walls, door frames and tables instead of passing through them, and a sword or
+  gun cannot pass through your other forearm. Hands, swords and guns already stop at walls, props and guards.
 - **The world reacts to your hands.** Push doors open or crack them to peek, turn valves, drag and carry bodies over
   your shoulder, hold the Heart up and listen.
 - **The game's own UI, in VR.** Menus, the Quick Access Wheel, journal and notes float in front of you; point and pull the
@@ -146,6 +149,8 @@ under your middle finger, **trigger** is under your index finger. The same guide
 | Select in menus and on the wheel | Point with the right controller, right trigger |
 | Draw and sheathe the sword | Grip over either shoulder; release it there to sheathe |
 | Draw and holster the pistol or crossbow | Grip at either hip; release there to holster |
+| Put a grenade or mine back; take it again | Let go of it slowly at the front of your belt; squeeze there and pull out |
+| Put the Heart away; take it out | Let go of it at your left chest (or hip); squeeze there and pull out |
 | Fire, cast, shoot | Trigger of the hand holding the gun, crossbow or power |
 | Second gun or crossbow | Pick it on the other hand's wheel |
 | Attack | Swing the sword. From behind an unaware guard it is a silent takedown |
