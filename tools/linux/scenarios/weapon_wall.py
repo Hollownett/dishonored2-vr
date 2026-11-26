@@ -22,7 +22,8 @@ _spec = importlib.util.spec_from_file_location("d2vr_scenario_lib", Path(__file_
 L = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(L)
 
-SPOT = {"x": 66.440, "y": -6.560, "z": 34.60, "yaw": -11.5}  # D2 WALL_FRONT
+SPOTS = {"doto": {"x": -27.755, "y": -53.654, "z": 42.25, "yaw": -129.3},   # WALL_FRONT per game (lab-facts.md); the D2 one was used for both
+         "d2": {"x": 66.440, "y": -6.560, "z": 34.60, "yaw": -11.5}}
 ZERO = [0.0, 0.0, 0.0]
 NEU = {"move_x": 0.0}
 GRIP = {"right_grip": 1.0}
@@ -39,6 +40,7 @@ def pose(t0, t1, right=ZERO, left=ZERO, inp=NEU, pitch=0):
 
 
 def build(lead_ms):
+    SPOT = SPOTS[os.environ.get("D2VR_SPOT", "doto")]
     segments = L.lead_in(lead_ms)
     t = lead_ms
     right_default = dict(right=ZONE, pitch=SWORD_PITCH)
