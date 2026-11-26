@@ -483,7 +483,7 @@ public:
     }
     Xf attachment_target(unsigned side,const Xf& grip) const {std::lock_guard<std::mutex> lock(mutex_);return hand_target(side&1u,grip);}   // the attachment joint a grip asks for (frame-order trace)
     void clear() {std::lock_guard<std::mutex> lock(mutex_);contact_model_.reset();image_valid_=false;image_held_ok_=false;have_track_=have_out_=have_native_body_=false;have_root_last_=have_root_at_publish_=have_root_solved_=false;have_xr_latest_=false;have_heading_last_=have_heading_at_publish_=have_heading_solved_=false;
-        have_native_arm_[0]=have_native_arm_[1]=false;native_={};for(auto& c:gun_clip_) c.clear();legacy_gun_clip_.clear();gun_clip_have_last_=false;gun_clip_calm_=0;gun_clip_type_=0;clip_fallbacks_={};last_={};solved_track_={};diag_={};solver_.reset();}
+        have_native_arm_[0]=have_native_arm_[1]=false;native_={};for(auto& c:gun_clip_) c.clear();legacy_gun_clip_.clear();gun_clip_have_last_=false;gun_clip_calm_=0;gun_clip_type_=0;clip_fallbacks_={};last_={};solved_track_={};diag_={};chest_heading_={1,0,0};solver_.reset();}
     void clear_calibration() {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!fit_) return;
@@ -580,10 +580,10 @@ public:
             const auto heading=body::mul(diag_.chest.q,body::conj(sk.bind[chest_index].q));
             auto forward=rotated(heading,{1,0,0});forward.z=0;
             const double fl=length(forward);
-            if(fl>1e-9) {
-                forward=forward*(1/fl);
-                diag_.chest_forward=forward;diag_.chest_left={-forward.y,forward.x,0};
-            } else {diag_.chest_forward={1,0,0};diag_.chest_left={0,1,0};}
+            // A chest pitched near vertical (bent over, crawling) has a levelled heading that is noise: below 0.1 keep the last good one (reset with clear()).
+            if(fl>.1) {forward=forward*(1/fl);chest_heading_=forward;}
+            else forward=chest_heading_;
+            diag_.chest_forward=forward;diag_.chest_left={-forward.y,forward.x,0};
         }
         for(unsigned i=0;i<2;++i) diag_.feet[i]=to_world(conv,to_xf(out[sk.find(i?"right_ankle_jnt":"left_ankle_jnt")]));
         legs_from_([&](std::size_t j) {return to_world(conv,to_xf(out[j]));},true);  // v1438: the solved legs, as drawn
@@ -643,7 +643,8 @@ public:
             diag_.shoulder[side]=to_world(conv,to_xf(out[sk.find(prefix+"_arm_jnt")])).p;
             diag_.elbow[side]=to_world(conv,to_xf(out[sk.find(prefix+"_elbow_jnt")])).p;
             diag_.swivel[side]=out_.swivel[side];diag_.swivel_residual[side]=out_.swivel_residual[side];
-            diag_.natural_elbow[side]=swivel_elbow(diag_.shoulder[side],diag_.wrist[side].p,diag_.elbow[side],-out_.swivel[side]);
+            // The natural elbow is the drawn one turned back by the swivel, only when the swivel was applied (shadow mode computes it and draws the natural arm).
+            diag_.natural_elbow[side]=solved_track_.arm_collision[side].shadow?diag_.elbow[side]:swivel_elbow(diag_.shoulder[side],diag_.wrist[side].p,diag_.elbow[side],-out_.swivel[side]);
             diag_.arm_joints_valid[side]=true;
         }
         std::array<Transform,4> knuckles{};const char* fingers[]={"index","medium","ring","pinky"};
@@ -745,6 +746,7 @@ public:
     }
 
 private:
+    Vec3 chest_heading_{1,0,0};   // the last good levelled chest heading (the body holsters' frame when the chest points straight up or down)
     mutable std::mutex mutex_;
     unsigned arm_why_[2]{};
     std::array<std::uint64_t,3> stale_hits_{};std::array<double,3> stale_max_ms_{},stale_last_ms_{};  // v1423 (under mutex_)

@@ -604,9 +604,9 @@ inline float memo_reach_key(float reach) noexcept {return std::round(reach/memo_
 // searched for the nearest pose out of it: first more closed along its path (min_curl: it bends on the surface), then its middle and tip joints
 // opened up to finger_hyperextension_degrees (hyperextended); still inside at that limit, it stops there (blocked, stuck_frames). The thumb, buried
 // where its march left it, closes across the palm to the least curl that is out (min_curl), or fully (blocked). Off for a hold: a wrap closes around
-// what it holds.
+// what it holds. surface_rules=false (the legacy knob of round 1, e14f377) turns G3 (palm-open share), G4 (thumb on top of an edge) and G7 (sticky buried test) off.
 inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPose& palm,const HeldShape* shapes,unsigned count,double dt,FingerIkState& state,float reach=1.f,
-    unsigned budget=finger_solve_all,const std::array<float,5>* wanted=nullptr,bool ease_opening=false,double max_open_lag_rad=0,bool stop_extended=false,double close_tau=finger_ik_tau) {
+    unsigned budget=finger_solve_all,const std::array<float,5>* wanted=nullptr,bool ease_opening=false,double max_open_lag_rad=0,bool stop_extended=false,double close_tau=finger_ik_tau,bool surface_rules=true) {
     require_hand(hand);require_frame(palm,"Invalid finger palm frame",true);
     if(!std::isfinite(dt) || dt<0 || dt>1) throw std::invalid_argument("Invalid finger contact step");
     if(!std::isfinite(max_open_lag_rad) || max_open_lag_rad<0) throw std::invalid_argument("Invalid finger opening lag");
@@ -626,7 +626,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
             double gap=1e9;for(unsigned i=0;i<count;++i) if(!shapes[i].fingers_only) gap=std::min(gap,shape_distance(shapes[i],skin_point)); // (the palm stop under the skin is no surface the hand lies on)
             rest_weight=static_cast<float>(std::clamp((resting_gap_far-gap)/(resting_gap_far-resting_gap_near),0.,1.));
         }
-        const bool palm_on=rest_weight>resting_open_weight;
+        const bool palm_on=surface_rules && rest_weight>resting_open_weight; // surface_rules=false: G3/G4/G7 off (the behaviour before round 1)
         // The solve runs in the palm's own frame: the shapes are carried into it once (a held object, which moves with the palm, is the same
         // shape every frame), and the points the fingers test need no transform.
         const auto world=[](Vec3 p) {return p;};
@@ -682,7 +682,7 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
             // G7 (Schmitt trigger on the buried test): a long finger free last call is buried when its straight pose is more than 1 mm inside a shape, as always;
             // one that was bent, lifted or blocked last call (the sticky flag, carried in the finger state) stays so until its straight pose is
             // finger_buried_release (2 mm) CLEAR of the shapes: arm noise of a millimetre about a skin on the surface neither frees it nor flips it between bending and lifting.
-            const bool sticky=f && state.valid && (state.blocked[f] || state.hyperextended[f] || state.min_curl[f]>1e-4f);
+            const bool sticky=surface_rules && f && state.valid && (state.blocked[f] || state.hyperextended[f] || state.min_curl[f]>1e-4f);
             // G4: the thumb of a palm on a surface (stop_extended, rest weight above resting_open_weight) stays on top of what the hand lies on: a thumb a
             // shape buries (below) is not closed on across the palm from where the march left it (under an edge) but searched from its open pose alone, the
             // nearest pose to that one clear of the shapes and of the hand. A thumb nothing buries keeps its march.
@@ -953,8 +953,8 @@ inline FingerCurls finger_contact(const HandGeometry& hand,const WorldTrackedPos
     // G3 (a free hand only: stop_extended; a hold wraps what it holds): the palm on a surface (rest weight above resting_open_weight) opens the four long fingers' wants by resting_open_share * weight, held
     // finger_open_hold_s after the palm leaves, then eased with the finger tau.
     float open_target=0;
-    if(stop_extended && rest_weight>resting_open_weight) {state.open_last=rest_weight;state.open_hold=static_cast<float>(finger_open_hold_s);open_target=rest_weight;}
-    else if(!stop_extended) {state.open=0;state.open_hold=0;state.open_last=0;} // a hold wraps what it holds: the open share ends at once
+    if(surface_rules && stop_extended && rest_weight>resting_open_weight) {state.open_last=rest_weight;state.open_hold=static_cast<float>(finger_open_hold_s);open_target=rest_weight;}
+    else if(!stop_extended || !surface_rules) {state.open=0;state.open_hold=0;state.open_last=0;} // a hold wraps what it holds: the open share ends at once
     else {state.open_hold=static_cast<float>(std::max(0.,state.open_hold-dt));if(state.open_hold>0) open_target=state.open_last;}
     const double kc=dt>0?1-std::exp(-dt/close_tau):0; // G8: the closing branch of follow only (target >= current); close_tau = finger_ik_tau is k
     const auto follow=[&](float& c,float t) {

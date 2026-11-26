@@ -1681,6 +1681,66 @@ int main() {
             if(report_task11) std::cerr<<side<<"buried hysteresis: largest min_curl step "<<worst<<", mode flips "<<flips<<std::endl;
             assert(worst<.05 && flips<=2);
         }
+        {   // finger_surface_rules_off_check: surface_rules=false is the behaviour before round 1 (e14f377): G3 (no open share), G4 (no thumb-on-top branch), G7 (fixed buried thresholds)
+            const double dt=1/72.;
+            {   // G3: the palm on a wall, wants {0,.9,.9,.9,.9}: no open share, the long fingers keep their closing wants (round 1: open, lying at the resting curl)
+                const auto slab=r::slab_shape(h.palm.position+up*(r::held_palm_depth+.015),up*-1.);
+                const std::array<float,5> wants{0,.9f,.9f,.9f,.9f};
+                const auto run=[&](bool rules) {
+                    r::FingerIkState st{};r::FingerCurls c{};
+                    for(unsigned i=0;i<20;++i) c=r::finger_contact(g,h.palm,&slab,1,dt,st,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,rules);
+                    assert(rules || (st.open==0.f && st.open_last==0.f && st.open_hold==0.f));
+                    return std::make_pair(c,r::grip_curls(c,wants));};
+                const auto on=run(true),off=run(false);
+                assert(off.first.open==0.f);
+                assert(std::abs(on.first.open-r::resting_open_share)<1e-5f);
+                unsigned curled=0;
+                for(unsigned f=1;f<5;++f) {
+                    assert(on.second[f]<=r::resting_curl+.05f);
+                    assert(off.second[f]==std::min(std::max({.9f,off.first.resting,off.first.min_curl[f]}),off.first.finger[f])); // the old grip_curls: the want unscaled
+                    assert(off.second[f]>=on.second[f]-1e-6f); // never lower than with the open share
+                    if(off.second[f]>on.second[f]+.01f) ++curled;
+                }
+                (void)curled; // (a wall may cap the fingers low either way; the exact old formula above is the assertion)
+                if(report_task11) {std::cerr<<side<<"surface_rules off, palm on wall: open "<<off.first.open<<", curls";for(unsigned f=1;f<5;++f) std::cerr<<" "<<off.second[f];std::cerr<<std::endl;}
+            }
+            {   // G4: the thumb over an edge (the slab under the palm's centre, half 4 cm): off, the thumb takes its old closing path (not within 10 degrees of the open pose), and the memo key ignores palm_on
+                const auto slab=r::slab_shape(h.palm.position+up*r::held_palm_depth,up*-1.,.04);
+                const std::array<float,5> wants{.3f,0,0,0,0};
+                const double open_cmc=r::finger_open_angles(0)[0];
+                const auto run=[&](bool rules) {
+                    r::FingerIkState st{};const auto c=r::finger_contact(g,h.palm,&slab,1,0,st,1.f,r::finger_solve_all,&wants,false,0,true,r::finger_ik_tau,rules);
+                    assert(rules || !st.memo[0].on_top);
+                    return std::make_pair(c,r::finger_drawn_pose(g,c,wants)[0][0]);};
+                const auto on=run(true),off=run(false);
+                if(report_task11) std::cerr<<side<<"surface_rules off, thumb on an edge: CMC on "<<on.second/deg<<" off "<<off.second/deg<<" (open "<<open_cmc/deg<<"), min_curl on "<<on.first.min_curl[0]<<" off "<<off.first.min_curl[0]<<std::endl;
+                assert(on.second<=open_cmc+10*deg);
+                assert(off.second>open_cmc+10*deg);
+            }
+            {   // G7: the +-1.2 mm slab at 36 Hz: off (fixed thresholds) the middle finger flips between bending, lifting and free beyond the round-1 bound
+                const unsigned f=2;
+                const auto skin_at=[&](double height) {
+                    const auto slab=r::slab_shape(h.palm.position+up*height,up*-1.);
+                    return r::finger_clearance(g.finger[f],g.thickness[f],r::finger_turns_of(g.finger[f],{0,0,0}),[&](Vec3 p) {return world_of(h,p);},[&](Vec3 w) {return r::shape_distance(slab,w);},r::arc_all,4,-1e300,0,2,1);};
+                double lo=-.1,hi=.1;for(unsigned i=0;i<40;++i) {const double m=(lo+hi)*.5;if(skin_at(m)<0) lo=m;else hi=m;}
+                const double face=(lo+hi)*.5;
+                const std::array<float,5> open{0,0,0,0,0};
+                const auto run=[&](bool rules) {
+                    r::FingerIkState st{};float last_min=0;unsigned last_mode=0,flips=0;double worst=0;bool first=true;
+                    for(unsigned i=0;i<144;++i) {
+                        const auto slab=r::slab_shape(h.palm.position+up*(face+.0012*std::cos(2*3.14159265358979323846*36*i*dt)),up*-1.);
+                        const auto c=r::finger_contact(g,h.palm,&slab,1,dt,st,1.f,r::finger_solve_all,&open,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,rules);
+                        const unsigned mode=c.hyperextended[f]?2u:c.min_curl[f]>.01f?1u:0u;
+                        if(!first) {worst=std::max(worst,static_cast<double>(std::abs(c.min_curl[f]-last_min)));if(mode!=last_mode) ++flips;}
+                        first=false;last_min=c.min_curl[f];last_mode=mode;
+                    }
+                    return std::make_pair(worst,flips);};
+                const auto on=run(true),off=run(false);
+                if(report_task11) std::cerr<<side<<"surface_rules off, buried: largest step "<<off.first<<" flips "<<off.second<<" (on: "<<on.first<<", "<<on.second<<")"<<std::endl;
+                assert(on.first<.05 && on.second<=2);
+                assert(off.first>=.05 || off.second>2);
+            }
+        }
         {   // finger_contact_close_tau (G8): close_tau is used only by the closing branch
             const std::array<float,5> fist{1,1,1,1,1};const double dt=1/60.;
             const auto close_run=[&](double tau) { // a hand held open by a wall, the wall gone: the pose closes onto nothing toward the free target

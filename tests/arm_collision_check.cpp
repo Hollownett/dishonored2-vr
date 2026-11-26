@@ -192,8 +192,15 @@ static void degenerate_inputs(){
     c.observe(0,geom(),none,0);ArmGeometry far=geom();far.wrist.x+=.5;c.observe(0,far,none,.01);
     assert(c.stats(0).resets==1);
 }
+static void answered_counts(){
+    ArmCollision c;ArmGeometry g=geom();
+    std::array<std::optional<ArmHit>,2> none;
+    c.observe(0,g,none,0);assert(c.stats(0).casts==2);              // default: both casts counted for one call
+    c.observe(1,g,none,0,1u<<0);c.observe(1,g,none,0,1u<<1);assert(c.stats(1).casts==2); // one call per answered part: 2 casts, not 4
+    c.observe(1,g,none,0,0);assert(c.stats(1).casts==2);            // nothing answered: nothing counted
+}
 int main(){
     side_wall_swivels();table_under_elbow();corner_two_planes();straight_arm_residual();inward_limit();
-    edge_discard();plane_expires();refresh_not_duplicate();corridor_no_flip();keeps_side();infeasible_stays_near();rotation_convention();release_eases();engage_fast();degenerate_inputs();
+    edge_discard();plane_expires();refresh_not_duplicate();corridor_no_flip();keeps_side();infeasible_stays_near();rotation_convention();release_eases();engage_fast();degenerate_inputs();answered_counts();
     std::printf("arm_collision_check ok\n");
 }

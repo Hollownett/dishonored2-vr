@@ -37,7 +37,7 @@ public:
         return out;
     }
 
-    void observe(unsigned side,const ArmGeometry& cast_geometry,const std::array<std::optional<ArmHit>,2>& hits,double now) {
+    void observe(unsigned side,const ArmGeometry& cast_geometry,const std::array<std::optional<ArmHit>,2>& hits,double now,unsigned answered=0x3u) { // answered: bit i = cast i was answered (counted in stats.casts)
         if(side>1||!std::isfinite(now)) return;
         const ArmGeometry& g=cast_geometry;
         if(!g.valid||!finite(g.shoulder)||!finite(g.elbow)||!finite(g.wrist)) return;
@@ -51,7 +51,7 @@ public:
         const auto cs=casts(g);
         const double cos_same=std::cos(cfg_.same_normal_deg*3.14159265358979323846/180);
         for(std::size_t i=0;i<2;++i) {
-            if(cs[i]) ++s.stats.casts;
+            if(cs[i] && ((answered>>i)&1u)) ++s.stats.casts;
             if(!hits[i]) continue;
             const ArmHit& h=*hits[i];
             ++s.stats.hits;
