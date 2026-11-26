@@ -1185,6 +1185,21 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_clamp_check.
 if not "%errorlevel%"=="0" exit /b 1
 build\hand_clamp_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+rem Arm collision (2026-11-26 design): natural-arm casts, half-space planes, the elbow swivel and its follower.
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\arm_collision_check.cpp /Fo:build\arm_collision_check.obj /Fe:build\arm_collision_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\arm_collision_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+rem Body holsters (2026-11-26 design): places on the pelvis/chest, the put-back rule, the squeeze-and-pull draw.
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\holster_rig_check.cpp /Fo:build\holster_rig_check.obj /Fe:build\holster_rig_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\holster_rig_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+rem Hand/weapon contact: dual wield, blade vs other hand, and (2026-11-26) the other arm's forearm.
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_weapon_contact_check.cpp /Fo:build\hand_weapon_contact_check.obj /Fe:build\hand_weapon_contact_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\hand_weapon_contact_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\held_clamp_check.cpp /Fo:build\held_clamp_check.obj /Fe:build\held_clamp_check.exe
 if not "%errorlevel%"=="0" exit /b 1
 build\held_clamp_check.exe
