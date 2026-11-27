@@ -36,7 +36,10 @@ def check(probe: str) -> list:
     need("d2vr::rig::palm_sweep(*geometry,palm,d2vr::rig::free_palm_reach)" in block, "free palm reach 8 cm")
     need("d2vr::rig::finger_sweep(*geometry,palm,f,finger_drawn_angles[side][f])" in block, "fingertip along the current pose")
     posts = block.count("post_weapon_segment(")
-    need(posts == 2, f"two post sites in the free branch (palm + the fingertip loop), found {posts}")
+    need(posts == 3, f"three post sites in the free branch (palm, the back of the hand, the fingertip loop), found {posts}")
+    # 2026-11-27 Task 16: the back-of-hand cast on its own slot, only while the surface rules are on (legacy-finger-surface: none)
+    need(re.search(r"if\(finger_surface_rules_on\) \{[^}]*post_weapon_segment\(side,d2vr::NativeInteractionAim::hand_back_slot,", block) is not None,
+         "the back-of-hand cast on hand_back_slot, gated by the surface rules")
     need(re.search(r"for\(unsigned k=0;k\+1<finger_probe_casts;\+\+k\)", block) is not None, "fingertip casts bounded by finger_probe_casts-1")
     need(re.search(r"static constexpr unsigned finger_probe_casts_default=2;static unsigned finger_probe_casts=finger_probe_casts_default;", probe) is not None,
          "finger_probe_casts default is 2 (ruling H18); 3 only via build/finger-probe-3")
@@ -46,7 +49,8 @@ def check(probe: str) -> list:
     need("free_hand=finger_surface && !legacy_finger_ease &&" in probe, "legacy-finger-ease turns G5 free-hand probes off (v611)")
     need("start(finger_drawn_valid[side]?finger_drawn_angles[side]:d2vr::rig::FingerAngles{},fk_t)" in probe, "hold edge blends from the open pose when nothing was drawn")
     need("std::array<std::uint64_t,2> held_shape_sig" in probe, "ease signature is a hash, not a string")
-    need("weapon_hit(side,slot,fk_now,d2vr::NativeInteractionAim::producer_clamp,150)" in block, "the finger slots read with 150 ms")
+    need("weapon_hit(side,cast_slot,fk_now,d2vr::NativeInteractionAim::producer_clamp,150)" in block, "the finger slots read with 150 ms")
+    need("const unsigned cast_slot=back_probe?d2vr::NativeInteractionAim::hand_back_slot:slot;" in block, "the back pass reads hand_back_slot, the others their own slot")
     need("probe_cache[side].probed(" in block and "probe_cache[side].shapes(" in block, "the sticky cache feeds the solver")
     # the free hand is never a weapon hand, a native-animated hand or a hold, and the knob turns it off
     free = re.search(r"\bfree_hand=(finger_surface[^;]*);", probe)

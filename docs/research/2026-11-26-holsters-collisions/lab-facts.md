@@ -86,3 +86,21 @@ wall (106 mm); on: natural 209 frames (102 mm), drawn 7 frames (59 mm): 97% of t
   the same frame (paired by the expected root): mean 3.4 mm carried vs 10.5 mm legacy (1,635 / 1,761 frames); max 165 mm in both (a turn).
 - **Lab note:** `dual-wield-events.jsonl` accumulates across sessions (append mode, never cleared): filter it by the run's tick range;
   `xr-live-status.json` is per run.
+
+## 2026-11-27: the load crash, the bisect, the second wave
+
+- **A save loaded during play crashed the game** (Death of the Outsider `loadgame 33`, 3 of 3 runs, base v145785 identical): an unhandled
+  access violation in VCRUNTIME memcpy called from `read_self_raw` (render_player_root on the present thread). clang-cl `/EHsc` does not
+  put memcpy-builtin calls under `__try` (a scratch check with the plain pattern died with "Unhandled page fault"; cl catches it).
+  Fix: `src/seh_copy.hpp`, 57 sites. Sims after the fix: `loadgame` in both games, no crash.
+- **Bisect** (13 builds, `~/d2vr-bisect` + `~/d2vr-test-builds/bisect/variant.sh`): the first fix build crashed 3 s into play in the
+  engine (DOTO +0x526047: `[[r13+0x60]+0x38]` null, then `[r15+0x20]`). Not the fingers, not the slot count, not give item; one header,
+  `bodyless_motion_guard.hpp`; include-only fine, the guarded call crashes, an integer-only opaque call crashes too: a live `__except` in
+  that read is the trigger. It stays as it always was.
+- **D2 grenades**: the lab save holds none: `d2vr give item regular_grenade 3` (the game's AddItem 0x6156e0) raises the existing record.
+  The held grenade's entity decl is `models/weapons/gadgets/grenade_base.def` (shared): the belt key comes from the slot-1 inventory
+  item's decl name (`regular_grenade.inventoryitem`). Put back + drawn 2x, no failure.
+- **Back of the hand**: back_wall's right hand did not register (to look at); the rule engaged on the resting left hand 1,003 frames
+  (0 with `legacy-finger-surface`).
+- **Thumb on a wall** (palm_wall, right hand): 25.7 / 17.5 / 26.4 mm across runs (v145785: 28.3). The solve's least-depth thumb pose is
+  not what is drawn (the relaxed/open want points into the wall).
