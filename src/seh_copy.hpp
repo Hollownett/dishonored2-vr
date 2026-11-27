@@ -9,21 +9,13 @@
 // would cover them) and the fault crashes the game (2026-11-26: Death of the Outsider crashed in read_self's memcpy while a save loaded:
 // the page was freed between the readability check and the copy). Calling them through volatile pointers makes the calls opaque, so the
 // __try covers them under both compilers. Every std::memcpy / memcmp / memmove / memset inside a __try in src/ goes through these.
-// tests/seh_copy_check.cpp proves it under the build's own flags. src/bodyless_motion_guard.hpp uses seh_integer_copy (its engine hook path must not touch the vector registers).
+// tests/seh_copy_check.cpp proves it under the build's own flags. EXCEPT src/bodyless_motion_guard.hpp (see its seh_read: its faults must reach the engine's handler).
 namespace d2vr {
 inline void* (*volatile seh_memcpy)(void*,const void*,std::size_t)=&std::memcpy;
 inline void* (*volatile seh_memmove)(void*,const void*,std::size_t)=&std::memmove;
 inline int (*volatile seh_memcmp)(const void*,const void*,std::size_t)=&std::memcmp;
 inline void* (*volatile seh_memset)(void*,int,std::size_t)=&std::memset;
-// An integer-only copy for engine hook paths that must not touch the vector registers (src/bodyless_motion_guard.hpp: its Havok callers keep
-// floats in xmm0-5 across the hooked call, which the CRT memcpy clobbers). Byte by byte through volatile pointers (no vectorising, no memcpy
-// call), never inlined, and called through a volatile pointer so the call stays opaque and the caller's __try covers it.
-__declspec(noinline) inline void* integer_copy(void* dst,const void* src,std::size_t size) noexcept {
-    auto* d=static_cast<volatile unsigned char*>(dst);const auto* s=static_cast<const volatile unsigned char*>(src);
-    for(std::size_t i=0;i<size;++i) d[i]=s[i];
-    return dst;
-}
-inline void* (*volatile seh_integer_copy)(void*,const void*,std::size_t)=&integer_copy;
+
 inline bool seh_copy(void* dst,const void* src,std::size_t size) noexcept {
     __try {seh_memcpy(dst,src,size);return true;}
     __except(GetExceptionCode()==0xC0000005UL /*access violation*/ || GetExceptionCode()==0xC0000006UL /*in-page error*/ ||

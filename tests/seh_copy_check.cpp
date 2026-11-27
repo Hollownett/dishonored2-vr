@@ -14,10 +14,6 @@ int main() {
     if(d2vr::seh_copy(buffer,page,8)) {std::puts("FAIL: a copy from a released page succeeded");return 1;}
     if(d2vr::seh_copy(page,buffer,8)) {std::puts("FAIL: a copy to a released page succeeded");return 1;}
     if(d2vr::seh_copy(buffer,reinterpret_cast<const void*>(std::uintptr_t{0x10}),8)) {std::puts("FAIL: a copy from address 0x10 succeeded");return 1;}
-    const auto integer_copy=[](void* d,const void* s,std::size_t n) noexcept {__try {d2vr::seh_integer_copy(d,s,n);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}};
-    unsigned char live[8]{1,2,3,4,5,6,7,8};
-    if(!integer_copy(buffer,live,8) || buffer[7]!=8) {std::puts("FAIL: the integer copy from a live buffer");return 1;}
-    if(integer_copy(buffer,page,8)) {std::puts("FAIL: the integer copy from a released page succeeded");return 1;}
     std::puts("seh_copy_check passed");
     return 0;
 }
