@@ -131,7 +131,7 @@ calls instead of being baked in by Map(DISCARD)"):
   the CPU and frozen into D3D11 lists we do not translate.
 - **Dying Light VR** [brief]: uses the Chrome Engine's own record-once / play-per-eye path. The Void engine exposes no such
   path. The only related bit is the unverified `item+0xf4 & 0x100` cached-list flag (U-3).
-- **Cyberpunk VR port** [brief]: D3D12 view instancing. D3D11 has no view instancing (ENGINE-PERF-PLAN.md:71). NVIDIA's NVAPI
+- **reference VR mod** [brief]: D3D12 view instancing. D3D11 has no view instancing (ENGINE-PERF-PLAN.md:71). NVIDIA's NVAPI
   multi-view would still need every vertex shader rewritten.
 
 ### 3.4 Verdict
