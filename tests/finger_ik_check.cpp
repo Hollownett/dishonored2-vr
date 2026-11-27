@@ -6,6 +6,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <utility>
 namespace r=d2vr::rig;
 using d2vr::Vec3;
 namespace {
@@ -1740,6 +1741,111 @@ int main() {
                 assert(on.first<.05 && on.second<=2);
                 assert(off.first>=.05 || off.second>2);
             }
+        }
+        {   // finger_thumb_off_wall (task 15): the open hand's palm on a wall (the slab's face at the palm skin). The thumb's deepest phalanx point (put_out's measure: shape_distance
+            // minus thickness over the six points) with surface_rules is no deeper than thumb_shape_tolerance when some pose of the thumb's grid (clear of the hand) is; else it is
+            // the least deep of the grid (a dense brute force over the thumb's joint box, within 1 mm); surface_rules=false is today's result exactly.
+            const auto slab=r::slab_shape(h.palm.position+up*r::held_palm_depth,up*-1.);
+            const std::array<float,5> wants{0,.9f,.9f,.9f,.9f};const double dt=1/72.;
+            const auto run=[&](bool rules) {r::FingerIkState st{};r::FingerCurls c{};for(unsigned i=0;i<20;++i) c=r::finger_contact(g,h.palm,&slab,1,dt,st,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,rules);return c;};
+            const auto on=run(true),off=run(false);
+            const auto thumb_depth=[&](const std::array<double,3>& a) {
+                const auto p=r::finger_points(g.finger[0],r::finger_turns_of(g.finger[0],a));const Vec3 q[6]{(p[0]+p[1])*.5,p[1],(p[1]+p[2])*.5,p[2],(p[2]+p[3])*.5,p[3]};
+                double least=1e9;for(const Vec3& v:q) least=std::min(least,r::shape_distance(slab,world_of(h,v))-g.thickness[0]);return least;};
+            const auto of=[&](const r::FingerCurls& c) {return std::array<double,3>{c.pose[0][0],c.pose[0][1],c.pose[0][2]};};
+            const auto depth_vs=[&](const r::HeldShape& w,const std::array<double,3>& a) {
+                const auto p=r::finger_points(g.finger[0],r::finger_turns_of(g.finger[0],a));const Vec3 q[6]{(p[0]+p[1])*.5,p[1],(p[1]+p[2])*.5,p[2],(p[2]+p[3])*.5,p[3]};
+                double least=1e9;for(const Vec3& v:q) least=std::min(least,r::shape_distance(w,world_of(h,v))-g.thickness[0]);return least;};
+            r::FingerAngles fingers{};for(unsigned k=1;k<5;++k) {const auto x=r::finger_pose_angles(k,std::max(wants[k],r::relaxed_share),on.pose[k]);for(unsigned j=0;j<3;++j) fingers[k][j]=static_cast<float>(x[j]);}
+            const r::ThumbBody body(g,fingers);
+            // brute force: a 25 x 25 x 25 grid over the joint box (open pose to limit), clear of the hand
+            const auto lo=r::finger_open_angles(0),hi=r::finger_angles(0,1.);
+            double best_any=-1e9;unsigned clear_poses=0;
+            for(int i=0;i<=24;++i) for(int j=0;j<=24;++j) for(int k=0;k<=24;++k) {
+                const std::array<double,3> a{lo[0]+(hi[0]-lo[0])*i/24,lo[1]+(hi[1]-lo[1])*j/24,lo[2]+(hi[2]-lo[2])*k/24};
+                if(body.clearance(a)<0) continue;
+                ++clear_poses;const double d=thumb_depth(a);best_any=std::max(best_any,d);
+            }
+            const double before=thumb_depth(of(off)),after=thumb_depth(of(on));
+            std::cerr<<side<<"thumb off wall: surface_rules=false deepest "<<before*1000<<" mm, with "<<after*1000<<" mm, brute-force best clear pose "<<best_any*1000<<" mm ("<<clear_poses<<" clear poses), clearance of the result "<<body.clearance(of(on))*1000<<" mm, touching "<<on.touching[0]<<std::endl;
+            assert(before<-r::thumb_shape_tolerance); // the evidence: the thumb lies in the wall without the rule
+            assert(on.touching[0] && body.clearance(of(on))>=0);
+            if(best_any>=-r::thumb_shape_tolerance) assert(after>=-r::thumb_shape_tolerance-1e-4);
+            else assert(std::abs(after-best_any)<=.001 || after>best_any);
+            assert(after>before);
+            // the drawn thumb follows: the filter's put_out finds nothing deeper than before
+            // surface_rules=false: today's result exactly, and the long fingers are the same either way
+            r::FingerIkState sa{},sb{};r::FingerCurls ca{},cb{};
+            for(unsigned i=0;i<20;++i) {ca=r::finger_contact(g,h.palm,&slab,1,dt,sa,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,false);
+                cb=r::finger_contact(g,h.palm,&slab,1,dt,sb,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,false);}
+            assert(std::memcmp(&ca.pose,&cb.pose,sizeof ca.pose)==0);
+            // a thumb already out of the wall is not touched: the palm 3 cm over the surface gives the same thumb with and without the rule
+            {   const auto far=r::slab_shape(h.palm.position+up*(r::held_palm_depth+.03),up*-1.);
+                r::FingerIkState s1{},s2{};r::FingerCurls c1{},c2{};
+                for(unsigned i=0;i<20;++i) {c1=r::finger_contact(g,h.palm,&far,1,dt,s1,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,true);
+                    c2=r::finger_contact(g,h.palm,&far,1,dt,s2,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,false);}
+                std::cerr<<side<<"thumb 3 cm over: off "<<depth_vs(far,of(c2))*1000<<" on "<<depth_vs(far,of(c1))*1000<<" mm, same "<<(std::memcmp(&c1.pose[0],&c2.pose[0],sizeof c1.pose[0])==0)<<std::endl;
+                assert(depth_vs(far,of(c2))>=-r::thumb_shape_tolerance && std::memcmp(&c1.pose[0],&c2.pose[0],sizeof c1.pose[0])==0);
+            }
+            // the main branch: a wall d below the palm skin that some clear thumb pose keeps within the tolerance of (the nearest such pose is taken)
+            {   // a small slab on the thumb's side only: its face at the palm skin, centred under the thumb's root (so the thumb can swing out of it)
+                const Vec3 root=world_of(h,g.finger[0].pivot);const Vec3 skin=h.palm.position+up*r::held_palm_depth;
+                for(const auto& hs:{std::pair<double,double>{.02,-.005},{.022,-.005},{.024,-.01},{.04,-.02}}) {const double half=hs.first,shift=hs.second;
+                    const Vec3 c=root-up*d2vr::dot(root-skin,up);
+                    const Vec3 lateral=d2vr::unit(c-h.palm.position-up*d2vr::dot(c-h.palm.position,up));
+                    const auto w=r::slab_shape(c+lateral*shift,up*-1.,half);
+                    r::FingerIkState s1{},s2{};r::FingerCurls c1{},c2{};
+                    for(unsigned i=0;i<20;++i) {c1=r::finger_contact(g,h.palm,&w,1,dt,s1,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,true);
+                        c2=r::finger_contact(g,h.palm,&w,1,dt,s2,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,false);}
+                    std::cerr<<side<<"thumb side slab half "<<half<<" shift "<<shift*1000<<": before "<<depth_vs(w,of(c2))*1000<<" mm, after "<<depth_vs(w,of(c1))*1000<<" mm"<<std::endl;
+                    // the main branch (the nearest clear pose within the tolerance) where one exists; never deeper than the solve in any case
+                    assert(depth_vs(w,of(c1))>=depth_vs(w,of(c2))-1e-9);
+                    if(half<.04) {assert(depth_vs(w,of(c2))<-r::thumb_shape_tolerance && depth_vs(w,of(c1))>=-r::thumb_shape_tolerance);}
+                }
+            }
+            // a hold (stop_extended false): no change either
+            {   r::FingerIkState s1{},s2{};r::FingerCurls c1{},c2{};
+                for(unsigned i=0;i<20;++i) {c1=r::finger_contact(g,h.palm,&slab,1,dt,s1,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),false,r::finger_ik_tau,true);
+                    c2=r::finger_contact(g,h.palm,&slab,1,dt,s2,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),false,r::finger_ik_tau,false);}
+                assert(std::memcmp(&c1.pose,&c2.pose,sizeof c1.pose)==0);
+            }
+        }
+        {   // finger_back_of_hand_check (task 16): the back of the hand (hand_back_depth behind the palm frame) pressed on a surface straightens the long fingers by up to
+            // back_open_share toward the open hand, 4 mm to 4.4 cm held off. The slab's face lies back_face_depth behind the palm frame (3 mm behind the back skin at 18 mm).
+            const std::array<float,5> wants{0,.8f,.8f,.8f,.8f};const double dt=1/72.;
+            const auto behind=[&](double depth_behind_palm) {return r::slab_shape(h.palm.position-up*depth_behind_palm,up);}; // face toward the hand's back
+            const auto run=[&](const r::HeldShape* slab,bool free_hand,bool rules,r::FingerCurls& c) {
+                r::FingerIkState st{};for(unsigned i=0;i<60;++i) c=r::finger_contact(g,h.palm,slab,slab?1u:0u,dt,st,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),free_hand,r::finger_ik_tau,rules);
+                return r::grip_curls(c,wants);};
+            r::FingerCurls none_c{},near_c{},lit_c{},far_c{},off_c{},hold_c{};
+            const auto air=run(nullptr,true,true,none_c);
+            const auto near_slab=behind(r::hand_back_depth+.003);
+            const auto pressed=run(&near_slab,true,true,near_c);
+            for(unsigned f=1;f<5;++f) assert(pressed[f]<=.8f*(1-r::back_open_share)+1e-3f && air[f]>=.8f-1e-3f);
+            assert(near_c.back>.99f && none_c.back==0.f && near_c.open<1e-4f);
+            // the brief's "1 cm behind the back-of-hand skin": a 10 mm gap is 85% of the way in
+            const auto lit_slab=behind(r::hand_back_depth+.01);const auto lit=run(&lit_slab,true,true,lit_c);
+            assert(std::abs(lit_c.back-(r::back_press_far-.01)/(r::back_press_far-r::back_press_near))<1e-3f);
+            for(unsigned f=1;f<5;++f) assert(std::abs(lit[f]-.8f*(1-r::back_open_share*lit_c.back))<2e-3f);
+            // the palm flat on a wall (face at the palm skin: 25 mm from the back point) or hovering 2 cm over a surface: no press on the BACK of the hand, back == 0 exactly
+            for(const double over:{0.,.02}) {
+                const auto in_front=r::slab_shape(h.palm.position+up*(r::held_palm_depth+over),up*-1.);r::FingerCurls fc{};(void)run(&in_front,true,true,fc);
+                assert(fc.back==0.f);
+            }
+            // 6 cm away: as with no slab
+            const auto far_slab=behind(r::hand_back_depth+.06);const auto farther=run(&far_slab,true,true,far_c);
+            assert(far_c.back==0.f);for(unsigned f=1;f<5;++f) assert(farther[f]==air[f]);
+            // surface_rules=false: unchanged
+            const auto legacy=run(&near_slab,true,false,off_c);
+            assert(off_c.back==0.f);for(unsigned f=1;f<5;++f) assert(legacy[f]>=.8f-1e-3f);
+            // a hold (stop_extended false): unchanged
+            const auto held=run(&near_slab,false,true,hold_c);
+            assert(hold_c.back==0.f);for(unsigned f=1;f<5;++f) assert(held[f]>=.8f-1e-3f);
+            // the share eases with the tau and ends at once for a hold
+            r::FingerIkState st{};r::FingerCurls c{};
+            c=r::finger_contact(g,h.palm,&near_slab,1,dt,st,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true);assert(c.back>=0.f && c.back<=1.f);
+            c=r::finger_contact(g,h.palm,&near_slab,1,dt,st,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),false);assert(c.back==0.f && st.back==0.f);
+            std::cerr<<side<<"back of hand: slab 3 mm behind the skin back "<<near_c.back<<" curls "<<pressed[1]<<" "<<pressed[2]<<" "<<pressed[3]<<" "<<pressed[4]<<"; 10 mm back "<<lit_c.back<<" curl "<<lit[1]<<"; 6 cm back "<<far_c.back<<"; air "<<air[1]<<std::endl;
         }
         {   // finger_contact_close_tau (G8): close_tau is used only by the closing branch
             const std::array<float,5> fist{1,1,1,1,1};const double dt=1/60.;
