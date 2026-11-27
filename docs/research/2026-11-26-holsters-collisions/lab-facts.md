@@ -104,3 +104,18 @@ wall (106 mm); on: natural 209 frames (102 mm), drawn 7 frames (59 mm): 97% of t
   (0 with `legacy-finger-surface`).
 - **Thumb on a wall** (palm_wall, right hand): 25.7 / 17.5 / 26.4 mm across runs (v145785: 28.3). The solve's least-depth thumb pose is
   not what is drawn (the relaxed/open want points into the wall).
+
+## 2026-11-27 (later): hands on surfaces, thumb, probes
+
+- **The hand clamp is a sphere.** `HandClampConfig::palm_radius` .05 + skin .005 around the grip, any orientation: an empty hand
+  stops ~4 cm short of a wall (back_wall: the back-of-hand probe's peak share 0.086 = the back skin ~4 cm off). Fixed by the settle
+  step (palm box + drawn phalanges), not by changing the clamp (its sweeps, validation and snapback are tuned on the headset).
+- **OpenXR grip axes in the sims:** the open fingers lie along the grip's -Y; -Z runs along the handle (little finger to thumb). A
+  scenario pose that takes -Z for the fingers hangs them down.
+- **Probe hygiene:** a sphere cast that starts inside geometry reports no real face (`initial_overlap`); the mod's own hand body is
+  reported as entity 0 (`hand_body`). Either made a slab through the hand. Both are misses now, for every free-hand cast.
+- **Measuring fingers:** `finger_ik.tip_pen[5]` (thumb) is a whole-run maximum; `round2.thumb_pen` is per frame. `steady[1]` is a
+  per-frame step in the PALM frame: a 100+ mm step is a finger flipping, not the hand moving; `round2.spikes` lists the last 12 with
+  the settle offset and blocked flags.
+- **D2 belt_reset** never registers the "empty" pull after the load (all builds); the belt does forget (key "" at the end, no draw).
+- **D2 heart_pocket:** the left natural elbow is in something 18 frames, up to ~205 mm, in every build (unchanged).

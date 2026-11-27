@@ -1,6 +1,6 @@
-# v1497 test build: solid arms, body holsters, grenades, mines and the Heart back in the inventory, natural fingers, no crash on loading a save (pre-release, 2026-11-27)
+# v1503 test build: solid arms, body holsters, grenades, mines and the Heart back in the inventory, hands that rest on surfaces, natural fingers, no crash on loading a save (pre-release, 2026-11-27)
 
-A test build from the branch `feat/doto-vr`: Dishonored 2 **v1497** and Death of the Outsider **v145799**. It follows v1483 / v145785 (the v1491 / v145793 package was never published: this one replaces it).
+A test build from the branch `feat/doto-vr`: Dishonored 2 **v1503** and Death of the Outsider **v145806**. It follows v1483 / v145785 (the v1491 / v145793 and v1497 / v145799 packages were never published: this one replaces them).
 **It has not been played in a headset yet.** Everything below was checked in simulated VR sessions of the real games: scripted head and
 controller input, the game's own state read back, and eye captures. The design follows the reference VR mod (its arm collision,
 its body holsters and its finger contact), read side by side with this mod (`docs/research/2026-11-26-holsters-collisions/`).
@@ -57,6 +57,30 @@ shoulder, and both stay there when you look down or turn your head.
 - **The shoulder holster follows your body** (built): over either shoulder, where the drawn body's shoulder is. Drawing and sheathing
   the sword there works as before (sim-proven, the same results as the previous build).
 
+## New: your hand rests on a surface instead of stopping 4 cm short (both games)
+
+Until now the mod kept your empty hand out of walls as if it were a ball 5 cm round the controller: whichever way the hand faced, it
+stopped with its skin about 4 cm off the surface. A palm "on" a wall floated in front of it, and the back of the hand could never touch
+one. The hand now has the shape the reference mod gives it: the palm is a flat box (1 cm deep on the palm side, 1.5 cm on the back),
+the fingers are the fingers as they are drawn. After the old stop, an empty hand moves on toward your controller until that shape meets
+the surface, a few millimetres off it (sim-proven, both games):
+- the palm or the back of the hand comes to rest on the wall; a fist stops at its knuckles, a thumb that sticks out stops the hand
+  until the fingers move it;
+- it follows the controller in smoothly (a host test presses in and out in 2 mm steps: never more than 2 mm a frame) and lets go the
+  way it did before;
+- only an empty hand, and only against walls, floors and things that do not move: a hand holding a weapon, a gadget, a body or a prop,
+  a hand the game animates, and anything loose are exactly as before (sim: the gun hand pressed into a wall never moved);
+- `legacy-palm-sphere` brings the old stop back.
+
+Palm flat on a wall, slid slowly and fast (sim, against `legacy-palm-sphere` in the same build):
+- Dishonored 2: fingers past the depth limit on 10 of 1,544 frames, 1.07 mm deep on average (1.99 mm before); the thumb more than 5 mm in
+  on 42 frames (244 before); the palm skin never inside the wall (17.5 mm before, a measuring artefact of the old probes, see below);
+- Death of the Outsider: fingers past the limit on 0-2 frames (4 before), the same steadiness (1.9 mm average step, no flicker).
+
+The probes that find surfaces for the fingers were also cleaned up: a probe that started inside something, met the mod's own hand
+body, or met a surface facing the wrong way used to become a "surface" through the hand (a resting hand's index finger flickered,
+and in Dishonored 2 the palm measured 18 mm into a wall that was not there). Such answers are now ignored.
+
 ## New: fingers that touch things naturally (both games)
 
 Your fingers now follow the reference mod's finger rules on walls, tables and props:
@@ -68,9 +92,9 @@ Your fingers now follow the reference mod's finger rules on walls, tables and pr
 - **Edges.** A surface the fingers touch is only as big as the hand felt it, so a finger past a table edge droops over it instead of
   resting on an invisible extension. (Checked by the host tests only: no table in the lab saves.)
 - **The thumb stays on top of an edge.**
-- **The back of your hand pressed on a surface straightens the fingers** (sim-proven: engaged on 1,003 frames, none with the switch
-  off): up to 35% of the way open, from 4.4 cm off to 4 mm, as in the reference mod. A probe behind the hand finds the surface; it
-  only counts when the surface is nearer the back of the hand than the palm (a palm on a wall is not a back press).
+- **The back of your hand pressed on a surface straightens the fingers**, up to 35% of the way open, from 4.4 cm off to 4 mm, as in
+  the reference mod. Sim-proven with the back of the hand pressed on a wall: engaged on 549 frames (Death of the Outsider) and 949
+  (Dishonored 2). Before the hand could rest on a surface it never engaged in that test (the hand stopped 4 cm short).
 - **Quick and steady.** Fingers close onto a surface or around a squeeze about twice as fast as before (about 35 ms) and open as
   before (about 70 ms), at most 6 rad/s: the reference mod's timing. The fingers resting on a surface are checked first and agree on one surface, so
   they stay level and still while your hand slides or you walk.
@@ -84,10 +108,11 @@ compared with the build before this work):
   brings the old timing back;
 - the wall rules (palm open, thumb, steady contact) against `legacy-finger-surface` in the same run: the largest frame-to-frame finger
   step 43 mm against 147 mm, the average 2.1 mm against 4.2 mm, and no flicker against 6 flips.
-- **Not fixed: the thumb.** With the palm flat on a wall the thumb's tip still sits about 2.5 cm inside it (2.8 cm before this work).
-  The contact solve now finds the least-deep thumb pose (in the host test the thumb comes out to 5.8 mm where a clear pose exists),
-  but the thumb is drawn from its relaxed pose, which points into the wall; the drawing path has to take the solved pose, and the
-  thumb's hinge joints cannot lay it fully flat. Next build.
+- **The thumb on a wall.** The thumb is now drawn in the pose the contact solve finds for it (it used to be drawn from its relaxed
+  pose, which points into the wall): in the host test from 20 mm in to 9 mm, the least the thumb's joints allow with the palm flat on
+  the surface (it cannot lie fully flat), and 5.8 mm where a clear pose exists. Measured frame by frame in the simulator, the thumb is
+  more than 5 mm in on 1-4% of the frames the hand is at the wall (the "2.5 cm" of the last notes was the single worst moment of a
+  fast slide).
 
 ## Checked for regressions (simulated, new build against v1483 / v145785)
 
@@ -121,6 +146,7 @@ An empty file with one of these names undoes that change. Put it in `%LOCALAPPDA
 - `legacy-shoulder-zone`: the old shoulder holster around the head
 - `legacy-hip-place`: the old hip gun placement
 - `no-finger-put-out`: fingers set out of surfaces
+- `legacy-palm-sphere`: the hand stops 4 cm short of surfaces again (the old ball-shaped stop)
 - `legacy-finger-surface`: the palm-open, thumb, back-of-hand and steady-finger rules
 - `legacy-finger-slab`: the old large surface planes
 - `legacy-finger-timing`: the old, slower finger timing
@@ -128,13 +154,13 @@ An empty file with one of these names undoes that change. Put it in `%LOCALAPPDA
 - `legacy-finger-plane`: each finger on its own plane
 
 ## Known issues
-- Not tested in a headset. What to check: `docs/VR-v1497-TEST-CHECKLIST.md`.
+- Not tested in a headset. What to check: `docs/VR-v1503-TEST-CHECKLIST.md`.
 - The arms only react when they really meet something. Standing at a wall, the game's body keeps them clear, so most of the time you
   will not see it. Leaning in is where it shows.
-- Palm flat on a wall: the thumb stays about 2.5 cm inside it (see the fingers section).
+- Palm flat on a wall: the thumb's joints cannot lay it fully flat, so it can sit a few millimetres in (see the fingers section).
 - Both DLLs and the launcher were built on Linux, not with the usual Windows build.
 
 ## Linux (Proton)
 
-Dishonored 2: `linux/d2vr-linux install --zip d2vr-v1497-dll.zip`. Death of the Outsider:
-`linux/d2vr-linux --game doto install --zip d2vr-doto-v145799-dll.zip`. See `linux/README.md`.
+Dishonored 2: `linux/d2vr-linux install --zip d2vr-v1503-dll.zip`. Death of the Outsider:
+`linux/d2vr-linux --game doto install --zip d2vr-doto-v145806-dll.zip`. See `linux/README.md`.

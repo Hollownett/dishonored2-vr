@@ -1,9 +1,9 @@
-# Headset checklist: solid arms, body holsters, gadgets and the Heart back, natural fingers (v1497 / v145799, 2026-11-26)
+# Headset checklist: solid arms, body holsters, gadgets and the Heart back, natural fingers (v1503 / v145806, 2026-11-26)
 
 Branch `feat/doto-vr`. Everything below was built and checked on Linux (host checks + simulated sessions of the real games under
 Proton, `tools/linux/scenarios/*`); none of it has been in a headset yet. Each line: what to do, what you should see, the knob that
 turns the change off if it feels wrong (`%LOCALAPPDATA%\DishonoredVR\build\<knob>` for Dishonored 2, `...\DishonoredVR-DOTO\build\<knob>`
-for the Outsider, or the launcher's feature list). Release notes: `docs/VR-v1497-RELEASE.md`.
+for the Outsider, or the launcher's feature list). Release notes: `docs/VR-v1503-RELEASE.md`.
 
 ## Arms (both games)
 
@@ -35,7 +35,9 @@ for the Outsider, or the launcher's feature list). Release notes: `docs/VR-v1497
 | 14 | Put your open hand flat on a wall, then squeeze the grip a little | The fingers lie flat on the wall and stay open on it; no finger inside the wall; the thumb not inside it either | `legacy-finger-surface` (opening), `no-finger-put-out` (sinking), `legacy-finger-timing` (timing) |
 | 15 | Slide the flat hand along the wall slowly, then fast; walk sideways with it on the wall | The fingers stay level and still on the surface; no flicker | `legacy-finger-probe-order`, `legacy-finger-plane`, `legacy-finger-surface` |
 | 16 | Lower your hand quickly onto a table | The fingers stop on the top, they never dip in | `no-finger-put-out` |
-| 17b | Press the back of your hand on a wall, then squeeze a little | The fingers straighten along the wall instead of closing | `legacy-finger-surface` |
+| 17b | Press the back of your hand on a wall, then squeeze a little | The back of the hand rests on the wall (not a few cm off it); the fingers straighten along it instead of closing | `legacy-finger-surface`, `legacy-palm-sphere` |
+| 17c | Put your open hand flat on a wall, then push the controller further in and pull it back | The palm rests on the wall (not 4 cm in front of it), follows you smoothly in and out, no jump | `legacy-palm-sphere` |
+| 17d | Make a fist and push it into a wall; then hold a gun or sword and push it into the wall | The fist stops at its knuckles; a held weapon stops as before (unchanged) | `legacy-palm-sphere` |
 | 17 | Rest the hand on a table with the fingers past its edge | The fingers past the edge droop over it; the thumb stays on top | `legacy-finger-slab` (edge), `legacy-finger-surface` (thumb) |
 | 18 | Make a fist and open it in the air; point; thumbs up | Quick and natural, not sluggish; no overshoot | `legacy-finger-timing` |
 | 19 | Grab a bottle, a sword hilt, a body | Holds look as before | — |
