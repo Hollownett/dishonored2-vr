@@ -1,7 +1,8 @@
 """Gameplay-script scenario: put a gadget back into the pouch and take it out again (plan 2026-11-26 Task 8, gadget stow).
 
 Run per game: `D2VR_SPOT=doto|d2 linux/d2vr-linux sim --scenario gadget_stow --knob sim-invulnerable --lead 54 --seconds 120`.
-DOTO holds the Hook Mine (`d2vr equip hook`, slot 1 = the left hand); D2 holds the regular grenade (`d2vr equip regular_grenade`).
+DOTO holds the Hook Mine (`d2vr equip hook`, slot 1 = the left hand); D2 holds the regular grenade (`d2vr equip regular_grenade`),
+first given with `d2vr give item regular_grenade 3` (the lab save holds none; D2VR_GADGET picks another).
 
 Timeline after the lead (left hand only; right hand at its default; head pitch 0):
  1  `god`; equip the gadget (console) and 1.5 s; the left hand squeezes in front (LFRONT) to hold it, 1 s.
@@ -21,6 +22,9 @@ L = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(L)
 
 EQUIP = {"doto": "d2vr equip hook", "d2": "d2vr equip regular_grenade"}
+# D2VR_GADGET=stun_mine|sticky_grenade|springrazor|regular_grenade picks the D2 gadget (whichever the lab save owns)
+if os.environ.get("D2VR_GADGET"):
+    EQUIP["d2"] = "d2vr equip " + os.environ["D2VR_GADGET"]
 ZERO = [0.0, 0.0, 0.0]
 NEU = {"move_x": 0.0}
 LGRIP = {"left_grip": 1.0}
@@ -58,6 +62,8 @@ def build(lead_ms):
 
     # 1
     add(500, cons="god", left=LFRONT)
+    if os.environ.get("D2VR_SPOT") == "d2":   # the D2 lab save holds no grenade: the game's AddItem raises the record first (`d2vr give item`)
+        add(800, cons="d2vr give item %s 3" % EQUIP["d2"].split()[-1], left=LFRONT)
     add(1000, cons=EQUIP[os.environ.get("D2VR_SPOT", "doto")], left=LFRONT)
     add(1000, left=LFRONT, inp=LGRIP)
     # 2: put back

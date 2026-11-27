@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#include "seh_copy.hpp"
 #include <intrin.h>
 #include <windows.h>
 #include <d3d11.h>
@@ -4272,7 +4273,7 @@ static void read_self_count(std::uintptr_t caller,std::size_t size,bool fault) n
 static bool read_self_raw(std::uintptr_t address,void* data,std::size_t size) noexcept {
     if(!data || !d2vr::native_readable_range_cached(address,size,GetTickCount64())) return false;
     // SEH handles only a concurrent unmap/protection race after validation.
-    __try {std::memcpy(data,reinterpret_cast<const void*>(address),size);return true;}
+    __try {d2vr::seh_memcpy(data,reinterpret_cast<const void*>(address),size);return true;}
     __except(read_self_filter(GetExceptionCode(),GetExceptionInformation())) {d2vr::native_readable_range_forget(address,size);return false;}
 }
 static bool read_self_profiling{};  // build/read-self-profile knob
@@ -4289,7 +4290,7 @@ bool write_taa_state(std::uintptr_t address,const void* data,std::size_t size) {
 
 bool write_self_aim(std::uintptr_t address,const void* data,std::size_t size) noexcept {
     if(!address || !data || size!=sizeof(d2vr::GameplayAim)) return false;
-    __try {std::memcpy(reinterpret_cast<void*>(address),data,size);return true;}
+    __try {d2vr::seh_memcpy(reinterpret_cast<void*>(address),data,size);return true;}
     __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
 
@@ -4581,7 +4582,7 @@ static std::array<float,12> weapon_frames() noexcept {   // frame-order trace: o
 static std::mutex weapon_place_mutex;static std::array<std::optional<d2vr::fullbody::Xf>,2> weapon_hand_read{};static std::array<std::uint64_t,2> weapon_hand_read_frame{},weapon_hand_read_serial{};   // v934: serial counts the reads recorded (a pair of a read and the tick frame it placed)
 static std::array<d2vr::WeaponPlace,2> weapon_place{};
 static bool write_self(std::uintptr_t address,const void* data,std::size_t size) noexcept {
-    __try {std::memcpy(reinterpret_cast<void*>(address),data,size);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    __try {d2vr::seh_memcpy(reinterpret_cast<void*>(address),data,size);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
 // v1254 (user, v1252 walking bursts: the carried ashtray is drawn at two places in a steady hand, ~4 cm apart on one render in three or four):
 // the publisher writes the held prop's / severed part's ENGINE render frame (model+0x1860) to the pose its draws are placed at, once per render,
@@ -6405,7 +6406,7 @@ static bool finger_put_out_enabled=true,finger_slab_legacy=false;   // finger_sl
 // build/legacy-finger-timing, legacy-finger-probe-order, legacy-finger-plane restore each. finger_near_bits: per hand, the fingers whose drawn tip was
 // within 3 cm of a probe shape last frame (the probe priority).
 static bool finger_timing_on=true,finger_probe_order_on=true,finger_plane_on=true,finger_surface_rules_on=true;static std::array<unsigned,2> finger_near_bits{};   // finger_surface_rules_on: G3/G4/G7 (build/legacy-finger-surface)
-static std::array<std::atomic<UINT64>,2> finger_priority_casts{};
+static std::array<std::atomic<UINT64>,2> finger_priority_casts{},finger_back_frames{};   // finger_back_frames: Task 16, frames with contact.back > 0.3
 static std::array<std::atomic<std::uint64_t>,2> finger_put_outs{};   // 2026-11-26 G1: fingers set out of a probe shape after the spring
 static std::string arm_collision_json() {
     std::ostringstream o;o<<"{\"enabled\":"<<(arm_collision_enabled?"true":"false")<<",\"shadow\":"<<(arm_collision_shadow?"true":"false");
@@ -7702,8 +7703,14 @@ static std::string run_test_command(const std::string& line) {
     if(verb=="give") { // test (sim, 2026-11-25, D2): "give power possession|far_reach": the game's own AddPower (NativeWeaponHands::test_give); "give status"
         std::string what,name;in>>what>>name;
         if(what=="status") return "give: result "+std::to_string(d2vr::NativeWeaponHands::give_result_.load())+" item "+std::string(d2vr::NativeWeaponHands::give_item_.data());
+        if(what=="item") {   // 2026-11-26: "give item <name> [count]": an inventory record's count raised by the game's AddItem (D2; the record must exist)
+            static std::string item_name;int count=1;in>>count;if(!in) count=1;
+            if(name.empty() || name.size()>40 || count<1 || count>9) return "usage: give item <name> [count 1-9]";
+            if constexpr(d2vr::game_traits::power_mimic_vtable!=0) return "give: Dishonored 2 only";
+            item_name=name;d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::test_give_item;r.decl=item_name.c_str();r.target=static_cast<std::uintptr_t>(count);
+            return d2vr::NativeWeaponHands::request(r)?"give item requested":"give queue full";}
         const int power=name=="possession"?7:name=="far_reach"?6:0;
-        if(what!="power" || !power) return "usage: give power possession|far_reach | give status";
+        if(what!="power" || !power) return "usage: give power possession|far_reach | give item <name> [count] | give status";
         if constexpr(d2vr::game_traits::power_mimic_vtable!=0) return "give: Dishonored 2 only";
         d2vr::NativeWeaponHands::Request r{};r.op=d2vr::NativeWeaponHands::Op::test_give;r.target=static_cast<std::uintptr_t>(power);
         return d2vr::NativeWeaponHands::request(r)?"give requested":"give queue full";}
@@ -12124,7 +12131,7 @@ void prepare_head_view(void* view) noexcept {
                 static std::array<bool,2> finger_was_held{};static std::array<UINT64,2> finger_hold_start{};static std::array<std::uint64_t,2> held_shape_sig{};static std::array<double,2> ease_until{};
                 const double fk_t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                 constexpr unsigned finger_solve_budget=1; // fingers solved per hand per frame (finger_ik.hpp: the rest keep a memo or wait their turn); a free hand: finger_free_solve_budget
-                static std::array<std::array<std::uint64_t,6>,2> probe_serial{}; // the scope that last answered each free-hand probe slot (3-8), as read
+                static std::array<std::array<std::uint64_t,7>,2> probe_serial{}; // the scope that last answered each free-hand probe slot (3-8; 6 = the back of the hand), as read
                 LARGE_INTEGER geo0{},geo1{},geof{};QueryPerformanceCounter(&geo0);refresh_finger_geometry();note_drawn_palms(hands,native_ownership);QueryPerformanceCounter(&geo1);QueryPerformanceFrequency(&geof);{const UINT64 ns=geof.QuadPart?static_cast<UINT64>(geo1.QuadPart-geo0.QuadPart)*1000000000ULL/static_cast<UINT64>(geof.QuadPart):0;UINT64 peak=finger_geo_max_ns.load();while(ns>peak && !finger_geo_max_ns.compare_exchange_weak(peak,ns)) {}}
                 flush_diag_dumps();LARGE_INTEGER fk_begin{},fk_end{};QueryPerformanceCounter(&fk_begin);
                 const double fdt=finger_ik_tick && hands.tick>finger_ik_tick?std::min((hands.tick-finger_ik_tick)/1000.,.1):0.;finger_ik_tick=hands.tick;
@@ -12289,17 +12296,19 @@ void prepare_head_view(void* view) noexcept {
                             if(free_hand) {
                                 // G5 free-hand probes: each answer of a probe slot (3: the palm, 4-8: the fingers) goes into the sticky cache once; the solver gets
                                 // the cache's live shapes (a hit lives 150 ms after its slot last answered and through one miss: ruling H10).
-                                for(unsigned slot=3;slot<d2vr::NativeInteractionAim::probe_slots;++slot) {
-                                    const auto serial=d2vr::NativeInteractionAim::weapon_serial(side,slot);
-                                    if(!serial || serial==probe_serial[side][slot-3]) continue;
-                                    probe_serial[side][slot-3]=serial;
+                                for(unsigned slot=3;slot<=d2vr::NativeInteractionAim::probe_slots;++slot) {   // 3-8 the palm and the fingertips; the last pass: the back of the hand
+                                    const bool back_probe=slot==d2vr::NativeInteractionAim::probe_slots;const unsigned cast_slot=back_probe?d2vr::NativeInteractionAim::hand_back_slot:slot;
+                                    const unsigned cache_slot=back_probe?6u:slot-3;
+                                    const auto serial=d2vr::NativeInteractionAim::weapon_serial(side,cast_slot);
+                                    if(!serial || serial==probe_serial[side][cache_slot]) continue;
+                                    probe_serial[side][cache_slot]=serial;
                                     std::optional<d2vr::rig::HeldShape> shape;const char* kind=nullptr;
-                                    if(const auto hit=d2vr::NativeInteractionAim::weapon_hit(side,slot,fk_now,d2vr::NativeInteractionAim::producer_clamp,150)) {
+                                    if(const auto hit=d2vr::NativeInteractionAim::weapon_hit(side,cast_slot,fk_now,d2vr::NativeInteractionAim::producer_clamp,150)) {
                                         ++finger_probe_hits;
-                                        shape=finger_collider(*hit,palm,fk_player,held,grabbed_entity,&probed_prop[side&1u],&kind,finger_slab_legacy?.12:slot==3?d2vr::rig::finger_slab_half_palm:d2vr::rig::finger_slab_half_tip);
+                                        shape=finger_collider(*hit,palm,fk_player,held,grabbed_entity,back_probe?nullptr:&probed_prop[side&1u],&kind,finger_slab_legacy?.12:(slot==3 || back_probe)?d2vr::rig::finger_slab_half_palm:d2vr::rig::finger_slab_half_tip);
                                         if(shape && kind && kind[0]=='s') ++finger_probe_hits_world;else if(shape && kind && kind[0]=='t') ++finger_probe_hits_thin;
                                     }
-                                    probe_cache[side].probed(slot-3,shape,fk_now,shape && kind && kind[0]=='s');   // G6: a world surface slab (not a prop)
+                                    probe_cache[side].probed(cache_slot,shape,fk_now,shape && kind && kind[0]=='s');   // G6: a world surface slab (not a prop)
                                 }
                                 std::array<d2vr::rig::HeldShape,8> cached{};
                                 const unsigned live=finger_plane_on?probe_cache[side].shapes_on_palm_plane(fk_now,cached):probe_cache[side].shapes(fk_now,cached);   // G6
@@ -12309,6 +12318,9 @@ void prepare_head_view(void* view) noexcept {
                                 }
                                 // The casts: the palm-normal cast every frame (8 cm), then finger_probe_casts-1 fingertips along their current pose, round-robin.
                                 {const auto sweep=d2vr::rig::palm_sweep(*geometry,palm,d2vr::rig::free_palm_reach);d2vr::NativeInteractionAim::post_weapon_segment(side,3,sweep.from,sweep.to,.03);++finger_probe_posts;}
+                                if(finger_surface_rules_on) {   // Task 16: behind the back of the hand (6 cm from the palm frame), what the back of the hand presses on
+                                    const auto n=d2vr::rig::palm_normal(palm,*geometry);
+                                    d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::hand_back_slot,palm.position,palm.position-n*.06,.03);++finger_probe_posts;}
                                 for(unsigned k=0;k+1<finger_probe_casts;++k) {
                                     const unsigned priority=finger_probe_order_on?finger_near_bits[side]&0x1fu:0u;   // G5: the fingers at a surface first
                                     const unsigned f=d2vr::rig::pick_probe_finger(priority,probe_frame,k,finger_probe_casts-1);if((priority>>f)&1u) finger_priority_casts[side].fetch_add(1,std::memory_order_relaxed);
@@ -12421,6 +12433,7 @@ void prepare_head_view(void* view) noexcept {
                             }
                             has_finger_turn[side]=true;
                             if(free_hand) { // G5 acceptance: the drawn tips against the probe shapes (not the palm stop)
+                                if(contact.back>.3f) finger_back_frames[side].fetch_add(1,std::memory_order_relaxed);   // Task 16: counted whether or not a fingertip is near (the back of the hand on a wall points them away)
                                 double deepest=0,thumb=0,palm_in=0;bool near_surface=false;std::array<d2vr::Vec3,5> tips_local{};unsigned near_bits=0;
                                 const auto skin_point=palm.position+d2vr::rig::palm_normal(palm,*geometry)*d2vr::rig::held_palm_depth;
                                 for(unsigned f=0;f<5;++f) {
@@ -13803,7 +13816,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"multiple\":" << query_outcomes[3] << ",\"rejected\":" << query_outcomes[4] << "}}"
         << ",\"native_art_movies\":{\"patched\":" << d2vr::native_art_movie_patched.load() << ",\"rejected\":" << d2vr::native_art_movie_rejected.load() << '}'
         << ",\"perf_governor\":{\"active\":" << (perf_governor_active?"true":"false") << ",\"scale\":" << perf_governor.scale() << ",\"changes\":" << perf_governor.changes << ",\"cpu_bound_holds\":" << perf_governor.cpu_bound_holds << "}" << ",\"performance_mode_advice\":{\"state\":\"" << d2vr::perf_mode_advice_name(perf_mode_advisor.advice) << "\",\"over_share\":" << perf_mode_advisor.last_over << ",\"gpu_share\":" << perf_mode_advisor.last_gpu_share << ",\"decisions\":" << perf_mode_advisor.decisions << ",\"gpu_windows\":" << perf_mode_advisor.gpu_windows << ",\"cpu_windows\":" << perf_mode_advisor.cpu_windows << "}" << ",\"finger_ik\":{\"frames\":" << finger_ik_frames.load() << ",\"avg_us\":" << (finger_ik_frames.load()?finger_ik_ns.load()/1000.0/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"max_us\":" << finger_ik_max_ns.load()/1000.0 << ",\"avg_shapes\":" << (finger_ik_frames.load()?static_cast<double>(finger_ik_shapes.load())/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"posts\":" << finger_probe_posts.load() << ",\"hits\":" << finger_probe_hits.load() << ",\"props\":" << finger_collider_props.load() << ",\"slabs\":" << finger_collider_slabs.load() << ",\"touch\":[" << held_touch_along_dbg.load() << ',' << held_touch_roll_dbg.load() << ',' << held_touches.load() << ',' << held_touch_defaults.load() << ']' << ",\"hold\":[" << held_snap.cylinder_set_frames << ',' << held_snap.gate_fail_frames << ',' << held_cylinder_errors.load() << ',' << held_snap.gate_distance << ',' << finger_thin_holds.load() << ',' << finger_box_holds.load() << ',' << finger_flat_holds.load() << ',' << finger_surface_holds.load() << ']' << ",\"solve_us\":[" << (finger_solve_calls.load()?finger_solve_ns.load()/1000.0/static_cast<double>(finger_solve_calls.load()):0.0) << ',' << finger_solve_max_ns.load()/1000.0 << "],\"geo_max_us\":" << finger_geo_max_ns.load()/1000.0 << ",\"ease_active\":[" << (finger_ease_active[0].load()?1:0) << ',' << (finger_ease_active[1].load()?1:0) << "]" << ",\"probe_hits_world\":" << finger_probe_hits_world.load() << ",\"probe_hits_thin\":" << finger_probe_hits_thin.load() << ",\"thin_props\":" << finger_collider_thin.load() << ",\"probe_casts\":" << finger_probe_casts << ",\"surface\":" << (finger_surface?"true":"false") << [&]{std::ostringstream o;const auto bits=[&](const char* key,const std::array<std::atomic<unsigned>,2>& v) {o<<",\""<<key<<"\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<((v[h].load()>>f)&1u);o<<']';}o<<']';};
-                   bits("blocked",finger_blocked_bits);bits("hyperextended",finger_hyper_bits);o<<",\"tip_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<n<<','<<tip_pen_over[h].load()<<','<<tip_pen_max_slow_um[h].load()/1000.<<','<<tip_pen_max_fast_um[h].load()/1000.<<','<<(n?static_cast<double>(tip_pen_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_um[h].load()/1000.<<','<<tip_pen_palm_um[h].load()/1000.<<','<<tip_pen_blocked[h].load()<<','<<tip_pen_hyper[h].load()<<']';}o<<']';o<<",\"round2\":{\"surface_rules\":"<<(finger_surface_rules_on?"true":"false")<<",\"timing\":"<<(finger_timing_on?"true":"false")<<",\"probe_order\":"<<(finger_probe_order_on?"true":"false")<<",\"plane\":"<<(finger_plane_on?"true":"false")<<",\"priority_casts\":["<<finger_priority_casts[0].load()<<','<<finger_priority_casts[1].load()<<"]}";o<<",\"steady\":[";for(unsigned h=0;h<2;++h) {const auto n=finger_steady_n[h].load();o<<(h?",[":"[")<<n<<','<<finger_steady_max_um[h].load()/1000.<<','<<(n?static_cast<double>(finger_steady_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<finger_open_frames[h].load()<<','<<finger_blocked_flips[h].load()<<']';}o<<']';o<<",\"stuck_frames\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<finger_stuck[h][f].load();o<<']';}o<<']';return o.str();}() << ",\"profile\":[" << profile_casts.load() << ',' << profile_hits.load() << ',' << profile_entries.load() << ']'
+                   bits("blocked",finger_blocked_bits);bits("hyperextended",finger_hyper_bits);o<<",\"tip_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<n<<','<<tip_pen_over[h].load()<<','<<tip_pen_max_slow_um[h].load()/1000.<<','<<tip_pen_max_fast_um[h].load()/1000.<<','<<(n?static_cast<double>(tip_pen_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_um[h].load()/1000.<<','<<tip_pen_palm_um[h].load()/1000.<<','<<tip_pen_blocked[h].load()<<','<<tip_pen_hyper[h].load()<<']';}o<<']';o<<",\"round2\":{\"surface_rules\":"<<(finger_surface_rules_on?"true":"false")<<",\"timing\":"<<(finger_timing_on?"true":"false")<<",\"probe_order\":"<<(finger_probe_order_on?"true":"false")<<",\"plane\":"<<(finger_plane_on?"true":"false")<<",\"priority_casts\":["<<finger_priority_casts[0].load()<<','<<finger_priority_casts[1].load()<<"],\"back_frames\":["<<finger_back_frames[0].load()<<','<<finger_back_frames[1].load()<<"]}";o<<",\"steady\":[";for(unsigned h=0;h<2;++h) {const auto n=finger_steady_n[h].load();o<<(h?",[":"[")<<n<<','<<finger_steady_max_um[h].load()/1000.<<','<<(n?static_cast<double>(finger_steady_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<finger_open_frames[h].load()<<','<<finger_blocked_flips[h].load()<<']';}o<<']';o<<",\"stuck_frames\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<finger_stuck[h][f].load();o<<']';}o<<']';return o.str();}() << ",\"profile\":[" << profile_casts.load() << ',' << profile_hits.load() << ',' << profile_entries.load() << ']'
         << ",\"route\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<(finger_route_hold[i].load()?1:0)<<','<<finger_route_pub[i][0].load()<<','<<finger_route_pub[i][1].load()<<','<<finger_route_pub[i][2].load()<<','<<finger_route_pub[i][3].load()<<']';}return o.str();}() << ']'
         << ",\"bend\":{\"planned\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<planned_bend[i][0].load()<<','<<planned_bend[i][1].load()<<','<<planned_bend[i][2].load()<<','<<planned_bend[i][3].load()<<']';}o<<']';return o.str();}()
         << ",\"drawn\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<drawn_bend[i][0].load()<<','<<drawn_bend[i][1].load()<<','<<drawn_bend[i][2].load()<<','<<drawn_bend[i][3].load()<<']';}o<<']';return o.str();}()
@@ -15996,6 +16009,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                          if(left_gadget) {   // 2026-11-26 body holsters: what a belt pouch gives back is the last gadget held, by its item decl (the pose name is "Grenade" for all)
                                              const auto decl=item_decl_name(state->slots[0]);
                                              auto kind=d2vr::gadget_drop::classify(decl);if(kind==d2vr::gadget_drop::Kind::any) kind=d2vr::gadget_drop::classify(n);
+                                             if(kind==d2vr::gadget_drop::Kind::any) kind=d2vr::gadget_drop::classify(d2vr::NativeWeaponHands::slot1_item_name());   // D2: the entity decl is grenade_base.def; the inventory item names it
                                              if constexpr(!d2vr::game_traits::has_heart) if(kind==d2vr::gadget_drop::Kind::any) {   // DOTO: one mine (Hook Mine) and one grenade (concussion)
                                                  if(d2vr::contains_nocase(n,"mine") || d2vr::contains_nocase(decl,"mine")) kind=d2vr::gadget_drop::Kind::hook_mine;
                                                  else if(d2vr::contains_nocase(n,"grenade") || d2vr::contains_nocase(decl,"grenade")) kind=d2vr::gadget_drop::Kind::concussion_grenade;}
@@ -17543,10 +17557,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* chain,UINT interval,UINT flags) {
                                                 {static UINT64 seen{};if(const auto e=holster_forget_epoch.load(std::memory_order_relaxed);e!=seen) {seen=e;empty_tick_at={};check_until={};check_heart={};}}   // a load: no pull carries over
                                                 const auto now_d=GetTickCount64();
                                                 if(empty_tick_at[h] && now_d>=empty_tick_at[h]) {empty_tick_at[h]=0;game_xr->pulse(h,.15f,.012f);}
-                                                if(check_until[h] && now_d>=check_until[h]) {   // the equip landed? a pouch whose gadget ran out forgets it
-                                                    check_until[h]=0;bool heart_now{};{std::lock_guard<std::mutex> l(hand_state_mutex);heart_now=std::string_view(left_equip_name).find("eart")!=std::string_view::npos;}
+                                                if(check_until[h]) {   // the equip landed? checked every frame until the deadline (it may be thrown or put back again
+                                                    // before then); never by the deadline: a failure, and a pouch whose gadget ran out forgets it
+                                                    bool heart_now{};{std::lock_guard<std::mutex> l(hand_state_mutex);heart_now=std::string_view(left_equip_name).find("eart")!=std::string_view::npos;}
                                                     const bool landed=(slot1_arm_now()&1u)==h && (check_heart[h]?heart_now:left_gadget.load());
-                                                    if(!landed) {++holster_draw_failed;game_xr->pulse(h,.15f,.012f);empty_tick_at[h]=now_d+40;if(!check_heart[h]) holster_pouch_key.store(nullptr);
+                                                    if(landed || now_d>=check_until[h]) check_until[h]=0;
+                                                    if(!landed && !check_until[h]) {++holster_draw_failed;game_xr->pulse(h,.15f,.012f);empty_tick_at[h]=now_d+40;if(!check_heart[h]) holster_pouch_key.store(nullptr);
                                                         dual_wield_event("\"ev\":\"pouch_draw_failed\",\"hand\":"+std::to_string(h)+",\"heart\":"+std::to_string(check_heart[h]?1:0));}
                                                 }
                                                 const auto place=holster_fresh()?holster_in[h].place:d2vr::HolsterPlace::none;const bool pocket=place==d2vr::HolsterPlace::heart_pocket;

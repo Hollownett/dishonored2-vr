@@ -151,7 +151,7 @@
    "file": "legacy-finger-surface",
    "kind": "disable",
    "label": "Fingers lie on walls and edges",
-   "help": "A palm resting on a wall or table opens the fingers onto it, the thumb stays on top of an edge, and a finger at a surface does not flicker between bending and lifting. Off: the older finger contact.",
+   "help": "A palm resting on a wall or table opens the fingers onto it, the thumb comes out of the surface and stays on top of an edge, the back of the hand pressed on something straightens the fingers, and a finger at a surface does not flicker. Off: the older finger contact.",
    "default": true
   },
   {

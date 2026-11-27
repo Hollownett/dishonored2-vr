@@ -1184,7 +1184,7 @@ private:
     // knob build/hand-body only: posted only while a create or a snap may need it), cast with kHandBodyFreeLayers (WORLD_LOW 0 included).
     // 15: the crosshair's 30 m aim-ray cast (producer_crosshair; the reticle distance, G4). 16: the dual-wield copy gun's ring reticle cast (v1387).
     // 17-18 (2026-11-26, arm_collision.hpp): the natural arm's forearm and upper-arm sweeps (producer_clamp, body class read).
-    inline static constexpr unsigned weapon_slots=19;
+    inline static constexpr unsigned weapon_slots=20;   // 2026-11-26: slot 19 the free hand's back-of-hand probe
     inline static std::mutex weapon_mutex_;static std::array<std::array<WeaponSegment,weapon_slots>,2> weapon_req_,weapon_answer_segments_; // defined after the class: clang-cl needs WeaponSegment's member initializers complete
     inline static std::array<std::array<std::optional<WorldTraceHit>,weapon_slots>,2> weapon_hit_{};inline static std::array<std::array<std::uint64_t,weapon_slots>,2> weapon_tick_{},weapon_serial_{};inline static std::array<std::array<std::uint8_t,weapon_slots>,2> weapon_producer_{};
 public:
@@ -1193,6 +1193,7 @@ public:
     static constexpr unsigned profile_slot=9;  // and 10
     static constexpr unsigned tip_slot=11,wall_tip_slot=12,exclude_slot=13;   // the hand clamp's (slot 0 is its palm)
     static constexpr unsigned crosshair_slot=15,copy_crosshair_slot=16;
+    static constexpr unsigned hand_back_slot=19;   // the free hand's back-of-hand probe (Task 16: the back of the hand pressed on a surface straightens the fingers)
     static constexpr unsigned hand_body_free_slot=14;   // the hand body's create / snap free probe (P3-1)
     static constexpr unsigned arm_forearm_slot=17,arm_upper_slot=18;   // the arm collision's casts (arm_collision.hpp)
     static constexpr bool clamp_slot(unsigned slot) {return slot==0 || slot==tip_slot || slot==wall_tip_slot || slot==exclude_slot;}

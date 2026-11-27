@@ -11,6 +11,7 @@
 //   Spawned this way its components never start (sim v407: identity flags 0x20000002) and Havok never moves it, not even with
 //   the grab motor's velocity (sim v413: three writes, no motion). So the mod flies it: gravity, spin, the native world
 //   sphere-cast for what it meets, and idEntity::Teleport 87d1e0(entity, origin, axis rows, 0) every game frame.
+#include "seh_copy.hpp"
 #include <windows.h>
 #include "game_profile.hpp"
 #include "game_rig.hpp"
@@ -141,7 +142,7 @@ class NativeWeaponHands {
     friend struct GunCopiesFixture;
 public:
     enum class Op : unsigned {draw,sheathe,drop,pickup,recall,stow,gun_draw,gun_holster,shove,ragdoll,yank,wake,living_start,living_pull,
-        gun_drop,gun_pickup,slot1_restore,test_equip,slot1_unequip,carry_left_redraw,real_copy,test_give}; // dual wield (row A): see gun_drop / gun_pickup / slot1_restore below; test_equip: the "equip" test command; slot1_unequip: the Heart let go (v771)
+        gun_drop,gun_pickup,slot1_restore,test_equip,slot1_unequip,carry_left_redraw,real_copy,test_give,test_give_item}; // dual wield (row A): see gun_drop / gun_pickup / slot1_restore below; test_equip: the "equip" test command; slot1_unequip: the Heart let go (v771)
     // G6 (plan Task 14): the hold of a living NPC pulls him (the existing teleport 0x87d1e0, horizontal steps toward the hand) only when the guard_probe
     // experiments (plan Task 13, docs/BONELAB-FEEL-GUARD-PULL-RE.md) showed no snap-back and no yaw pop. Set from that verdict.
     static constexpr bool living_pull_enabled=false;
@@ -156,7 +157,7 @@ public:
     static bool request(const Request& r) {
         const auto ok=[](const auto& a){return std::all_of(a.begin(),a.end(),[](float v){return std::isfinite(v);});};
         if(!ok(r.pos) || !ok(r.vel) || !ok(r.axis) || !ok(r.spin)) return false; // NaN into Teleport/spawn reaches every physics body (REA Q4)
-        Request q=r;if(q.op==Op::gun_drop && q.decl) q.decl=intern(q.decl); // a def name from the caller's stack or a game string must outlive the queue
+        Request q=r;if((q.op==Op::gun_drop || q.op==Op::test_give_item) && q.decl) q.decl=intern(q.decl); // a def name from the caller's stack or a game string must outlive the queue
         std::lock_guard<std::mutex> lock(m_);
         if(queue_.size()<8) {queue_.push_back(q);if(r.op==Op::gun_holster)++holster_enqueued_;return true;}
         if(r.op==Op::gun_holster)++holster_dropped_;
@@ -240,6 +241,7 @@ public:
             case Op::slot1_restore: try {ok=slot1_restore(base,read);} catch(...) {ok=false;} if(ok) ++slot1_restores;else ++gun_failed;break;
             case Op::test_equip: try {ok=test_equip(base,read,r.decl);} catch(...) {ok=false;} break;
             case Op::test_give: try {ok=test_give(base,read,static_cast<int>(r.target));} catch(...) {ok=false;give_result_.store(-9,std::memory_order_relaxed);} break;
+            case Op::test_give_item: try {ok=test_give_item(base,read,r.decl,static_cast<int>(r.target));} catch(...) {ok=false;give_result_.store(-9,std::memory_order_relaxed);} break;
             case Op::real_copy: {CrashOperation copy_operation("real copy experiment");try {ok=real_copy(base,read,r.decl,r.pos);} catch(...) {ok=false;}} break;
             case Op::carry_left_redraw: try {ok=carry_redraw(base,read,r.target);} catch(...) {ok=false;} break; // v1041/v1044: the left item CarryCorpse put away, equipped again
             case Op::slot1_unequip: try {ok=dual_wield_.load(std::memory_order_relaxed) && equip(base,read,0x20,64);} catch(...) {ok=false;} break; // the engine's own instant unequip (as a native gun_drop)
@@ -1578,6 +1580,10 @@ public:
 private:
     inline static std::atomic<bool> dual_wield_{},clear_guns_req_{};
     inline static std::atomic<std::int32_t> slot1_count_{-1};
+    inline static std::mutex slot1_name_m_;inline static std::array<char,96> slot1_item_name_{};inline static std::uintptr_t slot1_name_decl_{};   // game thread
+public:
+    static std::string slot1_item_name() {std::lock_guard<std::mutex> l(slot1_name_m_);return std::string(slot1_item_name_.data());}   // the equipped slot-1 item's inventory decl name ("" none)
+private:
     inline static std::atomic<bool> ride_other_{};inline static std::uintptr_t slot1_cur_{},slot1_prev_{};inline static std::uint64_t slot1_looked_{};
     inline static std::array<LyingGun,2> lying_{};inline static bool gun_native_lying_{},guns_live_{};inline static std::uintptr_t guns_game_{};
     inline static std::array<PoolEnt,8> pool_{};inline static std::array<HeldSide,2> held_{};inline static std::array<Adopt,2> adopt_{};inline static std::atomic<std::uint64_t> handovers{};inline static std::array<HeldSlot,2> meas_{};
@@ -2662,7 +2668,7 @@ private:
             auto* count=reinterpret_cast<std::uint32_t*>(comp+0x58);const std::uint32_t now=*count,n=now&0xffffffu,was=before&0xffffffu;
             if(n>was && n<=64) {
                 const auto data=*reinterpret_cast<const std::uintptr_t*>(comp+0x50);
-                if(data) std::memset(reinterpret_cast<void*>(data+(n-1)*0x28ull),0,0x28);
+                if(data) d2vr::seh_memset(reinterpret_cast<void*>(data+(n-1)*0x28ull),0,0x28);
                 *count=(now&~0xffffffu)|(n-1);++upgrade_rollbacks;
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -2837,6 +2843,13 @@ private:
             const auto item=inv && *inv?rig::value<std::uintptr_t>(read,*inv+0x70):std::nullopt;
             const auto decl=item && *item?rig::value<std::uintptr_t>(read,*item):std::nullopt;
             if(item) {const std::uintptr_t d=decl?*decl:0;if(d!=slot1_cur_) {if(slot1_cur_) slot1_prev_=slot1_cur_;slot1_cur_=d;}}
+            {   // 2026-11-27: the slot-1 inventory item's decl name ("regular_grenade.inventoryitem"): the belt pouch's key (D2's grenade entity decl
+                // is a shared grenade_base.def); re-read when the item changes, cleared when it cannot be read (menus, loads) so it never goes stale
+                const std::uintptr_t d=item && decl?*decl:0;
+                if(d!=slot1_name_decl_) {std::array<char,96> text{};bool ok=!d;
+                    if(d) if(const auto name=rig::value<std::uintptr_t>(read,d+0x8);name && rig::pointer(*name)) ok=read(*name,text.data(),text.size()-1);
+                    if(ok) slot1_name_decl_=d;   // a failed read is retried next frame
+                    std::lock_guard<std::mutex> l(slot1_name_m_);slot1_item_name_=text;}}
             slot1_count_.store(item && *item?rig::value<std::int32_t>(read,*item+0x20).value_or(-1):-1,std::memory_order_relaxed);}   // Task 7: the equipped gadget's count (record +0x20, as test_equip), -1 none
         service_measure(base,read,now);
         service_held(base,read);
@@ -3003,6 +3016,34 @@ private:
             give_item_={};if(const auto name=rig::value<std::uintptr_t>(read,reinterpret_cast<std::uintptr_t>(item)+0x8);name && rig::pointer(*name)) read(*name,give_item_.data(),give_item_.size()-1);
             const bool added=reinterpret_cast<AddPowerFn>(base+0x455850)(ps,power);
             give_result_.store(added?1:0,std::memory_order_relaxed);return added;
+        }
+    }
+    // Test (sim, 2026-11-26; R8: arkCpntInventory::AddItem 0x6156e0, the generic pickup add, int(inv, itemDecl*, count) -> the amount added):
+    // "d2vr give item <name> [count]" raises the count of the inventory record whose item decl's name contains <name> (a grenade, a mine), so a
+    // lab save without one can test the gadget put-back. AddItem only raises an EXISTING record (a save that never held the item has none:
+    // give_result_ -4). Dishonored 2 only. give_result_: >0 the amount added, 0 refused, -1 not D2 / code bytes differ, -2 no inventory, -4 no record.
+    template<class Read> static bool test_give_item(std::uintptr_t base,Read& read,const char* what,int count) {
+        give_result_.store(-1,std::memory_order_relaxed);
+        if constexpr(game_traits::power_mimic_vtable!=0) {(void)base;(void)read;(void)what;(void)count;return false;}
+        else {
+            static constexpr std::array<unsigned char,16> add_item_code{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x50,0x8b};
+            std::array<unsigned char,16> got{};
+            if(!what || !*what || count<1 || count>9 || !read(base+0x6156e0,got.data(),got.size()) || got!=add_item_code) return false;
+            give_result_.store(-2,std::memory_order_relaxed);
+            const auto fsm=player_fsm(base,read);const auto inventory=fsm?rig::value<std::uintptr_t>(read,fsm+0x328):std::nullopt;
+            const auto entries=inventory && *inventory?rig::list(read,*inventory+0x38,4096):std::nullopt;if(!entries) return false;
+            give_result_.store(-4,std::memory_order_relaxed);
+            for(unsigned i=0;i<entries->packed_count;++i) {
+                const auto record=entries->data+i*0x38ull;
+                const auto decl=rig::value<std::uintptr_t>(read,record);const auto name=decl && *decl?rig::value<std::uintptr_t>(read,*decl+0x8):std::nullopt;
+                std::array<char,128> text{};
+                if(!name || !rig::pointer(*name) || !read(*name,text.data(),text.size()-1) || !std::strstr(text.data(),what)) continue;
+                give_item_={};std::memcpy(give_item_.data(),text.data(),std::min(give_item_.size()-1,std::strlen(text.data())));
+                using AddItemFn=int(__fastcall*)(void*,void*,int);
+                const int added=reinterpret_cast<AddItemFn>(base+0x6156e0)(reinterpret_cast<void*>(*inventory),reinterpret_cast<void*>(*decl),count);
+                give_result_.store(added,std::memory_order_relaxed);return added>0;
+            }
+            return false;
         }
     }
     template<class Read> static bool test_equip(std::uintptr_t base,Read& read,const char* what) {
