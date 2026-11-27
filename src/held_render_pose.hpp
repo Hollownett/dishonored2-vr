@@ -31,6 +31,7 @@
 // Palette = inverse(D F) D B = inverse(F) B (unchanged), drawn at D F: the whole clone, its collapsed bones and bound children move rigidly by D in every
 // pass. A corpse held by one bone (opt-in build/held-render-pose-corpse) gets a TRANSLATION only (goal - held bone, capped at corpse_cap_m): its other
 // bones hang. build/no-held-render-pose-severed: ragdolls untouched (v1252).
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <intrin.h>
 #include <MinHook.h>
@@ -392,7 +393,7 @@ private:
     static constexpr unsigned age_bins=9;static constexpr double age_edge_ms[age_bins]={5,10,15,20,25,30,40,100,1e9};
     std::array<std::atomic<std::uint64_t>,age_bins> age_n_{};std::atomic<std::uint64_t> too_old_{};   // v1262: note age at the sync; carries refused as too old
     static bool same(std::uintptr_t at,const unsigned char* bytes,std::size_t n) noexcept {
-        __try {return std::memcmp(reinterpret_cast<const void*>(at),bytes,n)==0;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __try {return d2vr::seh_memcmp(reinterpret_cast<const void*>(at),bytes,n)==0;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static std::uintptr_t entity_of(void* holder) noexcept {   // rigid+0xe8 -> [+8] reference frame component -> [+0x10] entity
         __try {const auto rf=*reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(holder)+8);
@@ -404,11 +405,11 @@ private:
     // The held body's transform as the ragdoll sync reads it (hknp world +0x28 pool, 0xb0 a record, columns at +0x00): basis = columns 0-2, origin = column 3.
     static bool body_of(std::uintptr_t world,std::uint32_t handle,float* f) noexcept {
         __try {const auto pool=*reinterpret_cast<const std::uintptr_t*>(world+0x28);if(!pool || (handle&0xffffff)==0xffffff) return false;
-            std::memcpy(f,reinterpret_cast<const void*>(pool+std::uintptr_t(handle&0xffffff)*0xb0),16*sizeof(float));return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+            d2vr::seh_memcpy(f,reinterpret_cast<const void*>(pool+std::uintptr_t(handle&0xffffff)*0xb0),16*sizeof(float));return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static bool write_model_frame(std::uintptr_t entity,const float* o,const float* a) noexcept {
         __try {const auto model=*reinterpret_cast<const std::uintptr_t*>(entity+0xf0);if(!model) return false;
-            std::memcpy(reinterpret_cast<void*>(model+0x1860),o,3*sizeof(float));std::memcpy(reinterpret_cast<void*>(model+0x186c),a,9*sizeof(float));return true;}
+            d2vr::seh_memcpy(reinterpret_cast<void*>(model+0x1860),o,3*sizeof(float));d2vr::seh_memcpy(reinterpret_cast<void*>(model+0x186c),a,9*sizeof(float));return true;}
         __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     // Under m_: this tick's rigid move of a ragdoll `entity` (one per sync: the bone requests and the frame of one 0x76d640 call share it).

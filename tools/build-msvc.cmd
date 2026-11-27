@@ -1195,6 +1195,10 @@ cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\holster_rig_check
 if not "%errorlevel%"=="0" exit /b 1
 build\holster_rig_check.exe
 if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\seh_copy_check.cpp /Fo:build\seh_copy_check.obj /Fe:build\seh_copy_check.exe
+if not "%errorlevel%"=="0" exit /b 1
+build\seh_copy_check.exe
+if not "%errorlevel%"=="0" exit /b 1
 rem Hand/weapon contact: dual wield, blade vs other hand, and (2026-11-26) the other arm's forearm.
 cl /nologo /std:c++17 /utf-8 /EHsc /W4 /WX /O2 /MT /Isrc tests\hand_weapon_contact_check.cpp /Fo:build\hand_weapon_contact_check.obj /Fe:build\hand_weapon_contact_check.exe
 if not "%errorlevel%"=="0" exit /b 1

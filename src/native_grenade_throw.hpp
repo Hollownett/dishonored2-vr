@@ -5,6 +5,7 @@
 // (GetComponent exe+0x877720, flags 0, typeinfo exe+0x39E28E0: Throw itself asks for it at exe+0x633455). The velocity vector is Throw's
 // local at [rsp+0x50] (= rdx) and the launch point is the local 0x20 bytes after it ([rsp+0x70], passed to the launch exe+0x639970).
 // Both are rewritten in place from ThrowGesture. Any mismatch (bytes, hook, no gesture) leaves the native throw alone.
+#include "seh_copy.hpp"
 #include <windows.h>
 #include "game_profile.hpp"
 #if __has_include(<MinHook.h>)
@@ -58,7 +59,7 @@ public:
         if(!target_) {
             static const unsigned char want[8]{0x8b,0x02,0x89,0x81,0x3c,0x03,0x00,0x00};   // mov eax,[rdx]; mov [rcx+0x33c],eax
             unsigned char got[8]{};
-            __try {std::memcpy(got,reinterpret_cast<const void*>(base+setter_rva),8);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+            __try {d2vr::seh_memcpy(got,reinterpret_cast<const void*>(base+setter_rva),8);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
             if(std::memcmp(got,want,8)) return false;
             void* t=reinterpret_cast<void*>(base+setter_rva);
             if(MH_CreateHook(t,reinterpret_cast<void*>(&hook),reinterpret_cast<void**>(&original_))!=MH_OK) return false;
@@ -75,7 +76,7 @@ public:
         if(!scene_target_) {
             static const unsigned char want[12]{0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x56,0x57};
             unsigned char got[12]{};
-            __try {std::memcpy(got,reinterpret_cast<const void*>(base+fire_scene_rva),12);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+            __try {d2vr::seh_memcpy(got,reinterpret_cast<const void*>(base+fire_scene_rva),12);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
             if(std::memcmp(got,want,12)) return false;
             void* t=reinterpret_cast<void*>(base+fire_scene_rva);
             if(MH_CreateHook(t,reinterpret_cast<void*>(&scene_hook),reinterpret_cast<void**>(&scene_original_))!=MH_OK) return false;

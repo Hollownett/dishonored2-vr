@@ -2,6 +2,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include "native_trampoline_unwind.hpp"
@@ -148,7 +149,7 @@ private:
     struct Frame {NativeOfferedChoke* owner{};Frame* previous{};std::uintptr_t hud{};std::uint64_t epoch{};std::optional<Receipt> hint{};};
     struct Metadata {std::array<RUNTIME_FUNCTION,2> functions{};std::array<unsigned char,8> unwind{};std::array<unsigned char,4> relay{1,0,0,0};};
     static bool local_read(std::uintptr_t address,void* output,std::size_t size) noexcept {
-        __try {std::memcpy(output,reinterpret_cast<const void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __try {d2vr::seh_memcpy(output,reinterpret_cast<const void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static unsigned cpp_logic(Logic logic) noexcept {try {return logic?logic():0;}catch(...) {return 0;}}
     bool gameplay() const noexcept {__try {return cpp_logic(logic_)==2;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}

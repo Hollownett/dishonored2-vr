@@ -1,4 +1,5 @@
 #pragma once
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include "native_power_hand.hpp"
@@ -189,10 +190,10 @@ private:
         return true;
     }
     static bool copy_slot(std::uintptr_t at,const void* value) noexcept {
-        __try {std::memcpy(reinterpret_cast<void*>(at),value,64);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __try {d2vr::seh_memcpy(reinterpret_cast<void*>(at),value,64);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static void restore_slot(std::uintptr_t at,const void* tracked,const void* saved) noexcept {
-        __try {if(!std::memcmp(reinterpret_cast<void*>(at),tracked,64)) std::memcpy(reinterpret_cast<void*>(at),saved,64);} __except(EXCEPTION_EXECUTE_HANDLER) {}
+        __try {if(!d2vr::seh_memcmp(reinterpret_cast<void*>(at),tracked,64)) d2vr::seh_memcpy(reinterpret_cast<void*>(at),saved,64);} __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
     __declspec(noinline) static std::uint64_t invoke_cleanup(std::uint64_t(*invoke)(void*),void* frame,void(*cleanup)(void*) noexcept,bool* returned) {
         std::uint64_t result{};

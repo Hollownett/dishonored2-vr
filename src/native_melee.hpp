@@ -4,6 +4,7 @@
 // ctor from the sword's own damage decl, inflictor = sword entity (AI alert), instigator = player (kill credit).
 // The victim then joins the weapon's already-hit list (0x630540) so the native active frames of the same swing
 // skip it. Call ONLY from the game-thread Stage0 scope (NativeInteractionAim), never from render/XR threads.
+#include "seh_copy.hpp"
 #include "game_rig.hpp"
 #include "../third_party/minhook/include/MinHook.h"
 #include <atomic>
@@ -178,9 +179,9 @@ private:
         using Kill=void (__fastcall*)(std::uintptr_t,void*,int);
         __try {
             reinterpret_cast<Ctor>(base+ctor_rva)(params,decl);
-            std::memcpy(params+0x24,hit.point.data(),12);std::memcpy(params+0x30,hit.to_attacker.data(),12);
-            std::memcpy(params+0x3c,hit.direction.data(),12);
-            std::memcpy(params+0x50,&s.sword_id,4);std::memcpy(params+0x54,&s.player_id,4);
+            d2vr::seh_memcpy(params+0x24,hit.point.data(),12);d2vr::seh_memcpy(params+0x30,hit.to_attacker.data(),12);
+            d2vr::seh_memcpy(params+0x3c,hit.direction.data(),12);
+            d2vr::seh_memcpy(params+0x50,&s.sword_id,4);d2vr::seh_memcpy(params+0x54,&s.player_id,4);
             reinterpret_cast<Kill>(base+swarm_kill_rva)(record,params,0);
         } __except(EXCEPTION_EXECUTE_HANDLER) {return 2;}
         return 0;
@@ -207,9 +208,9 @@ private:
         using Sever=void (__fastcall*)(std::uintptr_t,void*);
         __try {
             reinterpret_cast<Ctor>(base+ctor_rva)(params,decl);
-            std::memcpy(params+0x24,hit.point.data(),12);std::memcpy(params+0x30,hit.to_attacker.data(),12);
-            std::memcpy(params+0x3c,hit.direction.data(),12);
-            std::memcpy(params+0x50,&s.sword_id,4);std::memcpy(params+0x54,&s.player_id,4);
+            d2vr::seh_memcpy(params+0x24,hit.point.data(),12);d2vr::seh_memcpy(params+0x30,hit.to_attacker.data(),12);
+            d2vr::seh_memcpy(params+0x3c,hit.direction.data(),12);
+            d2vr::seh_memcpy(params+0x50,&s.sword_id,4);d2vr::seh_memcpy(params+0x54,&s.player_id,4);
             reinterpret_cast<Sever>(base+sever_rva)(severable,params);
         } __except(EXCEPTION_EXECUTE_HANDLER) {return 2;}
         return 0;
@@ -221,10 +222,10 @@ private:
         using HitList=void (__fastcall*)(std::uintptr_t,std::uint32_t);
         __try {
             reinterpret_cast<Ctor>(base+ctor_rva)(params,s.decl);
-            if(s.amount>0) std::memcpy(params+0x08,&s.amount,4); // = 780a80(params, amount, no clamp)
-            std::memcpy(params+0x24,hit.point.data(),12);std::memcpy(params+0x30,hit.to_attacker.data(),12);
-            std::memcpy(params+0x3c,hit.direction.data(),12);
-            std::memcpy(params+0x50,&s.sword_id,4);std::memcpy(params+0x54,&s.player_id,4);
+            if(s.amount>0) d2vr::seh_memcpy(params+0x08,&s.amount,4); // = 780a80(params, amount, no clamp)
+            d2vr::seh_memcpy(params+0x24,hit.point.data(),12);d2vr::seh_memcpy(params+0x30,hit.to_attacker.data(),12);
+            d2vr::seh_memcpy(params+0x3c,hit.direction.data(),12);
+            d2vr::seh_memcpy(params+0x50,&s.sword_id,4);d2vr::seh_memcpy(params+0x54,&s.player_id,4);
             const auto returned=reinterpret_cast<Take>(base+take_rva)(hit.victim,result,params);
             if(observation)*observation=decode_damage_result(result,returned==result);
             if(s.weapon) reinterpret_cast<HitList>(base+hitlist_rva)(s.weapon,victim_id);

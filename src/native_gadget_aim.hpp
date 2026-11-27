@@ -7,6 +7,7 @@
 //        from entity+0x30c (x,y normalised, z forced 0), entity = [s+0x10]; its ray start is the same *([s+0x40]+0xd8).
 // While the hand pose is fresh the hook writes the hand's origin / forward into those fields, runs the native sensor and puts the
 // fields back (game thread, same call). No fresh pose, a bad pointer or a prologue mismatch leaves the native sensor untouched.
+#include "seh_copy.hpp"
 #include <windows.h>
 #if __has_include(<MinHook.h>)
 #include <MinHook.h>
@@ -44,7 +45,7 @@ public:
             const std::uintptr_t rvas[2]{placement_rva,throw_hit_rva};
             for(unsigned i=0;i<2;++i) {
                 unsigned char got[16]{};
-                __try {std::memcpy(got,reinterpret_cast<const void*>(base+rvas[i]),16);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+                __try {d2vr::seh_memcpy(got,reinterpret_cast<const void*>(base+rvas[i]),16);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
                 if(std::memcmp(got,want[i],16)) return false;
             }
             void* t[2]{reinterpret_cast<void*>(base+placement_rva),reinterpret_cast<void*>(base+throw_hit_rva)};
@@ -62,7 +63,7 @@ private:
     inline static void* targets_[2]{};inline static Fn original_[2]{};
     inline static std::mutex mutex_;inline static GadgetAimPose pose_{};inline static ThrowAimOverride override_{};
     template<class T> static bool rd(std::uintptr_t at,T& out) noexcept {
-        __try {std::memcpy(&out,reinterpret_cast<const void*>(at),sizeof(T));return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __try {d2vr::seh_memcpy(&out,reinterpret_cast<const void*>(at),sizeof(T));return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static float* f3(std::uintptr_t at) noexcept {float probe[3];return at>0x10000 && rd(at,probe)?reinterpret_cast<float*>(at):nullptr;}
     static bool pointer_field(std::uintptr_t object,std::uintptr_t offset,std::uintptr_t& out) noexcept {return rd(object+offset,out) && out>0x10000;}

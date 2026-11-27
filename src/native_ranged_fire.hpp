@@ -18,6 +18,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "seh_copy.hpp"
 #include <windows.h>
 #if __has_include(<MinHook.h>)
 #include <MinHook.h>
@@ -1202,8 +1203,8 @@ private:
         unsigned char saved[48]{};bool swapped=false;const auto owner=reinterpret_cast<std::uintptr_t*>(comp+0x10);const auto kept=*owner;
         const auto handle=reinterpret_cast<std::int32_t*>(comp+0x20);const auto handle_kept=*handle;
         __try {
-            std::memcpy(saved,reinterpret_cast<const void*>(entity+0x300),sizeof(saved));
-            std::memcpy(reinterpret_cast<void*>(entity+0x300),origin,12);std::memcpy(reinterpret_cast<void*>(entity+0x30c),axis,36);*owner=entity;*handle=-1;swapped=true;
+            d2vr::seh_memcpy(saved,reinterpret_cast<const void*>(entity+0x300),sizeof(saved));
+            d2vr::seh_memcpy(reinterpret_cast<void*>(entity+0x300),origin,12);d2vr::seh_memcpy(reinterpret_cast<void*>(entity+0x30c),axis,36);*owner=entity;*handle=-1;swapped=true;
             reinterpret_cast<Fn>(base+rva)(comp,0);
         } __finally {if(swapped) {*owner=kept;*handle=handle_kept;std::memcpy(reinterpret_cast<void*>(entity+0x300),saved,sizeof(saved));}}
     }

@@ -1,4 +1,5 @@
 #pragma once
+#include "seh_copy.hpp"
 #include "native_door_animation.hpp"
 
 namespace d2vr {
@@ -235,7 +236,7 @@ private:
     }
     static bool cpp_read(Read read,std::uintptr_t address,void* output,std::size_t size) noexcept {try {return read && read(address,output,size);}catch(...) {return false;}}
     static bool safe_read(Read read,std::uintptr_t address,void* output,std::size_t size) noexcept {__try {return cpp_read(read,address,output,size);}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
-    static bool local_read(std::uintptr_t address,void* output,std::size_t size) noexcept {__try {std::memcpy(output,reinterpret_cast<void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
+    static bool local_read(std::uintptr_t address,void* output,std::size_t size) noexcept {__try {d2vr::seh_memcpy(output,reinterpret_cast<void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
     template<class Value> bool get(std::uintptr_t address,Value& value) const noexcept {return safe_read(read_,address,&value,sizeof(value));}
     template<class Value> bool equals(std::uintptr_t address,Value expected) const noexcept {Value actual{};return get(address,actual) && actual==expected;}
     static bool cpp_qualify(Qualify qualify,const Request& request,Phase phase) noexcept {try {return qualify && qualify(request,phase);}catch(...) {return false;}}

@@ -1,4 +1,5 @@
 #pragma once
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include "game_profile.hpp"
@@ -181,7 +182,7 @@ private:
     bool gameplay() const noexcept {__try {return cpp_logic(logic_)==2;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
     struct PerformMetadata {RUNTIME_FUNCTION function;std::remove_const_t<decltype(game_traits::slash_perform_unwind)> unwind;};
     static bool trampoline_read(std::uintptr_t address,void* output,std::size_t size) noexcept {
-        __try {std::memcpy(output,reinterpret_cast<const void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __try {d2vr::seh_memcpy(output,reinterpret_cast<const void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static std::array<unsigned char,14> owned_perform_tail(std::uintptr_t base) noexcept {
         std::array<unsigned char,14> bytes{0x49,0xbb};const auto continuation=base+rvas[0]+perform_steal;

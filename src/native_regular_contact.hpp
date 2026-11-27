@@ -1,4 +1,5 @@
 #pragma once
+#include "seh_copy.hpp"
 #include "native_initial_contact.hpp"
 
 namespace d2vr {
@@ -43,7 +44,7 @@ struct NativeRegularContactCollector {
 private:
     static bool guarded_copy(const void* input,NativeInitialContactRecord& output) noexcept {
         if(!input)return false;
-        __try {std::memcpy(output.bytes.data(),input,output.bytes.size());return true;}
+        __try {d2vr::seh_memcpy(output.bytes.data(),input,output.bytes.size());return true;}
         __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static std::optional<NativeRegularContact> decode(const NativeInitialContactRecord& record) noexcept {

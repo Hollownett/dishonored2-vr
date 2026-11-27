@@ -1,4 +1,5 @@
 #pragma once
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include <bcrypt.h>
@@ -61,14 +62,14 @@ private:
                 for(std::size_t i=0;i<movie.count;++i) {
                     const auto& e=movie.edits[i];
                     if(e.offset>size || e.size>size-e.offset) {++mismatched;return;}
-                    if(std::memcmp(data+e.offset,e.new_bytes,e.size)) all_new=false;
-                    if(std::memcmp(data+e.offset,e.old_bytes,e.size)) all_old=false;
+                    if(d2vr::seh_memcmp(data+e.offset,e.new_bytes,e.size)) all_new=false;
+                    if(d2vr::seh_memcmp(data+e.offset,e.old_bytes,e.size)) all_old=false;
                 }
                 std::array<unsigned char,32> digest{};
                 if(BCryptHash(BCRYPT_SHA256_ALG_HANDLE,nullptr,0,data,static_cast<ULONG>(size),digest.data(),static_cast<ULONG>(digest.size()))<0) {++mismatched;return;}
                 if(all_new) return; // cached buffer, already ours (its hash may also carry the later glyph row)
                 if(!all_old || digest!=movie.original_sha256) {++mismatched;return;}
-                for(std::size_t i=0;i<movie.count;++i) std::memcpy(data+movie.edits[i].offset,movie.edits[i].new_bytes,movie.edits[i].size);
+                for(std::size_t i=0;i<movie.count;++i) d2vr::seh_memcpy(data+movie.edits[i].offset,movie.edits[i].new_bytes,movie.edits[i].size);
                 ++patched;return;
             }}();
             if(const auto callback=owned_movie_patch.load(std::memory_order_acquire)) callback(path,data,size);

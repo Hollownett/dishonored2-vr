@@ -13,6 +13,7 @@
 // - Arm hide/show: 0x774a10(u32* arm id field, show) is the engine's own arm hide (+0x80) / show (+0x88); 18 callers, among them
 //   Block's update hiding an empty left arm every frame (docs/native-attack-gating.md). Its hook skips hides of the arms the mod
 //   keeps (published within 200 ms); show_arms() shows an arm hidden by any other path (game thread only).
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <intrin.h>
 #include "../third_party/minhook/include/MinHook.h"
@@ -482,8 +483,8 @@ private:
             Target t=published;
             if(t.master_valid) if(const auto m=*reinterpret_cast<const std::uintptr_t*>(t.rf+0x3c8)) carry(t,m);
             if(!target_valid(t)) {++rejected_targets;return 0;}
-            float cp[3],ca[9];std::memcpy(cp,reinterpret_cast<const void*>(t.entity+0x300),12);std::memcpy(ca,reinterpret_cast<const void*>(t.entity+0x30c),36);
-            std::memcpy(pos,t.pos,12);std::memcpy(axis,t.axis,36);
+            float cp[3],ca[9];d2vr::seh_memcpy(cp,reinterpret_cast<const void*>(t.entity+0x300),12);d2vr::seh_memcpy(ca,reinterpret_cast<const void*>(t.entity+0x30c),36);
+            d2vr::seh_memcpy(pos,t.pos,12);d2vr::seh_memcpy(axis,t.axis,36);
             bind_entity_err.store(std::sqrt((cp[0]-t.pos[0])*(cp[0]-t.pos[0])+(cp[1]-t.pos[1])*(cp[1]-t.pos[1])+(cp[2]-t.pos[2])*(cp[2]-t.pos[2])),std::memory_order_relaxed);
             bool anchored_here{};
             if(const auto m=*reinterpret_cast<const std::uintptr_t*>(t.rf+0x3c8)) anchored_here=anchor(t,m);

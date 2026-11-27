@@ -11,6 +11,7 @@
 // asked Havok for body 0. So the shared Havok entry setBodyMotionType 0xc86800 (world, u32 id, u8 type, u8 activation; 8 direct
 // callers, void) is guarded too: body 0 is hknp's reserved fixed world body (no motion, +0x88 null) and 0xffffff is the invalid
 // id, neither may ever change motion type.
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include <intrin.h>
@@ -226,8 +227,12 @@ private:
         motion_original_.load()(world,motion);
     }
     inline static std::uintptr_t base_{};
+    // 2026-11-27: these hooks sit on Havok entry points whose engine callers keep live floats in the volatile vector registers across the
+    // call (whole-program optimised code). Routing this read through the CRT memcpy (seh_memcpy) clobbered xmm0-5 and the engine crashed a
+    // few seconds into play (DOTO +0x526047, bisected to this one line); a plain std::memcpy is not covered by clang-cl's __try. So it
+    // reads with seh_integer_copy: an opaque call (the __try catches a fault: a level freed under the hook) that uses no vector register.
     static bool seh_read(std::uintptr_t address,void* out,std::size_t size) noexcept {
-        __try {std::memcpy(out,reinterpret_cast<const void*>(address),size);return true;}
+        __try {d2vr::seh_integer_copy(out,reinterpret_cast<const void*>(address),size);return true;}
         __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static std::uintptr_t __fastcall hook(std::uintptr_t system,std::uintptr_t parent,std::uint16_t bone,std::uintptr_t r9,std::uint16_t extra) {

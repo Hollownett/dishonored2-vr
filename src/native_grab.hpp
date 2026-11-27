@@ -1,4 +1,5 @@
 #pragma once
+#include "seh_copy.hpp"
 #include "native_guarded_call.hpp"
 #include <windows.h>
 #include <MinHook.h>
@@ -44,7 +45,7 @@ class ScanReader {
     std::array<Slot,1024> slots_{};
     ULONGLONG slowest_{}; // microseconds: the slowest VirtualQuery since take_slowest()
     static bool copy(std::uintptr_t address,void* out,std::size_t size,Slot& slot) {
-        __try {std::memcpy(out,reinterpret_cast<const void*>(address),size);return true;}
+        __try {d2vr::seh_memcpy(out,reinterpret_cast<const void*>(address),size);return true;}
         __except(EXCEPTION_EXECUTE_HANDLER) {slot=Slot{};return false;}
     }
 public:

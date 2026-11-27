@@ -2,6 +2,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include "native_trampoline_unwind.hpp"
@@ -179,7 +180,7 @@ private:
     static bool cpp_read(Read read,std::uintptr_t address,void* output,std::size_t size) noexcept {try {return read && read(address,output,size);}catch(...) {return false;}}
     static bool safe_read(Read read,std::uintptr_t address,void* output,std::size_t size) noexcept {__try {return cpp_read(read,address,output,size);}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
     template<class Value> bool get(std::uintptr_t address,Value& value) const noexcept {return safe_read(read_,address,&value,sizeof(value));}
-    static bool local_read(std::uintptr_t address,void* output,std::size_t size) noexcept {__try {std::memcpy(output,reinterpret_cast<void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
+    static bool local_read(std::uintptr_t address,void* output,std::size_t size) noexcept {__try {d2vr::seh_memcpy(output,reinterpret_cast<void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}}
     static void write_float(std::uintptr_t address,float value) {std::memcpy(reinterpret_cast<void*>(address),&value,4);}
     bool unique_context(std::uintptr_t schema,std::uintptr_t binding,std::uint32_t size,std::uint32_t& offset) const noexcept {
         std::uintptr_t buckets{},key{};unsigned bucket_count{},node_count{},found{};
@@ -289,7 +290,7 @@ private:
             auto& receipt=receipts_[frame.slot];unsigned count{};const auto data=parent->context+0x9c0;
             if(!receipt.owned || receipt.generation!=parent->generation || !canonical(parent->context,count) || count!=receipt.count || frame.entry<data || (frame.entry-data)%0x28)return;
             const auto index=(frame.entry-data)/0x28;if(index>=count)return;frame.index=static_cast<unsigned>(index);frame.indexed=true;
-            int mode{};float time{},duration{},delta{};std::uintptr_t clip{},descriptor{};std::memcpy(&delta,&raw_dt,4);
+            int mode{};float time{},duration{},delta{};std::uintptr_t clip{},descriptor{};std::memcpy(&delta,&raw_dt,4);   // a local bit-cast (no guard needed)
             if(!enabled() || receipt.instances[index]!=receipt.opening_instance || !receipt.opening_instance || !get(frame.entry+0x1c,mode) || mode!=1 ||
                !std::isfinite(delta) || delta<0.f ||
                !get(frame.entry+0x10,frame.rate) || frame.rate!=1.f || !get(frame.entry+0x14,time) || !std::isfinite(time) || !get(frame.entry,clip) || !clip ||

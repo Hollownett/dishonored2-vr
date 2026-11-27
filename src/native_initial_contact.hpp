@@ -2,6 +2,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "seh_copy.hpp"
 #include <windows.h>
 #include "arm_ik.hpp"
 #include <array>
@@ -103,7 +104,7 @@ private:
     }
     static bool copy_record(const void* input,NativeInitialContactRecord& output) noexcept {
         if(!input)return false;
-        __try {std::memcpy(output.bytes.data(),input,output.bytes.size());return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __try {d2vr::seh_memcpy(output.bytes.data(),input,output.bytes.size());return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static std::optional<NativeInitialContact> decode(const NativeInitialContactRecord& record) noexcept {
         std::array<float,3> point{},normal{};NativeInitialContact result{};

@@ -16,6 +16,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "seh_copy.hpp"
 #include "game_rig.hpp"
 #include "native_melee.hpp"
 #include "tracked_pose.hpp"
@@ -385,7 +386,7 @@ private:
             if(!manager) return false;
             auto* p=static_cast<unsigned char*>(reinterpret_cast<void* (__fastcall*)(std::uintptr_t,unsigned,unsigned,std::uint32_t)>(base+0x8112c0)(manager+0xc8e8,velocity_event,0x1c,id));
             if(!p) return false;
-            std::memset(p,0,0x1c);std::memcpy(p,f,12);return true;
+            d2vr::seh_memset(p,0,0x1c);d2vr::seh_memcpy(p,f,12);return true;
         } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     template<class Read> static void run_ops(std::uintptr_t base,Read& read) {

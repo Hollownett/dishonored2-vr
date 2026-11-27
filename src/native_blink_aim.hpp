@@ -4,6 +4,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "seh_copy.hpp"
 #include <windows.h>
 #if __has_include(<MinHook.h>)
 #include <MinHook.h>
@@ -127,7 +128,7 @@ private:
         return (info.Protect&pages)!=0;
     }
     static bool copy_guarded(void* destination,const void* source,std::size_t size) noexcept {
-        __try {std::memcpy(destination,source,size);return true;}
+        __try {d2vr::seh_memcpy(destination,source,size);return true;}
         __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     bool fresh_hand(Publication& out,std::uint64_t now) {

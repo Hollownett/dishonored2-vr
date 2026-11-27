@@ -9,6 +9,7 @@
 // empty queue and zeroes dispatched[slot]: no readback ever runs in VR, and every ocean query (boats, swimming, floating props) reads
 // frozen results. The flat game and the theater render one view. Fix: one Dispatch per engine frame slot (slot = 0x3308d04, which the
 // backend advances once per frame); later views of the same frame skip it, as a second view never existed for the engine's design.
+#include "seh_copy.hpp"
 #include <windows.h>
 #if __has_include(<MinHook.h>)
 #include <MinHook.h>
@@ -44,7 +45,7 @@ public:
             // push rbp; push rsi; push r14; push r15; sub rsp,0x38; movsxd rax,[rcx+0x12d70] (the queue count)
             static const unsigned char want[16]{0x40,0x55,0x56,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x38,0x48,0x63,0x81,0x70,0x2d};
             unsigned char got[16]{};
-            __try {std::memcpy(got,reinterpret_cast<const void*>(base+dispatch_rva),16);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+            __try {d2vr::seh_memcpy(got,reinterpret_cast<const void*>(base+dispatch_rva),16);} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
             if(std::memcmp(got,want,16)) return false;
             void* t=reinterpret_cast<void*>(base+dispatch_rva);
             if(MH_CreateHook(t,reinterpret_cast<void*>(&hook),reinterpret_cast<void**>(&original_))!=MH_OK) return false;

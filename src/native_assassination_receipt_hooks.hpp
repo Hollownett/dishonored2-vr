@@ -2,6 +2,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "seh_copy.hpp"
 #include <windows.h>
 #include <MinHook.h>
 #include "native_trampoline_unwind.hpp"
@@ -118,7 +119,7 @@ private:
         __try {return cpp_read(read,address,output,size);}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     static bool local_read(std::uintptr_t address,void* output,std::size_t size) noexcept {
-        __try {std::memcpy(output,reinterpret_cast<const void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+        __try {d2vr::seh_memcpy(output,reinterpret_cast<const void*>(address),size);return true;}__except(EXCEPTION_EXECUTE_HANDLER) {return false;}
     }
     bool body(unsigned kind,std::uintptr_t caller,std::uintptr_t subject,int state,const void* packet) {
         const auto native=original(kind);if(!native)return false;
