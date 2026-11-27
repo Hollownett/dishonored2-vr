@@ -155,6 +155,14 @@
    "default": true
   },
   {
+   "id": "palm-box",
+   "file": "legacy-palm-sphere",
+   "kind": "disable",
+   "label": "Free hand rests on surfaces by its real shape",
+   "help": "An empty hand pressed palm-first or back-first on a wall or table settles right onto it (as the reference VR mod does) instead of stopping a few centimetres off. Off: the older round palm.",
+   "default": true
+  },
+  {
    "id": "finger-put-out",
    "file": "no-finger-put-out",
    "kind": "disable",

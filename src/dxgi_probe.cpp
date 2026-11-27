@@ -616,6 +616,8 @@ static std::array<std::atomic<unsigned>,2> finger_blocked_bits{},finger_hyper_bi
 // hand clamp's part, which the fingers cannot undo); frames with a finger blocked at the limit, frames with one hyperextended).
 static std::array<std::atomic<UINT64>,2> tip_pen_frames{},tip_pen_over{},tip_pen_sum_um{},tip_pen_blocked{},tip_pen_hyper{};
 static std::array<std::atomic<unsigned>,2> tip_pen_max_slow_um{},tip_pen_max_fast_um{},tip_pen_thumb_um{},tip_pen_palm_um{};
+// Task 17: the thumb per frame (the max above is one worst moment): frames it is over 5 mm in, the sum of its depth (um) for the mean (status round2.thumb_pen)
+static std::array<std::atomic<UINT64>,2> tip_pen_thumb_over{},tip_pen_thumb_sum_um{},tip_pen_thumb_off{};
 // 2026-11-26 (user: fingers react to tables and walls "correctly and steady in movement"): while a free hand is at a surface two frames running,
 // how far its long fingers' drawn tips move against the palm between the frames (the hand may slide; the fingers should not chatter: max, sum um,
 // frames compared), the frames the G3 open share is on (> 0.3), and the long fingers' blocked-flag flips (G7: a flag flip is a visible snap).
@@ -624,6 +626,10 @@ static std::array<std::atomic<UINT64>,2> finger_steady_n{},finger_steady_sum_um{
 static std::array<std::atomic<unsigned>,2> finger_steady_max_um{};
 // render thread: the last near-surface frame's tips and flags, and its probe_frame (a pair is only the frame right after it: a held, hidden or skipped
 // hand, or a frame the solve threw on, breaks the run whichever path it took)
+// 2026-11-27 diagnostics (palm box A/B): the frames a free hand's long fingertip jumps > 50 mm against the palm, with the settle offset then and
+// the frame before (status finger_ik.round2.spikes: the last 12).
+static std::array<std::atomic<unsigned>,2> diag_settle_um{},diag_settle_prev_um{};static std::array<std::atomic<bool>,2> diag_pressing{};
+static std::mutex diag_spike_lock;static std::array<std::string,12> diag_spikes;static unsigned diag_spike_n=0;
 static std::array<std::array<d2vr::Vec3,5>,2> finger_steady_last_tips{};static std::array<UINT64,2> finger_steady_at{~0ull,~0ull};static std::array<unsigned,2> finger_steady_last_blocked{};
 static void note_max_um(std::atomic<unsigned>& peak_um,double metres) {const auto um=static_cast<unsigned>(std::clamp(metres,0.,1.)*1e6);unsigned peak=peak_um.load();while(um>peak && !peak_um.compare_exchange_weak(peak,um)) {}}
 static std::mutex finger_touch_status_mutex;
@@ -810,7 +816,7 @@ static std::array<std::uint64_t,2> released_eye_request_ids{},released_eye_retir
 static std::uint64_t hand_body_probe_request_id{};static std::array<d2vr::HandBodyProbeClearance,2> hand_body_probe_clearance;
 struct HandClampStatus {
     std::atomic<bool> active{};std::atomic<unsigned> state{},probes{},max_casts{};
-    std::atomic<UINT64> contact_frames{},snapbacks{},squeeze_infeasible{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{},released_shots{};
+    std::atomic<UINT64> contact_frames{},snapbacks{},squeeze_infeasible{},reach_clamped{},yields{},missed_notes{},repeated_updates{},reacquire_blocked{},reacquire_holds{},unanswered{},released_shots{},settle_frames{},settle_max_um{},settle_sum_um{};   // Task 18: frames the palm box settled the hand (> 1 mm), the largest and the summed offset (micrometres)
     std::atomic<UINT64> holds{},hold_runs{},hold_longest_ms{},proven_draws{};   // v1423: frames the clamp held the drawn hand (waiting for a sweep), their runs, the longest, and the held frames drawn on the answered line
 };
 static std::array<HandClampStatus,2> hand_clamp_status;static std::atomic<double> hand_clamp_cast_mean{},hand_clamp_cast_max{};
@@ -6405,8 +6411,10 @@ static bool finger_put_out_enabled=true,finger_slab_legacy=false;   // finger_sl
 // 6 rad/s; the contact pose closes with tau .03), G5 the fingers at a surface probed first, G6 the fingertip slabs on the palm's plane. Knobs
 // build/legacy-finger-timing, legacy-finger-probe-order, legacy-finger-plane restore each. finger_near_bits: per hand, the fingers whose drawn tip was
 // within 3 cm of a probe shape last frame (the probe priority).
+static bool palm_box_on=true;   // Task 18: build/legacy-palm-sphere turns the palm box settle off
 static bool finger_timing_on=true,finger_probe_order_on=true,finger_plane_on=true,finger_surface_rules_on=true;static std::array<unsigned,2> finger_near_bits{};   // finger_surface_rules_on: G3/G4/G7 (build/legacy-finger-surface)
-static std::array<std::atomic<UINT64>,2> finger_priority_casts{},finger_back_frames{};   // finger_back_frames: Task 16, frames with contact.back > 0.3
+static std::array<std::atomic<UINT64>,2> finger_priority_casts{},finger_back_frames{};static std::array<std::atomic<unsigned>,2> finger_back_peak_permil{};static std::array<std::atomic<UINT64>,2> finger_back_rejects{};static std::array<std::array<std::atomic<UINT64>,3>,2> finger_probe_rejects{};   // Revision 2: rejected free-hand probe answers per side: palm, back, fingertips
+   // back casts that started inside geometry or met no face toward the back   // the largest back share seen, per mille   // finger_back_frames: Task 16, frames with contact.back > 0.3
 static std::array<std::atomic<std::uint64_t>,2> finger_put_outs{};   // 2026-11-26 G1: fingers set out of a probe shape after the spring
 static std::string arm_collision_json() {
     std::ostringstream o;o<<"{\"enabled\":"<<(arm_collision_enabled?"true":"false")<<",\"shadow\":"<<(arm_collision_shadow?"true":"false");
@@ -6930,8 +6938,11 @@ static void forget_hand_clamp() noexcept {
     reset_clamp_state();
     hand_clamp_budget.reset_window();
 }
+// Revision 2: the open hand's rig geometry per side (refresh_clamp_probes) and the finger IK's last drawn turns (the settle poses its phalanges from them)
+static std::array<std::optional<d2vr::rig::HandGeometry>,2> clamp_hand_geometry{};
+static std::array<std::array<std::array<float,3>,5>,2> finger_turn_last{};static std::array<bool,2> finger_turn_last_valid{};
 static void refresh_clamp_probes(unsigned side,const d2vr::WorldTrackedPose& grip) {
-    static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> built_for;static std::array<std::optional<d2vr::rig::HandGeometry>,2> geometry{};
+    static std::shared_ptr<const d2vr::rig::NativeArmBindingSnapshot> built_for;auto& geometry=clamp_hand_geometry;
     side&=1u;
     if(const auto snapshot=arm_binding_cache.load();snapshot!=built_for) {
         built_for=snapshot;
@@ -6948,7 +6959,7 @@ static void refresh_clamp_probes(unsigned side,const d2vr::WorldTrackedPose& gri
     const d2vr::Vec3 palm_local{d2vr::dot(offset,grip.basis[0]),d2vr::dot(offset,grip.basis[1]),d2vr::dot(offset,grip.basis[2])};
     if(!d2vr::clamp_probe_set_stale(clamp_probes[side],palm_local)) return;
     try {
-        const auto rebuilt=d2vr::clamp_probe_set(d2vr::hand_proxies(*geometry[side],{palm_local,{{{1,0,0},{0,1,0},{0,0,1}}}},std::array<float,5>{}),palm_local);
+        const auto rebuilt=d2vr::clamp_probe_set(d2vr::hand_proxies(*geometry[side],{palm_local,{{{1,0,0},{0,1,0},{0,0,1}}}},std::array<float,5>{}),palm_local,*geometry[side]);
         clamp_tip[side]=d2vr::remap_clamp_probe(clamp_probes[side],rebuilt,clamp_tip[side]);
         clamp_wall_tip[side]=d2vr::remap_clamp_probe(clamp_probes[side],rebuilt,clamp_wall_tip[side]);
         clamp_probes[side]=rebuilt;
@@ -11684,6 +11695,39 @@ void prepare_head_view(void* view) noexcept {
                             } else d2vr::align_weapon_blade(g,*r.blade_dir,sword_side && reverse_sword);
                             ++weapon_contact_frames;
                         }
+                        // Task 18 (build/legacy-palm-sphere turns it off): a FREE hand settles onto the surface by the hand's real shape (the palm as an
+                        // oriented box + the finger spheres, HandClamp::settle) instead of floating palm_radius + skin off it. After the clamp, the meet and the
+                        // blade: the clamp is told its own drawn hand (composed.noted, unchanged) and the re-acquire hold keeps the pre-settle one.
+                        const d2vr::Vec3 pre_settle=g.position;
+                        {   static std::array<d2vr::Vec3,2> settle_offset{};
+                            const bool settle_free=palm_box_on && !armed && clamp_updated && clamped.valid && !clamp_yield && !met_prop && !clamped.reacquired &&
+                                clamped.state!=d2vr::ClampState::released && probes.valid && probes.box_valid && d2vr::finite(g.position) &&
+                                !(held_clamp_enabled && held_clamp_live.holding && held_clamp_live.side==side) && !(physical_grab_requested && native_grab.holding(side));
+                            std::array<d2vr::ClampHit,d2vr::HandClamp::max_held_planes> held_now{};
+                            // fresh: the clamp validated this target and does not hold the hand; only then a new settle is computed (else the offset is kept).
+                            const bool settle_fresh=clamped.validated && !clamped.held;
+                            bool pressing=false;d2vr::Vec3 want{};
+                            if(settle_free && settle_fresh && hand_clamp.held_planes(side,held_now)>0) {
+                                // The hand as it is DRAWN: the open hand's spheres posed by the finger IK's last turns (the open pose until it has drawn one).
+                                d2vr::HandJointTurns turns{};
+                                if(finger_turn_last_valid[side]) for(unsigned f=0;f<5;++f) for(unsigned j=0;j<3;++j) turns[f][j]=finger_turn_last[side][f][j];
+                                else if(clamp_hand_geometry[side]) for(unsigned f=0;f<5;++f) turns[f]=d2vr::rig::finger_turn_at(clamp_hand_geometry[side]->finger[f],f,0.);
+                                if(clamp_hand_geometry[side]) try {
+                                    const auto posed=d2vr::hand_proxies(*clamp_hand_geometry[side],{probes.palm_local,{{{1,0,0},{0,1,0},{0,0,1}}}},turns);
+                                    const auto shape=d2vr::settle_shape(posed);
+                                    pressing=hand_clamp.pressing(side,target.basis,target.position,probes.box,shape);
+                                    if(pressing) want=hand_clamp.settle(side,target.basis,g.position,target.position,probes.box,shape)-g.position;
+                                } catch(const std::exception&) {pressing=false;want={};}
+                            }
+                            const auto offset=d2vr::settle_offset_next(settle_offset[side],settle_free,settle_fresh,pressing,want,dt,hand_clamp.config().release_speed,
+                                hand_clamp.config().palm_radius+hand_clamp.config().skin);
+                            settle_offset[side]=offset;
+                            const double mm=d2vr::length(settle_offset[side])*1000.;
+                            diag_settle_prev_um[side].store(diag_settle_um[side].load(std::memory_order_relaxed),std::memory_order_relaxed);diag_settle_um[side].store(static_cast<unsigned>(std::min(mm,1e6)*1000.),std::memory_order_relaxed);diag_pressing[side].store(pressing,std::memory_order_relaxed);
+                            if(mm>1e-9) g.position=g.position+settle_offset[side];
+                            if(mm>1.) {++status.settle_frames;status.settle_sum_um+=static_cast<UINT64>(mm*1000.);
+                                UINT64 peak=status.settle_max_um.load();const UINT64 um=static_cast<UINT64>(mm*1000.);while(um>peak && !status.settle_max_um.compare_exchange_weak(peak,um)) {}}
+                        }
                         {   // B14 (DeepSeek P1/P2): the palm is free only after three frames in a row of answered, unblocked palm casts to this very
                             // target: never on a re-acquire (free before its sweep answers), a held jump, a contact, an unanswered post, or a
                             // reach-clamped target (the cast then tested a nearer point than the palm the body is created at)
@@ -11724,7 +11768,7 @@ void prepare_head_view(void* view) noexcept {
                         // Every update is followed by the clamp's own hand (the next sweep starts there; a yield or an invalid target is ignored).
                         if(clamp_updated) hand_clamp.note_drawn(side,clamp_root,composed.noted);
                         const bool clamp_drew=clamp_updated && clamped.valid && !clamp_yield;
-                        if(clamp_drew || !clamp_updated) clamp_hold.note(side,clamp_epoch,clamp_root,g.position);
+                        if(clamp_drew || !clamp_updated) clamp_hold.note(side,clamp_epoch,clamp_root,clamp_updated?pre_settle:g.position);
                         // I2: while clamped, shots and the crosshair leave from the drawn barrel (read next frame by the aim publication).
                         // While released (G3 snap-back, drawn at the controller), the chest re-acquire and an eye -> hand sweep on the exclusion slot
                         // (a released side never posts one: no meet while released; N7) bound the origin to the near side of what lies between body
@@ -12304,6 +12348,22 @@ void prepare_head_view(void* view) noexcept {
                                     probe_serial[side][cache_slot]=serial;
                                     std::optional<d2vr::rig::HeldShape> shape;const char* kind=nullptr;
                                     if(const auto hit=d2vr::NativeInteractionAim::weapon_hit(side,cast_slot,fk_now,d2vr::NativeInteractionAim::producer_clamp,150)) {
+                                        // 2026-11-27: the back cast is a surface behind the back of the hand only if it faces it; a sphere that started inside
+                                        // geometry (a hand held against something) reports no real face, and its slab stood through the hand (sim: the resting
+                                        // left hand's palm skin 18 mm "inside" a back slab, its thumb >5 mm in on 130 frames, none without the back cast).
+                                        // Revision 2: every free-hand probe answer that started inside geometry, reports no real face or is the mod's own hand body is a miss (the palm on a
+                                        // surface starts its casts inside it); the palm cast's surface must face the palm, the back cast's the back.
+                                        {const unsigned kind_index=back_probe?1u:slot==3?0u:2u;
+                                         const double facing=d2vr::dot(d2vr::unit(hit->normal),d2vr::rig::palm_normal(palm,*geometry));
+                                         const bool wrong_way=back_probe?!(facing>.34):slot==3?!(facing<-.1):false;   // the palm's: anything not turned away (an edge's lip counts)
+                                         // A fingertip cast that starts inside geometry (its knuckle sphere already in something) reports no real face either: kept (v145803),
+                                         // its slabs made a resting hand's index finger flip blocked ~150 times a run (vs ~15); a miss, as for the palm and back casts.
+                                         // (The pressed hand never started a tip cast inside the wall it lay on: 0 rejects on v145802's palm_wall.)
+                                         const bool overlap_miss=hit->initial_overlap;
+                                         if(overlap_miss || !hit->normal_valid || hit->hand_body || wrong_way) {   // hand_body: the mod's own hand body, reported as entity 0 (never a surface)
+                                             finger_probe_rejects[side&1u][kind_index].fetch_add(1,std::memory_order_relaxed);
+                                             if(back_probe) finger_back_rejects[side&1u].fetch_add(1,std::memory_order_relaxed);
+                                             probe_cache[side].probed(cache_slot,std::nullopt,fk_now,false);continue;}}
                                         ++finger_probe_hits;
                                         shape=finger_collider(*hit,palm,fk_player,held,grabbed_entity,back_probe?nullptr:&probed_prop[side&1u],&kind,finger_slab_legacy?.12:(slot==3 || back_probe)?d2vr::rig::finger_slab_half_palm:d2vr::rig::finger_slab_half_tip);
                                         if(shape && kind && kind[0]=='s') ++finger_probe_hits_world;else if(shape && kind && kind[0]=='t') ++finger_probe_hits_thin;
@@ -12317,10 +12377,10 @@ void prepare_head_view(void* view) noexcept {
                                     if(!again) {shapes[count++]=cached[i];kinds[count-1]="probe";}
                                 }
                                 // The casts: the palm-normal cast every frame (8 cm), then finger_probe_casts-1 fingertips along their current pose, round-robin.
-                                {const auto sweep=d2vr::rig::palm_sweep(*geometry,palm,d2vr::rig::free_palm_reach);d2vr::NativeInteractionAim::post_weapon_segment(side,3,sweep.from,sweep.to,.03);++finger_probe_posts;}
+                                {const auto sweep=d2vr::rig::palm_sweep(*geometry,palm,d2vr::rig::free_palm_reach);const auto in=d2vr::rig::palm_normal(palm,*geometry);d2vr::NativeInteractionAim::post_weapon_segment(side,3,palm.position-in*.02,sweep.to,.03);++finger_probe_posts;}   // the 3 cm tube covers the whole palm (a ledge under its heel or thumb side); started 2 cm behind the palm frame, its front is at the palm skin, so a surface the palm rests on is not a start inside geometry   // Revision 2: from the palm frame (inside the hand: palm skin + held_palm_depth), a 1 cm sphere
                                 if(finger_surface_rules_on) {   // Task 16: behind the back of the hand (6 cm from the palm frame), what the back of the hand presses on
                                     const auto n=d2vr::rig::palm_normal(palm,*geometry);
-                                    d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::hand_back_slot,palm.position,palm.position-n*.06,.03);++finger_probe_posts;}
+                                    d2vr::NativeInteractionAim::post_weapon_segment(side,d2vr::NativeInteractionAim::hand_back_slot,palm.position,palm.position-n*.06,.01);++finger_probe_posts;}   // Revision 2: 1 cm start sphere inside the hand (back skin hand_back_depth)
                                 for(unsigned k=0;k+1<finger_probe_casts;++k) {
                                     const unsigned priority=finger_probe_order_on?finger_near_bits[side]&0x1fu:0u;   // G5: the fingers at a surface first
                                     const unsigned f=d2vr::rig::pick_probe_finger(priority,probe_frame,k,finger_probe_casts-1);if((priority>>f)&1u) finger_priority_casts[side].fetch_add(1,std::memory_order_relaxed);
@@ -12431,9 +12491,10 @@ void prepare_head_view(void* view) noexcept {
                                 if(probe_n) if(const auto moved=finger_pose_filter[side].put_out(*geometry,palm,probe.data(),probe_n,put_target)) {
                                     finger_turn[side]=finger_pose_filter[side].turn;finger_put_outs[side].fetch_add(moved,std::memory_order_relaxed);}
                             }
-                            has_finger_turn[side]=true;
+                            has_finger_turn[side]=true;finger_turn_last[side]=finger_turn[side];finger_turn_last_valid[side]=true;   // Revision 2: the settle's drawn finger pose
                             if(free_hand) { // G5 acceptance: the drawn tips against the probe shapes (not the palm stop)
-                                if(contact.back>.3f) finger_back_frames[side].fetch_add(1,std::memory_order_relaxed);   // Task 16: counted whether or not a fingertip is near (the back of the hand on a wall points them away)
+                                if(contact.back>.3f) finger_back_frames[side].fetch_add(1,std::memory_order_relaxed);
+                                {const auto pm=static_cast<unsigned>(std::clamp(contact.back,0.f,1.f)*1000);if(pm>finger_back_peak_permil[side].load(std::memory_order_relaxed)) finger_back_peak_permil[side].store(pm,std::memory_order_relaxed);}   // Task 16: counted whether or not a fingertip is near (the back of the hand on a wall points them away)
                                 double deepest=0,thumb=0,palm_in=0;bool near_surface=false;std::array<d2vr::Vec3,5> tips_local{};unsigned near_bits=0;
                                 const auto skin_point=palm.position+d2vr::rig::palm_normal(palm,*geometry)*d2vr::rig::held_palm_depth;
                                 for(unsigned f=0;f<5;++f) {
@@ -12452,6 +12513,7 @@ void prepare_head_view(void* view) noexcept {
                                     if(any_blocked) ++tip_pen_blocked[side];if(any_hyper) ++tip_pen_hyper[side];
                                     tip_pen_sum_um[side]+=static_cast<unsigned>(std::min(deepest,1.)*1e6);
                                     note_max_um(fast?tip_pen_max_fast_um[side]:tip_pen_max_slow_um[side],deepest);note_max_um(tip_pen_thumb_um[side],thumb);note_max_um(tip_pen_palm_um[side],palm_in);
+                                    if(thumb>.005) ++tip_pen_thumb_over[side];tip_pen_thumb_sum_um[side]+=static_cast<UINT64>(std::clamp(thumb,0.,1.)*1e6);if(contact.thumb_off_wall) ++tip_pen_thumb_off[side];
                                 }
                                 {   // steadiness at a surface (see finger_steady_n)
                                     auto& last_tips=finger_steady_last_tips;auto& last_blocked=finger_steady_last_blocked;
@@ -12462,6 +12524,10 @@ void prepare_head_view(void* view) noexcept {
                                             double step=0;for(unsigned f=1;f<5;++f) step=std::max(step,d2vr::length(tips_local[f]-last_tips[side][f]));
                                             finger_steady_n[side].fetch_add(1,std::memory_order_relaxed);finger_steady_sum_um[side].fetch_add(static_cast<UINT64>(std::min(step,1.)*1e6),std::memory_order_relaxed);
                                             note_max_um(finger_steady_max_um[side],step);
+                                            if(step>.05) {unsigned f_max=1;double best=0;for(unsigned f=1;f<5;++f) {const double d=d2vr::length(tips_local[f]-last_tips[side][f]);if(d>best) {best=d;f_max=f;}}
+                                                char row[220];std::snprintf(row,sizeof row,"t%llu s%u f%u step%.0f blk%x>%x curl%.2f min%.2f settle%.1f<%.1f press%d open%.2f back%.2f near%x",static_cast<unsigned long long>(GetTickCount64()),side,f_max,step*1000.,
+                                                    last_blocked[side],blocked_now,contact.finger[f_max],contact.min_curl[f_max],diag_settle_um[side].load()/1000.,diag_settle_prev_um[side].load()/1000.,int(diag_pressing[side].load()),contact.open,contact.back,finger_near_bits[side]);
+                                                std::lock_guard<std::mutex> g(diag_spike_lock);diag_spikes[diag_spike_n++%diag_spikes.size()]=row;}
                                             {unsigned flips=0;for(unsigned x=blocked_now^last_blocked[side];x;x>>=1) flips+=x&1u;finger_blocked_flips[side].fetch_add(flips,std::memory_order_relaxed);}
                                         }
                                         last_tips[side]=tips_local;last_blocked[side]=blocked_now;finger_steady_at[side]=probe_frame;
@@ -12492,7 +12558,7 @@ void prepare_head_view(void* view) noexcept {
                                     pending_snapshots.push_back(std::move(sn));snap_holding[side]=true;snap_tick[side]=now_s;
                                 }
                             } else snap_holding[side]=false;
-                        } else {finger_near_bits[side]=0;finger_ik[side]={};finger_pose_filter[side].reset();snap_holding[side]=false;grip_pose_blend[side].stop();finger_drawn_valid[side]=false;finger_ease_active[side]=false;probe_cache[side].clear();probe_serial[side]={};finger_blocked_bits[side]=0;finger_hyper_bits[side]=0;}
+                        } else {finger_near_bits[side]=0;finger_ik[side]={};finger_pose_filter[side].reset();snap_holding[side]=false;grip_pose_blend[side].stop();finger_drawn_valid[side]=false;finger_turn_last_valid[side]=false;finger_ease_active[side]=false;probe_cache[side].clear();probe_serial[side]={};finger_blocked_bits[side]=0;finger_hyper_bits[side]=0;}
                         finger_was_held[side]=tracked && (holding || native_hold);
                         // A hand holding something shuts every finger (the grip alone keeps a native hold); the contact stops them at the surface.
                         hands.finger_curls[side]=touch_curl?d2vr::rig::grip_curls(contact,touch_wants):d2vr::rig::grip_curls(contact,(holding||native_hold)?d2vr::rig::held_curl:hands.curls[side],(holding||native_hold)?d2vr::rig::held_curl:hands.index_curls[side]);
@@ -13816,7 +13882,7 @@ std::string feedback_status_json() {    std::ostringstream out;
         << ",\"multiple\":" << query_outcomes[3] << ",\"rejected\":" << query_outcomes[4] << "}}"
         << ",\"native_art_movies\":{\"patched\":" << d2vr::native_art_movie_patched.load() << ",\"rejected\":" << d2vr::native_art_movie_rejected.load() << '}'
         << ",\"perf_governor\":{\"active\":" << (perf_governor_active?"true":"false") << ",\"scale\":" << perf_governor.scale() << ",\"changes\":" << perf_governor.changes << ",\"cpu_bound_holds\":" << perf_governor.cpu_bound_holds << "}" << ",\"performance_mode_advice\":{\"state\":\"" << d2vr::perf_mode_advice_name(perf_mode_advisor.advice) << "\",\"over_share\":" << perf_mode_advisor.last_over << ",\"gpu_share\":" << perf_mode_advisor.last_gpu_share << ",\"decisions\":" << perf_mode_advisor.decisions << ",\"gpu_windows\":" << perf_mode_advisor.gpu_windows << ",\"cpu_windows\":" << perf_mode_advisor.cpu_windows << "}" << ",\"finger_ik\":{\"frames\":" << finger_ik_frames.load() << ",\"avg_us\":" << (finger_ik_frames.load()?finger_ik_ns.load()/1000.0/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"max_us\":" << finger_ik_max_ns.load()/1000.0 << ",\"avg_shapes\":" << (finger_ik_frames.load()?static_cast<double>(finger_ik_shapes.load())/static_cast<double>(finger_ik_frames.load()):0.0) << ",\"posts\":" << finger_probe_posts.load() << ",\"hits\":" << finger_probe_hits.load() << ",\"props\":" << finger_collider_props.load() << ",\"slabs\":" << finger_collider_slabs.load() << ",\"touch\":[" << held_touch_along_dbg.load() << ',' << held_touch_roll_dbg.load() << ',' << held_touches.load() << ',' << held_touch_defaults.load() << ']' << ",\"hold\":[" << held_snap.cylinder_set_frames << ',' << held_snap.gate_fail_frames << ',' << held_cylinder_errors.load() << ',' << held_snap.gate_distance << ',' << finger_thin_holds.load() << ',' << finger_box_holds.load() << ',' << finger_flat_holds.load() << ',' << finger_surface_holds.load() << ']' << ",\"solve_us\":[" << (finger_solve_calls.load()?finger_solve_ns.load()/1000.0/static_cast<double>(finger_solve_calls.load()):0.0) << ',' << finger_solve_max_ns.load()/1000.0 << "],\"geo_max_us\":" << finger_geo_max_ns.load()/1000.0 << ",\"ease_active\":[" << (finger_ease_active[0].load()?1:0) << ',' << (finger_ease_active[1].load()?1:0) << "]" << ",\"probe_hits_world\":" << finger_probe_hits_world.load() << ",\"probe_hits_thin\":" << finger_probe_hits_thin.load() << ",\"thin_props\":" << finger_collider_thin.load() << ",\"probe_casts\":" << finger_probe_casts << ",\"surface\":" << (finger_surface?"true":"false") << [&]{std::ostringstream o;const auto bits=[&](const char* key,const std::array<std::atomic<unsigned>,2>& v) {o<<",\""<<key<<"\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<((v[h].load()>>f)&1u);o<<']';}o<<']';};
-                   bits("blocked",finger_blocked_bits);bits("hyperextended",finger_hyper_bits);o<<",\"tip_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<n<<','<<tip_pen_over[h].load()<<','<<tip_pen_max_slow_um[h].load()/1000.<<','<<tip_pen_max_fast_um[h].load()/1000.<<','<<(n?static_cast<double>(tip_pen_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_um[h].load()/1000.<<','<<tip_pen_palm_um[h].load()/1000.<<','<<tip_pen_blocked[h].load()<<','<<tip_pen_hyper[h].load()<<']';}o<<']';o<<",\"round2\":{\"surface_rules\":"<<(finger_surface_rules_on?"true":"false")<<",\"timing\":"<<(finger_timing_on?"true":"false")<<",\"probe_order\":"<<(finger_probe_order_on?"true":"false")<<",\"plane\":"<<(finger_plane_on?"true":"false")<<",\"priority_casts\":["<<finger_priority_casts[0].load()<<','<<finger_priority_casts[1].load()<<"],\"back_frames\":["<<finger_back_frames[0].load()<<','<<finger_back_frames[1].load()<<"]}";o<<",\"steady\":[";for(unsigned h=0;h<2;++h) {const auto n=finger_steady_n[h].load();o<<(h?",[":"[")<<n<<','<<finger_steady_max_um[h].load()/1000.<<','<<(n?static_cast<double>(finger_steady_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<finger_open_frames[h].load()<<','<<finger_blocked_flips[h].load()<<']';}o<<']';o<<",\"stuck_frames\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<finger_stuck[h][f].load();o<<']';}o<<']';return o.str();}() << ",\"profile\":[" << profile_casts.load() << ',' << profile_hits.load() << ',' << profile_entries.load() << ']'
+                   bits("blocked",finger_blocked_bits);bits("hyperextended",finger_hyper_bits);o<<",\"tip_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<n<<','<<tip_pen_over[h].load()<<','<<tip_pen_max_slow_um[h].load()/1000.<<','<<tip_pen_max_fast_um[h].load()/1000.<<','<<(n?static_cast<double>(tip_pen_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_um[h].load()/1000.<<','<<tip_pen_palm_um[h].load()/1000.<<','<<tip_pen_blocked[h].load()<<','<<tip_pen_hyper[h].load()<<']';}o<<']';o<<",\"round2\":{\"surface_rules\":"<<(finger_surface_rules_on?"true":"false")<<",\"timing\":"<<(finger_timing_on?"true":"false")<<",\"probe_order\":"<<(finger_probe_order_on?"true":"false")<<",\"plane\":"<<(finger_plane_on?"true":"false")<<",\"priority_casts\":["<<finger_priority_casts[0].load()<<','<<finger_priority_casts[1].load()<<"],\"back_frames\":["<<finger_back_frames[0].load()<<','<<finger_back_frames[1].load()<<"],\"thumb_pen\":[";for(unsigned h=0;h<2;++h) {const auto n=tip_pen_frames[h].load();o<<(h?",[":"[")<<tip_pen_thumb_over[h].load()<<','<<(n?static_cast<double>(tip_pen_thumb_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<tip_pen_thumb_off[h].load()<<']';}o<<"],\"back_rejects\":["<<finger_back_rejects[0].load()<<','<<finger_back_rejects[1].load()<<"],\"probe_rejects\":["<<[&]{std::ostringstream q;for(unsigned h=0;h<2;++h) q<<(h?",[":"[")<<finger_probe_rejects[h][0].load()<<','<<finger_probe_rejects[h][1].load()<<','<<finger_probe_rejects[h][2].load()<<']';return q.str();}()<<"],\"spikes\":["<<[&]{std::lock_guard<std::mutex> g(diag_spike_lock);std::ostringstream q;const unsigned n=std::min<unsigned>(diag_spike_n,static_cast<unsigned>(diag_spikes.size()));for(unsigned i=0;i<n;++i) q<<(i?",":"")<<'"'<<diag_spikes[(diag_spike_n-n+i)%diag_spikes.size()]<<'"';return q.str();}()<<"],\"back_peak\":["<<finger_back_peak_permil[0].load()/1000.<<','<<finger_back_peak_permil[1].load()/1000.<<"]}";o<<",\"steady\":[";for(unsigned h=0;h<2;++h) {const auto n=finger_steady_n[h].load();o<<(h?",[":"[")<<n<<','<<finger_steady_max_um[h].load()/1000.<<','<<(n?static_cast<double>(finger_steady_sum_um[h].load())/1000./static_cast<double>(n):0.)<<','<<finger_open_frames[h].load()<<','<<finger_blocked_flips[h].load()<<']';}o<<']';o<<",\"stuck_frames\":[";for(unsigned h=0;h<2;++h) {o<<(h?",[":"[");for(unsigned f=0;f<5;++f) o<<(f?",":"")<<finger_stuck[h][f].load();o<<']';}o<<']';return o.str();}() << ",\"profile\":[" << profile_casts.load() << ',' << profile_hits.load() << ',' << profile_entries.load() << ']'
         << ",\"route\":[" << [&]{std::ostringstream o;for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<(finger_route_hold[i].load()?1:0)<<','<<finger_route_pub[i][0].load()<<','<<finger_route_pub[i][1].load()<<','<<finger_route_pub[i][2].load()<<','<<finger_route_pub[i][3].load()<<']';}return o.str();}() << ']'
         << ",\"bend\":{\"planned\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<planned_bend[i][0].load()<<','<<planned_bend[i][1].load()<<','<<planned_bend[i][2].load()<<','<<planned_bend[i][3].load()<<']';}o<<']';return o.str();}()
         << ",\"drawn\":" << [&]{std::ostringstream o;o<<'[';for(unsigned i=0;i<2;++i) {o<<(i?",":"")<<'['<<drawn_bend[i][0].load()<<','<<drawn_bend[i][1].load()<<','<<drawn_bend[i][2].load()<<','<<drawn_bend[i][3].load()<<']';}o<<']';return o.str();}()
@@ -13849,6 +13915,8 @@ std::string feedback_status_json() {    std::ostringstream out;
              <<",\"hold_longest_ms\":"<<pair([](const HandClampStatus& h){return h.hold_longest_ms.load();})<<",\"proven_draws\":"<<pair([](const HandClampStatus& h){return h.proven_draws.load();})
              <<",\"unanswered\":"<<pair([](const HandClampStatus& h){return h.unanswered.load();})
              <<",\"released_shots\":"<<pair([](const HandClampStatus& h){return h.released_shots.load();})
+             <<",\"settle\":["<<[&]{std::ostringstream q;for(unsigned i=0;i<2;++i) {const auto& h=hand_clamp_status[i];const auto n=h.settle_frames.load();
+                 q<<(i?",":"")<<'['<<n<<','<<h.settle_max_um.load()/1000.<<','<<(n?static_cast<double>(h.settle_sum_um.load())/1000./static_cast<double>(n):0.)<<']';}return q.str();}()<<']'
              <<",\"probes\":"<<pair([](const HandClampStatus& h){return h.probes.load();})
              <<",\"max_casts\":"<<pair([](const HandClampStatus& h){return h.max_casts.load();})
              <<",\"cast_us\":"<<hand_clamp_cast_mean.load()<<",\"cast_us_max\":"<<hand_clamp_cast_max.load()
@@ -20599,7 +20667,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI StartProbe(void*) {
         // 2026-11-26: arm collision, forearm contact, body holsters (spec docs/superpowers/specs/2026-11-26-arm-weapon-collisions-holsters-design.md)
         arm_collision_enabled=!fs::exists(root/L"build"/L"no-arm-collision");arm_collision_shadow=fs::exists(root/L"build"/L"arm-collision-shadow");
         forearm_contact_enabled=!fs::exists(root/L"build"/L"no-forearm-contact");finger_put_out_enabled=!fs::exists(root/L"build"/L"no-finger-put-out");finger_slab_legacy=fs::exists(root/L"build"/L"legacy-finger-slab");
-        finger_timing_on=!fs::exists(root/L"build"/L"legacy-finger-timing");finger_probe_order_on=!fs::exists(root/L"build"/L"legacy-finger-probe-order");finger_plane_on=!fs::exists(root/L"build"/L"legacy-finger-plane");finger_surface_rules_on=!fs::exists(root/L"build"/L"legacy-finger-surface");d2vr::NativeWeaponHands::hip_carry_on_.store(!fs::exists(root/L"build"/L"legacy-hip-place"));arm_collision=d2vr::ArmCollision{};arm_collision_posts={};arm_collision_folded={};arm_collision_active={};
+        finger_timing_on=!fs::exists(root/L"build"/L"legacy-finger-timing");finger_probe_order_on=!fs::exists(root/L"build"/L"legacy-finger-probe-order");finger_plane_on=!fs::exists(root/L"build"/L"legacy-finger-plane");finger_surface_rules_on=!fs::exists(root/L"build"/L"legacy-finger-surface");palm_box_on=!fs::exists(root/L"build"/L"legacy-palm-sphere");d2vr::NativeWeaponHands::hip_carry_on_.store(!fs::exists(root/L"build"/L"legacy-hip-place"));arm_collision=d2vr::ArmCollision{};arm_collision_posts={};arm_collision_folded={};arm_collision_active={};
         gadget_stow_enabled=!fs::exists(root/L"build"/L"no-gadget-stow");holster_draw_enabled=!fs::exists(root/L"build"/L"no-holster-draw");
         heart_pocket_enabled=d2vr::game_traits::has_heart && !fs::exists(root/L"build"/L"no-heart-pocket");legacy_shoulder_zone=fs::exists(root/L"build"/L"legacy-shoulder-zone");
         {   d2vr::HolsterConfig cfg{};

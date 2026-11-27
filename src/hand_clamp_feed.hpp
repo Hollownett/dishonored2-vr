@@ -79,6 +79,7 @@ inline Vec3 clamped_shot_origin(Vec3 raw_origin,const ClampedShotOffset& o,std::
 struct ClampProbeSet {
     std::array<ClampProbe,ClampInput::hand_capacity> hand{};std::size_t count{};
     Vec3 palm_local{};bool valid{};
+    std::array<Vec3,8> box{};bool box_valid{};   // Task 18: the palm box's corners in the grip frame (clamp_palm_box), rebuilt with the set
 };
 inline ClampProbeSet clamp_probe_set(const HandProxies& open_local,Vec3 palm_local) {
     ClampProbeSet set{};set.palm_local=palm_local;
@@ -87,6 +88,37 @@ inline ClampProbeSet clamp_probe_set(const HandProxies& open_local,Vec3 palm_loc
         if(set.count<set.hand.size() && clamp_detail::usable(probe)) set.hand[set.count++]=probe;
     }
     set.valid=set.count>0 && finite(palm_local);
+    return set;
+}
+// Task 18 (the reference VR mod's palm box, notes section 1.1): the palm as an oriented box instead of four spheres. Axes = palm_basis (across,
+// normal, wrist), centred like the proxies (hand_proxies posed at {palm_local, identity}); the extents across and along the wrist are those
+// of the 4 palm spheres (min/max of centre +- radius), through the palm the finger IK's palm skin (rig::held_palm_depth, +normal) and
+// G16's back skin (rig::hand_back_depth, -normal). Corners in the grip frame; false when the geometry is not finite.
+inline bool clamp_palm_box(const rig::HandGeometry& hand,Vec3 palm_local,std::array<Vec3,8>& corners) {
+    const auto axes=palm_basis(hand);
+    double lo_a=1e9,hi_a=-1e9,lo_w=1e9,hi_w=-1e9;
+    for(const auto& sphere:hand_palm) {
+        lo_a=std::min(lo_a,sphere.across-sphere.radius);hi_a=std::max(hi_a,sphere.across+sphere.radius);
+        lo_w=std::min(lo_w,sphere.wrist-sphere.radius);hi_w=std::max(hi_w,sphere.wrist+sphere.radius);
+    }
+    // The finger bases are the palm too (the clamp's settle drops those spheres): the box covers each pivot with its finger thickness.
+    for(unsigned f=0;f<5;++f) {
+        const Vec3 p=hand.finger[f].pivot;const double a=dot(p,axes.across),w=dot(p,axes.wrist),r=hand.thickness[f];
+        if(!std::isfinite(a) || !std::isfinite(w) || !std::isfinite(r)) return false;
+        lo_a=std::min(lo_a,a-r);hi_a=std::max(hi_a,a+r);lo_w=std::min(lo_w,w-r);hi_w=std::max(hi_w,w+r);
+    }
+    const double lo_n=-rig::hand_back_depth,hi_n=rig::held_palm_depth;
+    std::size_t n=0;
+    for(const double a:{lo_a,hi_a}) for(const double q:{lo_n,hi_n}) for(const double w:{lo_w,hi_w}) {
+        const Vec3 c=palm_local+axes.across*a+axes.normal*q+axes.wrist*w;
+        if(!finite(c)) return false;
+        corners[n++]=c;
+    }
+    return true;
+}
+inline ClampProbeSet clamp_probe_set(const HandProxies& open_local,Vec3 palm_local,const rig::HandGeometry& hand) {
+    auto set=clamp_probe_set(open_local,palm_local);
+    if(set.valid) set.box_valid=clamp_palm_box(hand,palm_local,set.box);
     return set;
 }
 // The palm offset the set was built with drifts (the arm solve's residual): rebuild past this, not every frame, so a probe keeps
@@ -101,6 +133,39 @@ inline ClampProbe remap_clamp_probe(const ClampProbeSet& from,const ClampProbeSe
     for(std::size_t i=0;i<from.count;++i)
         if(clamp_detail::same_probe(from.hand[i],current)) return i<to.count?to.hand[i]:current;
     return current;
+}
+
+// The settle's finger shape from a posed open hand (hand_proxies of the hand as drawn, in the grip frame): its phalanx spheres, without the 4 palm
+// spheres and each finger's base sphere (knuckle, thumb base): the palm box covers those.
+inline HandClamp::SettleShape settle_shape(const HandProxies& posed_local) {
+    HandClamp::SettleShape shape{};
+    for(std::size_t k=hand_palm_spheres;k<posed_local.size();++k) {
+        if((k-hand_palm_spheres)%4==0) continue;
+        const ClampProbe probe{posed_local[k].centre,posed_local[k].radius};
+        if(clamp_detail::usable(probe) && shape.count<shape.probe.size()) shape.probe[shape.count++]=probe;
+    }
+    return shape;
+}
+
+// Task 18: the per-side settle offset (drawn minus the clamp's own drawn grip), one frame's step.
+//  - not `free` (a weapon, gadget or item in the hand, a yield, a hold, a grab, a met prop, a re-acquire, released, the clamp not updated or
+//    invalid, the knob off): 0 at once. A stale offset is never added to a hand that is not free (a pop is acceptable, a penetration is not).
+//  - not `fresh` (the clamp holds the hand or its target is not validated): the offset is kept as it is, nothing new is computed.
+//  - not `pressing` (the target is not past the box stop of a held static plane): the offset decays at `rate` (the clamp's release_speed), so
+//    the clamp's own release ease is never bypassed.
+//  - else `want`, at most `cap` long (palm_radius + skin: the box never moves the hand farther than the clamp's own reach).
+inline Vec3 settle_offset_decay(Vec3 previous,double dt,double rate) {
+    const double len=finite(previous)?length(previous):0.,step=std::isfinite(dt) && dt>0 && std::isfinite(rate) && rate>0?rate*dt:len;
+    if(!(len>step)) return {};
+    return previous*(1.-step/len);
+}
+inline Vec3 settle_offset_next(Vec3 previous,bool free,bool fresh,bool pressing,Vec3 want,double dt,double rate,double cap) {
+    if(!free) return {};
+    if(!finite(previous)) previous={};
+    if(!fresh) return previous;
+    if(!pressing || !finite(want)) return settle_offset_decay(previous,dt,rate);
+    const double len=length(want);
+    return std::isfinite(cap) && cap>=0 && len>cap && len>0?want*(cap/len):want;
 }
 
 // The re-acquire frame (ClampOutput::reacquired: after a pause, a tracking gap or a reset) draws the target unswept, which can be

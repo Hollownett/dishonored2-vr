@@ -1,9 +1,13 @@
 // Physical hands Task 5: the pure part of the hand publication's clamp feed (src/hand_clamp_feed.hpp) and the clamp's
 // re-acquire flag. dxgi_probe.cpp's routing of these is guarded by tests/hand_clamp_routing_check.py.
 #include "hand_clamp_feed.hpp"
+#include "full_body_driver.hpp"
+#include "hand_bind.hpp"
+#include <string>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 using namespace d2vr;
 #define CHECK(x) do{if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 
@@ -453,10 +457,294 @@ void released_shot_actual_receipts() {
     guard.read_receipt(0,false,from_a,std::nullopt,0);
     CHECK(length(guard.origin(0,raw,1128)-eye)<1e-12);
 }
+
+// Task 18: the palm box settle on a real-shaped hand (palm toward -z, fingers along +x, wrist toward -x in the grip frame).
+// zk / zt: where the knuckle and thumb-base sphere centres sit on the back side (+z) of the palm plane. The settle is bounded by the finger spheres
+// (a 2 cm knuckle, a 2.66 cm thumb base): palm skin 1 cm needs zk >= .01 (zt >= .0166), back skin 1.5 cm needs zk <= -.005 (zt <= -.0116).
+rig::HandGeometry box_hand(double zk,double zt) {
+    rig::HandGeometry g{};g.palm_in={0,0,-1};
+    const double y[5]={.05,.03,.01,-.01,-.03};
+    for(unsigned f=0;f<5;++f) {
+        g.finger[f].pivot={.09,y[f],f?zk:zt};
+        g.finger[f].bone={Vec3{.035,0,0},Vec3{.025,0,0},Vec3{.02,0,0}};
+        g.finger[f].hinge={Vec3{0,1,0},Vec3{0,1,0},Vec3{0,1,0}};
+    }
+    return g;
+}
+// The player's real rig, as dxgi_probe's refresh_finger_geometry builds it (the same arm data as tests/finger_ik_check.cpp real_hand).
+rig::HandGeometry real_hand_geometry(bool right) {
+    namespace fb=fullbody;
+    const auto sk=fb::skeleton(right?fb::data::kRightArm:fb::data::kLeftArm);
+    const std::string side=right?"right_":"left_";
+    std::array<rig::Transform,69> bind{};rig::ArmHierarchy parents{};rig::FingerChains chains{};
+    CHECK(sk.local.size()==69);
+    for(unsigned j=0;j<69;++j) {bind[j]=fb::to_transform(sk.bind[j]);parents[j]=static_cast<std::int16_t>(sk.parent[j]);}
+    const char* digits[5]={"thumb","index","medium","ring","pinky"};
+    for(unsigned f=0;f<5;++f) for(unsigned q=0;q<3;++q) chains[f][q]=static_cast<unsigned>(sk.find(side+digits[f]+"_0"+std::to_string(q+(f?2:1))+"_jnt"));
+    const auto wrist=static_cast<unsigned>(sk.find(side+"wrist_jnt"));
+    std::array<rig::Transform,4> knuckles{};
+    for(unsigned i=0;i<4;++i) knuckles[i]=bind[chains[i+1][0]];
+    const auto grip=rig::hand_bind_grip(bind[wrist],knuckles);
+    const rig::HandJoints helpers{static_cast<unsigned>(sk.find(side+"helper_underwrist_jnt")),static_cast<unsigned>(sk.find(side+"helper_upperwrist_jnt"))};
+    return rig::hand_geometry(bind,parents,chains,helpers,wrist,grip);
+}
+struct BoxWall {Vec3 point,normal;std::uintptr_t entity;bool dynamic=false;};
+std::optional<ClampHit> walls_cast(const std::vector<BoxWall>& walls,const ClampSweep& s) {
+    if(!s.valid) return std::nullopt;
+    std::optional<ClampHit> best;double best_t=2;
+    for(const auto& w:walls) {
+        const double s0=dot(s.from-w.point,w.normal),s1=dot(s.to-w.point,w.normal);
+        if(s0<s.radius) {if(best_t>0) {best_t=0;best=ClampHit{s.from-w.normal*s0,w.normal,w.entity,3,true,true,w.dynamic?BodyClass::dynamic:BodyClass::world};}continue;}
+        if(s1>=s.radius) continue;
+        const double t=(s0-s.radius)/(s0-s1);
+        if(t<best_t) {best_t=t;const Vec3 c=s.from+(s.to-s.from)*t;best=ClampHit{c-w.normal*s.radius,w.normal,w.entity,3,false,true,w.dynamic?BodyClass::dynamic:BodyClass::world};}
+    }
+    return best;
+}
+struct BoxRig {
+    rig::HandGeometry hand;ClampProbeSet set;HandClamp::SettleShape shape;HandClamp clamp;std::vector<BoxWall> walls;std::array<Vec3,3> basis{};
+    ClampOutput out{};double now=0;bool started=false;Vec3 target{};
+    Vec3 palm_local{.01,0,0};
+    explicit BoxRig(std::array<Vec3,3> b,std::vector<BoxWall> w,double zk=.012,double zt=.02):hand(box_hand(zk,zt)),walls(std::move(w)),basis(b) {init();}
+    BoxRig(std::array<Vec3,3> b,std::vector<BoxWall> w,const rig::HandGeometry& real):hand(real),walls(std::move(w)),basis(b) {palm_local={};init();}
+    void init() {
+        set=clamp_probe_set(hand_proxies(hand,{palm_local,{{{1,0,0},{0,1,0},{0,0,1}}}},std::array<float,5>{}),palm_local,hand);
+        CHECK(set.valid && set.box_valid && set.count==hand_proxy_count);
+        shape=posed_shape(std::array<float,5>{});
+    }
+    // the phalanx spheres of the hand drawn at these curls (the settle's finger shape)
+    HandClamp::SettleShape posed_shape(std::array<float,5> curl) const {return settle_shape(hand_proxies(hand,{palm_local,{{{1,0,0},{0,1,0},{0,0,1}}}},curl));}
+    void step(Vec3 at) {
+        target=at;now+=dt;
+        ClampInput in{};in.now=now;in.epoch=1;in.root=level_frame({0,0,0},{1,0,0});in.target={at,basis};in.chest=Vec3{0,0,1};in.tip_enabled=false;
+        in.hand=set.hand;in.hand_count=set.count;
+        if(started) route_clamp_hits(in,out.state,walls_cast(walls,out.palm_sweep),std::nullopt,std::nullopt,std::nullopt);
+        out=clamp.update(0,in);started=true;
+        clamp.note_drawn(0,in.root,out.drawn.position);
+    }
+    // x of the point seen from the wall x = 1 (distance to it); skin point: a grip-frame point's world position
+    Vec3 world(Vec3 grip,Vec3 local) const {return grip+clamp_detail::rotate(basis,local);}
+};
+// distance of a world point from the plane through `point` with the free-space normal n
+double off(Vec3 p,Vec3 point,Vec3 n) {return dot(p-point,n);}
+
+void settle_case(const char* name,std::array<Vec3,3> basis,double approach_gap_min,double approach_gap_max,bool fingers_in,double zk,double zt) {
+    BoxRig r(basis,{{{1,0,0},{-1,0,0},7}},zk,zt);
+    const Vec3 wall{1,0,0},n{-1,0,0};
+    for(int i=0;i<40;++i) r.step({.5+.0125*i,0,1});
+    for(int i=0;i<60;++i) r.step({1.05,0,1});   // press 5 cm past the surface
+    const Vec3 from=r.out.drawn.position,target=r.target;
+    std::array<ClampHit,HandClamp::max_held_planes> held{};
+    CHECK(r.out.valid && r.clamp.held_planes(0,held)>0);
+    const Vec3 got=r.clamp.settle(0,basis,from,target,r.set.box,r.shape);
+    // no box corner / finger proxy inside the skin after the settle
+    double corner_gap=1e9,finger_gap=1e9;
+    for(const auto& c:r.set.box) corner_gap=std::min(corner_gap,off(r.world(got,c),wall,n));
+    for(std::size_t k=hand_palm_spheres;k<r.set.count;++k) if((k-hand_palm_spheres)%4) finger_gap=std::min(finger_gap,off(r.world(got,r.set.hand[k].local),wall,n)-r.set.hand[k].radius);
+    const double skin=r.clamp.config().skin;
+    CHECK(corner_gap>=skin-1e-6 && finger_gap>=skin-1e-6);
+    // the palm / back skin point (palm_local + normal * depth) before and after
+    const auto axes=palm_basis(r.hand);
+    const double depth=approach_gap_min<0?rig::hand_back_depth:rig::held_palm_depth;   // < 0: the back skin (-normal)
+    const Vec3 skin_local=Vec3{.01,0,0}+axes.normal*(approach_gap_min<0?-depth:depth);
+    const double before=off(r.world(from,skin_local),wall,n),after=off(r.world(got,skin_local),wall,n);
+    std::printf("  %s: skin point off the wall before %.1f mm, after %.1f mm; moved %.1f mm; corners >= %.2f mm, fingers >= %.2f mm\n",name,before*1000,after*1000,length(got-from)*1000,corner_gap*1000,finger_gap*1000);
+    if(!fingers_in) {CHECK(before>=approach_gap_max);CHECK(after<=skin+.001+1e-9);}
+    else CHECK(length(got-from)<.005);   // fingers lead into the wall: they stop it, the settle adds (almost) nothing
+    CHECK(length(got-target)<=length(from-target)+1e-9);   // never past the target
+}
+
+
+// The real hand on a wall, palm-first or back-first, drawn at `curl` (the finger IK's pose; the settle poses its phalanges from it, unflattened).
+bool pass_through_ok(double after,double before) {return after<=before+1e-9;}
+struct RealStop {double before{},after{},corner_gap{},phalanx_gap{},box_reach{},phalanx_reach{};};
+RealStop real_stop(bool right,bool palm_first,std::array<float,5> curl) {
+    const auto hand=real_hand_geometry(right);
+    const auto axes=palm_basis(hand);
+    const Vec3 u=axes.normal,c=cross(u,axes.across);
+    const double sgn=palm_first?1.:-1.;
+    std::array<Vec3,3> basis{};
+    for(unsigned i=0;i<3;++i) {
+        const double ui=i==0?u.x:i==1?u.y:u.z,ai=i==0?axes.across.x:i==1?axes.across.y:axes.across.z,ci=i==0?c.x:i==1?c.y:c.z;
+        basis[i]={sgn*ui,ai,sgn*ci};
+    }
+    BoxRig r(basis,{{{1,0,0},{-1,0,0},7}},hand);
+    r.shape=r.posed_shape(curl);
+    for(int i=0;i<40;++i) r.step({.5+.0125*i,0,1});
+    for(int i=0;i<60;++i) r.step({1.05,0,1});
+    std::array<ClampHit,HandClamp::max_held_planes> held{};
+    CHECK(r.out.valid && r.clamp.held_planes(0,held)>0);
+    const Vec3 from=r.out.drawn.position,got=r.clamp.settle(0,basis,from,r.target,r.set.box,r.shape);
+    const Vec3 wall{1,0,0},n{-1,0,0};
+    RealStop o{};o.corner_gap=1e9;o.phalanx_gap=1e9;o.box_reach=-1e9;o.phalanx_reach=-1e9;
+    for(const auto& cc:r.set.box) {o.corner_gap=std::min(o.corner_gap,off(r.world(got,cc),wall,n));o.box_reach=std::max(o.box_reach,dot(clamp_detail::rotate(basis,cc),n*-1.));}
+    for(std::size_t k=0;k<r.shape.count;++k) {
+        o.phalanx_gap=std::min(o.phalanx_gap,off(r.world(got,r.shape.probe[k].local),wall,n)-r.shape.probe[k].radius);
+        o.phalanx_reach=std::max(o.phalanx_reach,dot(clamp_detail::rotate(basis,r.shape.probe[k].local),n*-1.)+r.shape.probe[k].radius);
+    }
+    const Vec3 skin_local=r.palm_local+axes.normal*(palm_first?rig::held_palm_depth:-rig::hand_back_depth);
+    o.before=off(r.world(from,skin_local),wall,n);o.after=off(r.world(got,skin_local),wall,n);
+    const double skin=r.clamp.config().skin;
+    CHECK(o.corner_gap>=skin-1e-6 && o.phalanx_gap>=skin-1e-6);   // nothing of the drawn hand inside
+    CHECK(pass_through_ok(o.after,o.before));
+    std::printf("  real %s hand %s (%s): skin point %.1f -> %.1f mm off the wall; corners >= %.2f, phalanges >= %.2f mm; box reach %.1f mm, phalanx reach %.1f mm (%s binds)\n",
+                right?"right":"left",palm_first?"palm-first":"back-first",curl[1]>.5f?"fist":"relaxed (open pose)",o.before*1000,o.after*1000,o.corner_gap*1000,o.phalanx_gap*1000,
+                o.box_reach*1000,o.phalanx_reach*1000,o.box_reach>=o.phalanx_reach?"the box":"a phalanx");
+    return o;
+}
+
+// The wiring as dxgi_probe does it, on the real rig hand palm-first: the target steps 2 mm a frame from 8 cm off the wall to 3 cm past it and
+// back out. The drawn grip (clamp's own + settle_offset_next) must not jump on the way in, never put the box / phalanges inside the wall, end at
+// the stop at the deepest point and follow the target out at the release ease. `flat`: the phalanges laid onto the palm (a stand-in for what the
+// finger IK draws on a surface: centres at the box mid-depth, radius within the box depth) so the BOX binds; else the real open pose (a thumb binds).
+void settle_travel(bool right,bool flat) {
+    const auto hand=real_hand_geometry(right);
+    const auto axes=palm_basis(hand);
+    const Vec3 u=axes.normal,c=cross(u,axes.across);
+    std::array<Vec3,3> basis{};
+    for(unsigned i=0;i<3;++i) {
+        const double ui=i==0?u.x:i==1?u.y:u.z,ai=i==0?axes.across.x:i==1?axes.across.y:axes.across.z,ci=i==0?c.x:i==1?c.y:c.z;
+        basis[i]={ui,ai,ci};
+    }
+    BoxRig r(basis,{{{1,0,0},{-1,0,0},7}},hand);
+    if(flat) for(std::size_t k=0;k<r.shape.count;++k) {
+        auto& p=r.shape.probe[k];
+        const double along=dot(p.local,u);
+        p.local=p.local+u*(-.0025-along);p.radius=std::min(p.radius,.0095);
+    }
+    const double skin=r.clamp.config().skin,release=r.clamp.config().release_speed,cap=r.clamp.config().palm_radius+skin,step=.002;
+    for(int i=0;i<40;++i) r.step({.5+.0105*i,0,1});            // approach to .92 (8 cm off)
+    for(int i=0;i<30;++i) r.step({.92,0,1});
+    Vec3 offset{},last_drawn{},last_own{};bool have_last=false;double own_in=0;
+    double worst_in=0,worst_out=0,min_gap=1e9,deepest_gap=1e9,lag_growth=0,prev_lag=0;
+    std::vector<double> xs;for(double x=.92;x<1.03-1e-9;x+=step) xs.push_back(x);
+    const std::size_t turn=xs.size();for(std::size_t i=turn;i-->0;) xs.push_back(xs[i]);
+    for(int i=0;i<40;++i) xs.push_back(.92);                    // settle back to rest
+    const Vec3 wall{1,0,0},n{-1,0,0};
+    for(std::size_t k=0;k<xs.size();++k) {
+        r.step({xs[k],0,1});
+        const Vec3 from=r.out.drawn.position,target=r.target;
+        const bool fresh=r.out.validated && !r.out.held;
+        const bool pressing=r.clamp.pressing(0,basis,target,r.set.box,r.shape);
+        Vec3 want{};if(pressing) want=r.clamp.settle(0,basis,from,target,r.set.box,r.shape)-from;
+        offset=settle_offset_next(offset,true,fresh,pressing,want,dt,release,cap);
+        const Vec3 drawn=from+offset;
+        double gap=1e9;
+        for(const auto& cc:r.set.box) gap=std::min(gap,off(r.world(drawn,cc),wall,n));
+        for(std::size_t q=0;q<r.shape.count;++q) gap=std::min(gap,off(r.world(drawn,r.shape.probe[q].local),wall,n)-r.shape.probe[q].radius);
+        if(xs[k]>.96) min_gap=std::min(min_gap,gap);
+        if(k==turn-1) deepest_gap=gap;
+        if(have_last && k>0) {
+            const double move=length(drawn-last_drawn);
+            if(k<turn) {worst_in=std::max(worst_in,move);own_in=std::max(own_in,length(from-last_own));}else if(k<2*turn) worst_out=std::max(worst_out,move);
+            const double lag=drawn.x-target.x;   // toward the wall of the target: behind it on the way out
+            if(k>=turn && k<2*turn) lag_growth=std::max(lag_growth,lag-std::max(prev_lag,0.));
+        }
+        prev_lag=drawn.x-target.x;last_drawn=drawn;last_own=from;have_last=true;
+    }
+    std::printf("  travel real %s hand %s: largest move in %.2f mm (the clamp's own %.2f), out %.2f mm (step 2.00, release %.2f mm/frame); deepest gap %.2f mm, least gap %.2f mm; lag growth out %.2f mm\n",
+                right?"right":"left",flat?"phalanges flat":"open pose",worst_in*1000,own_in*1000,worst_out*1000,release*dt*1000,deepest_gap*1000,min_gap*1000,lag_growth*1000);
+    CHECK(worst_in<=std::max(step,own_in)+.001);                  // no jump on the way in: the settle adds at most 1 mm to the step / the clamp's own move
+    CHECK(min_gap>=skin-1e-6);                                    // never inside
+    CHECK(deepest_gap<=skin+.002);                                // at the deepest point it rests at the stop (box or phalanx)
+    CHECK(worst_out<=release*dt+step+.001);                       // out: at most the release ease plus the target's own step
+    CHECK(lag_growth<=.001);                                      // never lags the target by more than the decay allows
+    CHECK(length(last_drawn-Vec3{.92,0,1})<1e-3);                 // back at rest it is the target
+}
+void real_hand_cases() {
+    const double skin=.005;
+    for(const bool right:{true,false}) {
+        const auto relaxed_palm=real_stop(right,true,std::array<float,5>{});
+        const auto relaxed_back=real_stop(right,false,std::array<float,5>{});
+        const auto fist_palm=real_stop(right,true,std::array<float,5>{1,1,1,1,1});
+        const auto fist_back=real_stop(right,false,std::array<float,5>{1,1,1,1,1});
+        (void)fist_back;
+        CHECK(relaxed_palm.after<=relaxed_palm.before+1e-9 && relaxed_back.after<=relaxed_back.before+1e-9);   // the relaxed open pose: reported (the thumb / splayed fingers hold it off), never closer than the drawn hand allows
+        // a fist closes its fingers onto the palm side: the palm stops where the curled fingers meet the wall (a phalanx binds, at the skin)
+        CHECK(fist_palm.phalanx_reach>fist_palm.box_reach && std::abs(fist_palm.phalanx_gap-skin)<1e-3);
+    }
+}
+void palm_box() {
+    // palm toward +x (world), fingers up: local x -> +z, y -> +y, z -> -x
+    settle_case("palm-first",{{{0,0,1},{0,1,0},{-1,0,0}}},1,.03,false,.012,.02);
+    // back toward the wall: local z -> +x, y -> -y, x -> +z
+    settle_case("back-first",{{{0,0,1},{0,-1,0},{1,0,0}}},-1,.03,false,-.005,-.0116);
+    settle_case("fingers-in",{{{1,0,0},{0,1,0},{0,0,1}}},1,.03,true,.012,.02);
+    // a corner: walls x = 1 (normal -x) and y = 1 (normal -y); the hand palm-first into the x wall and pushed on into y
+    {
+        const std::array<Vec3,3> basis{{{0,0,1},{0,1,0},{-1,0,0}}};
+        BoxRig r(basis,{{{1,0,0},{-1,0,0},7},{{0,1,0},{0,-1,0},8}});
+        for(int i=0;i<40;++i) r.step({.5+.0125*i,.5+.0125*i,1});
+        for(int i=0;i<60;++i) r.step({1.05,1.05,1});
+        const Vec3 got=r.clamp.settle(0,basis,r.out.drawn.position,r.target,r.set.box,r.shape);
+        double gx=1e9,gy=1e9;
+        for(const auto& c:r.set.box) {const Vec3 w=r.world(got,c);gx=std::min(gx,1-w.x);gy=std::min(gy,1-w.y);}
+        for(std::size_t k=hand_palm_spheres;k<r.set.count;++k) if((k-hand_palm_spheres)%4) {const Vec3 w=r.world(got,r.set.hand[k].local);gx=std::min(gx,1-w.x-r.set.hand[k].radius);gy=std::min(gy,1-w.y-r.set.hand[k].radius);}
+        std::printf("  corner: gaps x %.2f mm, y %.2f mm\n",gx*1000,gy*1000);
+        CHECK(gx>=r.clamp.config().skin-1e-6 && gy>=r.clamp.config().skin-1e-6);
+        CHECK(gx<=r.clamp.config().skin+.002 && gy<=r.clamp.config().skin+.002);   // two passes: out of both and settled on both
+    }
+    real_hand_cases();
+    for(const bool right:{true,false}) {settle_travel(right,true);settle_travel(right,false);}
+    // outside every plane, a target that moves away, no plane, non-finite: never past the target, from unchanged
+    {
+        const std::array<Vec3,3> basis{{{0,0,1},{0,1,0},{-1,0,0}}};
+        BoxRig r(basis,{{{1,0,0},{-1,0,0},7}});
+        for(int i=0;i<40;++i) r.step({.5+.0125*i,0,1});
+        for(int i=0;i<10;++i) r.step({1.05,0,1});
+        const Vec3 from=r.out.drawn.position;
+        CHECK(length(r.clamp.settle(0,basis,from,from,r.set.box,r.shape)-from)<1e-12);                     // not asked to move
+        const Vec3 away=from+Vec3{-.2,.1,0};
+        CHECK(length(r.clamp.settle(0,basis,from,away,r.set.box,r.shape)-away)<1e-12);                      // moving off the wall: all the way, never beyond
+        const Vec3 past=r.clamp.settle(0,basis,from,from+Vec3{.3,0,0},r.set.box,r.shape);
+        CHECK(length(past-from)<=.3+1e-12 && past.x<=from.x+.3+1e-12 && 1-past.x>=0);              // toward the wall stops at the skin
+        CHECK(length(r.clamp.settle(0,basis,from,{std::nan(""),0,0},r.set.box,r.shape)-from)<1e-12);
+        HandClamp fresh;CHECK(length(fresh.settle(0,basis,from,away,r.set.box,r.shape)-from)<1e-12);      // no plane held
+        CHECK(length(r.clamp.settle(2,basis,from,away,r.set.box,r.shape)-from)<1e-12);                      // no such side
+    }
+    // a dynamic body's plane keeps the clamp's own reach: nothing settles toward it, and it is not pressing
+    {
+        const std::array<Vec3,3> basis{{{0,0,1},{0,1,0},{-1,0,0}}};
+        BoxRig r(basis,{{{1,0,0},{-1,0,0},9,true}});
+        for(int i=0;i<40;++i) r.step({.5+.0125*i,0,1});
+        for(int i=0;i<60;++i) r.step({1.05,0,1});
+        std::array<ClampHit,HandClamp::max_held_planes> held{};
+        const bool holds=r.clamp.held_planes(0,held)>0;
+        const Vec3 from=r.out.drawn.position,got=r.clamp.settle(0,basis,from,r.target,r.set.box,r.shape);
+        std::printf("  dynamic plane held=%d: settle moved %.3f mm, pressing=%d\n",int(holds),length(got-from)*1000,int(r.clamp.pressing(0,basis,r.target,r.set.box,r.shape)));
+        CHECK(length(got-from)<1e-3 && !r.clamp.pressing(0,basis,r.target,r.set.box,r.shape));
+    }
+    // pressing: only a target past the box stop of a static plane
+    {
+        const std::array<Vec3,3> basis{{{0,0,1},{0,1,0},{-1,0,0}}};
+        BoxRig r(basis,{{{1,0,0},{-1,0,0},7}});
+        for(int i=0;i<40;++i) r.step({.5+.0125*i,0,1});
+        for(int i=0;i<60;++i) r.step({1.05,0,1});
+        CHECK(r.clamp.pressing(0,basis,{1.05,0,1},r.set.box,r.shape));
+        CHECK(!r.clamp.pressing(0,basis,{.9,0,1},r.set.box,r.shape));     // the target is not past the stop (hand is leaving)
+    }
+    // the offset decays at release_speed: 3.5 cm takes >= 20 ms and never steps more than release_speed * dt
+    {
+        Vec3 o{.035,0,0};double t=0,worst=0;int frames=0;
+        while(length(o)>0 && frames<1000) {const Vec3 n=settle_offset_next(o,true,true,false,{},dt,1.5,.055);worst=std::max(worst,length(o)-length(n));o=n;t+=dt;++frames;}
+        std::printf("  decay: 3.5 cm gone after %.1f ms (%d frames), largest step %.2f mm\n",t*1000,frames,worst*1000);
+        CHECK(t>=.020 && worst<=1.5*dt+1e-9 && length(o)==0);
+        CHECK(length(settle_offset_next({.01,0,0},true,true,true,{.02,0,0},dt,1.5,.055)-Vec3{.02,0,0})<1e-12);   // pressing: the wanted offset as it is
+        const Vec3 stale{.03,0,0};
+        CHECK(length(settle_offset_next(stale,false,true,true,{.02,0,0},dt,1.5,.055))==0);                      // 1: not free (weapon, yield, hold, grab, met prop, re-acquire, released, knob): 0 at once
+        CHECK(length(settle_offset_next(stale,false,false,false,{},dt,1.5,.055))==0);
+        CHECK(length(settle_offset_next(stale,true,false,true,{.02,0,0},dt,1.5,.055)-stale)<1e-15);            // 2: not fresh (held / unvalidated): the offset kept, no new settle
+        CHECK(length(settle_offset_next(stale,true,false,false,{},dt,1.5,.055)-stale)<1e-15);
+        const Vec3 eased=settle_offset_next(stale,true,true,false,{.02,0,0},dt,1.5,.055);                       // 3: not pressing: want ignored, decays at release_speed
+        CHECK(std::abs(length(stale)-length(eased)-1.5*dt)<1e-12 && eased.x>0);
+        CHECK(length(settle_offset_next(stale,true,true,true,{.2,0,0},dt,1.5,.055))<=.055+1e-12 && length(settle_offset_next(stale,true,true,true,{.2,0,0},dt,1.5,.055))>.0549);   // 4: capped at palm_radius + skin
+        CHECK(length(settle_offset_next({std::nan(""),0,0},true,false,true,{},dt,1.5,.055))==0);
+    }
+}
 } // namespace
 
 int main() {
-    yields();posts();routes();probe_sets();hold_store();reacquire();blade_stab(true);blade_stab(false);blade_stab(false,true);blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();shot_clipped_at_held_planes();reload_forgets();released_shot_actual_receipts();
+    yields();palm_box();posts();routes();probe_sets();hold_store();reacquire();blade_stab(true);blade_stab(false);blade_stab(false,true);blade_push_stays_out();shot_origin_thin_wall();default_wall_tip();released_shot_through_door();paused_hand_guarded();shot_clipped_at_held_planes();reload_forgets();released_shot_actual_receipts();
     std::puts("PASS hand_clamp_feed_check: C9 yields, C14 cadence, answer routing, open-hand probe sets, re-acquire hold, blade stab, shot origin");
     return 0;
 }

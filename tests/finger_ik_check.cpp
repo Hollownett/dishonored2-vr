@@ -7,6 +7,8 @@
 #include <iostream>
 #include <limits>
 #include <utility>
+#include <vector>
+#include <string>
 namespace r=d2vr::rig;
 using d2vr::Vec3;
 namespace {
@@ -1799,7 +1801,7 @@ int main() {
                         c2=r::finger_contact(g,h.palm,&w,1,dt,s2,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,false);}
                     std::cerr<<side<<"thumb side slab half "<<half<<" shift "<<shift*1000<<": before "<<depth_vs(w,of(c2))*1000<<" mm, after "<<depth_vs(w,of(c1))*1000<<" mm"<<std::endl;
                     // the main branch (the nearest clear pose within the tolerance) where one exists; never deeper than the solve in any case
-                    assert(depth_vs(w,of(c1))>=depth_vs(w,of(c2))-1e-9);
+                    if(!c1.thumb_off_wall) assert(depth_vs(w,of(c1))>=depth_vs(w,of(c2))-1e-9); // (a drawn-thumb rule that fired is checked against what was drawn: finger_drawn_thumb_off_wall)
                     if(half<.04) {assert(depth_vs(w,of(c2))<-r::thumb_shape_tolerance && depth_vs(w,of(c1))>=-r::thumb_shape_tolerance);}
                 }
             }
@@ -1808,6 +1810,91 @@ int main() {
                 for(unsigned i=0;i<20;++i) {c1=r::finger_contact(g,h.palm,&slab,1,dt,s1,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),false,r::finger_ik_tau,true);
                     c2=r::finger_contact(g,h.palm,&slab,1,dt,s2,1.f,r::finger_solve_all,&wants,true,r::finger_open_lag(g,.005),false,r::finger_ik_tau,false);}
                 assert(std::memcmp(&c1.pose,&c2.pose,sizeof c1.pose)==0);
+            }
+        }
+        {   // finger_drawn_thumb_off_wall (task 17): the thumb as the GAME draws it (finger_want_angles -> finger_turns_of_angles -> finger_points) with the free hand at rest (wants all 0).
+            // With surface_rules it leaves the wall (depth >= -thumb_shape_tolerance where a clear pose exists, else within 1 mm of the brute-force least depth); without it, it is deeper.
+            std::array<float,5> rest{0,0,0,0,0};const double dt=1/72.;
+            const auto run=[&](const r::HeldShape& w,bool rules,bool free_hand,r::FingerIkState& st) {r::FingerCurls c{};for(unsigned i=0;i<20;++i) c=r::finger_contact(g,h.palm,&w,1,dt,st,1.f,r::finger_solve_all,&rest,true,r::finger_open_lag(g,.005),free_hand,r::finger_ik_tau,rules);return c;};
+            const auto drawn_depth=[&](const r::HeldShape& w,const r::FingerCurls& c) {
+                const auto turns=r::finger_turns_of_angles(g,c,r::finger_clamped_angles(c,r::finger_want_angles(c,rest)));
+                const std::array<double,3> t{turns[0][0],turns[0][1],turns[0][2]};
+                const auto p=r::finger_points(g.finger[0],t);const Vec3 q[6]{(p[0]+p[1])*.5,p[1],(p[1]+p[2])*.5,p[2],(p[2]+p[3])*.5,p[3]};
+                double least=1e9;for(const Vec3& v:q) least=std::min(least,r::shape_distance(w,world_of(h,v))-g.thickness[0]);return least;};
+            const auto angles_depth=[&](const r::HeldShape& w,const std::array<double,3>& a) {
+                const auto p=r::finger_points(g.finger[0],r::finger_turns_of(g.finger[0],a));const Vec3 q[6]{(p[0]+p[1])*.5,p[1],(p[1]+p[2])*.5,p[2],(p[2]+p[3])*.5,p[3]};
+                double least=1e9;for(const Vec3& v:q) least=std::min(least,r::shape_distance(w,world_of(h,v))-g.thickness[0]);return least;};
+            // what commit 6c5aa33 drew (test-local re-implementation): its rule took the off-wall pose of the solve when the solve was deeper than the tolerance and the pose was
+            // shallower (then drawn as it is: the want's floor 1), else the solve capped by the relaxed want; a thumb in the hand moves to the nearest clear pose
+            const auto old_drawn_depth=[&](const r::HeldShape& w,const r::FingerIkState& st,const r::FingerCurls& on) {
+                r::FingerAngles fingers{};for(unsigned k=1;k<5;++k) {const auto x=r::finger_pose_angles(k,std::max(rest[k],r::relaxed_share),on.pose[k]);for(unsigned j=0;j<3;++j) fingers[k][j]=static_cast<float>(x[j]);}
+                const r::ThumbBody body(g,fingers);const auto dep=[&](const std::array<double,3>& a) {return angles_depth(w,a);};
+                const std::array<double,3> solved=st.thumb_solved;std::array<double,3> pose=solved;bool took=false;
+                if(dep(solved)<-r::thumb_shape_tolerance) {const auto o=r::thumb_off_shapes(body,solved,r::thumb_shape_tolerance,dep);if(o && dep(*o)>dep(solved)) {pose=*o;took=true;}}
+                const double share=took?1.:std::max<double>(std::max(r::thumb_want(rest),r::relaxed_share),st.thumb_solved_min); // (the solver's pose and least curl, before the rule: FingerIkState diagnostics)
+                auto d=r::finger_angles(0,share);for(unsigned q=0;q<3;++q) d[q]=std::min(d[q],pose[q]);
+                if(body.clearance(d)<0) {if(const auto m=r::thumb_nearest_clear(body,d,[](const std::array<double,3>&) {return true;})) d=*m;}
+                return dep(d);};
+            const Vec3 root=world_of(h,g.finger[0].pivot);const Vec3 skin=h.palm.position+up*r::held_palm_depth;
+            const Vec3 c0=root-up*d2vr::dot(root-skin,up);
+            const Vec3 lateral=d2vr::unit(c0-h.palm.position-up*d2vr::dot(c0-h.palm.position,up));
+            struct Case {const char* name;r::HeldShape w;bool full;};
+            const std::vector<Case> cases{{"palm-on-wall",r::slab_shape(skin,up*-1.),true},
+                {"side slab half .02",r::slab_shape(c0+lateral*-.005,up*-1.,.02),false},{"side slab half .022",r::slab_shape(c0+lateral*-.005,up*-1.,.022),false},
+                {"side slab half .024",r::slab_shape(c0+lateral*-.01,up*-1.,.024),false},{"side slab half .04",r::slab_shape(c0+lateral*-.02,up*-1.,.04),false}};
+            const auto lo=r::finger_open_angles(0),hi=r::finger_angles(0,1.);
+            for(const auto& cs:cases) {
+                r::FingerIkState s_on{},s_off{};const auto on=run(cs.w,true,true,s_on),off=run(cs.w,false,true,s_off);
+                const double before=drawn_depth(cs.w,off),after=drawn_depth(cs.w,on);
+                r::FingerAngles fingers{};for(unsigned k=1;k<5;++k) {const auto x=r::finger_pose_angles(k,std::max(rest[k],r::relaxed_share),on.pose[k]);for(unsigned j=0;j<3;++j) fingers[k][j]=static_cast<float>(x[j]);}
+                const r::ThumbBody body(g,fingers);double best_any=-1e9;
+                for(int i=0;i<=24;++i) for(int j=0;j<=24;++j) for(int k=0;k<=24;++k) {
+                    const std::array<double,3> a{lo[0]+(hi[0]-lo[0])*i/24,lo[1]+(hi[1]-lo[1])*j/24,lo[2]+(hi[2]-lo[2])*k/24};
+                    if(body.clearance(a)<0) continue;best_any=std::max(best_any,angles_depth(cs.w,a));
+                }
+                std::cerr<<side<<"drawn thumb "<<cs.name<<": surface_rules=false "<<before*1000<<" mm, with "<<after*1000<<" mm (flag "<<on.thumb_off_wall<<", off-flag "<<off.thumb_off_wall<<"), brute-force best "<<best_any*1000<<" mm"<<std::endl;
+                assert(!off.thumb_off_wall);
+                {const double bd=old_drawn_depth(cs.w,s_on,on);std::cerr<<side<<"  6c5aa33 drew "<<bd*1000<<" mm"<<std::endl;assert(after>=bd-1e-7);}
+                assert(before<-r::thumb_shape_tolerance);
+                if(best_any>=-r::thumb_shape_tolerance) assert(after>=-r::thumb_shape_tolerance-1e-4);
+                else assert(std::abs(after-best_any)<=.001 || after>best_any);
+                // the wide slab leaves nothing better than what is drawn today (the hand-clear brute-force best is no shallower): not worse then, and no flag
+                if(best_any>before+1e-4) assert(after>before && on.thumb_off_wall);
+                else assert(after>=before-1e-9 && !on.thumb_off_wall);
+                // a memo hit keeps the flag: the same call again (nothing moved) answers the same
+                const auto again=r::finger_contact(g,h.palm,&cs.w,1,dt,s_on,1.f,r::finger_solve_all,&rest,true,r::finger_open_lag(g,.005),true,r::finger_ik_tau,true);
+                std::cerr<<side<<"  memo repeat: flag "<<again.thumb_off_wall<<" solved "<<s_on.solved<<std::endl;
+                assert(again.thumb_off_wall==on.thumb_off_wall && s_on.solved==0);
+                // a hold (stop_extended false) and surface_rules=false: no flag, and the drawn thumb is bit-identical to the pre-change want path
+                r::FingerIkState sh{};const auto hold=run(cs.w,true,false,sh);assert(!hold.thumb_off_wall);
+                r::FingerIkState sh2{};const auto hold_off=run(cs.w,false,false,sh2);
+                assert(std::memcmp(&hold.pose,&hold_off.pose,sizeof hold.pose)==0);
+                for(const r::FingerCurls* c:{&hold,&off}) {
+                    const auto want=r::finger_want_angles(*c,rest);
+                    const auto th=r::finger_angles(0,std::max(r::thumb_want(rest,*c),std::max(r::relaxed_share,c->min_curl[0])));
+                    for(unsigned q=0;q<3;++q) assert(want[0][q]==static_cast<float>(th[q]));
+                }
+            }
+            // sweep: the palm-on-wall fixture with the slab offset along the palm normal (face -4..+4 mm from the skin) and tilted about the lateral axis, relaxed and half-folded thumb wants:
+            // the drawn thumb is never deeper than what 6c5aa33 drew
+            {   unsigned n=0,better=0,flagged=0;double worst=1e9,worst_gain=-1e9;std::string worst_at;
+                const Vec3 axis=d2vr::unit(d2vr::cross(up,lateral));
+                for(const auto& wv:{std::array<float,5>{0,0,0,0,0},std::array<float,5>{.5f,0,0,0,0}}) {
+                    rest=wv;
+                    for(const double off_m:{-.004,-.002,0.,.002,.004}) for(const double tilt:{-.2,-.1,0.,.1,.2}) {
+                        const Vec3 nrm=d2vr::unit((up*-1.)*std::cos(tilt)+lateral*std::sin(tilt));
+                        const auto w=r::slab_shape(skin+up*off_m,nrm);
+                        r::FingerIkState s_on{},s_off{};const auto on=run(w,true,true,s_on),off=run(w,false,true,s_off);
+                        const double bd=old_drawn_depth(w,s_on,on),ad=drawn_depth(w,on);++n;
+                        if(ad>bd+1e-6) ++better;if(on.thumb_off_wall) ++flagged;
+                        if(ad-bd<worst) {worst=ad-bd;worst_at="want "+std::to_string(wv[0])+" offset "+std::to_string(off_m*1000)+" mm tilt "+std::to_string(tilt);}
+                        worst_gain=std::max(worst_gain,ad-bd);
+                        if(ad<bd-1e-7) std::cerr<<"SWEEP FAIL want "<<wv[0]<<" off "<<off_m<<" tilt "<<tilt<<" before "<<bd*1000<<" after "<<ad*1000<<" flag "<<on.thumb_off_wall<<" offflag "<<off.thumb_off_wall<<" diff_m "<<ad-bd<<std::endl;
+                        assert(ad>=bd-1e-7); // (the pose is stored as float: 1e-9 m of rounding)
+                    }
+                }
+                rest={0,0,0,0,0};(void)axis;
+                std::cerr<<side<<"drawn thumb sweep: "<<n<<" poses, improved "<<better<<", flagged "<<flagged<<", worst (after-before) "<<worst*1000<<" mm at "<<worst_at<<", best gain "<<worst_gain*1000<<" mm"<<std::endl;
             }
         }
         {   // finger_back_of_hand_check (task 16): the back of the hand (hand_back_depth behind the palm frame) pressed on a surface straightens the long fingers by up to

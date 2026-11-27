@@ -216,6 +216,9 @@ private:
     bool started_{},tip_{true},alternate_{},quiet_{},recovered_{};
 };
 
+// Task 18: the finger part of the settle's hand shape (HandClamp::settle): phalanx spheres in the grip frame.
+struct ClampSettleShape {std::array<ClampProbe,15> probe{};std::size_t count{};};
+
 class HandClamp {
 public:
     static constexpr double shadow_seconds=.2;     // a plane kept only by shadowing gets this long past its last direct hit
@@ -412,6 +415,32 @@ private:
             if(std::isfinite(q)) r=std::max(r,q);
         }
         return r;
+    }
+    static bool settle_static(const Plane& plane) {return plane.rank>=1 && !plane.loose;}
+    // Per held plane the reach settle works with (static: min of reach() and the box + phalanx spheres; else reach()). Returns the plane count, 0
+    // when the side holds nothing, is released, has no hand or an input is not finite.
+    std::size_t settle_reaches(const Side& s,const std::array<Vec3,3>& basis,const std::array<Vec3,8>& box,const ClampSettleShape& shape,
+                               std::array<double,plane_capacity>& reach_of) const {
+        if(!s.has || s.state==ClampState::released || !s.plane_count || !s.hand_count) return 0;
+        for(const auto& b:basis) if(!finite(b)) return 0;
+        for(const auto& c:box) if(!finite(c)) return 0;
+        const std::size_t n=std::min(s.plane_count,s.planes.size());
+        for(std::size_t i=0;i<n;++i) {
+            const auto& plane=s.planes[i];
+            reach_of[i]=reach(s,basis,plane);
+            if(!settle_static(plane)) continue;
+            const Vec3 into=plane.normal*-1.;
+            double fine=-1e9;
+            for(const auto& c:box) fine=std::max(fine,dot(clamp_detail::rotate(basis,c),into));
+            for(std::size_t k=0;k<std::min(shape.count,shape.probe.size());++k) {
+                const auto& probe=shape.probe[k];
+                if(!clamp_detail::usable(probe)) continue;
+                const double q=dot(clamp_detail::rotate(basis,probe.local),into)+probe.radius;
+                if(std::isfinite(q)) fine=std::max(fine,q);
+            }
+            reach_of[i]=std::min(reach_of[i],fine);
+        }
+        return n;
     }
     // How far grip point p (oriented by basis) is outside the plane's skin: negative when the hand is inside.
     double clearance(const Side& s,const std::array<Vec3,3>& basis,Vec3 p,const Plane& plane) const {
@@ -654,6 +683,65 @@ public:
         if(solve(s,basis,meet_position,nullptr,false,met)) return meet_position;
         bool minimax=false;   // two static planes the hand cannot be outside of together: back toward the chest, as update() does
         return retreat(s,basis,original,s.chest_world,met,minimax);
+    }
+
+    // Task 18 (the reference VR mod's palm box): a FREE hand's drawn grip moved from `from` (where the clamp put it, reach() deep off every
+    // plane) toward `toward` (the tracked target) as far as the hand's true shape allows against the planes this side holds. The shape: the palm
+    // as the oriented box `box` (its 8 corners in the grip frame, hand_clamp_feed.hpp clamp_palm_box) plus `shape.probe`, the phalanx spheres of the
+    // hand as it is DRAWN (the caller poses them from the finger IK's last turns, leaving out the 4 palm spheres and each finger's base sphere:
+    // the box covers those). A fist stops at its fingers, a flat hand lies flat, a thumb that sticks out holds the hand off until the IK moves it.
+    // Only STATIC planes settle (a world or an entity that does not move): the plane of a dynamic or loose body keeps the clamp's own reach(), so
+    // the hand never settles into a prop. Per plane reach_j = min(reach(), fine_j) (`from` stays feasible). Two passes at most: a plane that
+    // stops the first leaves the rest of the motion to slide along it (a corner ends out of both). Pure and const: the clamp never sees the result.
+    // No plane held, a non-finite input or no hand: `from`.
+    using SettleShape=ClampSettleShape;
+    Vec3 settle(unsigned side,const std::array<Vec3,3>& basis,Vec3 from,Vec3 toward,const std::array<Vec3,8>& box,const SettleShape& shape) const {
+        if(side>1 || !finite(from) || !finite(toward)) return from;
+        const auto& s=sides_[side];
+        std::array<double,plane_capacity> reach_of{};
+        const std::size_t n=settle_reaches(s,basis,box,shape,reach_of);
+        if(!n) return from;
+        // One pass: the farthest point of at + d * t, t in [0,1]; `bound` the plane that stopped it first (n when none).
+        const auto pass=[&](Vec3 at,Vec3 d,std::size_t& bound) {
+            double t=1;bound=n;
+            for(std::size_t i=0;i<n;++i) {
+                const auto& plane=s.planes[i];
+                const double c=dot(at-plane.point,plane.normal)-reach_of[i]-cfg_.skin,rate=dot(d,plane.normal);
+                if(!std::isfinite(c) || !std::isfinite(rate)) {bound=n;return at;}
+                if(rate<-1e-9) {const double ti=std::max(0.,c)/-rate;if(ti<t) {t=ti;bound=i;}}
+            }
+            t=std::clamp(t,0.,1.);
+            return at+d*t;
+        };
+        std::size_t bound=n;
+        const Vec3 p1=pass(from,toward-from,bound);
+        Vec3 out=p1;
+        if(bound<n) {
+            const Vec3 normal=s.planes[bound].normal,rest=toward-p1;
+            const Vec3 slide=rest-normal*std::min(0.,dot(rest,normal));   // the motion into the plane that stopped it is dropped
+            std::size_t again=n;
+            out=pass(p1,slide,again);
+        }
+        return finite(out)?out:from;
+    }
+    // The clamp holds the hand off the tracked target `toward` because of at least one held STATIC plane: the target lies inside that plane's
+    // CLAMP stop (the clamp's own reach + skin). Only then does the hand settle (from there toward the target, as far as the box allows);
+    // otherwise the clamp's own release ease is left alone. (Sim v145803: tested against the BOX stop instead, the hand waited at the clamp's
+    // stop while the controller went the last ~4 cm in, then jumped there in one frame.)
+    bool pressing(unsigned side,const std::array<Vec3,3>& basis,Vec3 toward,const std::array<Vec3,8>& box,const SettleShape& shape) const {
+        (void)box;(void)shape;
+        if(side>1 || !finite(toward)) return false;
+        const auto& s=sides_[side];
+        if(!s.has || s.state==ClampState::released || !s.plane_count || !s.hand_count) return false;   // as settle_reaches
+        for(const auto& b:basis) if(!finite(b)) return false;
+        const std::size_t n=std::min(s.plane_count,s.planes.size());
+        for(std::size_t i=0;i<n;++i) {
+            const auto& plane=s.planes[i];
+            if(!settle_static(plane)) continue;
+            const double c=dot(toward-plane.point,plane.normal)-reach(s,basis,plane)-cfg_.skin;
+            if(std::isfinite(c) && c<0) return true;
+        }
+        return false;
     }
 
     // Contract: one update per side per frame, `now` strictly increasing. In C14 alternate mode, pass post=false on the

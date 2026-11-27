@@ -882,6 +882,8 @@ python tests\held_object_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\hand_clamp_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
+python tests\palm_box_routing_check.py
+if not "%errorlevel%"=="0" exit /b 1
 python tests\held_clamp_routing_check.py
 if not "%errorlevel%"=="0" exit /b 1
 python tests\finger_touch_routing_check.py
